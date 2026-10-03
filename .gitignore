@@ -4,3 +4,4 @@ data/
 .env
 .superpowers/
 *.log
+engine/target/
