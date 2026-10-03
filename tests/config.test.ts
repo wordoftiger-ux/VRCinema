@@ -61,3 +61,22 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ ADMIN_PASSWORD: 'haslo123', VIDEO_ENCODER: 'foo' })).toThrow(/VIDEO_ENCODER/);
   });
 });
+
+describe('readEnvFile', () => {
+  it('czyta plik ze znacznikiem BOM (Notatnik, PowerShell) i końcami linii CRLF', async () => {
+    const { readEnvFile } = await import('../src/config.ts');
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'env-')), '.env');
+    fs.writeFileSync(file, '\uFEFFADMIN_PASSWORD=haslo123\r\nMEDIA_DIRS=D:\\Filmy;E:\\Seriale\r\n# komentarz\r\nPORT=9000\r\n');
+    expect(readEnvFile(file)).toEqual({ ADMIN_PASSWORD: 'haslo123', MEDIA_DIRS: 'D:\\Filmy;E:\\Seriale', PORT: '9000' });
+  });
+
+  it('nie nadpisuje zmiennych już ustawionych w środowisku', async () => {
+    const { applyEnv } = await import('../src/config.ts');
+    const env: Record<string, string | undefined> = { PORT: '1' };
+    applyEnv(env, { PORT: '2', ADMIN_PASSWORD: 'x' });
+    expect(env).toEqual({ PORT: '1', ADMIN_PASSWORD: 'x' });
+  });
+});

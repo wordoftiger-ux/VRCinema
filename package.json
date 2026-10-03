@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Kanał HLS dla odtwarzaczy VRChat: kolejka filmów z YouTube, pixeldrain, CDA i innych stron",
+  "description": "Self-hosted live HLS channel for VRChat video players: queue YouTube, pixeldrain, CDA links and local files",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wordoftiger-ux/vrcinema.git"
+  },
   "engines": {
     "node": ">=22.18"
   },

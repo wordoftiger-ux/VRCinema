@@ -1,130 +1,137 @@
-# Kanał filmowy dla VRChat
+# VRChat HLS Channel
 
-Serwer, który z linków do YouTube, pixeldrain, CDA i innych stron robi **jeden ciągły kanał telewizyjny HLS**.
-Link kanału wklejasz raz do odtwarzacza wideo w świecie VRChat, a filmy z kolejki lecą po kolei.
-Wszyscy w lobby widzą ten sam moment filmu.
+A small self-hosted server that turns links (YouTube, pixeldrain, CDA and anything else
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) understands) and video files from your own disk into
+**one continuous live HLS channel**. Paste the channel link into a video player in a VRChat world once,
+and the queue plays back to back. Everyone in the lobby sees the same moment.
 
-- Panel właściciela (`/admin`) z hasłem: dodawanie filmów i playlist, kolejność, pomijanie, podgląd, ustawienia.
-- Publiczna strona zgłoszeń (`/`): widzowie dodają filmy, z limitami i opcjonalnym zatwierdzaniem.
-- Gdy kolejka jest pusta, kanał nadaje planszę „Brak filmów w kolejce” i nie zrywa połączenia.
+Polish version: [README.pl.md](README.pl.md). The web interface is currently in Polish.
 
-## Wymagania
+- **Owner panel** (`/admin`, password protected): add videos, playlists or files from your disk, reorder, skip, live preview, settings.
+- **Public request page** (`/`): friends can suggest videos, with rate limits and optional approval.
+- **Never goes off air**: an idle screen plays when the queue is empty, so the VRChat player never disconnects.
+- **Light on CPU**: H.264 sources up to 1080p are repackaged without re-encoding. Everything else is converted, optionally on an NVIDIA, Intel or AMD GPU.
 
-- Windows 10/11, Linux albo macOS.
-- [Node.js](https://nodejs.org) w wersji **22.18 lub nowszej** (zalecana 24).
-- Do udostępnienia w internecie: [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) albo VPS.
+> **Intended for private watching with friends.** Whoever runs the server is responsible for what it streams.
+> Re-streaming content you don't have rights to may break copyright law and the terms of the sites you stream from.
 
-ffmpeg i yt-dlp instalują się automatycznie do folderu `bin`.
+## Requirements
 
-## Pierwsze uruchomienie (Windows)
+- Windows 10/11 or Linux (macOS works with ffmpeg from Homebrew).
+- [Node.js](https://nodejs.org) **22.18 or newer** (24 recommended).
+- A public HTTPS address so other players can reach you, e.g. [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) or a VPS.
+
+ffmpeg and yt-dlp are downloaded automatically into `bin/`.
+
+## Quick start (Windows)
+
+1. Download or clone this repository.
+2. Double-click **`start.bat`**. The first run installs dependencies, downloads ffmpeg and yt-dlp, and opens `.env` in Notepad.
+3. In `.env` set `ADMIN_PASSWORD` (at least 8 characters) and `SESSION_SECRET` (any long random string), save, then run `start.bat` again.
+4. Open `http://localhost:8080/admin`, log in and paste a link.
+
+Manual equivalent:
 
 ```powershell
 npm install
-npm run setup        # pobiera ffmpeg, ffprobe i yt-dlp, tworzy plik .env
-```
-
-Otwórz plik `.env` i ustaw co najmniej:
-
-```ini
-ADMIN_PASSWORD=twoje-dlugie-haslo
-SESSION_SECRET=dowolny-dlugi-losowy-ciag
-```
-
-Uruchom serwer:
-
-```powershell
+npm run setup     # downloads ffmpeg/ffprobe/yt-dlp, creates .env
 npm start
 ```
 
-Serwer wypisze adresy. Otwórz `http://localhost:8080/admin`, zaloguj się i wklej pierwszy link.
-Przycisk „Włącz podgląd” pokazuje kanał tak, jak zobaczą go widzowie.
+## Making it reachable from VRChat
 
-## Udostępnienie dla VRChat
-
-Każdy gracz w lobby pobiera obraz bezpośrednio z Twojego serwera, więc kanał musi mieć adres publiczny.
-
-**Najprościej: Cloudflare Tunnel.** Nie wymaga przekierowania portów.
+Every player downloads the stream from your server, so it needs a public address.
 
 ```powershell
 winget install --id Cloudflare.cloudflared
 cloudflared tunnel --url http://localhost:8080
 ```
 
-cloudflared wypisze adres w stylu `https://abc-def.trycloudflare.com`. Wtedy:
+cloudflared prints an address such as `https://abc-def.trycloudflare.com`.
 
-1. W `.env` ustaw `TRUST_CLOUDFLARE=true` i `PUBLIC_URL=https://abc-def.trycloudflare.com`, potem zrestartuj serwer.
-2. Link dla VRChat to `https://abc-def.trycloudflare.com/live/main.m3u8`.
-3. Strona zgłoszeń dla znajomych to `https://abc-def.trycloudflare.com/`.
+1. In `.env` set `TRUST_CLOUDFLARE=true` and `PUBLIC_URL=https://abc-def.trycloudflare.com`, then restart the server.
+2. The link for VRChat is `https://abc-def.trycloudflare.com/live/main.m3u8`.
 
-Darmowy szybki tunel zmienia adres po każdym uruchomieniu cloudflared. Stały adres daje nazwany tunel z własną domeną podpiętą do Cloudflare.
+Notes:
 
-**Ważne w VRChat:** każda osoba w lobby musi włączyć w ustawieniach opcję **Allow Untrusted URLs**.
-Twoja domena nie jest na liście zaufanych adresów VRChat, więc bez tej opcji zobaczy czarny ekran.
+- **Every player in the lobby must enable "Allow Untrusted URLs"** in VRChat settings. Your domain is not on VRChat's allowlist.
+- **Paste the link into the world's normal video URL field.** Some worlds have special "custom media" menus that only accept their own services.
+- The quick tunnel address changes every time cloudflared restarts. Tip: put the channel link into a [Pastebin](https://pastebin.com) paste and give friends the paste's *raw* link. VRChat follows it to your channel, and you only edit the paste when the tunnel address changes.
+- Quick tunnels are meant for testing and Cloudflare's free network is not designed for heavy video traffic. For regular use, a VPS is more reliable (see below).
 
-### Łącze
+### Bandwidth
 
-Każdy widz pobiera osobny strumień. Przy 1080p to około 6 Mb/s wysyłania na osobę, czyli 60 Mb/s dla 10 widzów.
-Przy wolniejszym łączu wysyłającym lepszy będzie VPS (rozdział niżej).
+Each viewer pulls their own stream: about 6 Mbit/s at 1080p, so 10 viewers need about 60 Mbit/s of upload.
 
-## Pierwszy test przejść w VRChat
+## Playing files from your disk
 
-Ten test sprawdza, czy odtwarzacz AVPro w VRChat płynnie przechodzi między filmami o różnych parametrach.
-
-1. Dodaj do kolejki dwa krótkie filmy o różnej jakości, np. stary film 240p i nowy 1080p60.
-2. Obejrzyj w VRChat moment przejścia między nimi oraz przejście do planszy na końcu.
-3. Jeśli obraz się zacina, czernieje albo odtwarzacz się rozłącza, zmień w panelu ustawienia i powtórz:
-   - najpierw wyłącz „Oznaczaj przejścia między filmami”,
-   - jeśli to nie pomoże, włącz z powrotem i włącz „Zawsze konwertuj obraz”.
-
-„Zawsze konwertuj obraz” mocno obciąża procesor. Z kartą NVIDIA ustaw w `.env` `VIDEO_ENCODER=h264_nvenc`, a konwersja przejdzie na kartę graficzną.
-
-## Ustawienia w panelu
-
-| Ustawienie | Domyślnie |
-|---|---|
-| Dozwolone serwisy dla widzów | youtube.com, youtu.be, pixeldrain.com, cda.pl |
-| Najdłuższy film od widza | 2 godziny |
-| Zgłoszenia z jednego adresu | 3 na 10 minut |
-| Filmów w kolejce na osobę | 5 |
-| Zatwierdzanie zgłoszeń | wyłączone |
-
-Ty jako właściciel możesz dodawać filmy z dowolnej strony obsługiwanej przez yt-dlp, transmisje na żywo
-i całe playlisty YouTube albo listy pixeldrain. Te limity Ciebie nie dotyczą.
-
-## Gdy coś nie działa
-
-- **Film od razu trafia do historii z błędem.** Powód jest przy filmie w historii. yt-dlp aktualizuje się przy każdym starcie i raz na dobę.
-- **YouTube każe się zalogować.** Wyeksportuj cookies z przeglądarki do pliku `cookies.txt` i ustaw `YTDLP_COOKIES` w `.env`.
-- **pixeldrain zwraca limit pobierania.** Ustaw `PIXELDRAIN_API_KEY` z ustawień swojego konta pixeldrain.
-- **Plansza „Buforowanie” trwa długo.** Źródło jest wolne. Po 30 sekundach bez danych film zostaje pominięty.
-- **Widzowie nie widzą obrazu.** Sprawdź opcję Allow Untrusted URLs i czy link kanału zaczyna się od `https://`.
-
-## VPS (Linux, Docker)
-
-W katalogu `deploy` utwórz plik `.env`:
+List the folders you want to share in `.env`, separated by semicolons:
 
 ```ini
-ADMIN_PASSWORD=twoje-dlugie-haslo
-SESSION_SECRET=dowolny-dlugi-losowy-ciag
-DOMAIN=tv.twojadomena.pl
+MEDIA_DIRS=D:\Movies;E:\Series
 ```
 
-Skieruj domenę na adres serwera i uruchom:
+The admin panel gets a **"Pliki z dysku"** (Files from disk) section. Browse the folders, queue a single file, or queue a whole folder in natural order (episode 2 before 10). Only the owner can do this. Viewers only see the title, never the path.
+
+## Settings
+
+| Setting (admin panel) | Default |
+|---|---|
+| Sites viewers may request from | youtube.com, youtu.be, pixeldrain.com, cda.pl |
+| Longest video a viewer may request | 2 hours |
+| Requests per IP address | 3 per 10 minutes |
+| Queued videos per person | 5 |
+| Approve requests before they are queued | off |
+
+The owner can add anything yt-dlp supports, live streams, YouTube playlists and pixeldrain lists. These limits don't apply to the owner.
+
+`.env` options are documented in [.env.example](.env.example). They cover the GPU encoder (`VIDEO_ENCODER=h264_nvenc`), YouTube cookies (`YTDLP_COOKIES`), a pixeldrain API key, and paths.
+
+## First transition test in VRChat
+
+The VRChat player (AVPro) usually handles switching between videos with different resolutions well, but players differ.
+Queue two short videos of different quality and watch the switch. If the picture freezes or the player disconnects, change these in the panel settings:
+
+1. Turn off "Oznaczaj przejścia między filmami" (mark transitions with `EXT-X-DISCONTINUITY`).
+2. If that doesn't help, turn it back on and enable "Zawsze konwertuj obraz" (always re-encode). With an NVIDIA GPU, set `VIDEO_ENCODER=h264_nvenc`.
+
+## VPS with Docker
+
+Create `deploy/.env`:
+
+```ini
+ADMIN_PASSWORD=your-long-password
+SESSION_SECRET=any-long-random-string
+DOMAIN=tv.example.com
+```
+
+Point the domain at the server, then:
 
 ```bash
 cd deploy
 docker compose up -d --build
 ```
 
-Caddy sam pobierze certyfikat HTTPS. Link kanału: `https://tv.twojadomena.pl/live/main.m3u8`.
+Caddy obtains the HTTPS certificate automatically. Channel link: `https://tv.example.com/live/main.m3u8`.
 
-## Dla programistów
+## Troubleshooting
+
+- **A video ends up in history with an error.** The reason is shown next to it. yt-dlp updates itself at start and once a day.
+- **YouTube asks to sign in.** Export browser cookies to `cookies.txt` and set `YTDLP_COOKIES`.
+- **pixeldrain hits its download limit.** Set `PIXELDRAIN_API_KEY`.
+- **Viewers see a black screen.** Check "Allow Untrusted URLs" and that the link starts with `https://`.
+
+## How it works
+
+yt-dlp (or the disk library) resolves a video. ffmpeg cuts it into 4-second MPEG-TS segments, repackaging H.264 without re-encoding whenever possible.
+A broadcaster publishes the segments in real time and rewrites their timestamps, so videos and idle screens form one continuous timeline.
+Design notes: [docs/superpowers/specs](docs/superpowers/specs).
 
 ```powershell
-npm test          # testy (część używa prawdziwego ffmpeg z ./bin)
+npm test          # some tests use the real ffmpeg from ./bin
 npm run typecheck
 ```
 
-Architektura i decyzje: `docs/superpowers/specs/2026-10-03-vrcinema-design.md`.
-W skrócie: yt-dlp rozpoznaje film, ffmpeg tnie go na 4-sekundowe fragmenty MPEG-TS (bez konwersji, gdy źródło to H.264 do 1080p),
-a nadajnik publikuje je w tempie czasu rzeczywistego i przepisuje znaczniki czasu, żeby filmy i plansze tworzyły jedną oś czasu.
+## License
+
+[MIT](LICENSE)

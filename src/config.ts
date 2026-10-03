@@ -1,5 +1,20 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { parseEnv } from 'node:util';
+
+/** Czyta plik .env, także zapisany przez Notatnik lub PowerShell ze znacznikiem BOM. */
+export function readEnvFile(file: string): Record<string, string> {
+  const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
+  return parseEnv(text) as Record<string, string>;
+}
+
+/** Dopisuje wartości z pliku, nie nadpisując zmiennych ustawionych już w środowisku. */
+export function applyEnv(target: Record<string, string | undefined>, values: Record<string, string>): void {
+  for (const [k, v] of Object.entries(values)) {
+    if (target[k] === undefined) target[k] = v;
+  }
+}
 
 export const VIDEO_ENCODERS = ['libx264', 'h264_nvenc', 'h264_qsv', 'h264_amf'] as const;
 export type VideoEncoder = (typeof VIDEO_ENCODERS)[number];

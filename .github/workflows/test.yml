@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-dejavu-core xz-utils
+      - run: npm ci
+      - run: node --disable-warning=ExperimentalWarning scripts/setup.ts --no-env
+      - run: npm run typecheck
+      - run: npm test

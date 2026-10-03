@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, type AppConfig } from './config.ts';
+import { applyEnv, loadConfig, readEnvFile, type AppConfig } from './config.ts';
 import { openDatabase, MAIN_CHANNEL_ID } from './db/database.ts';
 import { QueueRepo } from './db/queue.ts';
 import { SettingsRepo } from './db/settings.ts';
@@ -27,7 +27,7 @@ function log(msg: string): void {
 
 function loadEnv(): AppConfig {
   const envFile = path.join(root, '.env');
-  if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
+  if (fs.existsSync(envFile)) applyEnv(process.env, readEnvFile(envFile));
   try {
     return loadConfig(process.env, root);
   } catch (e) {
