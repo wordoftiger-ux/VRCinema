@@ -1,0 +1,25 @@
+{
+  "name": "vrcinema",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kanał HLS dla odtwarzaczy VRChat: kolejka filmów z YouTube, pixeldrain, CDA i innych stron",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.ts",
+    "setup": "node --disable-warning=ExperimentalWarning scripts/setup.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.3.0",
+    "fastify": "^5.12.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}
