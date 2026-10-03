@@ -30,12 +30,6 @@ pub enum SegmenterState {
     Killed,
 }
 
-impl SegmenterState {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Failed | Self::Killed)
-    }
-}
-
 /// JavaScript `Number(text)` for the CSV time columns: blank means 0, junk is `None`.
 fn parse_js_number(text: &str) -> Option<f64> {
     let text = text.trim();
@@ -76,6 +70,8 @@ pub fn parse_segment_csv(text: &str) -> Vec<(String, f64)> {
 struct Snapshot {
     state: SegmenterState,
     error: Option<String>,
+    /// Set once the child has really exited and been reaped (or never started).
+    exited: bool,
 }
 
 /// ffmpeg process cutting one clip into segments. States: Idle -> Running -> Done | Failed | Killed.
@@ -102,6 +98,7 @@ impl ClipSegmenter {
         let (status, _) = watch::channel(Snapshot {
             state: SegmenterState::Running,
             error: None,
+            exited: false,
         });
         let segmenter = ClipSegmenter {
             out_dir,
@@ -156,26 +153,23 @@ impl ClipSegmenter {
                 Err(e) => (SegmenterState::Failed, Some(e.to_string())),
             };
             // A kill() that already moved the state to Killed wins over the exit status.
-            status.send_if_modified(|s| {
-                if s.state != SegmenterState::Running {
-                    return false;
+            status.send_modify(|s| {
+                if s.state == SegmenterState::Running {
+                    s.state = state;
+                    s.error = error;
                 }
-                s.state = state;
-                s.error = error;
-                true
+                s.exited = true;
             });
         });
         segmenter
     }
 
+    /// Failure before any child exists: terminal state and exit signal at once.
     fn finish(&self, state: SegmenterState, error: Option<String>) {
-        self.status.send_if_modified(|s| {
-            if s.state != SegmenterState::Running {
-                return false;
-            }
+        self.status.send_modify(|s| {
             s.state = state;
             s.error = error;
-            true
+            s.exited = true;
         });
     }
 
@@ -187,12 +181,17 @@ impl ClipSegmenter {
         self.status.borrow().error.clone()
     }
 
-    /// Resolves with the terminal state (Done, Failed or Killed).
+    /// Resolves with the final state (Done, Failed or Killed) once ffmpeg has actually exited
+    /// and been reaped, so its files and working directory are released. `state()` may already
+    /// report Killed earlier, right after `kill()`.
     pub async fn wait(&self) -> SegmenterState {
         let mut rx = self.status.subscribe();
         loop {
-            let state = rx.borrow_and_update().state;
-            if state.is_terminal() {
+            let (state, exited) = {
+                let s = rx.borrow_and_update();
+                (s.state, s.exited)
+            };
+            if exited {
                 return state;
             }
             if rx.changed().await.is_err() {
@@ -203,11 +202,13 @@ impl ClipSegmenter {
 
     /// Segments that appeared in `list.csv` since the previous call.
     pub fn poll(&self) -> Vec<SegmentInfo> {
+        // Hold the lock across read + parse + update so concurrent polls cannot hand out a
+        // segment twice or move `consumed` backwards.
+        let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(bytes) = std::fs::read(self.out_dir.join("list.csv")) else {
             return Vec::new();
         };
         let all = parse_segment_csv(&String::from_utf8_lossy(&bytes));
-        let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
         let fresh = all
             .iter()
             .enumerate()
@@ -369,15 +370,110 @@ mod tests {
         .iter()
         .map(OsString::from)
         .collect();
-        let seg = ClipSegmenter::start(&ffmpeg, args, dir.path().to_path_buf(), None);
+        // cwd = the directory: on Windows a live process holds it, so removing it only works
+        // once ffmpeg is really gone.
+        let seg = ClipSegmenter::start(
+            &ffmpeg,
+            args,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
         assert_eq!(seg.state(), SegmenterState::Running);
         tokio::time::sleep(Duration::from_millis(300)).await;
         seg.kill();
         assert_eq!(seg.state(), SegmenterState::Killed);
         assert_eq!(seg.wait().await, SegmenterState::Killed);
+        // wait() resolved => the child has exited and been reaped.
+        std::fs::remove_dir_all(dir.path()).expect("directory still held by ffmpeg after wait()");
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(seg.state(), SegmenterState::Killed);
         assert_eq!(seg.error(), None);
+    }
+
+    /// A segmenter that never started a child, to exercise `poll()` on hand-written lists.
+    fn poll_only(dir: &Path) -> ClipSegmenter {
+        let (status, _) = watch::channel(Snapshot {
+            state: SegmenterState::Done,
+            error: None,
+            exited: true,
+        });
+        ClipSegmenter {
+            out_dir: dir.to_path_buf(),
+            consumed: Mutex::new(0),
+            status,
+            kill: Arc::new(Notify::new()),
+        }
+    }
+
+    #[test]
+    fn poll_returns_only_new_complete_rows_with_contiguous_indices() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("list.csv");
+        let seg = poll_only(dir.path());
+        assert!(seg.poll().is_empty(), "no list.csv yet");
+
+        std::fs::write(
+            &list,
+            "seg_00000.ts,0.000000,4.000000\nseg_00001.ts,4.000000,8.500000\nseg_00002.ts,8.5",
+        )
+        .unwrap();
+        let first = seg.poll();
+        assert_eq!(
+            first,
+            vec![
+                SegmentInfo {
+                    path: dir.path().join("seg_00000.ts"),
+                    duration: 4.0,
+                    index: 0
+                },
+                SegmentInfo {
+                    path: dir.path().join("seg_00001.ts"),
+                    duration: 4.5,
+                    index: 1
+                },
+            ]
+        );
+        assert!(seg.poll().is_empty(), "partial third line is not returned");
+
+        std::fs::write(
+            &list,
+            "seg_00000.ts,0.000000,4.000000\nseg_00001.ts,4.000000,8.500000\n\
+             seg_00002.ts,8.500000,12.000000\nseg_00003.ts,12.000000,13.250000\n",
+        )
+        .unwrap();
+        let next = seg.poll();
+        assert_eq!(next.iter().map(|s| s.index).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(next[0].path, dir.path().join("seg_00002.ts"));
+        assert_eq!(next[0].duration, 3.5);
+        assert_eq!(next[1].duration, 1.25);
+        assert!(seg.poll().is_empty());
+    }
+
+    #[test]
+    fn concurrent_polls_never_return_a_segment_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows: String = (0..200)
+            .map(|i| format!("seg_{i:05}.ts,{i}.000000,{}.000000\n", i + 1))
+            .collect();
+        std::fs::write(dir.path().join("list.csv"), rows).unwrap();
+        let seg = Arc::new(poll_only(dir.path()));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let seg = Arc::clone(&seg);
+                std::thread::spawn(move || {
+                    (0..20)
+                        .flat_map(|_| seg.poll())
+                        .map(|s| s.index)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut all: Vec<usize> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..200).collect::<Vec<_>>());
     }
 
     #[tokio::test]
