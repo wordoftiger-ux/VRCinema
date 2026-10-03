@@ -49,6 +49,9 @@ export function loadConfig(
   if (!adminPassword) {
     throw new Error('Brak ADMIN_PASSWORD w pliku .env — ustaw hasło do panelu administratora.');
   }
+  if (adminPassword === 'zmien-mnie' || adminPassword.length < 8) {
+    throw new Error('ADMIN_PASSWORD musi mieć co najmniej 8 znaków i nie może być przykładowym "zmien-mnie".');
+  }
   const encoder = (env.VIDEO_ENCODER?.trim() || 'libx264') as VideoEncoder;
   if (!VIDEO_ENCODERS.includes(encoder)) {
     throw new Error(`Nieznany VIDEO_ENCODER "${encoder}". Dozwolone: ${VIDEO_ENCODERS.join(', ')}`);

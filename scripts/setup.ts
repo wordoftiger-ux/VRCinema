@@ -82,7 +82,7 @@ for (const tool of ['ffmpeg', 'yt-dlp']) {
   const r = spawnSync(path.join(bin, `${tool}${exe}`), args, { encoding: 'utf8' });
   console.log(`${tool}: ${(r.stdout || r.stderr || 'błąd').split('\n')[0]}`);
 }
-if (!fs.existsSync(path.join(root, '.env'))) {
+if (!process.argv.includes('--no-env') && !fs.existsSync(path.join(root, '.env'))) {
   await fsp.copyFile(path.join(root, '.env.example'), path.join(root, '.env'));
   console.log('Utworzono .env z .env.example — ustaw w nim ADMIN_PASSWORD.');
 }

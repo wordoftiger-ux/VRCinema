@@ -13,7 +13,7 @@ import { Broadcaster } from '../src/pipeline/broadcaster.ts';
 import { generateSlates } from '../src/pipeline/slates.ts';
 import type { MediaResolver } from '../src/resolver/types.ts';
 
-const cfg = loadConfig({ ADMIN_PASSWORD: 'x' });
+const cfg = loadConfig({ ADMIN_PASSWORD: 'haslo123' });
 const hasTools = fs.existsSync(cfg.ffmpegPath) && fs.existsSync(cfg.ffprobePath);
 
 let work: string;

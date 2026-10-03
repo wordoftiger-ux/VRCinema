@@ -6,7 +6,7 @@ import { ClipSegmenter, parseSegmentCsv } from '../src/pipeline/segmenter.ts';
 import { buildClipArgs } from '../src/pipeline/ffmpegArgs.ts';
 import { loadConfig } from '../src/config.ts';
 
-const cfg = loadConfig({ ADMIN_PASSWORD: 'x' });
+const cfg = loadConfig({ ADMIN_PASSWORD: 'haslo123' });
 const hasFfmpeg = fs.existsSync(cfg.ffmpegPath);
 
 describe('parseSegmentCsv', () => {

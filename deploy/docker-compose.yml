@@ -1,0 +1,33 @@
+# Uruchomienie na VPS: w katalogu deploy utwórz plik .env z ADMIN_PASSWORD, SESSION_SECRET i DOMAIN,
+# skieruj domenę na adres serwera, potem: docker compose up -d
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ustaw ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET:?ustaw SESSION_SECRET}
+      PUBLIC_URL: https://${DOMAIN:?ustaw DOMAIN}
+      TRUST_PROXY: "true"
+      VIDEO_ENCODER: ${VIDEO_ENCODER:-libx264}
+      PIXELDRAIN_API_KEY: ${PIXELDRAIN_API_KEY:-}
+    volumes:
+      - channel-data:/app/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - app
+
+volumes:
+  channel-data:
+  caddy-data:

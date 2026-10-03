@@ -7,8 +7,13 @@ describe('loadConfig', () => {
     expect(() => loadConfig({})).toThrow(/ADMIN_PASSWORD/);
   });
 
+  it('odrzuca domyślne i zbyt krótkie hasło', () => {
+    expect(() => loadConfig({ ADMIN_PASSWORD: 'zmien-mnie' })).toThrow(/ADMIN_PASSWORD/);
+    expect(() => loadConfig({ ADMIN_PASSWORD: 'abc' })).toThrow(/ADMIN_PASSWORD/);
+  });
+
   it('ustawia wartości domyślne', () => {
-    const c = loadConfig({ ADMIN_PASSWORD: 'x' }, '/proj', 'win32');
+    const c = loadConfig({ ADMIN_PASSWORD: 'haslo123' }, '/proj', 'win32');
     expect(c.port).toBe(8080);
     expect(c.host).toBe('0.0.0.0');
     expect(c.segmentSeconds).toBe(4);
@@ -22,14 +27,14 @@ describe('loadConfig', () => {
   });
 
   it('na Linuksie używa nazw bez .exe', () => {
-    const c = loadConfig({ ADMIN_PASSWORD: 'x' }, '/proj', 'linux');
+    const c = loadConfig({ ADMIN_PASSWORD: 'haslo123' }, '/proj', 'linux');
     expect(c.ffmpegPath).toBe(path.resolve('/proj', 'bin', 'ffmpeg'));
   });
 
   it('czyta nadpisania z env', () => {
     const c = loadConfig(
       {
-        ADMIN_PASSWORD: 'x',
+        ADMIN_PASSWORD: 'haslo123',
         PORT: '9000',
         VIDEO_ENCODER: 'h264_nvenc',
         TRUST_CLOUDFLARE: 'true',
@@ -47,6 +52,6 @@ describe('loadConfig', () => {
   });
 
   it('odrzuca nieznany enkoder', () => {
-    expect(() => loadConfig({ ADMIN_PASSWORD: 'x', VIDEO_ENCODER: 'foo' })).toThrow(/VIDEO_ENCODER/);
+    expect(() => loadConfig({ ADMIN_PASSWORD: 'haslo123', VIDEO_ENCODER: 'foo' })).toThrow(/VIDEO_ENCODER/);
   });
 });

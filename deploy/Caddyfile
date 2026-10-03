@@ -1,0 +1,5 @@
+# Caddy sam pobiera certyfikat HTTPS (Let's Encrypt) dla domeny z DOMAIN.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:8080
+}

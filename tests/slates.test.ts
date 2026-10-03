@@ -6,7 +6,7 @@ import { generateSlates, slateFilter } from '../src/pipeline/slates.ts';
 import { loadConfig } from '../src/config.ts';
 import { minDts } from '../src/pipeline/tsrewrite.ts';
 
-const cfg = loadConfig({ ADMIN_PASSWORD: 'x' });
+const cfg = loadConfig({ ADMIN_PASSWORD: 'haslo123' });
 const hasFfmpeg = fs.existsSync(cfg.ffmpegPath);
 
 describe('slateFilter', () => {
