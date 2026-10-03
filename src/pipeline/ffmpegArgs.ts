@@ -51,6 +51,8 @@ export function segmentOutputArgs(segmentSeconds: number, outDir: string): strin
     '-segment_time', String(segmentSeconds),
     '-segment_time_delta', '0.05',
     '-segment_format', 'mpegts',
+    // Każda ramka dźwięku we własnym PES: znacznik czasu ostatniego pakietu = faktyczny koniec dźwięku.
+    '-segment_format_options', 'pes_payload_size=0',
     '-segment_list', path.join(outDir, 'list.csv'),
     '-segment_list_type', 'csv',
     '-reset_timestamps', '0',

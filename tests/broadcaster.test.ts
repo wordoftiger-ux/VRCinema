@@ -136,6 +136,39 @@ describe('Broadcaster', () => {
     expect(read(2)).toBe(START_PTS + 720_000);
   });
 
+  it('nowe źródło nie zaczyna się przed ostatnim pakietem poprzedniego (bez cofania DTS)', () => {
+    const src = new FakeSource();
+    // Fragment deklaruje 4 s, ale jego dźwięk sięga 4,05 s.
+    const a = src.make('a', 0, 4, 126_000);
+    fs.writeFileSync(a.path, Buffer.concat([tsWithPts(126_000), tsWithPts(126_000 + 364_500)]));
+    src.queue.push(a, src.make('b', 0, 4, 5_000_000));
+    const b = make(src);
+    b.start(false);
+    const read = (n: number) => minDts(fs.readFileSync(path.join(dir, `${n}.ts`)))!;
+    const lastOfA = START_PTS + 364_500;
+    expect(read(1)).toBeGreaterThan(lastOfA);
+    expect(read(1) - lastOfA).toBeLessThanOrEqual(4_500);
+  });
+
+  it('gdy fragment deklaruje więcej niż zawiera, nowe źródło dokleja się tuż za ostatnim pakietem', () => {
+    const src = new FakeSource();
+    const a = src.make('a', 0, 4.067, 126_000);
+    fs.writeFileSync(a.path, Buffer.concat([tsWithPts(126_000), tsWithPts(126_000 + 357_000)]));
+    src.queue.push(a, src.make('b', 0, 4, 5_000_000));
+    const b = make(src);
+    b.start(false);
+    const read = (n: number) => minDts(fs.readFileSync(path.join(dir, `${n}.ts`)))!;
+    expect(read(1)).toBe(START_PTS + 357_000 + 3_000);
+  });
+
+  it('target duration: EXTINF zaokrąglony do całości nie przekracza wartości', () => {
+    const src = new FakeSource();
+    src.queue.push(src.make('a', 0, 4.066667));
+    const b = make(src);
+    b.start(false);
+    expect(b.playlist()).toContain('#EXT-X-TARGETDURATION:4');
+  });
+
   it('target duration rośnie przy długim fragmencie i już nie maleje', () => {
     const src = new FakeSource();
     src.queue.push(src.make('a', 0, 6.5));

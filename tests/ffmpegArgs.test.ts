@@ -72,6 +72,7 @@ describe('buildClipArgs', () => {
     expect(valueAfter(args, '-f')).toBe('segment');
     expect(valueAfter(args, '-segment_time')).toBe('4');
     expect(valueAfter(args, '-segment_list_type')).toBe('csv');
+    expect(valueAfter(args, '-segment_format_options')).toBe('pes_payload_size=0');
     expect(valueAfter(args, '-segment_list')).toBe(path.join('/tmp/clip', 'list.csv'));
     expect(args.at(-1)).toBe(path.join('/tmp/clip', 'seg_%05d.ts'));
     expect(valueAfter(args, '-map', 0)).toBe('0:v:0');

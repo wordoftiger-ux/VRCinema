@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TsRewriter, minDts, readPesTimestamps, readPcr } from '../src/pipeline/tsrewrite.ts';
+import { TsRewriter, contentEnd, minDts, readPesTimestamps, readPcr } from '../src/pipeline/tsrewrite.ts';
 
 const WRAP = 2 ** 33;
 
@@ -100,6 +100,70 @@ describe('TsRewriter', () => {
   it('odrzuca dane bez bajtu synchronizacji', () => {
     const bad = Buffer.alloc(188, 0);
     expect(() => new TsRewriter().rewrite(bad, 0)).toThrow(/synchroniz/);
+  });
+});
+
+function adts(payloadBytes: number, sfIndex = 3): number[] {
+  const len = 7 + payloadBytes;
+  return [
+    0xff, 0xf1, (1 << 6) | (sfIndex << 2), (2 << 6) | ((len >> 11) & 3), (len >> 3) & 0xff, ((len & 7) << 5) | 0x1f, 0xfc,
+    ...new Array(payloadBytes).fill(0x21),
+  ];
+}
+
+/** PES dźwięku (stream_id 0xC0) z ramkami ADTS, rozłożony na pakiety TS. */
+function audioPes(pid: number, pts: number, frames: number[][]): Buffer {
+  const data = frames.flat();
+  const header = [0, 0, 1, 0xc0, 0, 0, 0x80, 0x80, 5, ...encTs(2, pts)];
+  const bytes = [...header, ...data];
+  const packets: Buffer[] = [];
+  for (let i = 0; i < bytes.length; i += 184) {
+    const chunk = bytes.slice(i, i + 184);
+    const pkt = Buffer.alloc(188, 0xff);
+    pkt[0] = 0x47;
+    pkt[1] = (i === 0 ? 0x40 : 0) | ((pid >> 8) & 0x1f);
+    pkt[2] = pid & 0xff;
+    if (chunk.length === 184) {
+      pkt[3] = 0x10;
+      pkt.set(chunk, 4);
+    } else {
+      // dopełnienie polem adaptacyjnym, dane na końcu pakietu
+      const af = 184 - chunk.length - 1;
+      pkt[3] = 0x30;
+      pkt[4] = af;
+      if (af > 0) pkt[5] = 0x00;
+      pkt.set(chunk, 188 - chunk.length);
+    }
+    packets.push(pkt);
+  }
+  return Buffer.concat(packets);
+}
+
+describe('contentEnd', () => {
+  it('dźwięk: koniec = PTS ostatniego PES + liczba ramek AAC × 1024 próbek', () => {
+    const buf = Buffer.concat([
+      audioPes(0x101, 90_000, [adts(6)]),
+      audioPes(0x101, 100_000, [adts(6), adts(6), adts(6)]),
+    ]);
+    expect(contentEnd(buf)).toBe(100_000 + 3 * 1920);
+  });
+  it('dźwięk rozłożony na kilka pakietów TS', () => {
+    const buf = audioPes(0x101, 50_000, [adts(300), adts(300)]);
+    expect(contentEnd(buf)).toBe(50_000 + 2 * 1920);
+  });
+  it('44,1 kHz', () => {
+    expect(contentEnd(audioPes(0x101, 0, [adts(6, 4)]))).toBe(Math.round((1024 * 90_000) / 44_100));
+  });
+  it('wideo: ostatni DTS + jedna klatka (≈33 ms)', () => {
+    const buf = Buffer.concat([packet({ pid: 0x100, pusi: true, pts: 10_000, dts: 7_000 })]);
+    expect(contentEnd(buf)).toBe(7_000 + 3_000);
+  });
+  it('bierze maksimum ze wszystkich strumieni', () => {
+    const buf = Buffer.concat([
+      packet({ pid: 0x100, pusi: true, pts: 100_000 }),
+      audioPes(0x101, 99_000, [adts(6), adts(6)]),
+    ]);
+    expect(contentEnd(buf)).toBe(103_000);
   });
 });
 

@@ -20,6 +20,8 @@ export interface AppConfig {
   trustProxy: boolean;
   /** Opcjonalny plik cookies.txt dla yt-dlp. */
   ytdlpCookies: string;
+  /** Opcjonalny klucz API pixeldrain (omija limity pobierania). */
+  pixeldrainApiKey: string;
   /** Czcionka do plansz. Pusta = wykrywana automatycznie. */
   fontFile: string;
   segmentSeconds: number;
@@ -70,6 +72,7 @@ export function loadConfig(
     trustCloudflare: bool(env.TRUST_CLOUDFLARE),
     trustProxy: bool(env.TRUST_PROXY),
     ytdlpCookies: env.YTDLP_COOKIES?.trim() || '',
+    pixeldrainApiKey: env.PIXELDRAIN_API_KEY?.trim() || '',
     fontFile: env.FONT_FILE?.trim() || defaultFont(platform),
     segmentSeconds: 4,
     windowSize: 10,

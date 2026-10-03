@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { TsRewriter, minDts } from './tsrewrite.ts';
+import { TsRewriter, contentEnd, minDts } from './tsrewrite.ts';
 import { buildLivePlaylist, type PlaylistSegment } from './playlist.ts';
 
 /** Początek osi czasu kanału (10 s), żeby przesunięte DTS nigdy nie były ujemne. */
@@ -43,6 +43,8 @@ export interface BroadcasterOptions {
 
 const INITIAL_SEGMENTS = 3;
 const MAX_SOURCE_ATTEMPTS = 5;
+/** Do jakiej różnicy (90 kHz) między zegarem a końcem ostatniego pakietu ufamy pakietom: 1 s. */
+const JOIN_WINDOW = 90_000;
 
 /**
  * Publikuje fragmenty w tempie czasu rzeczywistego, przepisując znaczniki czasu na wspólną oś kanału,
@@ -57,6 +59,8 @@ export class Broadcaster {
   private seq = 0;
   private clock = 0;
   private offset = 0;
+  /** Koniec wysłanej zawartości na osi kanału (90 kHz, bez zawijania 2^33). */
+  private lastEnd: number | null = null;
   private last: SourceSegment | null = null;
   private targetDuration: number;
   private discontinuitySequence = 0;
@@ -135,8 +139,18 @@ export class Broadcaster {
     let offset = this.offset;
     if (!continuing) {
       const base = minDts(input) ?? 0;
-      offset = Math.round(START_PTS + this.clock * 90_000) - base;
+      const byClock = Math.round(START_PTS + this.clock * 90_000);
+      let target = byClock;
+      if (this.lastEnd !== null) {
+        const joined = this.lastEnd;
+        // Deklarowane długości (EXTINF) rozmijają się z zawartością o ułamki sekundy w obie strony.
+        // Blisko zegara doklejamy tuż za ostatnim pakietem; nigdy nie cofamy osi czasu.
+        target = Math.abs(joined - byClock) <= JOIN_WINDOW ? joined : Math.max(byClock, joined);
+        this.clock = (target - START_PTS) / 90_000;
+      }
+      offset = target - base;
     }
+    const inputEnd = contentEnd(input);
     const output = this.rewriter.rewrite(input, offset);
     const sourceChanged = this.last !== null && seg.sourceKey !== this.last.sourceKey;
 
@@ -146,9 +160,11 @@ export class Broadcaster {
 
     const published: PublishedSegment = { ...seg, seq, channelTime: this.clock };
     this.offset = offset;
+    if (inputEnd !== null) this.lastEnd = Math.max(this.lastEnd ?? 0, inputEnd + offset);
     this.last = seg;
     this.clock += seg.duration;
-    this.targetDuration = Math.max(this.targetDuration, Math.ceil(seg.duration));
+    // HLS: EXTINF zaokrąglony do całości nie może przekraczać TARGETDURATION.
+    this.targetDuration = Math.max(this.targetDuration, Math.round(seg.duration));
     this.published.push({
       seq,
       name,

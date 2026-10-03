@@ -92,6 +92,63 @@ export function minDts(buf: Buffer): number | null {
   return min;
 }
 
+const AAC_SAMPLE_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+/** Przybliżona długość klatki wideo (90 kHz), gdy nie znamy fps: ~33 ms. */
+const VIDEO_FRAME = 3_000;
+/** Jedna ramka AAC przy 48 kHz, gdy nie da się odczytać nagłówków. */
+const AAC_FRAME_48K = 1_920;
+
+function payloadOffset(buf: Buffer, off: number): number {
+  const afc = (buf[off + 3] >> 4) & 0x3;
+  if ((afc & 1) === 0) return -1;
+  return (afc & 2) !== 0 ? off + 5 + buf[off + 4] : off + 4;
+}
+
+/** Długość (90 kHz) ramek ADTS AAC zapisanych jedna po drugiej, albo null. */
+function adtsDuration(data: Buffer): number | null {
+  let p = 0;
+  let frames = 0;
+  let rate = 0;
+  while (p + 7 <= data.length && data[p] === 0xff && (data[p + 1] & 0xf0) === 0xf0) {
+    rate = AAC_SAMPLE_RATES[(data[p + 2] >> 2) & 0xf] ?? 0;
+    const len = ((data[p + 3] & 3) << 11) | (data[p + 4] << 3) | (data[p + 5] >> 5);
+    if (len < 7 || rate === 0) break;
+    frames++;
+    p += len;
+  }
+  return frames > 0 && rate > 0 ? Math.round((frames * 1024 * 90_000) / rate) : null;
+}
+
+/**
+ * Koniec zawartości fragmentu (90 kHz): dla dźwięku PTS ostatniego PES plus długość jego ramek AAC
+ * (ffmpeg pakuje kilka małych ramek w jeden PES), dla wideo ostatni DTS plus jedna klatka.
+ */
+export function contentEnd(buf: Buffer): number | null {
+  const last = new Map<number, { ts: number; sid: number; chunks: Buffer[] }>();
+  for (let off = 0; off + PACKET <= buf.length; off += PACKET) {
+    const l = layout(buf, off);
+    if (l.pesAt >= 0) {
+      const flags = buf[l.pesAt + 7] >> 6;
+      const pts = flags & 2 ? readTs(buf, l.pesAt + 9) : null;
+      const dts = flags === 3 ? readTs(buf, l.pesAt + 14) : null;
+      const ts = dts ?? pts;
+      if (ts === null) continue;
+      const start = l.pesAt + 9 + buf[l.pesAt + 8];
+      last.set(l.pid, { ts, sid: buf[l.pesAt + 3], chunks: [buf.subarray(start, off + PACKET)] });
+    } else if (!l.pusi && l.hasPayload && last.has(l.pid)) {
+      const p = payloadOffset(buf, off);
+      if (p >= 0) last.get(l.pid)!.chunks.push(buf.subarray(p, off + PACKET));
+    }
+  }
+  let end: number | null = null;
+  for (const { ts, sid, chunks } of last.values()) {
+    const isAudio = sid >= 0xc0 && sid <= 0xdf;
+    const e = isAudio ? ts + (adtsDuration(Buffer.concat(chunks)) ?? AAC_FRAME_48K) : ts + VIDEO_FRAME;
+    if (end === null || e > end) end = e;
+  }
+  return end;
+}
+
 export class TsRewriter {
   private counters = new Map<number, number>();
 

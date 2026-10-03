@@ -75,6 +75,12 @@ export class RateLimiter {
     return true;
   }
 
+  /** Liczba prób w bieżącym oknie, bez rejestrowania nowej. */
+  peek(key: string): number {
+    const now = this.now();
+    return (this.hits.get(key) ?? []).filter((t) => now - t < this.windowMs).length;
+  }
+
   private prune(now: number): void {
     for (const [key, times] of this.hits) {
       if (times.every((t) => now - t >= this.windowMs)) this.hits.delete(key);
