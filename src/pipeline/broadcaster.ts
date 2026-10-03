@@ -122,7 +122,14 @@ export class Broadcaster {
   /** Publikuje jeden fragment i zwraca jego długość w sekundach. */
   private publishOne(): number {
     for (let attempt = 0; attempt < MAX_SOURCE_ATTEMPTS; attempt++) {
-      const seg = this.o.source.next();
+      let seg: SourceSegment;
+      try {
+        seg = this.o.source.next();
+      } catch (e) {
+        // Błąd źródła nie może wyłączyć serwera: spróbujemy w następnym takcie.
+        this.o.log?.(`Błąd źródła fragmentów: ${(e as Error).message}`);
+        return 1;
+      }
       try {
         return this.publish(seg);
       } catch (e) {

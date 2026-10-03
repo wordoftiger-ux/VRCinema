@@ -208,6 +208,31 @@ describe('Broadcaster', () => {
     expect(seen).toEqual([0, 1, 2]);
   });
 
+  it('wyjątek w źródle nie przerywa nadawania ani nie wyrzuca błędu z tick()', () => {
+    const src = new FakeSource();
+    let fail = false;
+    const flaky: SegmentSource = {
+      next: () => {
+        if (fail) throw new Error('baza niedostępna');
+        return src.next();
+      },
+    };
+    const logs: string[] = [];
+    const b = new Broadcaster({
+      dir, windowSize: 10, segmentSeconds: 4, pathPrefix: '', source: flaky,
+      discontinuityTags: () => true, now: () => now, log: (m) => logs.push(m),
+    });
+    b.start(false);
+    fail = true;
+    now += 4_000;
+    expect(() => b.tick()).not.toThrow();
+    expect(logs.some((l) => l.includes('baza niedostępna'))).toBe(true);
+    fail = false;
+    now += 5_000;
+    b.tick();
+    expect(b.playlist().split('\n').filter((l) => l.endsWith('.ts')).length).toBeGreaterThan(3);
+  });
+
   it('pomija uszkodzony fragment źródła i bierze następny', () => {
     const src = new FakeSource();
     const broken = path.join(srcDir, 'broken.ts');
