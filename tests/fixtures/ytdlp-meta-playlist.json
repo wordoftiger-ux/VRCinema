@@ -1,0 +1,34 @@
+{
+  "_type": "playlist",
+  "id": "PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+  "title": "Popular Music Videos",
+  "entries": [
+    {
+      "_type": "url",
+      "ie_key": "Youtube",
+      "id": "fOT0BUpITw8",
+      "url": "https://www.youtube.com/watch?v=fOT0BUpITw8",
+      "title": "BELLAKEO (Video Oficial) - Peso Pluma, Anitta",
+      "duration": 235,
+      "live_status": null
+    },
+    {
+      "_type": "url",
+      "ie_key": "Youtube",
+      "id": "NFvDHYMzj9U",
+      "url": "https://www.youtube.com/watch?v=NFvDHYMzj9U",
+      "title": "Arcángel - FN8 ( Video Lyric )",
+      "duration": 650,
+      "live_status": null
+    },
+    {
+      "_type": "url",
+      "ie_key": "Youtube",
+      "id": "8c7KOGxeY3w",
+      "url": "https://www.youtube.com/watch?v=8c7KOGxeY3w",
+      "title": "Becky G - POR EL CONTRARIO (Performance Video) ft. Ángela Aguilar, Leonardo Aguilar",
+      "duration": 235,
+      "live_status": null
+    }
+  ]
+}
