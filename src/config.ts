@@ -22,6 +22,8 @@ export interface AppConfig {
   ytdlpCookies: string;
   /** Opcjonalny klucz API pixeldrain (omija limity pobierania). */
   pixeldrainApiKey: string;
+  /** Foldery z filmami na dysku właściciela (MEDIA_DIRS, rozdzielone średnikami). */
+  mediaDirs: string[];
   /** Czcionka do plansz. Pusta = wykrywana automatycznie. */
   fontFile: string;
   segmentSeconds: number;
@@ -76,6 +78,7 @@ export function loadConfig(
     trustProxy: bool(env.TRUST_PROXY),
     ytdlpCookies: env.YTDLP_COOKIES?.trim() || '',
     pixeldrainApiKey: env.PIXELDRAIN_API_KEY?.trim() || '',
+    mediaDirs: (env.MEDIA_DIRS ?? '').split(';').map((d) => d.trim()).filter(Boolean),
     fontFile: env.FONT_FILE?.trim() || defaultFont(platform),
     segmentSeconds: 4,
     windowSize: 10,

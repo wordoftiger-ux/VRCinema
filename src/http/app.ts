@@ -17,6 +17,7 @@ import {
   verifySessionToken,
 } from './auth.ts';
 import { getClientIp, isHttps } from './clientIp.ts';
+import { LibraryError, type MediaLibrary } from '../library/library.ts';
 
 export interface AppDeps {
   config: Pick<AppConfig, 'adminPassword' | 'sessionSecret' | 'publicUrl' | 'trustCloudflare' | 'trustProxy'>;
@@ -35,6 +36,8 @@ export interface AppDeps {
     segmentPath(name: string): string | null;
   };
   publicDir: string;
+  /** Foldery z filmami na dysku (opcjonalnie). */
+  library?: MediaLibrary;
   log?: (msg: string) => void;
 }
 
@@ -270,6 +273,51 @@ export async function buildApp(d: AppDeps): Promise<FastifyInstance> {
       queue.setStatus(item.id, 'removed');
       d.channel.onQueueChanged();
       return { ok: true };
+    });
+
+    // ---------- Pliki z dysku ----------
+    const libraryError = (e: unknown): never => {
+      if (e instanceof LibraryError) throw new HttpError(400, e.message);
+      throw e;
+    };
+
+    admin.get<{ Querystring: { root?: string; path?: string } }>('/api/admin/library', (req) => {
+      const lib = d.library;
+      if (!lib || !lib.enabled) return { enabled: false, roots: [] };
+      const root = Number(req.query.root ?? 0);
+      try {
+        return { enabled: true, roots: lib.roots().map((r) => ({ index: r.index, name: r.name })), ...lib.list(root, req.query.path ?? '') };
+      } catch (e) {
+        return libraryError(e);
+      }
+    });
+
+    admin.post<{ Body: { root?: unknown; path?: unknown } }>('/api/admin/channels/main/local', async (req, reply) => {
+      const lib = d.library;
+      if (!lib || !lib.enabled) throw new HttpError(400, 'Pliki z dysku są wyłączone. Ustaw MEDIA_DIRS w pliku .env.');
+      const root = Number(req.body?.root);
+      const rel = typeof req.body?.path === 'string' ? req.body.path : '';
+      let files: string[];
+      try {
+        const full = lib.resolve(root, rel);
+        files = fs.statSync(full).isDirectory() ? lib.videosIn(root, rel).map((e) => e.path) : [rel];
+      } catch (e) {
+        return libraryError(e);
+      }
+      if (files.length === 0) throw new HttpError(400, 'W tym folderze nie ma plików wideo.');
+      const added = [];
+      for (const rel2 of files.slice(0, MAX_PLAYLIST_ITEMS)) {
+        const sourceUrl = lib.toSourceUrl(root, rel2);
+        const meta = await d.resolver.fetchMeta(sourceUrl).catch((e: Error) => {
+          throw new HttpError(400, e.message);
+        });
+        added.push(queue.add({
+          channelId, sourceUrl, title: meta.title, durationS: meta.durationS, isLive: false,
+          status: 'queued', addedBy: 'admin', requesterName: null, requesterIp: null,
+        }));
+      }
+      d.channel.onQueueChanged();
+      return reply.code(201).send({ added: added.length, title: added.length === 1 ? added[0].title : rel.split('/').at(-1) || 'folder' });
     });
 
     admin.post('/api/admin/channels/main/skip', () => {

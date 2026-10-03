@@ -55,6 +55,19 @@
       <p class="notice" id="add-notice" role="status"></p>
     </form>
 
+    <div id="library-block" class="hidden">
+      <h2>Pliki z dysku</h2>
+      <div class="row" style="align-items:flex-end">
+        <label style="flex:0 1 240px">Folder
+          <select id="library-root"></select>
+        </label>
+        <p class="muted small" id="library-path" style="flex:1 1 200px;margin:0 0 12px"></p>
+        <button type="button" class="quiet" id="library-add-folder" style="flex:0 0 auto">Dodaj cały folder</button>
+      </div>
+      <ul class="plain" id="library" style="margin-top:10px"></ul>
+      <p class="notice" id="library-notice" role="status"></p>
+    </div>
+
     <div id="pending-block" class="hidden">
       <h2>Zgłoszenia do zatwierdzenia</h2>
       <ul class="plain" id="pending"></ul>
@@ -116,6 +129,7 @@
     panelView.classList.add('hidden');
     loginView.classList.remove('hidden');
     settingsLoaded = false;
+    lib.loaded = false;
   }
 
   $('login-form').addEventListener('submit', async (e) => {
@@ -192,6 +206,72 @@
     }
   });
 
+  // ---------- Pliki z dysku ----------
+  const lib = { root: 0, path: '', loaded: false };
+
+  function sourceLink(i) {
+    if (i.sourceUrl.startsWith('local:')) return el('span', {}, i.title, el('span', { class: 'badge' }, 'z dysku'));
+    return el('a', { href: i.sourceUrl, target: '_blank', rel: 'noopener' }, i.title);
+  }
+
+  async function loadLibrary(root, relPath) {
+    let d;
+    try {
+      d = await api('GET', '/api/admin/library?root=' + root + '&path=' + encodeURIComponent(relPath));
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      return notice($('library-notice'), err.message, 'err');
+    }
+    $('library-block').classList.toggle('hidden', !d.enabled);
+    if (!d.enabled) return;
+    lib.root = d.root;
+    lib.path = d.path;
+    lib.loaded = true;
+    const select = $('library-root');
+    if (!select.options.length) {
+      d.roots.forEach((r) => select.append(el('option', { value: r.index }, r.name)));
+      select.addEventListener('change', () => loadLibrary(Number(select.value), ''));
+    }
+    select.value = String(d.root);
+    $('library-path').textContent = d.path ? 'Jesteś w: ' + d.path : 'Folder główny';
+    const rows = [];
+    if (d.parent !== null) {
+      rows.push(el('li', {},
+        el('button', { type: 'button', class: 'quiet', style: 'justify-self:start', onclick: () => loadLibrary(d.root, d.parent) }, 'Wróć do folderu wyżej'),
+        el('span')));
+    }
+    for (const e of d.entries) {
+      if (e.type === 'dir') {
+        rows.push(el('li', {},
+          el('button', { type: 'button', class: 'quiet', style: 'text-align:left;justify-self:start', onclick: () => loadLibrary(d.root, e.path) }, '📁 ' + e.name),
+          el('span')));
+      } else {
+        rows.push(el('li', {},
+          el('div', {},
+            el('div', { class: 'item-title' }, e.name),
+            el('div', { class: 'item-meta' }, (e.sizeBytes / 1024 ** 3).toFixed(2) + ' GB')),
+          el('button', { type: 'button', onclick: () => addLocal(e.path) }, 'Dodaj do kolejki')));
+      }
+    }
+    if (!d.entries.length) rows.push(el('li', { class: 'empty', style: 'display:block' }, 'W tym folderze nie ma filmów ani podfolderów.'));
+    $('library').replaceChildren(...rows);
+    $('library-add-folder').disabled = !d.entries.some((e) => e.type === 'file');
+  }
+
+  async function addLocal(relPath) {
+    notice($('library-notice'), 'Dodaję…');
+    try {
+      const r = await api('POST', '/api/admin/channels/main/local', { root: lib.root, path: relPath });
+      notice($('library-notice'), r.added > 1 ? 'Dodano ' + r.added + ' filmów z folderu „' + r.title + '”.' : 'Dodano „' + r.title + '”.', 'ok');
+      refresh();
+    } catch (err) {
+      if (err.status === 401) return showLogin();
+      notice($('library-notice'), err.message, 'err');
+    }
+  }
+
+  $('library-add-folder').addEventListener('click', () => addLocal(lib.path));
+
   // ---------- Listy ----------
   function meta(i) {
     const parts = [];
@@ -213,7 +293,7 @@
         el('li', {},
           el('div', {},
             el('div', { class: 'item-title' },
-              el('a', { href: i.sourceUrl, target: '_blank', rel: 'noopener' }, i.title),
+              sourceLink(i),
               d.prefetchedItemId === i.id ? el('span', { class: 'badge warn' }, 'przygotowany') : null),
             el('div', { class: 'item-meta' }, [i.isLive ? 'na żywo' : fmtTime(i.durationS), meta(i)].filter(Boolean).join(', '))),
           el('div', { class: 'item-actions' },
@@ -234,7 +314,7 @@
       ...d.pending.map((i) =>
         el('li', {},
           el('div', {},
-            el('div', { class: 'item-title' }, el('a', { href: i.sourceUrl, target: '_blank', rel: 'noopener' }, i.title)),
+            el('div', { class: 'item-title' }, sourceLink(i)),
             el('div', { class: 'item-meta' }, [fmtTime(i.durationS), meta(i)].filter(Boolean).join(', '))),
           el('div', { class: 'item-actions' },
             el('button', { type: 'button', onclick: () => action('PATCH', `/api/admin/items/${i.id}`, { action: 'approve' }) }, 'Zatwierdź'),
@@ -253,7 +333,7 @@
         el('li', {},
           el('div', {},
             el('div', { class: 'item-title' },
-              el('a', { href: i.sourceUrl, target: '_blank', rel: 'noopener' }, i.title),
+              sourceLink(i),
               i.status === 'failed' ? el('span', { class: 'badge err' }, 'błąd') : null),
             i.error ? el('div', { class: 'item-meta' }, i.error) : el('div', { class: 'item-meta' }, meta(i))),
           el('span', { class: 'item-side' }, i.finishedAt ? new Date(i.finishedAt).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : ''))),
@@ -316,6 +396,7 @@
       fillSettings(d.settings);
       settingsLoaded = true;
     }
+    if (!lib.loaded) loadLibrary(0, '');
   }
 
   refresh();

@@ -10,17 +10,23 @@ import { openDatabase, MAIN_CHANNEL_ID } from '../src/db/database.ts';
 import { QueueRepo } from '../src/db/queue.ts';
 import { SettingsRepo } from '../src/db/settings.ts';
 import type { MediaMeta, MediaResolver } from '../src/resolver/types.ts';
+import { MediaLibrary } from '../src/library/library.ts';
 
 let app: FastifyInstance;
 let queue: QueueRepo;
 let settings: SettingsRepo;
 let metas: Record<string, MediaMeta | Error>;
 let liveDir: string;
+let mediaDir: string;
 let skipped = 0;
 let queueChanged = 0;
 
 const resolver: MediaResolver = {
   async fetchMeta(url) {
+    if (url.startsWith('local:')) {
+      const name = decodeURIComponent(url.split('/').at(-1)!).replace(/\.[^.]+$/, '');
+      return video(name, 60);
+    }
     const m = metas[url];
     if (!m) throw new Error('Unsupported URL');
     if (m instanceof Error) throw m;
@@ -74,6 +80,10 @@ beforeEach(async () => {
     },
   };
   liveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-'));
+  mediaDir = fs.mkdtempSync(path.join(os.tmpdir(), 'media-'));
+  fs.mkdirSync(path.join(mediaDir, 'Seria'));
+  for (const n of [10, 2, 1]) fs.writeFileSync(path.join(mediaDir, 'Seria', `Odc ${n}.mkv`), 'x');
+  fs.writeFileSync(path.join(mediaDir, 'Film.mp4'), 'x');
   fs.writeFileSync(path.join(liveDir, '5.ts'), Buffer.alloc(188, 0x47));
   skipped = 0;
   queueChanged = 0;
@@ -98,6 +108,7 @@ beforeEach(async () => {
       segmentPath: (name) => (name === '5.ts' ? path.join(liveDir, '5.ts') : null),
     },
     publicDir: path.resolve('public'),
+    library: new MediaLibrary([mediaDir]),
   };
   app = await buildApp(deps);
 });
@@ -105,6 +116,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await app.close();
   fs.rmSync(liveDir, { recursive: true, force: true });
+  fs.rmSync(mediaDir, { recursive: true, force: true });
 });
 
 describe('strumień', () => {
@@ -275,6 +287,68 @@ describe('panel administratora', () => {
     const cookie = await login();
     const r = await app.inject({ method: 'POST', url: '/api/admin/logout', headers: { cookie } });
     expect(String(r.headers['set-cookie'])).toMatch(/Max-Age=0/);
+  });
+});
+
+describe('pliki z dysku', () => {
+  it('bez logowania → 401', async () => {
+    expect((await app.inject('/api/admin/library?root=0&path=')).statusCode).toBe(401);
+    const r = await app.inject({ method: 'POST', url: '/api/admin/channels/main/local', payload: { root: 0, path: 'Film.mp4' } });
+    expect(r.statusCode).toBe(401);
+  });
+
+  it('listuje folder główny i podfolder', async () => {
+    const cookie = await login();
+    const root = (await app.inject({ url: '/api/admin/library?root=0&path=', headers: { cookie } })).json();
+    expect(root.enabled).toBe(true);
+    expect(root.roots).toHaveLength(1);
+    expect(root.entries.map((e: { name: string }) => e.name)).toEqual(['Seria', 'Film.mp4']);
+    const sub = (await app.inject({ url: '/api/admin/library?root=0&path=Seria', headers: { cookie } })).json();
+    expect(sub.entries.map((e: { name: string }) => e.name)).toEqual(['Odc 1.mkv', 'Odc 2.mkv', 'Odc 10.mkv']);
+    expect(sub.parent).toBe('');
+  });
+
+  it('próba wyjścia poza folder → 400', async () => {
+    const cookie = await login();
+    const r = await app.inject({ url: '/api/admin/library?root=0&path=..', headers: { cookie } });
+    expect(r.statusCode).toBe(400);
+    const add = await app.inject({
+      method: 'POST', url: '/api/admin/channels/main/local', headers: { cookie }, payload: { root: 0, path: '../x.mp4' },
+    });
+    expect(add.statusCode).toBe(400);
+  });
+
+  it('dodaje pojedynczy plik jako local: z tytułem z nazwy', async () => {
+    const cookie = await login();
+    const r = await app.inject({
+      method: 'POST', url: '/api/admin/channels/main/local', headers: { cookie }, payload: { root: 0, path: 'Film.mp4' },
+    });
+    expect(r.statusCode).toBe(201);
+    const [item] = queue.listByStatus(MAIN_CHANNEL_ID, ['queued']);
+    expect(item).toMatchObject({ title: 'Film', sourceUrl: 'local:0/Film.mp4', addedBy: 'admin', durationS: 60 });
+  });
+
+  it('dodaje cały folder w kolejności naturalnej', async () => {
+    const cookie = await login();
+    const r = await app.inject({
+      method: 'POST', url: '/api/admin/channels/main/local', headers: { cookie }, payload: { root: 0, path: 'Seria' },
+    });
+    expect(r.statusCode).toBe(201);
+    expect(r.json().added).toBe(3);
+    expect(queue.listByStatus(MAIN_CHANNEL_ID, ['queued']).map((i) => i.title)).toEqual(['Odc 1', 'Odc 2', 'Odc 10']);
+  });
+
+  it('strona publiczna nie ujawnia ścieżek plików', async () => {
+    const cookie = await login();
+    await app.inject({ method: 'POST', url: '/api/admin/channels/main/local', headers: { cookie }, payload: { root: 0, path: 'Film.mp4' } });
+    const body = (await app.inject('/api/channels/main/state')).body;
+    expect(body).not.toContain('local:');
+    expect(body).not.toContain(path.basename(mediaDir));
+  });
+
+  it('widz nie może zgłosić pliku z dysku', async () => {
+    const r = await request('local:0/Film.mp4');
+    expect(r.statusCode).toBe(400);
   });
 });
 

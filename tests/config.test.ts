@@ -51,6 +51,12 @@ describe('loadConfig', () => {
     expect(c.publicUrl).toBe('https://tv.example.com');
   });
 
+  it('MEDIA_DIRS: lista folderów rozdzielona średnikami, domyślnie pusta', () => {
+    expect(loadConfig({ ADMIN_PASSWORD: 'haslo123' }, '/proj', 'win32').mediaDirs).toEqual([]);
+    const c = loadConfig({ ADMIN_PASSWORD: 'haslo123', MEDIA_DIRS: ' D:/Filmy ; E:/Seriale;;' }, '/proj', 'win32');
+    expect(c.mediaDirs).toEqual(['D:/Filmy', 'E:/Seriale']);
+  });
+
   it('odrzuca nieznany enkoder', () => {
     expect(() => loadConfig({ ADMIN_PASSWORD: 'haslo123', VIDEO_ENCODER: 'foo' })).toThrow(/VIDEO_ENCODER/);
   });

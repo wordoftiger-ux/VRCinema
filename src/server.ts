@@ -8,6 +8,8 @@ import { SettingsRepo } from './db/settings.ts';
 import { YtDlpResolver } from './resolver/ytdlp.ts';
 import { PixeldrainResolver } from './resolver/pixeldrain.ts';
 import { CompositeResolver } from './resolver/index.ts';
+import { LocalResolver } from './resolver/local.ts';
+import { MediaLibrary } from './library/library.ts';
 import { probeDuration } from './pipeline/probe.ts';
 import { generateSlates } from './pipeline/slates.ts';
 import { Channel } from './pipeline/channel.ts';
@@ -70,6 +72,10 @@ async function main(): Promise<void> {
   const queue = new QueueRepo(db);
   const settings = new SettingsRepo(db);
 
+  const library = new MediaLibrary(cfg.mediaDirs);
+  for (const r of library.roots()) {
+    if (!fs.existsSync(r.path)) log(`Uwaga: folder z MEDIA_DIRS nie istnieje: ${r.path}`);
+  }
   const resolver = new CompositeResolver(
     new PixeldrainResolver({
       probeDuration: (url, headers) => probeDuration(cfg.ffprobePath, url, headers),
@@ -80,6 +86,7 @@ async function main(): Promise<void> {
       jsRuntime: process.execPath,
       cookiesFile: cfg.ytdlpCookies || undefined,
     }),
+    library.enabled ? new LocalResolver(library, (file) => probeDuration(cfg.ffprobePath, file, {})) : null,
   );
 
   const clipsDir = path.join(cfg.dataDir, 'clips');
@@ -136,6 +143,7 @@ async function main(): Promise<void> {
     channel,
     broadcaster,
     publicDir: path.join(root, 'public'),
+    library,
     log,
   });
   await app.listen({ port: cfg.port, host: cfg.host });
