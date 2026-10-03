@@ -1,4 +1,6 @@
 //! Media pipeline building blocks (ports of `src/pipeline/*.ts`).
 
+pub mod ffmpeg_args;
 pub mod playlist;
+pub mod probe;
 pub mod tsrewrite;
