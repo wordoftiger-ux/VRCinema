@@ -4,6 +4,11 @@
 //! The test re-invokes this very test binary as the "parent" (selected by an environment
 //! variable). The parent starts a long-running process, prints its PID and exits. The outer
 //! test then checks that the grandchild is gone.
+//!
+//! Windows only: the guarantee comes from the Windows Job Object. On Linux the children rely on
+//! `kill_on_drop` (no PDEATHSIG, which is tied to the spawning thread and unsafe with tokio).
+
+#![cfg(windows)]
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -15,33 +20,16 @@ use vrcinema::process;
 const HELPER_ENV: &str = "VRCINEMA_JOB_HELPER";
 const PID_PREFIX: &str = "CHILD_PID=";
 
-#[cfg(windows)]
 fn long_running() -> (&'static str, Vec<&'static str>) {
     ("ping", vec!["-n", "60", "127.0.0.1"])
 }
 
-#[cfg(unix)]
-fn long_running() -> (&'static str, Vec<&'static str>) {
-    ("sleep", vec!["60"])
-}
-
-#[cfg(windows)]
 fn is_alive(pid: u32) -> bool {
     let out = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
         .output()
         .expect("tasklist");
     String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
-}
-
-#[cfg(unix)]
-fn is_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// Entry point of the helper "parent" process. A no-op in a normal test run.
@@ -103,12 +91,9 @@ fn child_dies_when_parent_exits_abruptly() {
     while is_alive(pid) {
         if Instant::now() > deadline {
             // Do not leave the 60 s process behind if the assertion fails.
-            #[cfg(windows)]
             let _ = Command::new("taskkill")
                 .args(["/F", "/PID", &pid.to_string()])
                 .output();
-            #[cfg(unix)]
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
             panic!("child {pid} survived the exit of its parent");
         }
         std::thread::sleep(Duration::from_millis(100));

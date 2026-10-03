@@ -321,7 +321,6 @@ name = "vrcinema"
 version = "0.1.0"
 dependencies = [
  "getrandom",
- "libc",
  "rusqlite",
  "serde",
  "serde_json",

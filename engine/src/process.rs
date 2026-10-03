@@ -1,13 +1,13 @@
 //! Child processes: run-and-collect helper plus a shared way to spawn long-lived children
-//! (ffmpeg) that are guaranteed to die together with this program.
+//! (ffmpeg) that die together with this program on Windows (job object) and when dropped.
 //!
 //! Port of `src/util/process.ts`.
 
-use std::cell::Cell;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -31,11 +31,16 @@ pub enum ProcessError {
     Io(#[from] io::Error),
 }
 
-/// Builds a command for a long-lived or short-lived child: no console window on Windows,
-/// killed when the `Child` handle is dropped, and (on Linux) killed when this process dies.
+/// Builds a command: no console window on Windows and `kill_on_drop(true)` (the child is killed
+/// when its `Child` handle is dropped).
 ///
-/// Spawn it with [`spawn`] (or use [`run_process`]) so that, on Windows, the child is also
-/// attached to the program-wide job object.
+/// **Callers must start the command with [`spawn`]** (or [`run_process`]), not with
+/// `Command::spawn`; only `spawn` attaches the child to the Windows job object. Without it a
+/// child outlives this process if the program dies abruptly.
+///
+/// On Linux there is deliberately no parent-death signal (`PR_SET_PDEATHSIG` is tied to the
+/// spawning thread, and tokio blocking threads come and go); we rely on `kill_on_drop` and the
+/// container lifecycle there.
 pub fn command(cmd: &Path) -> Command {
     let mut command = Command::new(cmd);
     command.kill_on_drop(true);
@@ -44,25 +49,12 @@ pub fn command(cmd: &Path) -> Command {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: the closure runs between fork and exec and only calls the async-signal-safe
-        // `prctl`. Note: the signal is tied to the *thread* that spawned the child, so spawn
-        // from threads that live as long as the runtime (tokio worker threads do).
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
     command
 }
 
-/// Spawns `cmd` (built with [`command`]) and attaches the child to the program-wide job object,
-/// so it cannot outlive this process even if we are killed abruptly.
+/// Spawns `cmd` (built with [`command`]) and, on Windows, attaches the child to the
+/// program-wide job object so it cannot outlive this process even if we are killed abruptly.
+/// On other platforms this is equivalent to `cmd.spawn()` (`kill_on_drop` only).
 pub fn spawn(cmd: &mut Command) -> io::Result<Child> {
     let child = cmd.spawn()?;
     assign_to_job(&child);
@@ -70,8 +62,7 @@ pub fn spawn(cmd: &mut Command) -> io::Result<Child> {
 }
 
 /// Attaches an already spawned child to the program-wide job object (Windows,
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Best effort; a no-op on other platforms, where
-/// [`command`] arranges `PR_SET_PDEATHSIG` instead.
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Best effort; a no-op on other platforms.
 pub fn assign_to_job(child: &Child) {
     #[cfg(windows)]
     job::assign(child);
@@ -148,15 +139,15 @@ mod job {
 
 /// Reads `reader` to the end, keeping chunks only while the shared byte total stays within
 /// [`MAX_OUTPUT`] (like the TypeScript original, which still drains the pipe afterwards).
-async fn collect<R: AsyncRead + Unpin>(mut reader: R, total: &Cell<usize>) -> Vec<u8> {
+async fn collect<R: AsyncRead + Unpin>(mut reader: R, total: &AtomicUsize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                total.set(total.get() + n);
-                if total.get() <= MAX_OUTPUT {
+                let seen = total.fetch_add(n, Ordering::Relaxed) + n;
+                if seen <= MAX_OUTPUT {
                     out.extend_from_slice(&buf[..n]);
                 }
             }
@@ -165,7 +156,7 @@ async fn collect<R: AsyncRead + Unpin>(mut reader: R, total: &Cell<usize>) -> Ve
     out
 }
 
-async fn collect_opt<R: AsyncRead + Unpin>(reader: Option<R>, total: &Cell<usize>) -> Vec<u8> {
+async fn collect_opt<R: AsyncRead + Unpin>(reader: Option<R>, total: &AtomicUsize) -> Vec<u8> {
     match reader {
         Some(reader) => collect(reader, total).await,
         None => Vec::new(),
@@ -189,7 +180,7 @@ pub async fn run_process(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let total = Cell::new(0usize);
+    let total = AtomicUsize::new(0);
     let work = async {
         let (status, out, err) = tokio::join!(
             child.wait(),
@@ -300,6 +291,21 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with(&cmd.display().to_string()), "{text}");
+    }
+
+    /// Compile-time proof that the future is `Send` (needed for `tokio::spawn` / axum handlers).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_process_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let (cmd, args) = shell("echo hello");
+        let fut = run_process(&cmd, &args, Duration::from_secs(10));
+        assert_send(&fut);
+        drop(fut);
+
+        let handle =
+            tokio::spawn(async move { run_process(&cmd, &args, Duration::from_secs(10)).await });
+        let out = handle.await.unwrap().unwrap();
+        assert_eq!(out.stdout.trim(), "hello");
     }
 
     #[test]
