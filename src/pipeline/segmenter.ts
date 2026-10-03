@@ -32,6 +32,8 @@ export interface ClipSegmenterOptions {
   ffmpegPath: string;
   args: string[];
   outDir: string;
+  /** Katalog roboczy procesu (np. dla względnych ścieżek w filtrach). */
+  cwd?: string;
 }
 
 /**
@@ -54,7 +56,11 @@ export class ClipSegmenter extends EventEmitter {
   start(): void {
     fs.mkdirSync(this.opts.outDir, { recursive: true });
     this.state = 'running';
-    const child = spawn(this.opts.ffmpegPath, this.opts.args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(this.opts.ffmpegPath, this.opts.args, {
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      cwd: this.opts.cwd,
+    });
     this.child = child;
     child.stderr!.setEncoding('utf8');
     child.stderr!.on('data', (chunk: string) => {

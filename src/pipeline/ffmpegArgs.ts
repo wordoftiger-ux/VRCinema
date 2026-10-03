@@ -49,6 +49,7 @@ export function segmentOutputArgs(segmentSeconds: number, outDir: string): strin
     '-max_muxing_queue_size', '1024',
     '-f', 'segment',
     '-segment_time', String(segmentSeconds),
+    '-segment_time_delta', '0.05',
     '-segment_format', 'mpegts',
     '-segment_list', path.join(outDir, 'list.csv'),
     '-segment_list_type', 'csv',
