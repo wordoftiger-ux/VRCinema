@@ -12,7 +12,10 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| cwd.clone());
     let root = find_root(&exe_dir, &cwd);
 
-    let mut env: HashMap<String, String> = std::env::vars().collect();
+    // vars() panics on non-Unicode entries; skip those instead.
+    let mut env: HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v.to_str()?.to_string())))
+        .collect();
     let env_file = root.join(".env");
     if env_file.exists() {
         match read_env_file(&env_file) {
