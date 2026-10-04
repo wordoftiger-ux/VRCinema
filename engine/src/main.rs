@@ -70,6 +70,30 @@ async fn ctrl_c() {
     }
 }
 
+#[cfg(unix)]
+async fn terminate() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            sigterm.recv().await;
+        }
+        Err(_) => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate() {
+    std::future::pending::<()>().await;
+}
+
+/// Resolves on Ctrl+C (SIGINT) or, on unix, SIGTERM (`docker stop`, systemd).
+async fn shutdown_signal() {
+    tokio::select! {
+        () = ctrl_c() => {}
+        () = terminate() => {}
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let root = application_root();
@@ -107,7 +131,7 @@ async fn main() -> ExitCode {
         fake_resolver,
         ready: None,
     };
-    match run(config, opts, ctrl_c()).await {
+    match run(config, opts, shutdown_signal()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e:#}");
