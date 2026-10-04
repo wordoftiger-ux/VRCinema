@@ -79,7 +79,8 @@ pub struct Broadcaster {
     last: Option<SourceSegment>,
     target_duration: f64,
     discontinuity_sequence: u64,
-    next_publish_at: u64,
+    /// Milliseconds on the `now` clock; fractional, so 4.004 s segments do not drift.
+    next_publish_at: f64,
 }
 
 impl Broadcaster {
@@ -98,7 +99,7 @@ impl Broadcaster {
             last: None,
             target_duration,
             discontinuity_sequence: 0,
-            next_publish_at: 0,
+            next_publish_at: 0.0,
         }
     }
 
@@ -131,12 +132,12 @@ impl Broadcaster {
                 first = d;
             }
         }
-        self.next_publish_at = (self.now)() + secs_to_ms(first);
+        self.next_publish_at = (self.now)() as f64 + secs_to_ms(first);
     }
 
     pub fn tick(&mut self, source: &mut dyn SegmentSource) {
         let mut guard = 0;
-        while (self.now)() >= self.next_publish_at && guard < MAX_PUBLISH_PER_TICK {
+        while (self.now)() as f64 >= self.next_publish_at && guard < MAX_PUBLISH_PER_TICK {
             guard += 1;
             let d = self.publish_one(source);
             self.next_publish_at += secs_to_ms(d);
@@ -311,8 +312,14 @@ fn is_segment_name(name: &str) -> bool {
         .is_some_and(|stem| !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn secs_to_ms(secs: f64) -> u64 {
-    (secs * 1000.0) as u64
+/// Kept fractional (like the TS `number`): rounding each segment to whole milliseconds would
+/// make the schedule drift. A broken duration (negative, NaN, infinite) counts as 0.
+fn secs_to_ms(secs: f64) -> f64 {
+    if secs.is_finite() && secs > 0.0 {
+        secs * 1000.0
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -717,5 +724,42 @@ mod tests {
         let mut b = env.broadcaster(true);
         b.start_initial(&mut src);
         assert_eq!(ts_lines(&b).len(), 3);
+    }
+
+    fn schedule_ms(b: &Broadcaster) -> f64 {
+        b.next_publish_at
+    }
+
+    /// 29.97 fps material gives 4.004 s segments; truncating each to whole milliseconds
+    /// (4003) made the channel run about 0.9 s per hour faster than real time.
+    #[test]
+    fn segments_of_4_004_s_advance_the_schedule_without_drift() {
+        let env = Env::new();
+        let mut src = env.source();
+        for i in 0..1_010 {
+            let s = src.make_with("clip-1", i, 4.004, 126_000);
+            src.push(s);
+        }
+        let mut b = env.broadcaster(true);
+        b.start_initial(&mut src);
+        let start = schedule_ms(&b);
+        for _ in 0..1_000 {
+            env.advance(4_004);
+            b.tick(&mut src);
+        }
+        // 3 initial segments + one per 4.004 s.
+        assert_eq!(b.seq, 1_003);
+        assert!(
+            (schedule_ms(&b) - start - 4_004_000.0).abs() < 1.0,
+            "schedule advanced by {} ms",
+            schedule_ms(&b) - start
+        );
+        // Just before the 1001st scheduled time nothing more goes out.
+        env.advance(4_003);
+        b.tick(&mut src);
+        assert_eq!(b.seq, 1_003);
+        env.advance(1);
+        b.tick(&mut src);
+        assert_eq!(b.seq, 1_004);
     }
 }
