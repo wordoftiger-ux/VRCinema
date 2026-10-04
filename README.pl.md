@@ -147,7 +147,7 @@ Caddy sam pobierze certyfikat HTTPS. Link kanału: `https://tv.twojadomena.pl/li
 
 ## Wersja w Rust (eksperymentalna)
 
-W katalogu `engine/` jest druga implementacja tego samego serwera, napisana w Rust. To bezpośredni zamiennik: to samo API HTTP, ten sam plik `.env`, ten sam katalog `data/` i baza. Zamiast procesu Node.js jest jeden mały program, który podczas odtwarzania filmu zajmuje około 25 MB RAM (pomiar: 22 MB pamięci roboczej wersji release, 29 MB wersji debug; ffmpeg to osobny proces i nie jest wliczony).
+W katalogu `engine/` jest druga implementacja tego samego serwera, napisana w Rust. To bezpośredni zamiennik: to samo API HTTP, ten sam plik `.env`, ten sam katalog `data/` i baza. Zamiast procesu Node.js jest jeden mały program, który podczas odtwarzania filmu zajmuje około 22 MB RAM (wersja release; pomiar pamięci roboczej; wersja debug zajmuje 29 MB; ffmpeg to osobny proces i nie jest wliczony).
 Wersja Node.js zostaje w repozytorium do czasu przełączenia.
 
 ```powershell
@@ -159,6 +159,7 @@ engine\target\release\vrcinema.exe         # uruchamia kanał (z katalogu projek
 ```
 
 Na tym samym katalogu `data/` uruchamiaj naraz tylko jedną wersję. Żeby wrócić, zatrzymaj `vrcinema` i uruchom wersję Node.js (`npm start`); baza jest zgodna w obie strony.
+Przełączaj w nowym oknie PowerShell: ustawienia nadpisane wcześniej przez `$env:PORT` czy `$env:DATA_DIR` zostają w starym oknie i wygrywają z `.env`. Wersja Rust blokuje katalog danych (`vrcinema.lock`), więc drugi serwer Rust na tym samym `data/` nie wystartuje.
 
 ## Dla programistów
 

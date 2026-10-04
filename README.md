@@ -123,7 +123,7 @@ Caddy obtains the HTTPS certificate automatically. Channel link: `https://tv.exa
 
 ## Rust version (experimental)
 
-There is a second implementation of the same server written in Rust, in `engine/`. It is a drop-in replacement: same HTTP API, same `.env`, same `data/` folder and database. It is one small executable instead of a Node.js process, and it uses about 25 MB of RAM while a film plays (measured: 22 MB working set for the release build, 29 MB for the debug build; ffmpeg is a separate process and is not included).
+There is a second implementation of the same server written in Rust, in `engine/`. It is a drop-in replacement: same HTTP API, same `.env`, same `data/` folder and database. It is one small executable instead of a Node.js process, and it uses about 22 MB of RAM (release build) while a film plays (measured working set; the debug build uses 29 MB; ffmpeg is a separate process and is not included).
 The Node.js version stays in this repository until the switch-over is done.
 
 ```powershell
@@ -135,6 +135,7 @@ engine\target\release\vrcinema.exe         # starts the channel (run it from the
 ```
 
 Run only one version at a time on the same `data/` folder. To go back, stop `vrcinema` and start the Node.js version (`npm start`); the database is compatible both ways.
+Switch over from a fresh PowerShell window: overrides set earlier with `$env:PORT` or `$env:DATA_DIR` linger in the old window and win over `.env`. The Rust version locks the data folder (`vrcinema.lock`), so a second Rust server on the same `data/` folder refuses to start.
 
 ## How it works
 
