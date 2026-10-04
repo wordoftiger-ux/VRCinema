@@ -145,6 +145,21 @@ docker compose up -d --build
 
 Caddy sam pobierze certyfikat HTTPS. Link kanału: `https://tv.twojadomena.pl/live/main.m3u8`.
 
+## Wersja w Rust (eksperymentalna)
+
+W katalogu `engine/` jest druga implementacja tego samego serwera, napisana w Rust. To bezpośredni zamiennik: to samo API HTTP, ten sam plik `.env`, ten sam katalog `data/` i baza. Zamiast procesu Node.js jest jeden mały program, który podczas odtwarzania filmu zajmuje około 25 MB RAM (pomiar: 22 MB pamięci roboczej wersji release, 29 MB wersji debug; ffmpeg to osobny proces i nie jest wliczony).
+Wersja Node.js zostaje w repozytorium do czasu przełączenia.
+
+```powershell
+cd engine
+cargo build --release     # wymaga Rusta; wynik: engine\target\release\vrcinema.exe
+cd ..
+engine\target\release\vrcinema.exe setup   # pobiera ffmpeg/ffprobe/yt-dlp, tworzy .env
+engine\target\release\vrcinema.exe         # uruchamia kanał (z katalogu projektu)
+```
+
+Na tym samym katalogu `data/` uruchamiaj naraz tylko jedną wersję. Żeby wrócić, zatrzymaj `vrcinema` i uruchom wersję Node.js (`npm start`); baza jest zgodna w obie strony.
+
 ## Dla programistów
 
 ```powershell

@@ -121,6 +121,21 @@ Caddy obtains the HTTPS certificate automatically. Channel link: `https://tv.exa
 - **pixeldrain hits its download limit.** Set `PIXELDRAIN_API_KEY`.
 - **Viewers see a black screen.** Check "Allow Untrusted URLs" and that the link starts with `https://`.
 
+## Rust version (experimental)
+
+There is a second implementation of the same server written in Rust, in `engine/`. It is a drop-in replacement: same HTTP API, same `.env`, same `data/` folder and database. It is one small executable instead of a Node.js process, and it uses about 25 MB of RAM while a film plays (measured: 22 MB working set for the release build, 29 MB for the debug build; ffmpeg is a separate process and is not included).
+The Node.js version stays in this repository until the switch-over is done.
+
+```powershell
+cd engine
+cargo build --release     # needs Rust; result: engine\target\release\vrcinema.exe
+cd ..
+engine\target\release\vrcinema.exe setup   # downloads ffmpeg/ffprobe/yt-dlp, creates .env
+engine\target\release\vrcinema.exe         # starts the channel (run it from the project folder)
+```
+
+Run only one version at a time on the same `data/` folder. To go back, stop `vrcinema` and start the Node.js version (`npm start`); the database is compatible both ways.
+
 ## How it works
 
 yt-dlp (or the disk library) resolves a video. ffmpeg cuts it into 4-second MPEG-TS segments, repackaging H.264 without re-encoding whenever possible.
