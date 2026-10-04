@@ -113,9 +113,136 @@ function stripTiming(v, topLevelChannel) {
   return v;
 }
 
+/** Pełna lista atrybutów z wartościami; normalizowana tylko wartość tokenu i data Expires. */
 function cookieShape(setCookies) {
-  return setCookies.map((c) => c.split(';').map((p, i) => (i === 0 ? p.split('=')[0] : p.split('=')[0].trim().toLowerCase())).join(';'));
+  return setCookies.map((c) =>
+    c
+      .split(';')
+      .map((part, i) => {
+        const t = part.trim();
+        const eq = t.indexOf('=');
+        const k = eq < 0 ? t : t.slice(0, eq);
+        const v = eq < 0 ? null : t.slice(eq + 1);
+        if (i === 0) return `${k}=${v === '' ? '(pusty)' : '<token>'}`;
+        if (k.toLowerCase() === 'expires') return 'Expires=<data>';
+        return v === null ? k : `${k}=${v}`;
+      })
+      .join('; '),
+  );
 }
+
+// Zamierzony status każdego kroku (sprawdzany na obu serwerach niezależnie od porównania serwerów).
+const EXPECTED_STATUS = {
+  "GET /": 200,
+  "GET /admin": 200,
+  "GET /static/common.js": 200,
+  "GET /static/style.css": 200,
+  "GET /static/brak.js (404)": 404,
+  "GET /favicon.ico": 204,
+  "GET /nie-ma (404)": 404,
+  "GET state": 200,
+  "GET /live/main.m3u8": 200,
+  "request: nie link": 400,
+  "request: ftp": 400,
+  "request: niedozwolona domena": 400,
+  "request: url nie string": 400,
+  "request: pusty obiekt": 400,
+  "request: zepsuty JSON": 400,
+  "request: zły content-type": 415,
+  "admin panel bez sesji (401)": 401,
+  "admin skip bez sesji (401)": 401,
+  "login: złe hasło": 401,
+  "login: brak hasła": 401,
+  "login: dobre": 200,
+  "admin panel (pusty)": 200,
+  "request: poprawne (ok1)": 201,
+  "request: błąd resolvera": 400,
+  "request: za długi": 400,
+  "request: limit zgłoszeń (429)": 429,
+  "GET admin settings (domyślne)": 200,
+  "PUT settings: zły klucz": 400,
+  "PUT settings: zły typ": 400,
+  "PUT settings: ujemna liczba": 400,
+  "PUT settings: dobre": 200,
+  "request: transmisja na żywo": 400,
+  "request: playlista": 400,
+  "request: local: (niepoprawny link)": 400,
+  "request: nieznany URL": 400,
+  "request: ok2": 201,
+  "request: ok4 (limit aktywnych?)": 201,
+  "request: ok3 (limit aktywnych?)": 429,
+  "request: limit aktywnych (429)": 429,
+  "GET state z kolejką": 200,
+  "PUT settings: moderacja": 200,
+  "request: moderacja (pending)": 201,
+  "GET state z regułami": 200,
+  "admin panel z pending": 200,
+  "PATCH: zły body": 400,
+  "PATCH: brak body": 400,
+  "PATCH: position ujemna": 400,
+  "PATCH: position dla pending (409)": 409,
+  "PATCH: approve": 200,
+  "PATCH: approve ponownie (409)": 409,
+  "PATCH: reject dla queued (409)": 409,
+  "PATCH: position 0": 200,
+  "PATCH: position ułamek": 400,
+  "PATCH: nieistniejące id (404)": 404,
+  "PATCH: id nie-liczba (404)": 404,
+  "PATCH: position dla playing (409)": 409,
+  "request: moderacja 2 (pending)": 201,
+  "PATCH: reject": 200,
+  "request: moderacja 3 (pending)": 201,
+  "admin add: poprawny": 201,
+  "admin add: playlista": 201,
+  "admin add: pusta playlista": 400,
+  "admin add: błąd resolvera": 400,
+  "admin add: nieznany URL": 400,
+  "admin add: nie link": 400,
+  "admin add: bez url": 400,
+  "library: root": 200,
+  "library: sub": 200,
+  "library: pusty folder": 200,
+  "library: ..": 400,
+  "library: ../..": 400,
+  "library: sub/../..": 400,
+  "library: absolutna": 400,
+  "library: zły root": 400,
+  "library: root nie-liczba": 400,
+  "library: nieistniejący": 400,
+  "library: plik zamiast folderu": 400,
+  "local: plik": 201,
+  "local: folder": 201,
+  "local: pusty folder": 400,
+  "local: ..": 400,
+  "local: brak pliku": 400,
+  "local: zły root": 400,
+  "local: brak body": 400,
+  "local: plik bez fałszywych metadanych": 400,
+  "admin panel po dodaniu": 200,
+  "DELETE: nieistniejące (404)": 404,
+  "DELETE: queued": 200,
+  "DELETE: ponownie (409)": 409,
+  "DELETE: pending": 200,
+  "segment: nieznany (404)": 404,
+  "segment: ..%2F..%2Fpackage.json": 404,
+  "segment: ..%5C..%5Cpackage.json": 404,
+  "segment: ../../package.json (surowe)": 404,
+  "segment: %2e%2e": 404,
+  "logout": 200,
+  "admin panel po wylogowaniu (401)": 401,
+  "admin panel z podrobioną sesją (401)": 401,
+  "login: dobre ponownie": 200,
+  "skip": 200,
+  "skip bez filmu": 200,
+  "admin panel końcowy": 200,
+  "login: zablokowany (zły)": 429,
+  "login: zablokowany (dobry)": 429,
+  "login: złe hasło #1": 401,
+  "login: złe hasło #2": 401,
+  "login: złe hasło #3": 401,
+  "login: zablokowany #4": 429,
+  "login: zablokowany #5": 429,
+};
 
 class Client {
   constructor(srv) {
@@ -175,6 +302,13 @@ class Client {
       'set-cookie': cookieShape(setCookies),
       body: JSON.parse(normalized),
     });
+    const expect = opts.expect ?? (name.startsWith('cleanup DELETE') ? 200 : EXPECTED_STATUS[name]);
+    if (expect === undefined) throw new Error(`Brak oczekiwanego statusu dla kroku "${name}"`);
+    if (res.status !== expect) {
+      throw new Error(`${this.srv.name}: "${name}" -> ${res.status}, oczekiwano ${expect}
+  odpowiedź: ${text.slice(0, 500)}`);
+    }
+    if (process.env.PARITY_VERBOSE) console.log(this.srv.name, res.status, name);
     return { status: res.status, json: parsed };
   }
 
@@ -183,6 +317,11 @@ class Client {
 }
 
 const yt = (id) => `https://www.youtube.com/watch?v=${id}`;
+
+function need(value, what) {
+  if (value === undefined || value === null) throw new Error(`Brak wartości: ${what}`);
+  return value;
+}
 
 async function waitPlaying(c, count = 1) {
   for (let i = 0; i < 120; i++) {
@@ -254,7 +393,8 @@ async function scenario(srv) {
   // Moderacja
   await c.call('PUT settings: moderacja', 'PUT', `${adminPanel}/settings`, { json: { moderation: true, maxActivePerRequester: 10 } });
   const ok5 = await request('request: moderacja (pending)', yt('ok5'));
-  const ok5Id = ok5.json?.item?.id;
+  const ok5Id = need(ok5.json?.item?.id, 'id zgłoszenia ok5');
+  const ok1Id = need(ok1.json?.item?.id, 'id zgłoszenia ok1');
   await c.get('GET state z regułami', '/api/channels/main/state', { channelBody: true });
   await c.get('admin panel z pending', adminPanel, { channelBody: true });
   const patch = (name, id, json) => c.call(name, 'PATCH', `/api/admin/items/${id}`, { json });
@@ -269,9 +409,9 @@ async function scenario(srv) {
   await patch('PATCH: position ułamek', ok5Id, { position: 1.5 });
   await patch('PATCH: nieistniejące id (404)', 9999, { action: 'approve' });
   await patch('PATCH: id nie-liczba (404)', 'abc', { action: 'approve' });
-  await patch('PATCH: position dla playing (409)', ok1.json?.item?.id, { position: 0 });
+  await patch('PATCH: position dla playing (409)', ok1Id, { position: 0 });
   const p2 = await request('request: moderacja 2 (pending)', yt('ok2'));
-  await patch('PATCH: reject', p2.json?.item?.id, { action: 'reject' });
+  await patch('PATCH: reject', need(p2.json?.item?.id, 'id p2'), { action: 'reject' });
   const p3 = await request('request: moderacja 3 (pending)', yt('ok3'));
 
   // Dodawanie przez administratora
@@ -308,11 +448,12 @@ async function scenario(srv) {
 
   // Panel po dodaniu, usuwanie
   const panel = await c.get('admin panel po dodaniu', adminPanel, { channelBody: true });
-  const queued = (panel.json?.queue ?? []).map((i) => i.id);
+  const queued = need(panel.json?.queue, 'kolejka w panelu').map((i) => i.id);
+  if (queued.length === 0) throw new Error('Kolejka w panelu jest pusta');
   await c.call('DELETE: nieistniejące (404)', 'DELETE', '/api/admin/items/9999');
   await c.call('DELETE: queued', 'DELETE', `/api/admin/items/${queued[0]}`);
   await c.call('DELETE: ponownie (409)', 'DELETE', `/api/admin/items/${queued[0]}`);
-  await c.call('DELETE: pending', 'DELETE', `/api/admin/items/${p3.json?.item?.id}`);
+  await c.call('DELETE: pending', 'DELETE', `/api/admin/items/${need(p3.json?.item?.id, 'id p3')}`);
 
   // Fragmenty strumienia
   await c.get('segment: nieznany (404)', '/live/main/brak.ts');
@@ -331,14 +472,16 @@ async function scenario(srv) {
 
   // Posprzątanie kolejki, żeby skip nie uruchomił następnego filmu w wyścigu
   const before = await fetch(`${srv.base}${adminPanel}`, { headers: { cookie: c.cookieHeader() } }).then((r) => r.json());
-  for (const i of before.queue) await c.call(`cleanup DELETE ${i.id}`, 'DELETE', `/api/admin/items/${i.id}`);
+  for (const i of need(before.queue, 'kolejka przed sprzątaniem')) await c.call(`cleanup DELETE ${i.id}`, 'DELETE', `/api/admin/items/${i.id}`);
   await c.post('skip', `${adminPanel}/skip`, {});
   await waitPlaying(c, 0); // Rust wykonuje skip przy następnym cyklu silnika, TS od razu
   await c.post('skip bez filmu', `${adminPanel}/skip`, {});
   await c.get('admin panel końcowy', adminPanel, { channelBody: true });
 
   // Blokada logowania na końcu (oba serwery widzą 127.0.0.1)
-  for (let i = 1; i <= 5; i++) await login(`login: złe hasło #${i}`, 'zle-haslo');
+  // Wcześniej były 2 nieudane próby (złe hasło, brak hasła); 3 kolejne dobijają do limitu 5.
+  for (let i = 1; i <= 3; i++) await login(`login: złe hasło #${i}`, 'zle-haslo');
+  for (let i = 4; i <= 5; i++) await login(`login: zablokowany #${i}`, 'zle-haslo');
   await login('login: zablokowany (zły)', 'zle-haslo');
   await login('login: zablokowany (dobry)', PASSWORD);
   return c.records;
@@ -360,8 +503,8 @@ function compare(tsRecs, rustRecs) {
   const diffs = [];
   if (tsRecs.length !== rustRecs.length) diffs.push({ name: '(liczba żądań)', field: 'count', ts: tsRecs.length, rust: rustRecs.length });
   for (let i = 0; i < Math.min(tsRecs.length, rustRecs.length); i++) {
+    if (tsRecs[i].name !== rustRecs[i].name) throw new Error(`Rozjechane kroki scenariusza: #${i} "${tsRecs[i].name}" vs "${rustRecs[i].name}"`);
     for (const d of diffValues(tsRecs[i], rustRecs[i])) {
-      if (d.field === 'name') continue;
       diffs.push({ name: tsRecs[i].name, ...d });
     }
   }
@@ -377,8 +520,16 @@ async function main() {
   const rust = startServer('rust', 8192, rustBin, [], fx);
   await Promise.all([waitReady(ts), waitReady(rust)]);
   console.log('Oba serwery gotowe, odtwarzam scenariusz...');
-  const tsRecs = await scenario(ts);
-  const rustRecs = await scenario(rust);
+  const [tsRes, rustRes] = await Promise.allSettled([scenario(ts), scenario(rust)]);
+  if (tsRes.status === 'rejected' || rustRes.status === 'rejected') {
+    for (const [n, r] of [['TS', tsRes], ['Rust', rustRes]]) {
+      console.error(`
+[${n}] ${r.status === 'rejected' ? r.reason.message : 'scenariusz przeszedł'}`);
+    }
+    return 1;
+  }
+  const tsRecs = tsRes.value;
+  const rustRecs = rustRes.value;
   console.log(`Żądań na serwer: ${tsRecs.length} (TS), ${rustRecs.length} (Rust)`);
   const diffs = compare(tsRecs, rustRecs);
   for (const d of diffs) {
