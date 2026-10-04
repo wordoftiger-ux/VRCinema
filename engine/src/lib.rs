@@ -7,3 +7,6 @@ pub mod pipeline;
 pub mod process;
 pub mod resolver;
 pub mod rules;
+pub mod server;
+pub mod setup;
+pub mod updater;
