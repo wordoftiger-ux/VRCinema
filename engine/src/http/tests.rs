@@ -1110,7 +1110,7 @@ async fn bodies_are_limited_and_must_be_json() {
         .send(call("POST", "/api/admin/login").raw("application/json", &big))
         .await;
     assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(!r.error().is_empty());
+    assert_eq!(r.error(), "Request body is too large");
     let r = h
         .send(call("POST", "/api/admin/login").raw("application/json", b"{oops"))
         .await;
@@ -1124,9 +1124,26 @@ async fn bodies_are_limited_and_must_be_json() {
         "Body cannot be empty when content-type is set to 'application/json'"
     );
     let r = h
-        .send(call("POST", "/api/admin/login").raw("text/plain", b"tajne"))
+        .send(call("POST", "/api/admin/login").raw("application/xml", b"<a/>"))
         .await;
     assert_eq!(r.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(r.error(), "Unsupported Media Type");
+}
+
+#[tokio::test]
+async fn a_text_plain_login_body_is_a_wrong_password_and_counts_as_a_failure() {
+    let h = Harness::new();
+    for _ in 0..5 {
+        let r = h
+            .send(call("POST", "/api/admin/login").raw("text/plain", b"tajne"))
+            .await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(r.error(), "Złe hasło.");
+    }
+    let r = h
+        .send(call("POST", "/api/admin/login").json(json!({"password": "tajne"})))
+        .await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
 }
 
 // ---------- pliki z dysku ----------

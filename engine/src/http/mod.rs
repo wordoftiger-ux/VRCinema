@@ -261,10 +261,7 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.trim().to_ascii_lowercase());
         let bytes = to_bytes(body, BODY_LIMIT).await.map_err(|_| {
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Request body is larger than the provided limit",
-            )
+            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "Request body is too large")
         })?;
         let is_json = content_type
             .as_deref()
@@ -279,13 +276,20 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
             };
         }
         if !is_json {
-            return Err(ApiError::new(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                format!(
-                    "Unsupported Media Type: {}",
-                    content_type.as_deref().unwrap_or("undefined")
-                ),
-            ));
+            // Like Fastify: text/plain reaches the handler as a string; anything else is 415.
+            let is_text = content_type
+                .as_deref()
+                .is_some_and(|c| c == "text/plain" || c.starts_with("text/plain;"));
+            return if is_text {
+                Ok(Self(Value::String(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                )))
+            } else {
+                Err(ApiError::new(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "Unsupported Media Type",
+                ))
+            };
         }
         serde_json::from_slice(&bytes)
             .map(Self)
