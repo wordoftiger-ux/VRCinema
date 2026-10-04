@@ -259,6 +259,33 @@ pub fn apply_env(target: &mut HashMap<String, String>, values: Vec<(String, Stri
     }
 }
 
+/// The variables the server reads: `process_env` (non-Unicode entries skipped) plus
+/// `<root>/.env`, real environment variables winning (like `applyEnv` in TS).
+pub fn merged_env(
+    process_env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    root: &Path,
+) -> Result<HashMap<String, String>, String> {
+    let mut env: HashMap<String, String> = process_env
+        .into_iter()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    let env_file = root.join(".env");
+    if env_file.exists() {
+        let values = read_env_file(&env_file)
+            .map_err(|e| format!("Nie można odczytać pliku {}: {e}", env_file.display()))?;
+        apply_env(&mut env, values);
+    }
+    Ok(env)
+}
+
+/// `VRCINEMA_FAKE_RESOLVER` from the merged variables; an empty value counts as unset (in TS
+/// `if (process.env.VRCINEMA_FAKE_RESOLVER)`).
+pub fn fake_resolver_file(env: &HashMap<String, String>) -> Option<PathBuf> {
+    env.get("VRCINEMA_FAKE_RESOLVER")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Katalog główny aplikacji: ten z `public/`, najpierw obok pliku wykonywalnego, potem cwd.
 pub fn find_root(exe_dir: &Path, cwd: &Path) -> PathBuf {
     if exe_dir.join("public").is_dir() {
@@ -277,6 +304,47 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn os_env(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
+    }
+
+    #[test]
+    fn fake_resolver_from_the_env_file_and_empty_means_unset() {
+        let root = tempfile::tempdir().unwrap();
+        // No .env: only the process environment counts.
+        let merged = merged_env(os_env(&[("PORT", "1")]), root.path()).unwrap();
+        assert_eq!(fake_resolver_file(&merged), None);
+        let merged = merged_env(os_env(&[("VRCINEMA_FAKE_RESOLVER", "")]), root.path()).unwrap();
+        assert_eq!(fake_resolver_file(&merged), None);
+        let merged =
+            merged_env(os_env(&[("VRCINEMA_FAKE_RESOLVER", "a.json")]), root.path()).unwrap();
+        assert_eq!(fake_resolver_file(&merged), Some(PathBuf::from("a.json")));
+
+        // Set only in .env: honoured, like TS (read after applyEnv).
+        std::fs::write(
+            root.path().join(".env"),
+            "VRCINEMA_FAKE_RESOLVER=z-pliku.json\nPORT=8080\n",
+        )
+        .unwrap();
+        let merged = merged_env(os_env(&[("PORT", "1")]), root.path()).unwrap();
+        assert_eq!(
+            fake_resolver_file(&merged),
+            Some(PathBuf::from("z-pliku.json"))
+        );
+        assert_eq!(merged["PORT"], "1");
+        // A real (even empty) variable wins over .env, and empty means unset.
+        let merged = merged_env(os_env(&[("VRCINEMA_FAKE_RESOLVER", "")]), root.path()).unwrap();
+        assert_eq!(fake_resolver_file(&merged), None);
+
+        // An empty value in .env is unset too.
+        std::fs::write(root.path().join(".env"), "VRCINEMA_FAKE_RESOLVER=\n").unwrap();
+        let merged = merged_env(os_env(&[]), root.path()).unwrap();
+        assert_eq!(fake_resolver_file(&merged), None);
     }
 
     fn err_text(r: Result<AppConfig, ConfigError>) -> String {

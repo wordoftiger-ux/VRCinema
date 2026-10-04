@@ -52,17 +52,45 @@ fn job_helper_parent() {
     std::process::exit(0);
 }
 
+/// Helper "parent" that puts itself into the job first (like `main` does) and then starts a
+/// child WITHOUT `process::spawn`. This stands for a grandchild that a child (the PyInstaller
+/// yt-dlp bootloader) starts immediately, before any per-child assignment could catch it:
+/// only membership inherited from this process keeps it in the job.
+#[test]
+fn job_helper_contained_parent() {
+    if std::env::var_os(CONTAINED_HELPER_ENV).is_none() {
+        return;
+    }
+    process::contain_this_process().expect("join the job object");
+    let (program, args) = long_running();
+    let child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn child");
+    println!("{PID_PREFIX}{}", child.id());
+    std::thread::sleep(Duration::from_millis(1500));
+    std::process::exit(0);
+}
+
+const CONTAINED_HELPER_ENV: &str = "VRCINEMA_JOB_CONTAINED_HELPER";
+
 #[test]
 fn child_dies_when_parent_exits_abruptly() {
+    assert_child_dies_with_parent("job_helper_parent", HELPER_ENV);
+}
+
+#[test]
+fn an_unassigned_grandchild_dies_when_the_contained_parent_exits_abruptly() {
+    assert_child_dies_with_parent("job_helper_contained_parent", CONTAINED_HELPER_ENV);
+}
+
+fn assert_child_dies_with_parent(helper: &str, env: &str) {
     let exe = std::env::current_exe().expect("current_exe");
     let mut parent = Command::new(exe)
-        .args([
-            "job_helper_parent",
-            "--exact",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env(HELPER_ENV, "1")
+        .args([helper, "--exact", "--nocapture", "--test-threads=1"])
+        .env(env, "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

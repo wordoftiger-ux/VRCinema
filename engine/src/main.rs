@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use vrcinema::config::{AppConfig, apply_env, find_root, load_config, read_env_file};
+use vrcinema::config::{AppConfig, fake_resolver_file, find_root, load_config, merged_env};
+use vrcinema::process::contain_this_process;
 use vrcinema::server::{RunOptions, log, run};
 use vrcinema::setup::{SetupOptions, run_setup};
 
@@ -17,17 +18,8 @@ fn application_root() -> PathBuf {
 
 /// Environment plus `<root>/.env` (real environment variables win).
 fn load_env(root: &std::path::Path) -> Result<HashMap<String, String>, String> {
-    // vars() panics on non-Unicode entries; skip those instead.
-    let mut env: HashMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v.to_str()?.to_string())))
-        .collect();
-    let env_file = root.join(".env");
-    if env_file.exists() {
-        let values = read_env_file(&env_file)
-            .map_err(|e| format!("Nie można odczytać pliku {}: {e}", env_file.display()))?;
-        apply_env(&mut env, values);
-    }
-    Ok(env)
+    // vars() panics on non-Unicode entries; merged_env skips those instead.
+    merged_env(std::env::vars_os(), root)
 }
 
 fn check_tools(config: &AppConfig) -> Result<(), String> {
@@ -50,7 +42,8 @@ fn check_tools(config: &AppConfig) -> Result<(), String> {
     }
 }
 
-fn prepare_server(root: &std::path::Path) -> Result<AppConfig, String> {
+/// The configuration and the merged variables (environment + `.env`).
+fn prepare_server(root: &std::path::Path) -> Result<(AppConfig, HashMap<String, String>), String> {
     let env = load_env(root)?;
     let config = load_config(&env, root, cfg!(windows))
         .map_err(|e| format!("\nBłąd konfiguracji: {e}\n"))?;
@@ -60,7 +53,7 @@ fn prepare_server(root: &std::path::Path) -> Result<AppConfig, String> {
             "Uwaga: brak SESSION_SECRET w .env — po restarcie trzeba będzie zalogować się ponownie.",
         );
     }
-    Ok(config)
+    Ok((config, env))
 }
 
 async fn ctrl_c() {
@@ -117,14 +110,22 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let config = match prepare_server(&root) {
+    let (config, env) = match prepare_server(&root) {
         Ok(c) => c,
         Err(msg) => {
             eprintln!("{msg}");
             return ExitCode::FAILURE;
         }
     };
-    let fake_resolver = std::env::var_os("VRCINEMA_FAKE_RESOLVER").map(PathBuf::from);
+    // Every process started from here on (ffmpeg, yt-dlp and whatever they start) is born
+    // inside the job object and dies with this program (Windows; a no-op elsewhere).
+    if let Err(e) = contain_this_process() {
+        log(&format!(
+            "Uwaga: nie można powiązać procesów potomnych z serwerem: {e}"
+        ));
+    }
+    // Read after .env was applied; an empty value counts as unset (like TS).
+    let fake_resolver = fake_resolver_file(&env);
     let opts = RunOptions {
         root,
         update_ytdlp: fake_resolver.is_none(),

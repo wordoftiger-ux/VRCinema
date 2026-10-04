@@ -36,7 +36,8 @@ pub enum ProcessError {
 ///
 /// **Callers must start the command with [`spawn`]** (or [`run_process`]), not with
 /// `Command::spawn`; only `spawn` attaches the child to the Windows job object. Without it a
-/// child outlives this process if the program dies abruptly.
+/// child outlives this process if the program dies abruptly. (The server additionally puts
+/// itself into the job at startup, see [`contain_this_process`]; then children inherit it.)
 ///
 /// On Linux there is deliberately no parent-death signal (`PR_SET_PDEATHSIG` is tied to the
 /// spawning thread, and tokio blocking threads come and go); we rely on `kill_on_drop` and the
@@ -61,6 +62,20 @@ pub fn spawn(cmd: &mut Command) -> io::Result<Child> {
     Ok(child)
 }
 
+/// Puts this process itself into the program-wide job object (Windows), so every process it
+/// starts from now on — and every process those start — is born inside the job and dies with
+/// this program, even a grandchild started before [`spawn`] could assign its parent.
+///
+/// Call it once at server startup from `main`. Never from tests or library code run inside
+/// the test harness: the job kills all its members when this process exits.
+/// A no-op on other platforms.
+pub fn contain_this_process() -> io::Result<()> {
+    #[cfg(windows)]
+    return job::contain_self();
+    #[cfg(not(windows))]
+    Ok(())
+}
+
 /// Attaches an already spawned child to the program-wide job object (Windows,
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Best effort; a no-op on other platforms.
 pub fn assign_to_job(child: &Child) {
@@ -74,6 +89,7 @@ pub fn assign_to_job(child: &Child) {
 mod job {
     use std::io::Error;
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::process::Child;
     use windows_sys::Win32::Foundation::HANDLE;
@@ -82,11 +98,38 @@ mod job {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     /// The job handle as an address (`HANDLE` is a raw pointer, not `Send`/`Sync`); 0 = unavailable.
     /// The handle is intentionally never closed: it lives as long as the program, and the OS
     /// closing it at process exit is exactly what kills the children.
     static JOB: OnceLock<usize> = OnceLock::new();
+    /// This process is a member of `JOB`: children inherit the membership at creation.
+    static SELF_CONTAINED: AtomicBool = AtomicBool::new(false);
+
+    fn job() -> usize {
+        *JOB.get_or_init(|| create().unwrap_or(0))
+    }
+
+    pub fn contain_self() -> std::io::Result<()> {
+        if SELF_CONTAINED.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let job = job();
+        if job == 0 {
+            return Err(Error::other(
+                "nie można utworzyć obiektu zadania (job object)",
+            ));
+        }
+        // SAFETY: `job` is a valid job handle; GetCurrentProcess returns a pseudo-handle that
+        // needs no closing.
+        let ok = unsafe { AssignProcessToJobObject(job as HANDLE, GetCurrentProcess()) };
+        if ok == 0 {
+            return Err(Error::last_os_error());
+        }
+        SELF_CONTAINED.store(true, Ordering::SeqCst);
+        Ok(())
+    }
 
     fn create() -> Option<usize> {
         // SAFETY: plain Win32 calls with valid arguments; `info` outlives the call.
@@ -118,8 +161,14 @@ mod job {
         }
     }
 
+    /// Fallback for when this process is not itself in the job (tests, or `contain_self`
+    /// failed): attaches the child after it started. A child that starts its own child at once
+    /// can escape this way, hence `contain_self` at startup.
     pub fn assign(child: &Child) {
-        let job = *JOB.get_or_init(|| create().unwrap_or(0));
+        if SELF_CONTAINED.load(Ordering::SeqCst) {
+            return; // born inside the job already
+        }
+        let job = job();
         if job == 0 {
             return;
         }
