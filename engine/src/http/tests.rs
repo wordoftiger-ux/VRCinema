@@ -279,22 +279,7 @@ impl Harness {
     }
 
     async fn send(&self, c: Call) -> Resp {
-        let mut builder = Request::builder().method(c.method).uri(&c.url);
-        for (k, v) in &c.headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let mut req = builder
-            .body(Body::from(c.body.unwrap_or_default()))
-            .unwrap();
-        let addr = SocketAddr::new(c.ip.parse().unwrap(), 40_000);
-        req.extensions_mut().insert(ConnectInfo(addr));
-        let res = self.router.clone().oneshot(req).await.unwrap();
-        let (parts, body) = res.into_parts();
-        Resp {
-            status: parts.status,
-            headers: parts.headers,
-            body: body.collect().await.unwrap().to_bytes().to_vec(),
-        }
+        send_to(self.router.clone(), c).await
     }
 
     fn with_db<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
@@ -380,6 +365,25 @@ impl Harness {
 
     async fn request_default(&self, url: &str) -> Resp {
         self.request(url, "1.1.1.1", None).await
+    }
+}
+
+async fn send_to(router: Router, c: Call) -> Resp {
+    let mut builder = Request::builder().method(c.method).uri(&c.url);
+    for (k, v) in &c.headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    let mut req = builder
+        .body(Body::from(c.body.unwrap_or_default()))
+        .unwrap();
+    let addr = SocketAddr::new(c.ip.parse().unwrap(), 40_000);
+    req.extensions_mut().insert(ConnectInfo(addr));
+    let res = router.oneshot(req).await.unwrap();
+    let (parts, body) = res.into_parts();
+    Resp {
+        status: parts.status,
+        headers: parts.headers,
+        body: body.collect().await.unwrap().to_bytes().to_vec(),
     }
 }
 
@@ -774,6 +778,46 @@ async fn wrong_password_is_401_and_after_5_attempts_429() {
         )
         .await;
     assert_eq!(other.status, StatusCode::OK);
+}
+
+/// The check (peek), the password comparison and the registration (hit) are one step: wrong
+/// passwords sent at the same moment from several threads cannot slip past the limit of 5.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_wrong_passwords_never_get_more_than_5_attempts() {
+    const PARALLEL: usize = 32;
+    for round in 0..40 {
+        let h = Harness::new();
+        let barrier = Arc::new(tokio::sync::Barrier::new(PARALLEL));
+        let tasks: Vec<_> = (0..PARALLEL)
+            .map(|_| {
+                let router = h.router.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    send_to(
+                        router,
+                        call("POST", "/api/admin/login").json(json!({"password": "x"})),
+                    )
+                    .await
+                    .status
+                })
+            })
+            .collect();
+        let mut unauthorized = 0;
+        let mut too_many = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                StatusCode::UNAUTHORIZED => unauthorized += 1,
+                StatusCode::TOO_MANY_REQUESTS => too_many += 1,
+                other => panic!("unexpected status {other}"),
+            }
+        }
+        assert_eq!(
+            (unauthorized, too_many),
+            (5, PARALLEL - 5),
+            "round {round}: {unauthorized} wrong passwords were checked"
+        );
+    }
 }
 
 #[tokio::test]

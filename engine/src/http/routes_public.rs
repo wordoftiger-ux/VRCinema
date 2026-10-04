@@ -178,26 +178,24 @@ async fn post_request(
 }
 
 async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody) -> ApiResult {
-    let blocked = state
-        .login_limiter
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .peek(&ctx.ip)
-        >= super::LOGIN_FAILURES as usize;
-    if blocked {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Za dużo nieudanych prób logowania. Spróbuj za 15 minut.",
-        ));
-    }
     let password = body.get("password").and_then(Value::as_str);
-    if !check_password(password, &state.config.admin_password) {
-        state
+    {
+        // One lock scope for check, comparison and registration (all synchronous): concurrent
+        // wrong passwords cannot all pass the check before any of them is registered.
+        let mut limiter = state
             .login_limiter
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .hit(&ctx.ip);
-        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Złe hasło."));
+            .unwrap_or_else(PoisonError::into_inner);
+        if limiter.peek(&ctx.ip) >= super::LOGIN_FAILURES as usize {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Za dużo nieudanych prób logowania. Spróbuj za 15 minut.",
+            ));
+        }
+        if !check_password(password, &state.config.admin_password) {
+            limiter.hit(&ctx.ip);
+            return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Złe hasło."));
+        }
     }
     let now = crate::db::now_ms().max(0) as u64;
     let token = create_session_token(&state.config.session_secret, SESSION_TTL_MS, now);
