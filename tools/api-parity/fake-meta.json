@@ -1,0 +1,26 @@
+{
+  "https://www.youtube.com/watch?v=ok1": {"title": "Film jeden", "durationS": 300, "isLive": false, "isPlaylist": false, "inputs": [{"url": "@MEDIA@"}]},
+  "https://www.youtube.com/watch?v=ok2": {"title": "Film dwa", "durationS": 301, "isLive": false, "isPlaylist": false, "inputs": [{"url": "@MEDIA@"}]},
+  "https://www.youtube.com/watch?v=ok3": {"title": "Film trzy", "durationS": 302, "isLive": false, "isPlaylist": false, "inputs": [{"url": "@MEDIA@"}]},
+  "https://youtu.be/ok4": {"title": "Film cztery", "durationS": 303, "isLive": false, "isPlaylist": false, "inputs": [{"url": "@MEDIA@"}]},
+  "https://www.youtube.com/watch?v=ok5": {"title": "Film pięć", "durationS": null, "isLive": false, "isPlaylist": false, "inputs": [{"url": "@MEDIA@"}]},
+  "https://www.youtube.com/watch?v=err": {"error": "Video unavailable"},
+  "https://www.youtube.com/watch?v=long": {"title": "Bardzo długi film", "durationS": 99999, "isLive": false, "isPlaylist": false},
+  "https://www.youtube.com/watch?v=live": {"title": "Transmisja", "durationS": null, "isLive": true, "isPlaylist": false},
+  "https://www.youtube.com/playlist?list=pl": {"title": "Lista publiczna", "durationS": null, "isLive": false, "isPlaylist": true, "entries": [
+    {"url": "https://www.youtube.com/watch?v=pl1", "title": "Z listy 1", "durationS": 310},
+    {"url": "https://www.youtube.com/watch?v=pl2", "title": "Z listy 2", "durationS": 320}
+  ]},
+  "https://example.org/video": {"title": "Film admina", "durationS": 400, "isLive": false, "isPlaylist": false, "inputs": [{"url": "@MEDIA@"}]},
+  "https://example.org/list": {"title": "Lista admina", "durationS": null, "isLive": false, "isPlaylist": true, "entries": [
+    {"url": "https://example.org/e1", "title": "Admin 1", "durationS": 410},
+    {"url": "https://example.org/e2", "title": "Admin 2", "durationS": null},
+    {"url": "https://example.org/e3", "title": "Admin 3", "durationS": 430}
+  ]},
+  "https://example.org/empty": {"title": "Pusta lista", "durationS": null, "isLive": false, "isPlaylist": true, "entries": []},
+  "https://example.org/broken": {"error": "Unable to extract"},
+  "local:0/movie1.mp4": {"title": "movie1", "durationS": null, "isLive": false, "isPlaylist": false},
+  "local:0/movie2.mkv": {"title": "movie2", "durationS": null, "isLive": false, "isPlaylist": false},
+  "local:0/sub/clip3.mp4": {"title": "clip3", "durationS": null, "isLive": false, "isPlaylist": false},
+  "local:0/sub/clip4.mkv": {"title": "clip4", "durationS": null, "isLive": false, "isPlaylist": false}
+}

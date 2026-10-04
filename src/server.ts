@@ -9,6 +9,7 @@ import { YtDlpResolver } from './resolver/ytdlp.ts';
 import { PixeldrainResolver } from './resolver/pixeldrain.ts';
 import { CompositeResolver } from './resolver/index.ts';
 import { LocalResolver } from './resolver/local.ts';
+import { FakeResolver } from './resolver/fake.ts';
 import { MediaLibrary } from './library/library.ts';
 import { probeDuration } from './pipeline/probe.ts';
 import { generateSlates } from './pipeline/slates.ts';
@@ -76,7 +77,8 @@ async function main(): Promise<void> {
   for (const r of library.roots()) {
     if (!fs.existsSync(r.path)) log(`Uwaga: folder z MEDIA_DIRS nie istnieje: ${r.path}`);
   }
-  const resolver = new CompositeResolver(
+  const fakeResolverFile = process.env.VRCINEMA_FAKE_RESOLVER;
+  const resolver = fakeResolverFile ? new FakeResolver(fakeResolverFile) : new CompositeResolver(
     new PixeldrainResolver({
       probeDuration: (url, headers) => probeDuration(cfg.ffprobePath, url, headers),
       apiKey: cfg.pixeldrainApiKey || undefined,
@@ -166,15 +168,18 @@ async function main(): Promise<void> {
   ];
   console.log(lines.join('\n'));
 
-  void updateYtDlp(cfg);
-  const updater = setInterval(() => void updateYtDlp(cfg), 24 * 3600 * 1000);
+  let updater: NodeJS.Timeout | undefined;
+  if (!fakeResolverFile) {
+    void updateYtDlp(cfg);
+    updater = setInterval(() => void updateYtDlp(cfg), 24 * 3600 * 1000);
+  }
 
   let closing = false;
   const shutdown = async () => {
     if (closing) return;
     closing = true;
     log('Zamykanie...');
-    clearInterval(updater);
+    if (updater) clearInterval(updater);
     broadcaster.stop();
     channel.stop();
     await app.close().catch(() => {});

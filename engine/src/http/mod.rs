@@ -13,7 +13,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Request};
-use axum::http::header::{CONTENT_TYPE, COOKIE, HOST};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, HOST};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
@@ -245,6 +245,39 @@ async fn not_found(method: Method, uri: Uri) -> Response {
     )
 }
 
+/// Makes `/static/*` answer like @fastify/static: charset on JS/CSS, `Cache-Control`, JSON 404.
+async fn static_fixups(req: Request, next: Next) -> Response {
+    let is_static = req.uri().path().starts_with("/static/");
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let mut res = next.run(req).await;
+    if !is_static {
+        return res;
+    }
+    if res.status() == StatusCode::NOT_FOUND {
+        return not_found(method, uri).await;
+    }
+    if res.status().is_success() {
+        let fixed = match res
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+        {
+            Some("text/javascript") => Some("application/javascript; charset=utf-8"),
+            Some("text/css") => Some("text/css; charset=utf-8"),
+            _ => None,
+        };
+        if let Some(value) = fixed {
+            res.headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(value));
+        }
+        res.headers_mut()
+            .entry(CACHE_CONTROL)
+            .or_insert(HeaderValue::from_static("public, max-age=0"));
+    }
+    res
+}
+
 // ---------- Extractors ----------
 
 /// JSON request body with Fastify's error behaviour; an absent body is `null`.
@@ -291,9 +324,11 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
                 ))
             };
         }
-        serde_json::from_slice(&bytes)
-            .map(Self)
-            .map_err(|e| ApiError::bad_request(format!("Body is not valid JSON: {e}")))
+        serde_json::from_slice(&bytes).map(Self).map_err(|_| {
+            ApiError::bad_request(
+                "Body is not valid JSON but content-type is set to 'application/json'",
+            )
+        })
     }
 }
 
@@ -431,6 +466,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest_service("/static", static_files)
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
+        .layer(middleware::from_fn(static_fixups))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             log_internal_errors,

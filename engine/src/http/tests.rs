@@ -1115,6 +1115,10 @@ async fn bodies_are_limited_and_must_be_json() {
         .send(call("POST", "/api/admin/login").raw("application/json", b"{oops"))
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        r.error(),
+        "Body is not valid JSON but content-type is set to 'application/json'"
+    );
     let r = h
         .send(call("POST", "/api/admin/login").raw("application/json", b""))
         .await;
@@ -1404,10 +1408,23 @@ async fn serves_static_files_and_favicon() {
     let h = Harness::new();
     let css = h.send(get("/static/style.css")).await;
     assert_eq!(css.status, StatusCode::OK);
-    assert!(css.header("content-type").starts_with("text/css"));
+    assert_eq!(css.header("content-type"), "text/css; charset=utf-8");
+    assert_eq!(css.header("cache-control"), "public, max-age=0");
+    let js = h.send(get("/static/common.js")).await;
     assert_eq!(
-        h.send(get("/static/nope.css")).await.status,
-        StatusCode::NOT_FOUND
+        js.header("content-type"),
+        "application/javascript; charset=utf-8"
+    );
+    assert_eq!(js.header("cache-control"), "public, max-age=0");
+    let missing = h.send(get("/static/nope.css")).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        missing.json(),
+        json!({
+            "message": "Route GET:/static/nope.css not found",
+            "error": "Not Found",
+            "statusCode": 404
+        })
     );
     assert_eq!(h.send(get("/static/")).await.status, StatusCode::NOT_FOUND);
     let fav = h.send(get("/favicon.ico")).await;
