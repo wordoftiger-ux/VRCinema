@@ -171,6 +171,21 @@ pub async fn run(
         ready,
     } = opts;
 
+    // Before anything in DATA_DIR is touched: fail fast on a taken port, then make sure no
+    // other server uses this data folder. The listener is not served until the first real
+    // playlist exists; until then the OS backlog holds early connections.
+    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Nie można nasłuchiwać na {}:{}: {e}",
+                config.host,
+                config.port
+            )
+        })?;
+    // Held until the server stops (for `main`: the process lifetime).
+    let _data_lock = lock_data_dir(&config.data_dir)?;
+
     let db = Arc::new(Mutex::new(open_database(
         &config.data_dir.join("vrcinema.db"),
     )?));
@@ -272,7 +287,6 @@ pub async fn run(
     .with_log(Arc::clone(&shared_log));
     let router = build_router(state);
 
-    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     let addr = listener.local_addr()?;
     println!("{}", banner(&config, addr.port()));
     if let Some(ready) = ready {
@@ -299,6 +313,40 @@ pub async fn run(
     result
 }
 
+/// Name of the lock file in DATA_DIR.
+pub const LOCK_FILE: &str = "vrcinema.lock";
+
+/// Takes an exclusive lock on `<data_dir>/vrcinema.lock` (the OS releases it when the returned
+/// file is closed or the process dies). Fails with a Polish message when another server holds
+/// it: two servers on one data folder would wipe each other's clips, slates and live segments.
+pub fn lock_data_dir(data_dir: &Path) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Nie można utworzyć folderu danych {}: {e}",
+            data_dir.display()
+        )
+    })?;
+    let path = data_dir.join(LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| anyhow::anyhow!("Nie można otworzyć pliku {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::anyhow!(
+            "Inny serwer kanału już używa folderu danych: {}",
+            data_dir.display()
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(anyhow::anyhow!(
+            "Nie można zablokować pliku {}: {e}",
+            path.display()
+        )),
+    }
+}
+
 fn monotonic_clock() -> Box<dyn Fn() -> u64 + Send> {
     let t0 = Instant::now();
     Box::new(move || u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX))
@@ -310,6 +358,148 @@ mod tests {
 
     fn exe(name: &str) -> String {
         format!("{name}{}", if cfg!(windows) { ".exe" } else { "" })
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    /// A data folder with something in clips/, slates/ and live/ that startup would wipe.
+    fn data_with_markers() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let markers: Vec<PathBuf> = ["clips", "slates", "live/main"]
+            .iter()
+            .map(|d| data.join(d).join("marker.txt"))
+            .collect();
+        for m in &markers {
+            std::fs::create_dir_all(m.parent().unwrap()).unwrap();
+            std::fs::write(m, "x").unwrap();
+        }
+        (tmp, data, markers)
+    }
+
+    fn test_config(data: &Path, port: u16) -> AppConfig {
+        let env: std::collections::HashMap<String, String> = [
+            ("ADMIN_PASSWORD", "haslo-testowe-123"),
+            ("DATA_DIR", data.to_str().unwrap()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let mut config = crate::config::load_config(&env, &repo_root(), cfg!(windows)).unwrap();
+        config.port = port;
+        config.host = "127.0.0.1".into();
+        config.data_dir = data.to_path_buf();
+        config
+    }
+
+    fn test_opts(tmp: &Path) -> RunOptions {
+        let fake = tmp.join("fake.json");
+        std::fs::write(&fake, "{}").unwrap();
+        RunOptions {
+            root: repo_root(),
+            fake_resolver: Some(fake),
+            update_ytdlp: false,
+            ready: None,
+        }
+    }
+
+    /// Runs the server and stops it right after it starts serving.
+    async fn run_once(config: AppConfig, opts: RunOptions) -> anyhow::Result<()> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            run(config, opts, std::future::ready(())),
+        )
+        .await
+        .expect("run() did not finish in 60 s")
+    }
+
+    #[tokio::test]
+    async fn a_second_server_on_the_same_data_folder_exits_without_touching_it() {
+        let (tmp, data, markers) = data_with_markers();
+        // The other server: holds the lock on the data folder.
+        let other = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data.join("vrcinema.lock"))
+            .unwrap();
+        other.try_lock().unwrap();
+
+        let err = run_once(test_config(&data, 0), test_opts(tmp.path()))
+            .await
+            .expect_err("a second server must not start");
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "Inny serwer kanału już używa folderu danych: {}",
+                data.display()
+            )
+        );
+        for m in &markers {
+            assert!(m.exists(), "{} was wiped", m.display());
+        }
+        drop(other);
+    }
+
+    #[tokio::test]
+    async fn a_port_in_use_fails_before_the_data_folder_is_touched() {
+        let (tmp, data, markers) = data_with_markers();
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+
+        let err = run_once(test_config(&data, port), test_opts(tmp.path()))
+            .await
+            .expect_err("the port is taken");
+        for m in &markers {
+            assert!(m.exists(), "{} was wiped", m.display());
+        }
+        assert!(format!("{err:#}").contains(&port.to_string()), "{err:#}");
+        assert!(!data.join("vrcinema.db").exists(), "database opened");
+        assert!(!data.join("vrcinema.lock").exists(), "lock taken");
+    }
+
+    #[tokio::test]
+    async fn a_running_server_holds_the_data_folder_lock_until_it_stops() {
+        let exe = if cfg!(windows) { ".exe" } else { "" };
+        if !repo_root()
+            .join("bin")
+            .join(format!("ffmpeg{exe}"))
+            .exists()
+        {
+            eprintln!("pomijam: brak bin/ffmpeg");
+            return;
+        }
+        let (tmp, data, _markers) = data_with_markers();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let mut opts = test_opts(tmp.path());
+        opts.ready = Some(ready_tx);
+        let server = tokio::spawn(run(test_config(&data, 0), opts, async {
+            let _ = stop_rx.await;
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
+            .await
+            .expect("server did not start in 60 s")
+            .unwrap();
+
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data.join("vrcinema.lock"))
+            .unwrap();
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        probe.try_lock().unwrap();
     }
 
     #[test]
