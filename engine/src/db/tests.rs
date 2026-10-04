@@ -196,6 +196,64 @@ fn set_status_finished_for_all_terminal_states_only() {
 }
 
 #[test]
+fn start_playing_only_takes_a_queued_item() {
+    let conn = mem();
+    let q = QueueRepo::new(&conn);
+    let a = q.add(&item("a")).unwrap();
+    assert!(q.start_playing(a.id).unwrap());
+    let got = q.get(a.id).unwrap().unwrap();
+    assert_eq!(got.status, ItemStatus::Playing);
+    assert!(got.started_at.is_some());
+    assert_eq!(got.error, None);
+    // Already playing: no second transition.
+    assert!(!q.start_playing(a.id).unwrap());
+
+    // Removed (DELETE between reading the head and starting it) stays removed.
+    let b = q.add(&item("b")).unwrap();
+    q.set_status(b.id, ItemStatus::Removed, None).unwrap();
+    assert!(!q.start_playing(b.id).unwrap());
+    let got = q.get(b.id).unwrap().unwrap();
+    assert_eq!(got.status, ItemStatus::Removed);
+    assert_eq!(got.started_at, None);
+    for st in [ItemStatus::PendingApproval, ItemStatus::Rejected] {
+        let c = q.add(&item("c")).unwrap();
+        q.set_status(c.id, st, None).unwrap();
+        assert!(!q.start_playing(c.id).unwrap(), "{st:?}");
+        assert_eq!(q.get(c.id).unwrap().unwrap().status, st);
+    }
+    assert!(!q.start_playing(9_999).unwrap());
+}
+
+#[test]
+fn finish_does_not_overwrite_a_removed_item() {
+    let conn = mem();
+    let q = QueueRepo::new(&conn);
+    for status in [ItemStatus::Played, ItemStatus::Failed] {
+        let a = q.add(&item("a")).unwrap();
+        q.set_status(a.id, ItemStatus::Playing, None).unwrap();
+        q.set_status(a.id, ItemStatus::Removed, None).unwrap();
+        assert!(!q.finish(a.id, status, Some("x")).unwrap(), "{status:?}");
+        let got = q.get(a.id).unwrap().unwrap();
+        assert_eq!(got.status, ItemStatus::Removed);
+        assert_eq!(got.error, None);
+
+        // From playing (and queued) it does finish, with error and finished_at.
+        let b = q.add(&item("b")).unwrap();
+        q.set_status(b.id, ItemStatus::Playing, None).unwrap();
+        assert!(q.finish(b.id, status, Some("zepsute")).unwrap());
+        let got = q.get(b.id).unwrap().unwrap();
+        assert_eq!(got.status, status);
+        assert_eq!(got.error.as_deref(), Some("zepsute"));
+        assert!(got.finished_at.is_some());
+        let c = q.add(&item("c")).unwrap();
+        assert!(q.finish(c.id, status, None).unwrap());
+        assert_eq!(q.get(c.id).unwrap().unwrap().status, status);
+        // A finished item is not finished again.
+        assert!(!q.finish(c.id, ItemStatus::Failed, Some("y")).unwrap());
+    }
+}
+
+#[test]
 fn reset_playing_puts_interrupted_item_first() {
     let conn = mem();
     let q = QueueRepo::new(&conn);

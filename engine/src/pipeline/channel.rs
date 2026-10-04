@@ -351,6 +351,18 @@ impl Channel {
         self.prefetched.as_ref().map(|c| c.item.id)
     }
 
+    /// The queue item being aired (or started) right now; `state()` lags behind it.
+    pub fn current_item_id(&self) -> Option<i64> {
+        self.current.as_ref().map(|c| c.item.id)
+    }
+
+    /// Marks `id` failed with `error` (the supervisor's verdict on a film that keeps crashing
+    /// the loop). An owner's removal is not overwritten. The clips are disposed by `stop()`.
+    pub fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()> {
+        self.queue(|q| q.finish(id, ItemStatus::Failed, Some(error)))
+            .map(|_| ())
+    }
+
     /// Hands finished clip starts to their clips; a start whose clip was dropped meanwhile is
     /// disposed.
     pub fn poll_launches(&mut self) {
@@ -495,32 +507,51 @@ impl Channel {
     }
 
     /// The current film ended or there is none: take the prefetched one or the queue head.
+    ///
+    /// The head is only taken while it is still queued: an owner's removal that lands between
+    /// reading the head and starting it wins, the started clip is dropped and the next head is
+    /// picked.
     fn promote(&mut self) -> anyhow::Result<()> {
         let channel_id = self.o.channel_id;
-        let head = self.queue(|q| q.next_queued(channel_id))?;
-        let prefetched_stale = self
-            .prefetched
-            .as_ref()
-            .is_some_and(|p| head.as_ref().is_none_or(|h| h.id != p.item.id));
-        if prefetched_stale {
-            self.drop_prefetched();
-        }
-        let Some(head) = head else {
-            return Ok(());
-        };
-        let mut clip = match self.prefetched.take() {
-            Some(clip) => clip,
-            None => self.launch(head.clone(), 0.0, 0),
-        };
-        let id = head.id;
-        clip.item = head;
-        self.current = Some(clip);
-        let fresh = self.queue(|q| {
-            q.set_status(id, ItemStatus::Playing, None)?;
-            q.get(id)
-        })?;
-        if let (Some(fresh), Some(current)) = (fresh, self.current.as_mut()) {
-            current.item = fresh;
+        for _ in 0..NEXT_GUARD {
+            let head = self.queue(|q| q.next_queued(channel_id))?;
+            let prefetched_stale = self
+                .prefetched
+                .as_ref()
+                .is_some_and(|p| head.as_ref().is_none_or(|h| h.id != p.item.id));
+            if prefetched_stale {
+                self.drop_prefetched();
+            }
+            let Some(head) = head else {
+                return Ok(());
+            };
+            let mut clip = match self.prefetched.take() {
+                Some(clip) => clip,
+                None => self.launch(head.clone(), 0.0, 0),
+            };
+            let id = head.id;
+            let fresh = self.queue(|q| {
+                if q.start_playing(id)? {
+                    q.get(id)
+                } else {
+                    Ok(None)
+                }
+            });
+            match fresh {
+                Ok(Some(fresh)) => {
+                    clip.item = fresh;
+                    self.current = Some(clip);
+                    return Ok(());
+                }
+                // No longer queued (removed meanwhile): drop the clip and look again.
+                Ok(None) => clip.dispose(),
+                Err(e) => {
+                    // As before the conditional update: keep airing it, the error is logged.
+                    clip.item = head;
+                    self.current = Some(clip);
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
@@ -613,9 +644,10 @@ impl Channel {
         status: ItemStatus,
         error: Option<&str>,
     ) -> anyhow::Result<()> {
-        let result = self.queue(|q| q.set_status(c.item.id, status, error));
+        // Conditional: an owner's removal (status `removed`) is never overwritten.
+        let result = self.queue(|q| q.finish(c.item.id, status, error));
         c.dispose();
-        result
+        result.map(|_| ())
     }
 
     fn drop_current(&mut self) {
@@ -783,6 +815,8 @@ mod tests {
         attempt: u32,
     }
 
+    type CreateHook = Box<dyn Fn(&QueueItem) + Send>;
+
     #[derive(Default)]
     struct FactoryState {
         handles: Vec<Fake>,
@@ -791,6 +825,8 @@ mod tests {
         /// When set, every create() waits until its gate is released.
         manual: bool,
         gates: Vec<oneshot::Sender<()>>,
+        /// Runs inside create(), i.e. between the channel reading the queue head and starting it.
+        on_create: Option<CreateHook>,
     }
 
     #[derive(Clone, Default)]
@@ -824,6 +860,9 @@ mod tests {
                 start_at_s,
                 attempt,
             });
+            if let Some(hook) = &s.on_create {
+                hook(&item);
+            }
             if s.fail_next > 0 {
                 s.fail_next -= 1;
                 return Box::pin(async { Err("nie da się rozpoznać".to_string()) });
@@ -1320,6 +1359,85 @@ mod tests {
         assert!(e.factory.handle(0).disposed());
         assert!(e.factory.handle(1).disposed());
         assert_eq!(e.channel.prefetched_item_id(), None);
+    }
+
+    /// An owner's DELETE that lands between the channel reading the queue head and marking it
+    /// playing is not overwritten: the launched clip is dropped and the next film is picked.
+    #[tokio::test]
+    async fn a_removal_while_the_head_is_being_started_wins_and_the_next_film_is_picked() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        let db = Arc::clone(&e.db);
+        let target = a.id;
+        e.factory.lock().on_create = Some(Box::new(move |item: &QueueItem| {
+            if item.id == target {
+                let conn = db.lock().unwrap();
+                QueueRepo::new(&conn)
+                    .set_status(target, ItemStatus::Removed, None)
+                    .unwrap();
+            }
+        }));
+        assert_eq!(e.key(), "buffering");
+        assert_eq!(e.get(a.id).status, ItemStatus::Removed);
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing);
+        let ids: Vec<i64> = e.factory.calls().iter().map(|c| c.item_id).collect();
+        assert_eq!(ids, [a.id, b.id]);
+        e.flush().await;
+        // The clip started for the removed film is disposed once its start completes.
+        let handles: Vec<Fake> = e.factory.lock().handles.clone();
+        let for_a = handles.iter().find(|h| h.item_id() == a.id).unwrap();
+        assert!(for_a.disposed());
+        let for_b = handles.iter().find(|h| h.item_id() == b.id).unwrap();
+        assert!(!for_b.disposed());
+        for_b.produce(1);
+        assert_eq!(e.key(), clip_key(&b, 0));
+    }
+
+    /// A removal the channel has not been told about yet is not turned into "played" by a skip
+    /// or the end of the film.
+    #[tokio::test]
+    async fn ending_a_film_does_not_overwrite_its_removal() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.next();
+        e.flush().await;
+        e.factory.handle(0).produce(2);
+        e.next();
+        e.set_status(a.id, ItemStatus::Removed);
+        e.channel.skip().unwrap();
+        assert_eq!(e.get(a.id).status, ItemStatus::Removed);
+        assert_eq!(e.get(a.id).error, None);
+
+        let b = e.add_item("b");
+        e.next();
+        e.flush().await;
+        let hb = e.factory.handle(1);
+        hb.produce(1);
+        assert_eq!(e.key(), clip_key(&b, 0));
+        e.set_status(b.id, ItemStatus::Removed);
+        hb.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "idle");
+        assert_eq!(e.get(b.id).status, ItemStatus::Removed);
+    }
+
+    #[tokio::test]
+    async fn current_item_id_is_the_film_being_aired_and_fail_item_marks_it_failed() {
+        let mut e = setup();
+        assert_eq!(e.channel.current_item_id(), None);
+        let a = e.add_item("a");
+        e.next();
+        assert_eq!(e.channel.current_item_id(), Some(a.id));
+        e.channel.fail_item(a.id, "Błąd wewnętrzny").unwrap();
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Failed);
+        assert_eq!(fresh.error.as_deref(), Some("Błąd wewnętrzny"));
+        assert!(fresh.finished_at.is_some());
+        // A removed item stays removed.
+        let b = e.add_item("b");
+        e.set_status(b.id, ItemStatus::Removed);
+        e.channel.fail_item(b.id, "Błąd wewnętrzny").unwrap();
+        assert_eq!(e.get(b.id).status, ItemStatus::Removed);
     }
 
     #[tokio::test]

@@ -53,6 +53,10 @@ pub trait ChannelControl: SegmentSource + Send {
     fn on_queue_changed(&mut self) -> anyhow::Result<()>;
     fn state(&self) -> ChannelState;
     fn prefetched_item_id(&self) -> Option<i64>;
+    /// The queue item being aired right now (not the one viewers see, which lags behind).
+    fn current_item_id(&self) -> Option<i64>;
+    /// Marks the item failed with `error` (unless the owner removed it meanwhile).
+    fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()>;
 }
 
 impl ChannelControl for Channel {
@@ -74,10 +78,24 @@ impl ChannelControl for Channel {
     fn prefetched_item_id(&self) -> Option<i64> {
         Channel::prefetched_item_id(self)
     }
+    fn current_item_id(&self) -> Option<i64> {
+        Channel::current_item_id(self)
+    }
+    fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()> {
+        Channel::fail_item(self, id, error)
+    }
 }
 
 const TICK: Duration = Duration::from_millis(250);
+/// First restart delay; doubled after every failure up to [`MAX_RESTART_DELAY`].
 const RESTART_DELAY: Duration = Duration::from_secs(1);
+const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
+/// A run at least this long counts as healthy: the next restart waits [`RESTART_DELAY`] again.
+const HEALTHY_RUN: Duration = Duration::from_secs(60);
+/// Consecutive crashes with the same queue item current after which that item is failed.
+const CRASHES_BEFORE_FAILING_ITEM: u32 = 3;
+/// Error stored on an item that kept crashing the loop.
+const INTERNAL_ERROR: &str = "Błąd wewnętrzny";
 const COMMAND_CAPACITY: usize = 64;
 
 /// The supervisor task, for an explicit shutdown.
@@ -158,6 +176,30 @@ enum Exit {
     Failed(String),
 }
 
+/// Consecutive crashed runs with the same queue item current.
+#[derive(Default)]
+struct CrashStreak {
+    item: Option<i64>,
+    count: u32,
+}
+
+impl CrashStreak {
+    /// Records a crash with `id` current; returns how many crashes in a row it has caused.
+    fn record(&mut self, id: i64) -> u32 {
+        if self.item == Some(id) {
+            self.count += 1;
+        } else {
+            self.item = Some(id);
+            self.count = 1;
+        }
+        self.count
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Owns everything that must outlive a crashed run: the command receiver, the snapshot sender and
 /// the factory of fresh (Broadcaster, Channel) pairs.
 struct Supervisor<F, L> {
@@ -174,16 +216,28 @@ where
     F: Fn() -> (Broadcaster, C),
     L: Fn(&str) + Sync,
 {
+    /// Restarts a failed run with exponential backoff (1 s, 2 s, 4 s … 30 s; back to 1 s after a
+    /// run of at least 60 s). A film current in 3 crashed runs in a row is marked failed
+    /// ("Błąd wewnętrzny"): `Channel::start` would otherwise put it back at the head forever.
     async fn run(mut self) {
+        let mut delay = RESTART_DELAY;
+        let mut streak = CrashStreak::default();
         loop {
+            let started = tokio::time::Instant::now();
             let failure = match guarded(&self.build) {
-                Err(panic) => panic,
+                Err(panic) => {
+                    streak.clear();
+                    panic
+                }
                 Ok((broadcaster, channel)) => {
                     let mut core = Core {
                         broadcaster,
                         channel,
                     };
                     let exit = self.run_core(&mut core).await;
+                    if let Exit::Failed(_) = exit {
+                        self.judge_current_item(&mut core.channel, &mut streak);
+                    }
                     // Also after a panic: dispose the crashed channel's clips (ffmpeg processes)
                     // instead of leaving them to a plain drop.
                     if let Err(panic) = guarded(|| core.channel.stop()) {
@@ -195,16 +249,46 @@ where
                     }
                 }
             };
+            if started.elapsed() >= HEALTHY_RUN {
+                delay = RESTART_DELAY;
+            }
             (self.log)(&format!(
                 "Pętla kanału zakończyła się błędem: {failure} — uruchamiam ponownie"
             ));
             tokio::select! {
-                () = tokio::time::sleep(RESTART_DELAY) => {}
+                () = tokio::time::sleep(delay) => {}
                 () = stop_requested(&mut self.stop) => return,
             }
+            delay = (delay * 2).min(MAX_RESTART_DELAY);
             if self.commands.is_closed() {
                 return;
             }
+        }
+    }
+
+    /// Counts the crash against the item current at that moment; on the third crash in a row
+    /// with the same item, marks it failed (before the channel is stopped and rebuilt).
+    fn judge_current_item(&self, channel: &mut C, streak: &mut CrashStreak) {
+        let Ok(Some(id)) = guarded(|| channel.current_item_id()) else {
+            streak.clear();
+            return;
+        };
+        if streak.record(id) < CRASHES_BEFORE_FAILING_ITEM {
+            return;
+        }
+        streak.clear();
+        (self.log)(&format!(
+            "Film #{id} przerwał pętlę kanału {CRASHES_BEFORE_FAILING_ITEM} razy z rzędu — \
+             oznaczam go jako nieudany: {INTERNAL_ERROR}"
+        ));
+        match guarded(|| channel.fail_item(id, INTERNAL_ERROR)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => (self.log)(&format!(
+                "Nie udało się oznaczyć filmu #{id} jako nieudanego: {e}"
+            )),
+            Err(panic) => (self.log)(&format!(
+                "Nie udało się oznaczyć filmu #{id} jako nieudanego: {panic}"
+            )),
         }
     }
 
@@ -373,11 +457,30 @@ mod tests {
         fail_skip: AtomicBool,
         /// `next()` call number (1-based, counted across restarts) that panics once; 0 = never.
         panic_at_next: AtomicUsize,
+        /// `start()` call numbers (1-based) that fail with an error.
+        fail_starts: Mutex<HashSet<usize>>,
+        /// When each `start()` was called.
+        start_times: Mutex<Vec<Instant>>,
+        /// Queue item current in the run started by `start()` number n (index n - 1).
+        items_per_start: Mutex<Vec<Option<i64>>>,
+        /// `start()` panics while an item is current (a film that crashes the loop).
+        panic_start_with_item: AtomicBool,
+        /// Items marked failed through `fail_item`.
+        failed: Mutex<Vec<(i64, String)>>,
+        /// Order of `start`, `fail_item` and `stop` calls.
+        events: Mutex<Vec<String>>,
+    }
+
+    impl Probe {
+        fn event(&self, e: String) {
+            self.events.lock().unwrap().push(e);
+        }
     }
 
     struct FakeChannel {
         probe: Arc<Probe>,
         src_dir: PathBuf,
+        current: Option<i64>,
     }
 
     impl SegmentSource for FakeChannel {
@@ -406,14 +509,44 @@ mod tests {
 
     impl ChannelControl for FakeChannel {
         fn start(&mut self) -> anyhow::Result<()> {
-            self.probe.starts.fetch_add(1, Ordering::SeqCst);
-            if self.probe.fail_start_once.swap(false, Ordering::SeqCst) {
+            let n = self.probe.starts.fetch_add(1, Ordering::SeqCst) + 1;
+            self.probe.start_times.lock().unwrap().push(Instant::now());
+            self.probe.event("start".to_string());
+            let item = self
+                .probe
+                .items_per_start
+                .lock()
+                .unwrap()
+                .get(n - 1)
+                .copied()
+                .flatten();
+            let failed = self.probe.failed.lock().unwrap().clone();
+            self.current = item.filter(|id| !failed.iter().any(|(f, _)| f == id));
+            if self.probe.fail_start_once.swap(false, Ordering::SeqCst)
+                || self.probe.fail_starts.lock().unwrap().contains(&n)
+            {
                 anyhow::bail!("baza zablokowana");
+            }
+            if self.current.is_some() && self.probe.panic_start_with_item.load(Ordering::SeqCst) {
+                panic!("atrapa filmu: awaria");
             }
             Ok(())
         }
         fn stop(&mut self) {
             self.probe.stops.fetch_add(1, Ordering::SeqCst);
+            self.probe.event("stop".to_string());
+        }
+        fn current_item_id(&self) -> Option<i64> {
+            self.current
+        }
+        fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()> {
+            self.probe.event(format!("fail {id}: {error}"));
+            self.probe
+                .failed
+                .lock()
+                .unwrap()
+                .push((id, error.to_string()));
+            Ok(())
         }
         fn skip(&mut self) -> anyhow::Result<()> {
             self.probe.skips.fetch_add(1, Ordering::SeqCst);
@@ -488,6 +621,7 @@ mod tests {
                 let channel = FakeChannel {
                     probe: Arc::clone(&probe),
                     src_dir: src_dir.clone(),
+                    current: None,
                 };
                 (Broadcaster::new(options, tokio_clock()), channel)
             };
@@ -644,14 +778,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_build_panic_or_failed_start_is_logged_and_retried_after_a_second() {
+    async fn a_build_panic_or_failed_start_is_logged_and_retried_with_backoff() {
         let env = Env::new();
         env.probe.panic_build_once.store(true, Ordering::SeqCst);
         env.probe.fail_start_once.store(true, Ordering::SeqCst);
         let t0 = Instant::now();
         let (mut handle, _task) = env.spawn();
         let s = wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
-        assert_eq!(t0.elapsed(), Duration::from_secs(2));
+        // 1 s after the first failure, 2 s after the second.
+        assert_eq!(t0.elapsed(), Duration::from_secs(3));
         assert_eq!(names(&s), vec!["0.ts", "1.ts", "2.ts"]);
         assert_eq!(
             env.logs(),
@@ -664,6 +799,97 @@ mod tests {
         assert_eq!(env.count(|p| &p.starts), 2);
         // The channel whose start failed was stopped too.
         assert_eq!(env.count(|p| &p.stops), 1);
+    }
+
+    /// Seconds between consecutive `start()` calls.
+    fn start_gaps(probe: &Probe) -> Vec<u64> {
+        probe
+            .start_times
+            .lock()
+            .unwrap()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).as_secs())
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restarts_back_off_exponentially_up_to_30_s() {
+        let env = Env::new();
+        env.probe.fail_starts.lock().unwrap().extend(1..=9);
+        let (_handle, _task) = env.spawn();
+        // 1 + 2 + 4 + 8 + 16 + 30 + 30 + 30 = 121 s for 9 starts.
+        tokio::time::sleep(Duration::from_millis(121_500)).await;
+        assert_eq!(start_gaps(&env.probe), vec![1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_of_60_s_or_more_resets_the_backoff_to_1_s() {
+        let env = Env::new();
+        env.probe.fail_starts.lock().unwrap().extend([1, 2, 4]);
+        // Run 3 starts at 3 s (nexts 1-3); next n airs at 3 + 4 (n - 3) s: #19 at 67 s,
+        // after 64 s of running.
+        env.probe.panic_at_next.store(19, Ordering::SeqCst);
+        let (mut handle, _task) = env.spawn();
+        let probe = Arc::clone(&env.probe);
+        wait_until(&mut handle.snapshot, |_| {
+            probe.starts.load(Ordering::SeqCst) >= 5
+        })
+        .await;
+        let times = env.probe.start_times.lock().unwrap().clone();
+        let at: Vec<u64> = times.iter().map(|t| (*t - times[0]).as_secs()).collect();
+        // 1 s, 2 s, then the long run, 1 s after its crash, then 2 s again.
+        assert_eq!(at, vec![0, 1, 3, 68, 70]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn three_crashes_in_a_row_with_the_same_film_mark_it_failed() {
+        let env = Env::new();
+        env.probe
+            .panic_start_with_item
+            .store(true, Ordering::SeqCst);
+        *env.probe.items_per_start.lock().unwrap() = vec![Some(7); 10];
+        let (mut handle, _task) = env.spawn();
+        let s = wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        assert_eq!(names(&s), vec!["0.ts", "1.ts", "2.ts"]);
+        assert_eq!(
+            *env.probe.failed.lock().unwrap(),
+            vec![(7, "Błąd wewnętrzny".to_string())]
+        );
+        // Marked failed before the crashed channel was stopped and rebuilt.
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            vec![
+                "start",
+                "stop",
+                "start",
+                "stop",
+                "start",
+                "fail 7: Błąd wewnętrzny",
+                "stop",
+                "start",
+            ]
+        );
+        let logs = env.logs();
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("Film #7") && l.contains("Błąd wewnętrzny")),
+            "{logs:?}"
+        );
+        assert_eq!(start_gaps(&env.probe), vec![1, 2, 4]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crashes_with_different_films_are_not_counted_together() {
+        let env = Env::new();
+        env.probe
+            .panic_start_with_item
+            .store(true, Ordering::SeqCst);
+        *env.probe.items_per_start.lock().unwrap() =
+            vec![Some(7), Some(7), Some(8), Some(7), None, None];
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        assert_eq!(env.count(|p| &p.starts), 5);
+        assert!(env.probe.failed.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -705,6 +931,131 @@ mod tests {
         ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>> {
             Box::pin(std::future::pending())
         }
+    }
+
+    /// A film whose content crashes the loop: every poll of its clip panics.
+    struct PanickingFactory;
+
+    struct PanickingClip;
+
+    impl ClipHandle for PanickingClip {
+        fn state(&self) -> crate::pipeline::segmenter::SegmenterState {
+            crate::pipeline::segmenter::SegmenterState::Running
+        }
+        fn error(&self) -> Option<String> {
+            None
+        }
+        fn duration_s(&self) -> Option<f64> {
+            None
+        }
+        fn poll(&mut self) -> Vec<SegmentInfo> {
+            panic!("zepsuty fragment filmu");
+        }
+        fn kill(&mut self) {}
+        fn dispose(&mut self) {}
+    }
+
+    impl ClipFactory for PanickingFactory {
+        fn create(
+            &self,
+            _item: QueueItem,
+            _start_at_s: f64,
+            _attempt: u32,
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>> {
+            Box::pin(async { Ok(Box::new(PanickingClip) as Box<dyn ClipHandle>) })
+        }
+    }
+
+    fn real_slates(dir: &Path) -> Slates {
+        Slates {
+            idle: slate_in(dir, "idle.ts"),
+            buffering: slate_in(dir, "buffering.ts"),
+        }
+    }
+
+    /// The crash loop of the final review: `start()` puts the crashing film back at the head,
+    /// so without a verdict it would crash the loop forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_film_that_keeps_crashing_the_loop_is_failed_after_three_crashes() {
+        let live = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let db = Arc::new(Mutex::new(
+            crate::db::open_database(Path::new(":memory:")).unwrap(),
+        ));
+        let add = |title: &str| {
+            let conn = db.lock().unwrap();
+            QueueRepo::new(&conn)
+                .add(&NewItem {
+                    channel_id: MAIN_CHANNEL_ID,
+                    source_url: format!("https://youtu.be/{title}"),
+                    title: title.into(),
+                    duration_s: Some(100.0),
+                    is_live: false,
+                    status: ItemStatus::Queued,
+                    added_by: AddedBy::Admin,
+                    requester_name: None,
+                    requester_ip: None,
+                })
+                .unwrap()
+        };
+        let bad = add("zły");
+        let slates_dir = src.path().to_path_buf();
+        let live_dir = live.path().join("main");
+        let shared_db = Arc::clone(&db);
+        let builds = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&builds);
+        let logs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&logs);
+        let (mut handle, _task) = spawn_engine_with(
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let channel = Channel::new(ChannelOptions::new(
+                    MAIN_CHANNEL_ID,
+                    Arc::clone(&shared_db),
+                    Arc::new(PanickingFactory),
+                    real_slates(&slates_dir),
+                ));
+                let options = BroadcasterOptions {
+                    dir: live_dir.clone(),
+                    window_size: 10,
+                    segment_seconds: 4.0,
+                    path_prefix: "main/".to_string(),
+                    discontinuity_tags: Box::new(|| true),
+                    retain_s: None,
+                    log: None,
+                };
+                (Broadcaster::new(options, tokio_clock()), channel)
+            },
+            move |m: &str| sink.lock().unwrap().push(m.to_string()),
+        );
+        let status = |db: &Arc<Mutex<rusqlite::Connection>>| {
+            let conn = db.lock().unwrap();
+            QueueRepo::new(&conn).get(bad.id).unwrap().unwrap()
+        };
+        let counted = Arc::clone(&builds);
+        wait_until(&mut handle.snapshot, |s| {
+            counted.load(Ordering::SeqCst) == 4 && !s.segments.is_empty()
+        })
+        .await;
+        let failed = status(&db);
+        assert_eq!(failed.status, ItemStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("Błąd wewnętrzny"));
+        // The rebuilt channel stays up on the idle slate; no further crashes.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(builds.load(Ordering::SeqCst), 4);
+        let s = handle.snapshot.borrow().clone();
+        assert_eq!(s.state.status, ChannelStatus::Idle);
+        let logs = logs.lock().unwrap().clone();
+        let crashes = logs
+            .iter()
+            .filter(|l| l.contains("zepsuty fragment filmu"))
+            .count();
+        assert_eq!(crashes, 3, "{logs:?}");
+        assert!(
+            logs.iter()
+                .any(|l| l.contains(&format!("Film #{}", bad.id)) && l.contains("Błąd wewnętrzny")),
+            "{logs:?}"
+        );
     }
 
     fn slate_in(dir: &Path, name: &str) -> Vec<SegmentInfo> {

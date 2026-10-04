@@ -248,6 +248,35 @@ impl<'a> QueueRepo<'a> {
         Ok(())
     }
 
+    /// The channel starts airing `id`: `queued` → `playing` only. Returns `false` (nothing
+    /// changed) when the item is no longer queued, e.g. removed after it was read as the head.
+    pub fn start_playing(&self, id: i64) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE queue_items SET status = 'playing', error = NULL,
+               started_at = COALESCE(started_at, ?)
+             WHERE id = ? AND status = 'queued'",
+            params![now_ms(), id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// The channel ends `id` with `status` (played/failed). Only an item still `playing` or
+    /// `queued` changes, so an owner's removal is never overwritten. Returns whether it changed.
+    pub fn finish(
+        &self,
+        id: i64,
+        status: ItemStatus,
+        error: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let finished = status.is_terminal().then(now_ms);
+        let changed = self.conn.execute(
+            "UPDATE queue_items SET status = ?, error = ?, finished_at = COALESCE(?, finished_at)
+             WHERE id = ? AND status IN ('playing', 'queued')",
+            params![status.as_str(), error, finished, id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Moves an item within the queued list to `to_index` (clamped) and
     /// renumbers queued items 1..n. Unknown ids are ignored.
     pub fn move_item(&self, id: i64, to_index: usize) -> rusqlite::Result<()> {
