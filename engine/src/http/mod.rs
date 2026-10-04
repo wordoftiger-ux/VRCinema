@@ -1,0 +1,452 @@
+//! HTTP layer (axum): the same routes, status codes, headers and JSON as `src/http/app.ts`.
+
+pub mod auth;
+pub mod client_ip;
+mod routes_admin;
+mod routes_public;
+mod routes_stream;
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::extract::{ConnectInfo, FromRequest, FromRequestParts, Request};
+use axum::http::header::{CONTENT_TYPE, COOKIE, HOST};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use rusqlite::Connection;
+use serde_json::{Map, Value, json};
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::services::ServeDir;
+
+use crate::db::{QueueItem, SettingsRepo};
+use crate::engine::{Command, EngineHandle, Snapshot};
+use crate::library::MediaLibrary;
+use crate::pipeline::channel::ChannelState;
+use crate::resolver::MediaResolver;
+use crate::rules::{RateLimiter, system_clock};
+
+use auth::{SESSION_COOKIE, parse_cookies, verify_session_token};
+use client_ip::{Trust, get_client_ip, is_https};
+
+const LOGIN_FAILURES: u32 = 5;
+const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
+const BODY_LIMIT: usize = 16 * 1024;
+
+pub type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// The part of the configuration HTTP needs.
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    pub admin_password: String,
+    pub session_secret: String,
+    pub public_url: String,
+    pub trust_cloudflare: bool,
+    pub trust_proxy: bool,
+}
+
+impl From<&crate::config::AppConfig> for HttpConfig {
+    fn from(c: &crate::config::AppConfig) -> Self {
+        Self {
+            admin_password: c.admin_password.clone(),
+            session_secret: c.session_secret.clone(),
+            public_url: c.public_url.clone(),
+            trust_cloudflare: c.trust_cloudflare,
+            trust_proxy: c.trust_proxy,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<HttpConfig>,
+    pub channel_id: i64,
+    pub db: Arc<Mutex<Connection>>,
+    pub resolver: Arc<dyn MediaResolver>,
+    pub engine: EngineHandle,
+    pub library: Option<Arc<MediaLibrary>>,
+    pub public_dir: PathBuf,
+    pub request_limiter: Arc<Mutex<RateLimiter>>,
+    pub login_limiter: Arc<Mutex<RateLimiter>>,
+    pub log: LogFn,
+}
+
+impl AppState {
+    /// Limiters start from the stored settings (like `buildApp` in TS); no library, silent log.
+    pub fn new(
+        config: HttpConfig,
+        channel_id: i64,
+        db: Arc<Mutex<Connection>>,
+        resolver: Arc<dyn MediaResolver>,
+        engine: EngineHandle,
+        public_dir: PathBuf,
+    ) -> rusqlite::Result<Self> {
+        let s0 = {
+            let conn = db.lock().unwrap_or_else(PoisonError::into_inner);
+            SettingsRepo::new(&conn).get(channel_id)?
+        };
+        let request_limiter = RateLimiter::new(
+            s0.request_limit_count,
+            Duration::from_secs(s0.request_limit_window_s),
+            system_clock(),
+        );
+        let login_limiter = RateLimiter::new(LOGIN_FAILURES, LOGIN_WINDOW, system_clock());
+        Ok(Self {
+            config: Arc::new(config),
+            channel_id,
+            db,
+            resolver,
+            engine,
+            library: None,
+            public_dir,
+            request_limiter: Arc::new(Mutex::new(request_limiter)),
+            login_limiter: Arc::new(Mutex::new(login_limiter)),
+            log: Arc::new(|_| {}),
+        })
+    }
+
+    pub fn with_library(mut self, library: Option<Arc<MediaLibrary>>) -> Self {
+        self.library = library;
+        self
+    }
+
+    pub fn with_log(mut self, log: LogFn) -> Self {
+        self.log = log;
+        self
+    }
+
+    /// Runs `f` with the database locked. The lock is never held across an `.await`.
+    fn with_db<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T, ApiError> {
+        let conn = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&conn).map_err(ApiError::from)
+    }
+
+    fn settings(&self) -> Result<crate::db::ChannelSettings, ApiError> {
+        self.with_db(|c| SettingsRepo::new(c).get(self.channel_id))
+    }
+
+    /// Latest published engine state.
+    fn snapshot(&self) -> Arc<Snapshot> {
+        Arc::clone(&self.engine.snapshot.borrow())
+    }
+
+    /// Fire-and-forget: HTTP never waits for the engine loop.
+    fn send_command(&self, command: Command) {
+        if let Err(e) = self.engine.commands.try_send(command) {
+            (self.log)(&format!(
+                "Nie można przekazać polecenia {command:?} do kanału: {e}"
+            ));
+        }
+    }
+
+    fn trusted(&self) -> bool {
+        self.config.trust_cloudflare || self.config.trust_proxy
+    }
+
+    fn is_admin(&self, headers: &HeaderMap) -> bool {
+        let cookies = parse_cookies(headers.get(COOKIE).and_then(|v| v.to_str().ok()));
+        verify_session_token(
+            cookies.get(SESSION_COOKIE).map(String::as_str),
+            &self.config.session_secret,
+            crate::db::now_ms().max(0) as u64,
+        )
+    }
+}
+
+// ---------- Errors ----------
+
+pub(crate) type ApiResult<T = Response> = Result<T, ApiError>;
+
+/// Logged by [`log_internal_errors`]; carried on the 500 response.
+#[derive(Clone)]
+struct InternalError(String);
+
+pub(crate) enum ApiError {
+    Http(StatusCode, String),
+    Internal(String),
+}
+
+impl ApiError {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self::Http(status, message.into())
+    }
+
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message)
+    }
+}
+
+impl From<rusqlite::Error> for ApiError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Internal(e.to_string())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Http(status, message) => json_response(status, &json!({ "error": message })),
+            Self::Internal(message) => {
+                let mut res = json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &json!({ "error": "Błąd serwera" }),
+                );
+                res.extensions_mut().insert(InternalError(message));
+                res
+            }
+        }
+    }
+}
+
+async fn log_internal_errors(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut res = next.run(req).await;
+    if let Some(InternalError(message)) = res.extensions_mut().remove::<InternalError>() {
+        (state.log)(&format!("Błąd serwera: {message}"));
+    }
+    res
+}
+
+pub(crate) fn json_response(status: StatusCode, value: &Value) -> Response {
+    let body = serde_json::to_vec(value).unwrap_or_else(|_| b"null".to_vec());
+    let mut res = Response::new(Body::from(body));
+    *res.status_mut() = status;
+    res.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    res
+}
+
+pub(crate) fn json_ok(value: &Value) -> Response {
+    json_response(StatusCode::OK, value)
+}
+
+/// Fastify's default 404 (also used for a known path with another method).
+async fn not_found(method: Method, uri: Uri) -> Response {
+    let url = uri.path_and_query().map_or("/", |p| p.as_str());
+    json_response(
+        StatusCode::NOT_FOUND,
+        &json!({
+            "message": format!("Route {method}:{url} not found"),
+            "error": "Not Found",
+            "statusCode": 404
+        }),
+    )
+}
+
+// ---------- Extractors ----------
+
+/// JSON request body with Fastify's error behaviour; an absent body is `null`.
+pub(crate) struct JsonBody(pub Value);
+
+impl<S: Send + Sync> FromRequest<S> for JsonBody {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, _state: &S) -> Result<Self, ApiError> {
+        let (parts, body) = req.into_parts();
+        let content_type = parts
+            .headers
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim().to_ascii_lowercase());
+        let bytes = to_bytes(body, BODY_LIMIT).await.map_err(|_| {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Request body is larger than the provided limit",
+            )
+        })?;
+        let is_json = content_type
+            .as_deref()
+            .is_some_and(|c| c == "application/json" || c.starts_with("application/json;"));
+        if bytes.is_empty() {
+            return if is_json {
+                Err(ApiError::bad_request(
+                    "Body cannot be empty when content-type is set to 'application/json'",
+                ))
+            } else {
+                Ok(Self(Value::Null))
+            };
+        }
+        if !is_json {
+            return Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!(
+                    "Unsupported Media Type: {}",
+                    content_type.as_deref().unwrap_or("undefined")
+                ),
+            ));
+        }
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|e| ApiError::bad_request(format!("Body is not valid JSON: {e}")))
+    }
+}
+
+/// Who is asking and how they reached us.
+pub(crate) struct Ctx {
+    pub ip: String,
+    pub base_url: String,
+    pub https: bool,
+}
+
+impl FromRequestParts<AppState> for Ctx {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let remote = parts
+            .extensions
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip().to_string())
+            .unwrap_or_default();
+        let cfg = &state.config;
+        let trust = Trust {
+            cloudflare: cfg.trust_cloudflare,
+            proxy: cfg.trust_proxy,
+        };
+        let ip = get_client_ip(&parts.headers, &remote, trust);
+        let https = is_https(&parts.headers, false, state.trusted());
+        let base_url = if cfg.public_url.is_empty() {
+            let forwarded = state
+                .trusted()
+                .then(|| {
+                    parts
+                        .headers
+                        .get("x-forwarded-host")
+                        .and_then(|v| v.to_str().ok())
+                })
+                .flatten()
+                .filter(|h| !h.is_empty());
+            let host = forwarded
+                .map(str::to_string)
+                .or_else(|| {
+                    parts
+                        .headers
+                        .get(HOST)
+                        .and_then(|v| v.to_str().ok())
+                        .filter(|h| !h.is_empty())
+                        .map(str::to_string)
+                })
+                .or_else(|| parts.uri.authority().map(|a| a.to_string()))
+                .unwrap_or_else(|| "localhost".to_string());
+            format!("{}://{host}", if https { "https" } else { "http" })
+        } else {
+            cfg.public_url.clone()
+        };
+        Ok(Self {
+            ip,
+            base_url,
+            https,
+        })
+    }
+}
+
+// ---------- JSON shapes ----------
+
+/// A number the way JS prints it: whole values as integers.
+pub(crate) fn num_json(v: f64) -> Value {
+    if v.is_finite() && v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_992.0 {
+        Value::from(v as i64)
+    } else {
+        serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number)
+    }
+}
+
+fn opt_num_json(v: Option<f64>) -> Value {
+    v.map_or(Value::Null, num_json)
+}
+
+pub(crate) fn public_item(i: &QueueItem) -> Value {
+    json!({
+        "id": i.id,
+        "title": i.title,
+        "durationS": opt_num_json(i.duration_s),
+        "requesterName": i.requester_name,
+        "isLive": i.is_live,
+    })
+}
+
+pub(crate) fn admin_item(i: &QueueItem) -> Value {
+    let mut item = public_item(i);
+    if let Value::Object(map) = &mut item {
+        map.insert("sourceUrl".into(), json!(i.source_url));
+        map.insert("status".into(), json!(i.status.as_str()));
+        map.insert("addedBy".into(), json!(i.added_by.as_str()));
+        map.insert("requesterIp".into(), json!(i.requester_ip));
+        map.insert("error".into(), json!(i.error));
+        map.insert("createdAt".into(), json!(i.created_at));
+        map.insert("finishedAt".into(), json!(i.finished_at));
+    }
+    item
+}
+
+/// `{ status, current }` exactly like the TS channel state; the caller adds more keys.
+pub(crate) fn state_map(state: &ChannelState) -> Map<String, Value> {
+    let current = state.current.as_ref().map_or(Value::Null, |c| {
+        json!({
+            "itemId": c.item_id,
+            "title": c.title,
+            "durationS": opt_num_json(c.duration_s),
+            "positionS": c.position_s,
+            "requesterName": c.requester_name,
+            "isLive": c.is_live,
+        })
+    });
+    let mut map = Map::new();
+    map.insert("status".into(), json!(state.status.as_str()));
+    map.insert("current".into(), current);
+    map
+}
+
+// ---------- Router ----------
+
+pub fn build_router(state: AppState) -> Router {
+    let log = Arc::clone(&state.log);
+    let admin = routes_admin::router().route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        routes_admin::require_admin,
+    ));
+    let static_files = ServeDir::new(&state.public_dir).append_index_html_on_directories(false);
+    Router::new()
+        .merge(routes_public::router())
+        .merge(routes_stream::router())
+        .merge(admin)
+        .nest_service("/static", static_files)
+        .fallback(not_found)
+        .method_not_allowed_fallback(not_found)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            log_internal_errors,
+        ))
+        .layer(CatchPanicLayer::custom(
+            move |panic: Box<dyn std::any::Any + Send>| {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "nieznana panika".to_string());
+                log(&format!("Błąd serwera: {message}"));
+                json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &json!({ "error": "Błąd serwera" }),
+                )
+            },
+        ))
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests;
