@@ -1924,3 +1924,18 @@ async fn switching_the_remote_panel_off_ends_remote_sessions_but_not_the_window(
             .await;
     assert_eq!(d.status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn an_empty_configured_password_never_authenticates() {
+    let mut cfg = config();
+    cfg.admin_password = String::new();
+    let h = Harness::with_config(cfg);
+    for body in [json!({"password": ""}), json!({})] {
+        let res = h.send(call("POST", "/api/admin/login").json(body)).await;
+        assert_ne!(res.status, StatusCode::OK);
+        assert_eq!(res.status, StatusCode::FORBIDDEN);
+        assert_eq!(res.error(), "Panel zdalny jest wyłączony.");
+        assert_eq!(res.header("set-cookie"), "");
+    }
+    assert!(!check_password(Some(""), ""));
+}

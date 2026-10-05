@@ -190,12 +190,10 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
         ));
     }
     {
-        // One lock scope for check, comparison and registration (all synchronous): concurrent
-        // wrong passwords cannot all pass the check before any of them is registered.
-        let mut limiter = state
-            .login_limiter
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        // One lock scope for check, comparison and registration: concurrent wrong passwords
+        // cannot all pass the check before any of them is registered. The lock is a tokio one
+        // so it can be held across the blocking Argon2 verification without stalling workers.
+        let mut limiter = state.login_limiter.lock().await;
         if limiter.peek(&ctx.ip) >= super::LOGIN_FAILURES as usize {
             return Err(ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -204,11 +202,15 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
         }
         let ok = match &auth {
             AdminAuth::PlainPassword(expected) => check_password(password, expected),
-            AdminAuth::App { password_hash, .. } => password.is_some_and(|p| {
-                password_hash
-                    .as_deref()
-                    .is_some_and(|h| verify_password(p, h))
-            }),
+            AdminAuth::App { password_hash, .. } => match (password, password_hash.as_deref()) {
+                (Some(p), Some(h)) => {
+                    let (p, h) = (p.to_string(), h.to_string());
+                    tokio::task::spawn_blocking(move || verify_password(&p, &h))
+                        .await
+                        .unwrap_or(false)
+                }
+                _ => false,
+            },
         };
         if !ok {
             limiter.hit(&ctx.ip);

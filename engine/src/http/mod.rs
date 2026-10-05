@@ -69,7 +69,7 @@ pub struct AppState {
     pub engine: EngineHandle,
     pub library: Option<Arc<MediaLibrary>>,
     pub request_limiter: Arc<Mutex<RateLimiter>>,
-    pub login_limiter: Arc<Mutex<RateLimiter>>,
+    pub login_limiter: Arc<tokio::sync::Mutex<RateLimiter>>,
     pub log: LogFn,
     /// Changes at runtime (settings of the desktop app), hence behind a lock.
     admin_auth: Arc<RwLock<AdminAuth>>,
@@ -98,7 +98,15 @@ impl AppState {
         // Headless (`.env`) default; the key made here is never shown to anyone, so
         // `/desktop-login` stays closed until the app shell installs its own with
         // `with_desktop_key`.
-        let admin_auth = AdminAuth::PlainPassword(config.admin_password.clone());
+        // Fail closed: no configured password means no remote login (app mode starts that way).
+        let admin_auth = if config.admin_password.is_empty() {
+            AdminAuth::App {
+                remote_enabled: false,
+                password_hash: None,
+            }
+        } else {
+            AdminAuth::PlainPassword(config.admin_password.clone())
+        };
         Ok(Self {
             admin_auth: Arc::new(RwLock::new(admin_auth)),
             desktop_key: Arc::new(DesktopKey::generate().0),
@@ -109,7 +117,7 @@ impl AppState {
             engine,
             library: None,
             request_limiter: Arc::new(Mutex::new(request_limiter)),
-            login_limiter: Arc::new(Mutex::new(login_limiter)),
+            login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
         })
     }

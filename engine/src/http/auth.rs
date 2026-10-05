@@ -158,7 +158,7 @@ pub fn session_kind(token: Option<&str>, secret: &str, now_ms: u64) -> Option<Se
 }
 
 pub fn check_password(input: Option<&str>, expected: &str) -> bool {
-    input.is_some_and(|i| safe_equal(i, expected))
+    !expected.is_empty() && input.is_some_and(|i| safe_equal(i, expected))
 }
 
 /// Like JS `decodeURIComponent`: `None` on malformed escapes or invalid UTF-8.
