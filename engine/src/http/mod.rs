@@ -6,7 +6,6 @@ mod routes_admin;
 mod routes_public;
 mod routes_stream;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -18,10 +17,10 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::services::ServeDir;
 
 use crate::db::{QueueItem, SettingsRepo};
 use crate::engine::{Command, EngineHandle, Snapshot};
@@ -69,7 +68,6 @@ pub struct AppState {
     pub resolver: Arc<dyn MediaResolver>,
     pub engine: EngineHandle,
     pub library: Option<Arc<MediaLibrary>>,
-    pub public_dir: PathBuf,
     pub request_limiter: Arc<Mutex<RateLimiter>>,
     pub login_limiter: Arc<Mutex<RateLimiter>>,
     pub log: LogFn,
@@ -83,7 +81,6 @@ impl AppState {
         db: Arc<Mutex<Connection>>,
         resolver: Arc<dyn MediaResolver>,
         engine: EngineHandle,
-        public_dir: PathBuf,
     ) -> rusqlite::Result<Self> {
         let s0 = {
             let conn = db.lock().unwrap_or_else(PoisonError::into_inner);
@@ -102,7 +99,6 @@ impl AppState {
             resolver,
             engine,
             library: None,
-            public_dir,
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -245,37 +241,28 @@ async fn not_found(method: Method, uri: Uri) -> Response {
     )
 }
 
-/// Makes `/static/*` answer like @fastify/static: charset on JS/CSS, `Cache-Control`, JSON 404.
-async fn static_fixups(req: Request, next: Next) -> Response {
-    let is_static = req.uri().path().starts_with("/static/");
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let mut res = next.run(req).await;
-    if !is_static {
-        return res;
+/// A page or static file from the embedded `public/` (like @fastify/static: charset on text
+/// types, `Cache-Control: public, max-age=0`).
+pub(crate) fn asset_response(path: &str) -> Option<Response> {
+    let (bytes, mime) = crate::assets::asset(path)?;
+    Some(
+        (
+            [(CONTENT_TYPE, mime), (CACHE_CONTROL, "public, max-age=0")],
+            bytes.into_owned(),
+        )
+            .into_response(),
+    )
+}
+
+async fn static_file(
+    axum::extract::Path(path): axum::extract::Path<String>,
+    method: Method,
+    uri: Uri,
+) -> Response {
+    match asset_response(&path) {
+        Some(res) => res,
+        None => not_found(method, uri).await,
     }
-    if res.status() == StatusCode::NOT_FOUND {
-        return not_found(method, uri).await;
-    }
-    if res.status().is_success() {
-        let fixed = match res
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-        {
-            Some("text/javascript") => Some("application/javascript; charset=utf-8"),
-            Some("text/css") => Some("text/css; charset=utf-8"),
-            _ => None,
-        };
-        if let Some(value) = fixed {
-            res.headers_mut()
-                .insert(CONTENT_TYPE, HeaderValue::from_static(value));
-        }
-        res.headers_mut()
-            .entry(CACHE_CONTROL)
-            .or_insert(HeaderValue::from_static("public, max-age=0"));
-    }
-    res
 }
 
 // ---------- Extractors ----------
@@ -458,15 +445,13 @@ pub fn build_router(state: AppState) -> Router {
         state.clone(),
         routes_admin::require_admin,
     ));
-    let static_files = ServeDir::new(&state.public_dir).append_index_html_on_directories(false);
     Router::new()
         .merge(routes_public::router())
         .merge(routes_stream::router())
         .merge(admin)
-        .nest_service("/static", static_files)
+        .route("/static/{*path}", get(static_file))
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
-        .layer(middleware::from_fn(static_fixups))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             log_internal_errors,

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE};
+use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 
 use super::auth::{SESSION_TTL_MS, check_password, create_session_token, session_cookie};
 use super::{
-    ApiError, ApiResult, AppState, Ctx, JsonBody, json_ok, json_response, num_json, public_item,
-    state_map,
+    ApiError, ApiResult, AppState, Ctx, JsonBody, asset_response, json_ok, json_response, num_json,
+    public_item, state_map,
 };
 use crate::db::{AddedBy, ItemStatus, NewItem, QueueRepo};
 use crate::rules::{is_allowed_domain, parse_source_url, validate_meta};
@@ -30,26 +30,18 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/logout", post(logout))
 }
 
-async fn page(state: &AppState, file: &str) -> Response {
-    match tokio::fs::read(state.public_dir.join(file)).await {
-        Ok(bytes) => (
-            [
-                (CONTENT_TYPE, "text/html; charset=utf-8"),
-                (CACHE_CONTROL, "public, max-age=0"),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => ApiError::new(StatusCode::NOT_FOUND, "Nie znaleziono strony").into_response(),
-    }
+fn page(file: &str) -> Response {
+    asset_response(file).unwrap_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "Nie znaleziono strony").into_response()
+    })
 }
 
-async fn index(State(state): State<AppState>) -> Response {
-    page(&state, "index.html").await
+async fn index() -> Response {
+    page("index.html")
 }
 
-async fn admin_page(State(state): State<AppState>) -> Response {
-    page(&state, "admin.html").await
+async fn admin_page() -> Response {
+    page("admin.html")
 }
 
 async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {

@@ -60,6 +60,7 @@ async fn serves_playlist_with_three_segments() {
         root,
         fake_resolver: Some(fake),
         update_ytdlp: false,
+        port_fallback: false,
         ready: Some(ready_tx),
     };
     let server = tokio::spawn(run(config, opts, async {

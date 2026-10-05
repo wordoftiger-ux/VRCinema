@@ -27,12 +27,15 @@ use crate::resolver::{CompositeResolver, MediaResolver};
 use crate::updater::spawn_updater;
 
 pub struct RunOptions {
-    /// Application root (`public/` lives here).
+    /// Application root (`bin/` with the tools lives here).
     pub root: PathBuf,
     /// Use a `FakeResolver` loaded from this JSON file instead of the real resolvers.
     pub fake_resolver: Option<PathBuf>,
     /// Run `yt-dlp -U` at start and every 24 h.
     pub update_ytdlp: bool,
+    /// Desktop app: a taken port moves on to the next free one (the bound address is reported
+    /// through `ready`). The headless server keeps failing fast.
+    pub port_fallback: bool,
     /// Receives the address the HTTP listener is bound to, once it accepts connections.
     pub ready: Option<oneshot::Sender<SocketAddr>>,
 }
@@ -158,6 +161,40 @@ fn build_resolver(
     )))
 }
 
+/// How many ports after the configured one are tried when the fallback is on.
+pub const PORT_FALLBACK_SPAN: u16 = 20;
+
+/// Binds `host:port`. With `fallback`, a taken port moves on to the next ones (up to
+/// [`PORT_FALLBACK_SPAN`] further); otherwise it fails with the Polish "port in use" error.
+pub async fn bind_listener(
+    host: &str,
+    port: u16,
+    fallback: bool,
+) -> anyhow::Result<tokio::net::TcpListener> {
+    let last = if fallback && port != 0 {
+        port.saturating_add(PORT_FALLBACK_SPAN)
+    } else {
+        port
+    };
+    let mut candidate = port;
+    loop {
+        match tokio::net::TcpListener::bind((host, candidate)).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && candidate < last => {
+                candidate += 1;
+            }
+            Err(e) => {
+                let tried = if candidate == port {
+                    format!("{host}:{port}")
+                } else {
+                    format!("{host}:{port}-{candidate}")
+                };
+                return Err(anyhow::anyhow!("Nie można nasłuchiwać na {tried}: {e}"));
+            }
+        }
+    }
+}
+
 /// Starts everything and serves until `shutdown` completes, then stops cleanly.
 pub async fn run(
     config: AppConfig,
@@ -168,21 +205,14 @@ pub async fn run(
         root,
         fake_resolver,
         update_ytdlp,
+        port_fallback,
         ready,
     } = opts;
 
     // Before anything in DATA_DIR is touched: fail fast on a taken port, then make sure no
     // other server uses this data folder. The listener is not served until the first real
     // playlist exists; until then the OS backlog holds early connections.
-    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port))
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Nie można nasłuchiwać na {}:{}: {e}",
-                config.host,
-                config.port
-            )
-        })?;
+    let listener = bind_listener(&config.host, config.port, port_fallback).await?;
     // Held until the server stops (for `main`: the process lifetime).
     let _data_lock = lock_data_dir(&config.data_dir)?;
 
@@ -281,7 +311,6 @@ pub async fn run(
         Arc::clone(&db),
         resolver,
         handle,
-        root.join("public"),
     )?
     .with_library(Some(library))
     .with_log(Arc::clone(&shared_log));
@@ -404,8 +433,61 @@ mod tests {
             root: repo_root(),
             fake_resolver: Some(fake),
             update_ytdlp: false,
+            port_fallback: false,
             ready: None,
         }
+    }
+
+    #[tokio::test]
+    async fn bind_listener_without_fallback_fails_on_a_taken_port() {
+        let taken = bind_listener("127.0.0.1", 0, false).await.unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let err = bind_listener("127.0.0.1", port, false).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Nie można nasłuchiwać na"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_listener_with_fallback_takes_the_next_free_port() {
+        // Two adjacent ports: hold the first two, expect the third (or a later free one).
+        let (a, b) = loop {
+            let a = bind_listener("127.0.0.1", 0, false).await.unwrap();
+            let p = a.local_addr().unwrap().port();
+            if let Ok(b) = bind_listener("127.0.0.1", p + 1, false).await {
+                break (a, b);
+            }
+        };
+        let base = a.local_addr().unwrap().port();
+        let got = bind_listener("127.0.0.1", base, true).await.unwrap();
+        let port = got.local_addr().unwrap().port();
+        assert!(
+            port > base + 1 && port <= base + PORT_FALLBACK_SPAN,
+            "{port}"
+        );
+        drop(b);
+    }
+
+    #[tokio::test]
+    async fn bind_listener_gives_up_after_the_span() {
+        let mut held = Vec::new();
+        let first = bind_listener("127.0.0.1", 0, false).await.unwrap();
+        let base = first.local_addr().unwrap().port();
+        if base > u16::MAX - PORT_FALLBACK_SPAN - 1 {
+            return;
+        }
+        for p in base + 1..=base + PORT_FALLBACK_SPAN {
+            match bind_listener("127.0.0.1", p, false).await {
+                Ok(l) => held.push(l),
+                Err(_) => return, // someone else holds it: cannot build the scenario
+            }
+        }
+        let err = bind_listener("127.0.0.1", base, true).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Nie można nasłuchiwać na"),
+            "{err}"
+        );
     }
 
     /// Runs the server and stops it right after it starts serving.

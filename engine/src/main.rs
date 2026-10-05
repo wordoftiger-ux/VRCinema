@@ -129,6 +129,7 @@ async fn main() -> ExitCode {
     let opts = RunOptions {
         root,
         update_ytdlp: fake_resolver.is_none(),
+        port_fallback: false,
         fake_resolver,
         ready: None,
     };

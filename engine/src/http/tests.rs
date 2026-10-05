@@ -257,7 +257,6 @@ impl Harness {
                 metas: Arc::clone(&metas),
             }),
             engine,
-            repo_public_dir(),
         )
         .unwrap()
         .with_library(Some(Arc::new(MediaLibrary::new(vec![
@@ -1256,7 +1255,6 @@ async fn library_is_disabled_without_media_dirs() {
             commands: mpsc::channel(1).0,
             snapshot: h.snapshots.subscribe(),
         },
-        repo_public_dir(),
     )
     .unwrap();
     let router = build_router(state);
@@ -1444,6 +1442,15 @@ async fn serves_the_request_page_and_the_panel() {
     assert_eq!(
         index.body,
         std::fs::read(repo_public_dir().join("index.html")).unwrap()
+    );
+    assert_eq!(index.header("content-type"), "text/html; charset=utf-8");
+    assert_eq!(index.header("cache-control"), "public, max-age=0");
+    let admin = h.send(get("/admin")).await;
+    assert_eq!(admin.header("content-type"), "text/html; charset=utf-8");
+    assert_eq!(admin.header("cache-control"), "public, max-age=0");
+    assert_eq!(
+        admin.body,
+        std::fs::read(repo_public_dir().join("admin.html")).unwrap()
     );
 }
 

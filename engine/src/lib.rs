@@ -1,6 +1,9 @@
+pub mod app_settings;
+pub mod assets;
 pub mod config;
 pub mod db;
 pub mod engine;
+pub mod home;
 pub mod http;
 pub mod library;
 pub mod pipeline;

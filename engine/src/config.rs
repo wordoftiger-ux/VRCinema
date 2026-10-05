@@ -27,7 +27,7 @@ impl VideoEncoder {
         }
     }
 
-    fn parse(name: &str) -> Option<VideoEncoder> {
+    pub(crate) fn parse(name: &str) -> Option<VideoEncoder> {
         Self::ALL.into_iter().find(|e| e.as_str() == name)
     }
 }
