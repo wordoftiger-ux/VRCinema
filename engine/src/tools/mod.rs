@@ -286,8 +286,8 @@ impl ToolsManager {
             Ok(Some(text)) => {
                 let sum = download::parse_sums(&text, source.file);
                 if sum.is_none() {
-                    eprintln!(
-                        "narzędzia: brak sumy kontrolnej dla {} w pliku sum; instalacja bez weryfikacji",
+                    anyhow::bail!(
+                        "Plik sum kontrolnych nie zawiera wpisu dla {}.",
                         source.file
                     );
                 }
@@ -643,6 +643,37 @@ mod tests {
         assert_eq!(fs::read(f.tools.join("ffmpeg.exe")).unwrap(), b"OLD1");
         assert_eq!(fs::read(f.tools.join("avcodec-61.dll")).unwrap(), b"OLD3");
         assert!(!f.tools.join("avcodec-62.dll").exists());
+    }
+
+    #[tokio::test]
+    async fn sums_file_without_an_entry_for_the_download_fails_and_installs_nothing() {
+        let f = Fixture::new().await;
+        fs::write(f.tools.join("yt-dlp.exe"), b"OLD-WORKING").unwrap();
+        f.server.put(
+            "yt/SHA2-256SUMS",
+            format!(
+                "{}  yt-dlp_x86.exe\n{}  yt-dlp_macos\n",
+                hex(b"a"),
+                hex(b"b")
+            ),
+        );
+        let m = f.manager();
+        let err = m.update(Tool::YtDlp).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Plik sum kontrolnych nie zawiera wpisu dla yt-dlp.exe."
+        );
+        assert_eq!(
+            fs::read(f.tools.join("yt-dlp.exe")).unwrap(),
+            b"OLD-WORKING"
+        );
+        assert!(
+            !f.server
+                .requested_paths()
+                .contains(&"yt/yt-dlp.exe".to_string()),
+            "must not even download"
+        );
+        assert!(m.progress().borrow().error.is_some());
     }
 
     #[tokio::test]
