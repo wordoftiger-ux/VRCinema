@@ -26,6 +26,7 @@ unicode-normalization = "0.1.25"
 url = "2.5.8"
 xz2 = "0.1.7"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+argon2 = "0.6.0"
 
 [dev-dependencies]
 futures-util = "0.3.34"

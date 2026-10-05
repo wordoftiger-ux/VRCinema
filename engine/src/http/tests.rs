@@ -18,11 +18,12 @@ use tokio::sync::{mpsc, watch};
 use tower::ServiceExt;
 
 use super::auth::{
-    SESSION_TTL_MS, check_password, create_session_token, parse_cookies, session_cookie,
-    verify_session_token,
+    AdminAuth, DesktopKey, SESSION_TTL_MS, SessionKind, check_password,
+    create_desktop_session_token, create_session_token, hash_password, parse_cookies,
+    session_cookie, session_kind, verify_password, verify_session_token,
 };
 use super::client_ip::{Trust, get_client_ip, is_https};
-use super::{AppState, HttpConfig, build_router};
+use super::{AppState, DesktopSession, HttpConfig, build_router};
 use crate::db::{
     AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueItem, QueueRepo, SettingsPatch,
     SettingsRepo, open_database,
@@ -188,6 +189,10 @@ impl Harness {
     }
 
     fn with_config(config: HttpConfig) -> Self {
+        Self::with_state(config, |s| s)
+    }
+
+    fn with_state(config: HttpConfig, tweak: impl FnOnce(AppState) -> AppState) -> Self {
         let db = Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap()));
         let live_dir = tempfile::tempdir().unwrap();
         let media_dir = tempfile::tempdir().unwrap();
@@ -265,6 +270,7 @@ impl Harness {
         .with_log(Arc::new(move |m: &str| {
             sink.lock().unwrap().push(m.to_string())
         }));
+        let state = tweak(state);
         Self {
             router: build_router(state),
             db,
@@ -1608,4 +1614,313 @@ fn password_check_and_cookies() {
         session_cookie("tok", true, 60),
         "vrcinema_session=tok; Path=/; HttpOnly; SameSite=Lax; Max-Age=60; Secure"
     );
+}
+
+// ---------- Panel access of the desktop app (window key, remote switch, Argon2) ----------
+
+const SECRET: &str = "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss";
+
+fn remote_off() -> AdminAuth {
+    AdminAuth::App {
+        remote_enabled: false,
+        password_hash: None,
+    }
+}
+
+fn remote_on(password: &str) -> AdminAuth {
+    AdminAuth::App {
+        remote_enabled: true,
+        password_hash: Some(hash_password(password)),
+    }
+}
+
+#[test]
+fn session_kinds_are_signed_into_the_token() {
+    let now = 1_000;
+    let remote = create_session_token(SECRET, 5_000, now);
+    let desktop = create_desktop_session_token(SECRET, 5_000, now);
+    assert!(desktop.contains(".d."));
+    assert_eq!(
+        session_kind(Some(&remote), SECRET, now),
+        Some(SessionKind::Remote)
+    );
+    assert_eq!(
+        session_kind(Some(&desktop), SECRET, now),
+        Some(SessionKind::Desktop)
+    );
+    assert!(verify_session_token(Some(&desktop), SECRET, now));
+    // Expired, wrong secret.
+    assert_eq!(session_kind(Some(&desktop), SECRET, now + 5_000), None);
+    assert_eq!(session_kind(Some(&desktop), "inny", now), None);
+    // A remote MAC cannot be relabelled as a desktop session, nor the other way round.
+    let (expires, mac) = remote.split_once('.').unwrap();
+    let relabelled = format!("{expires}.d.{mac}");
+    assert_eq!(session_kind(Some(&relabelled), SECRET, now), None);
+    let dmac = desktop.rsplit('.').next().unwrap();
+    let stripped = format!("{expires}.{dmac}");
+    assert_eq!(session_kind(Some(&stripped), SECRET, now), None);
+    assert_eq!(session_kind(Some("5000.d"), SECRET, now), None);
+}
+
+#[test]
+fn password_hash_is_argon2id_and_verifies() {
+    let phc = hash_password("sekret");
+    assert!(phc.starts_with("$argon2id$"), "{phc}");
+    assert_ne!(phc, hash_password("sekret"), "salt must differ");
+    assert!(verify_password("sekret", &phc));
+    assert!(!verify_password("Sekret", &phc));
+    assert!(!verify_password("sekret", "nie-jest-hashem"));
+    assert!(!verify_password("sekret", ""));
+}
+
+#[test]
+fn desktop_key_is_one_time_and_rotates() {
+    let (key, first) = DesktopKey::generate();
+    assert!(first.len() >= 43, "32 random bytes in base64url");
+    assert!(!key.redeem("zly"));
+    assert!(!key.redeem(""));
+    assert!(key.redeem(&first));
+    assert!(!key.redeem(&first), "second use");
+    let second = key.rotate();
+    assert_ne!(first, second);
+    assert!(!key.redeem(&first));
+    let third = key.rotate();
+    assert!(
+        !key.redeem(&second),
+        "rotating invalidates the previous key"
+    );
+    assert!(key.redeem(&third));
+    assert_ne!(DesktopKey::generate().1, DesktopKey::generate().1);
+}
+
+struct AppHarness {
+    h: Harness,
+    key: Arc<DesktopKey>,
+    state: AppState,
+}
+
+fn app_harness(auth: AdminAuth) -> (AppHarness, String) {
+    let (key, first) = DesktopKey::generate();
+    let key = Arc::new(key);
+    let mut captured = None;
+    let k = Arc::clone(&key);
+    let mut cfg = config();
+    cfg.session_secret = SECRET.to_string();
+    let h = Harness::with_state(cfg, |s| {
+        let s = s.with_admin_auth(auth).with_desktop_key(k);
+        captured = Some(s.clone());
+        s
+    });
+    let state = captured.unwrap();
+    (AppHarness { h, key, state }, first)
+}
+
+fn cookie_of(res: &Resp) -> String {
+    res.header("set-cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn window_cookie(a: &AppHarness, key: &str) -> String {
+    let res = a.h.send(get(&format!("/desktop-login?key={key}"))).await;
+    assert_eq!(res.status, StatusCode::FOUND);
+    cookie_of(&res)
+}
+
+async fn remote_login(a: &AppHarness, password: &str) -> Resp {
+    a.h.send(call("POST", "/api/admin/login").json(json!({ "password": password })))
+        .await
+}
+
+#[tokio::test]
+async fn window_key_logs_in_once_and_redirects_without_the_key() {
+    let (a, key) = app_harness(remote_off());
+    let res = a.h.send(get(&format!("/desktop-login?key={key}"))).await;
+    assert_eq!(res.status, StatusCode::FOUND);
+    assert_eq!(res.header("location"), "/admin");
+    assert_eq!(res.header("referrer-policy"), "no-referrer");
+    let set_cookie = res.header("set-cookie");
+    assert!(set_cookie.starts_with("vrcinema_session="), "{set_cookie}");
+    assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("SameSite=Lax"));
+    assert!(!set_cookie.contains("Secure"));
+    assert!(!res.header("location").contains(&key));
+    // The cookie opens the panel even though the remote panel is off.
+    let cookie = cookie_of(&res);
+    let panel = a.h.send(get("/api/admin/library").cookie(&cookie)).await;
+    assert_eq!(panel.status, StatusCode::OK);
+
+    // Second use of the same key.
+    let again = a.h.send(get(&format!("/desktop-login?key={key}"))).await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(again.error(), "Nieprawidłowy klucz okna.");
+    assert_eq!(again.header("set-cookie"), "");
+    // Nothing the key was in ends up in the log.
+    assert!(a.h.logs().iter().all(|l| !l.contains(&key)));
+}
+
+#[tokio::test]
+async fn window_login_cookie_is_secure_behind_a_trusted_https_proxy() {
+    let (key, first) = DesktopKey::generate();
+    let k = Arc::new(key);
+    let mut cfg = config();
+    cfg.trust_proxy = true;
+    let h = Harness::with_state(cfg, |s| s.with_desktop_key(Arc::clone(&k)));
+    let res = h
+        .send(get(&format!("/desktop-login?key={first}")).header("x-forwarded-proto", "https"))
+        .await;
+    assert_eq!(res.status, StatusCode::FOUND);
+    assert!(res.header("set-cookie").ends_with("; Secure"));
+}
+
+#[tokio::test]
+async fn wrong_missing_or_malformed_window_key_is_401() {
+    let (a, key) = app_harness(remote_off());
+    for url in [
+        "/desktop-login".to_string(),
+        "/desktop-login?key=".to_string(),
+        "/desktop-login?key=zly".to_string(),
+        "/desktop-login?klucz=x".to_string(),
+        format!("/desktop-login?key={key}x"),
+        format!("/desktop-login?key=%zz{key}"),
+    ] {
+        let res = a.h.send(get(&url)).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{url}");
+        assert_eq!(res.error(), "Nieprawidłowy klucz okna.");
+        assert_eq!(res.header("set-cookie"), "");
+    }
+    // A failed attempt does not burn the real key.
+    assert!(!window_cookie(&a, &key).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_rotated_window_key_replaces_the_previous_one() {
+    let (a, old) = app_harness(remote_off());
+    let new = a.key.rotate();
+    let res = a.h.send(get(&format!("/desktop-login?key={old}"))).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    window_cookie(&a, &new).await;
+}
+
+#[tokio::test]
+async fn headless_mode_has_no_usable_window_key() {
+    let h = Harness::new();
+    let res = h.send(get("/desktop-login?key=cokolwiek")).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn disabled_remote_panel_refuses_login_without_counting_it() {
+    let (a, _) = app_harness(AdminAuth::App {
+        remote_enabled: false,
+        password_hash: Some(hash_password("sekret")),
+    });
+    for _ in 0..7 {
+        let res = remote_login(&a, "sekret").await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN);
+        assert_eq!(res.error(), "Panel zdalny jest wyłączony.");
+        assert_eq!(res.header("set-cookie"), "");
+    }
+    // Switching on later: the refusals above did not fill the limiter.
+    a.state.set_admin_auth(remote_on("sekret"));
+    assert_eq!(remote_login(&a, "sekret").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn enabled_remote_panel_without_a_password_is_refused() {
+    let (a, _) = app_harness(AdminAuth::App {
+        remote_enabled: true,
+        password_hash: None,
+    });
+    let res = remote_login(&a, "").await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.error(), "Panel zdalny jest wyłączony.");
+}
+
+#[tokio::test]
+async fn enabled_remote_panel_checks_the_argon2_hash_and_keeps_the_limiter() {
+    let (a, _) = app_harness(remote_on("sekret"));
+    let login = |ip: &'static str, password: Value| {
+        a.h.send(
+            call("POST", "/api/admin/login")
+                .ip(ip)
+                .json(json!({ "password": password })),
+        )
+    };
+    let ok = login("9.9.9.9", json!("sekret")).await;
+    assert_eq!(ok.status, StatusCode::OK);
+    let cookie = cookie_of(&ok);
+    let now = crate::db::now_ms() as u64;
+    assert_eq!(
+        session_kind(cookie.strip_prefix("vrcinema_session="), SECRET, now),
+        Some(SessionKind::Remote)
+    );
+    for p in [json!("zle"), json!(5), json!(null), json!("tajne")] {
+        let res = login("9.9.9.9", p).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(res.error(), "Złe hasło.");
+    }
+    let fifth = login("9.9.9.9", json!("zle")).await;
+    assert_eq!(fifth.status, StatusCode::UNAUTHORIZED);
+    // Five failures: now even the right password is blocked.
+    let blocked = login("9.9.9.9", json!("sekret")).await;
+    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS);
+    // Another address is unaffected.
+    let other = login("8.8.8.8", json!("sekret")).await;
+    assert_eq!(other.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn desktop_routes_need_a_window_session_and_admin_routes_take_both() {
+    let (a, key) = app_harness(remote_on("sekret"));
+    let desktop_cookie = window_cookie(&a, &key).await;
+    let remote_cookie = cookie_of(&remote_login(&a, "sekret").await);
+
+    let router = axum::Router::new()
+        .route(
+            "/api/desktop/ping",
+            axum::routing::get(|_: DesktopSession| async { "pong" }),
+        )
+        .with_state(a.state.clone());
+    let ping = |cookie: Option<&str>| {
+        let mut c = get("/api/desktop/ping");
+        if let Some(cookie) = cookie {
+            c = c.cookie(cookie);
+        }
+        send_to(router.clone(), c)
+    };
+    assert_eq!(ping(Some(&desktop_cookie)).await.status, StatusCode::OK);
+    assert_eq!(
+        ping(Some(&remote_cookie)).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(ping(None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        ping(Some("vrcinema_session=1.zly")).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    for cookie in [&desktop_cookie, &remote_cookie] {
+        let res = a.h.send(get("/api/admin/library").cookie(cookie)).await;
+        assert_eq!(res.status, StatusCode::OK);
+    }
+    let anon = a.h.send(get("/api/admin/library")).await;
+    assert_eq!(anon.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn switching_the_remote_panel_off_ends_remote_sessions_but_not_the_window() {
+    let (a, key) = app_harness(remote_on("sekret"));
+    let desktop_cookie = window_cookie(&a, &key).await;
+    let remote_cookie = cookie_of(&remote_login(&a, "sekret").await);
+    a.state.set_admin_auth(remote_off());
+    let r =
+        a.h.send(get("/api/admin/library").cookie(&remote_cookie))
+            .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    let d =
+        a.h.send(get("/api/admin/library").cookie(&desktop_cookie))
+            .await;
+    assert_eq!(d.status, StatusCode::OK);
 }

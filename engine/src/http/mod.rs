@@ -6,7 +6,7 @@ mod routes_admin;
 mod routes_public;
 mod routes_stream;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use axum::Router;
@@ -29,7 +29,7 @@ use crate::pipeline::channel::ChannelState;
 use crate::resolver::MediaResolver;
 use crate::rules::{RateLimiter, system_clock};
 
-use auth::{SESSION_COOKIE, parse_cookies, verify_session_token};
+use auth::{AdminAuth, DesktopKey, SESSION_COOKIE, SessionKind, parse_cookies, session_kind};
 use client_ip::{Trust, get_client_ip, is_https};
 
 const LOGIN_FAILURES: u32 = 5;
@@ -71,6 +71,9 @@ pub struct AppState {
     pub request_limiter: Arc<Mutex<RateLimiter>>,
     pub login_limiter: Arc<Mutex<RateLimiter>>,
     pub log: LogFn,
+    /// Changes at runtime (settings of the desktop app), hence behind a lock.
+    admin_auth: Arc<RwLock<AdminAuth>>,
+    desktop_key: Arc<DesktopKey>,
 }
 
 impl AppState {
@@ -92,7 +95,13 @@ impl AppState {
             system_clock(),
         );
         let login_limiter = RateLimiter::new(LOGIN_FAILURES, LOGIN_WINDOW, system_clock());
+        // Headless (`.env`) default; the key made here is never shown to anyone, so
+        // `/desktop-login` stays closed until the app shell installs its own with
+        // `with_desktop_key`.
+        let admin_auth = AdminAuth::PlainPassword(config.admin_password.clone());
         Ok(Self {
+            admin_auth: Arc::new(RwLock::new(admin_auth)),
+            desktop_key: Arc::new(DesktopKey::generate().0),
             config: Arc::new(config),
             channel_id,
             db,
@@ -113,6 +122,36 @@ impl AppState {
     pub fn with_log(mut self, log: LogFn) -> Self {
         self.log = log;
         self
+    }
+
+    pub fn with_admin_auth(self, auth: AdminAuth) -> Self {
+        self.set_admin_auth(auth);
+        self
+    }
+
+    /// The app shell keeps a handle to mint a fresh key whenever it opens the window.
+    pub fn with_desktop_key(mut self, key: Arc<DesktopKey>) -> Self {
+        self.desktop_key = key;
+        self
+    }
+
+    /// Takes effect for the next request (remote switch / password changed in settings).
+    pub fn set_admin_auth(&self, auth: AdminAuth) {
+        *self
+            .admin_auth
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = auth;
+    }
+
+    pub fn admin_auth(&self) -> AdminAuth {
+        self.admin_auth
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn desktop_key(&self) -> &Arc<DesktopKey> {
+        &self.desktop_key
     }
 
     /// Runs `f` with the database locked. The lock is never held across an `.await`.
@@ -146,13 +185,50 @@ impl AppState {
         self.config.trust_cloudflare || self.config.trust_proxy
     }
 
-    fn is_admin(&self, headers: &HeaderMap) -> bool {
+    /// Kind of the valid session on the request, if any. With the remote panel switched off
+    /// only window sessions count (a remote cookie issued earlier stops working).
+    fn session(&self, headers: &HeaderMap) -> Option<SessionKind> {
         let cookies = parse_cookies(headers.get(COOKIE).and_then(|v| v.to_str().ok()));
-        verify_session_token(
+        let kind = session_kind(
             cookies.get(SESSION_COOKIE).map(String::as_str),
             &self.config.session_secret,
             crate::db::now_ms().max(0) as u64,
-        )
+        )?;
+        let remote_off = matches!(
+            self.admin_auth(),
+            AdminAuth::App {
+                remote_enabled: false,
+                ..
+            }
+        );
+        (kind == SessionKind::Desktop || !remote_off).then_some(kind)
+    }
+
+    fn is_admin(&self, headers: &HeaderMap) -> bool {
+        self.session(headers).is_some()
+    }
+}
+
+/// Extractor for routes only the app window may use (`/api/desktop/*`): a remote session is
+/// 403, no session 401.
+#[allow(dead_code)] // first user: the `/api/desktop/*` routes of the next task
+pub(crate) struct DesktopSession;
+
+impl FromRequestParts<AppState> for DesktopSession {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match state.session(&parts.headers) {
+            Some(SessionKind::Desktop) => Ok(Self),
+            Some(SessionKind::Remote) => Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Ta funkcja jest dostępna tylko w oknie aplikacji.",
+            )),
+            None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "Zaloguj się.")),
+        }
     }
 }
 

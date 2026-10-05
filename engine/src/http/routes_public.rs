@@ -4,14 +4,17 @@ use std::sync::PoisonError;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::header::SET_COOKIE;
+use axum::extract::{RawQuery, State};
+use axum::http::header::{CACHE_CONTROL, LOCATION, REFERRER_POLICY, SET_COOKIE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 
-use super::auth::{SESSION_TTL_MS, check_password, create_session_token, session_cookie};
+use super::auth::{
+    AdminAuth, SESSION_TTL_MS, check_password, create_desktop_session_token, create_session_token,
+    session_cookie, verify_password,
+};
 use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, asset_response, json_ok, json_response, num_json,
     public_item, state_map,
@@ -26,6 +29,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route("/api/channels/main/state", get(channel_state))
         .route("/api/channels/main/requests", post(post_request))
+        .route("/desktop-login", get(desktop_login))
         .route("/api/admin/login", post(login))
         .route("/api/admin/logout", post(logout))
 }
@@ -171,6 +175,20 @@ async fn post_request(
 
 async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody) -> ApiResult {
     let password = body.get("password").and_then(Value::as_str);
+    let auth = state.admin_auth();
+    // App mode with the remote panel off (or without a password set): refused before the
+    // limiter, so it does not count as a failed attempt.
+    if let AdminAuth::App {
+        remote_enabled,
+        password_hash,
+    } = &auth
+        && (!remote_enabled || password_hash.is_none())
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Panel zdalny jest wyłączony.",
+        ));
+    }
     {
         // One lock scope for check, comparison and registration (all synchronous): concurrent
         // wrong passwords cannot all pass the check before any of them is registered.
@@ -184,7 +202,15 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
                 "Za dużo nieudanych prób logowania. Spróbuj za 15 minut.",
             ));
         }
-        if !check_password(password, &state.config.admin_password) {
+        let ok = match &auth {
+            AdminAuth::PlainPassword(expected) => check_password(password, expected),
+            AdminAuth::App { password_hash, .. } => password.is_some_and(|p| {
+                password_hash
+                    .as_deref()
+                    .is_some_and(|h| verify_password(p, h))
+            }),
+        };
+        if !ok {
             limiter.hit(&ctx.ip);
             return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Złe hasło."));
         }
@@ -193,6 +219,39 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
     let token = create_session_token(&state.config.session_secret, SESSION_TTL_MS, now);
     let cookie = session_cookie(&token, ctx.https, SESSION_TTL_MS / 1000);
     Ok(with_cookie(&cookie))
+}
+
+/// One-time login of the app window. Neither the key nor the query string is logged, and the
+/// redirect target does not carry the key.
+async fn desktop_login(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let key = query.as_deref().and_then(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == "key")
+            .map(|(_, v)| v.into_owned())
+    });
+    if !key.is_some_and(|k| state.desktop_key().redeem(&k)) {
+        let mut res =
+            ApiError::new(StatusCode::UNAUTHORIZED, "Nieprawidłowy klucz okna.").into_response();
+        res.headers_mut()
+            .insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+        return res;
+    }
+    let now = crate::db::now_ms().max(0) as u64;
+    let token = create_desktop_session_token(&state.config.session_secret, SESSION_TTL_MS, now);
+    let cookie = session_cookie(&token, ctx.https, SESSION_TTL_MS / 1000);
+    let mut res = StatusCode::FOUND.into_response();
+    let headers = res.headers_mut();
+    headers.insert(LOCATION, HeaderValue::from_static("/admin"));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        headers.insert(SET_COOKIE, value);
+    }
+    res
 }
 
 async fn logout(ctx: Ctx) -> Response {
