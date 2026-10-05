@@ -28,6 +28,7 @@ xz2 = "0.1.7"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+futures-util = "0.3.34"
 http-body-util = "0.1.5"
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["test-util"] }

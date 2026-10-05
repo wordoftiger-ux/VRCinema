@@ -12,4 +12,5 @@ pub mod resolver;
 pub mod rules;
 pub mod server;
 pub mod setup;
+pub mod tools;
 pub mod updater;

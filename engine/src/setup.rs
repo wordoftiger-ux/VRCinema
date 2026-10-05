@@ -70,7 +70,7 @@ pub fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
     let file = fs::File::open(archive)?;
     let mut zip = zip::ZipArchive::new(file)?;
     for i in 0..zip.len() {
