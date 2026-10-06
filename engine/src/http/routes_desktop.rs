@@ -87,6 +87,8 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "firstRunCompleted": s.first_run_completed,
         "toolsOk": core.tools.status().missing.is_empty(),
         "channelRunning": core.channel_running(),
+        "channelError": core.channel_error(),
+        "restarting": core.restarting(),
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
         "update": update,

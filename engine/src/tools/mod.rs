@@ -319,23 +319,37 @@ impl ToolsManager {
                 p.total = total;
             });
         };
-        download::download_file(&self.http, &source.url, &part, &mut on_progress).await?;
-
-        if let Some(expected) = expected {
+        // At most twice: a resumed download may continue an older file published under the
+        // same name ("latest" assets change), which only the checksum reveals.
+        let mut fresh_retry = true;
+        loop {
+            let resumed = fs::metadata(&part).is_ok_and(|m| m.len() > 0);
+            self.set_progress(|p| p.phase = "download".into());
+            download::download_file(&self.http, &source.url, &part, &mut on_progress).await?;
             self.set_progress(|p| p.phase = "verify".into());
+            let Some(expected) = &expected else {
+                break;
+            };
             let path = part.clone();
             let actual =
                 tokio::task::spawn_blocking(move || download::sha256_file(&path)).await??;
-            if actual != expected {
-                // Corrupt data must not be resumed on the next attempt.
-                let _ = fs::remove_file(&part);
-                anyhow::bail!(
-                    "Suma kontrolna pliku {} nie zgadza się (oczekiwano {expected}, otrzymano {actual}).",
-                    source.file
-                );
+            if &actual == expected {
+                break;
             }
-        } else {
-            self.set_progress(|p| p.phase = "verify".into());
+            // Corrupt data must not be resumed on the next attempt.
+            let _ = fs::remove_file(&part);
+            if resumed && fresh_retry {
+                fresh_retry = false;
+                (self.log)(&format!(
+                    "Narzędzia: wznowiony plik {} nie zgadza się z sumą kontrolną (wydawca mógł go podmienić) — pobieram od nowa.",
+                    source.file
+                ));
+                continue;
+            }
+            anyhow::bail!(
+                "Suma kontrolna pliku {} nie zgadza się (oczekiwano {expected}, otrzymano {actual}).",
+                source.file
+            );
         }
 
         self.set_progress(|p| p.phase = "install".into());
@@ -735,6 +749,41 @@ mod tests {
             f.server.requests()
         );
         assert!(m.progress().borrow().error.is_none());
+    }
+
+    /// A "latest" asset replaced on the server since yesterday's interrupted download: the
+    /// resumed file fails the checksum, so the same job starts it over and installs the new one.
+    #[tokio::test]
+    async fn a_stale_partial_download_of_a_replaced_asset_is_started_over() {
+        let f = Fixture::new().await;
+        f.server.drop_next_response_after(90_000);
+        let m = f.manager();
+        assert!(m.update(Tool::YtDlp).await.is_err());
+        let part = f.tools.join(".download/yt-dlp.exe.part");
+        let kept = fs::metadata(&part).unwrap().len();
+        assert!(kept > 0, "kept {kept}");
+
+        let newer: Vec<u8> = (0..260_000).map(|i| (i % 241) as u8 ^ 0x5a).collect();
+        f.server.put("yt/yt-dlp.exe", newer.clone());
+        f.server
+            .put("yt/SHA2-256SUMS", format!("{}  yt-dlp.exe\n", hex(&newer)));
+
+        m.update(Tool::YtDlp).await.unwrap();
+        assert_eq!(fs::read(f.tools.join("yt-dlp.exe")).unwrap(), newer);
+        assert!(m.progress().borrow().error.is_none());
+        let downloads: Vec<_> = f
+            .server
+            .requests()
+            .into_iter()
+            .filter(|(p, _)| p == "yt/yt-dlp.exe")
+            .map(|(_, r)| r)
+            .collect();
+        assert_eq!(
+            downloads,
+            [None, Some(format!("bytes={kept}-")), None],
+            "first try, the resume, then one fresh download"
+        );
+        assert_eq!(fs::read_dir(f.tools.join(".download")).unwrap().count(), 0);
     }
 
     #[tokio::test]

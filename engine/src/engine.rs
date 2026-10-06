@@ -114,6 +114,17 @@ impl EngineTask {
     pub fn is_finished(&self) -> bool {
         self.join.is_finished()
     }
+
+    /// Asks the loop to stop the channel and end, without waiting.
+    pub fn request_stop(&self) {
+        self.stop.send_replace(true);
+    }
+
+    /// Waits until the loop has ended (after [`Self::request_stop`]). Call it at most until it
+    /// first completes.
+    pub async fn wait(&mut self) {
+        let _ = (&mut self.join).await;
+    }
 }
 
 /// Starts the engine (tick 250 ms, supervised) and logs to stdout. Must be called inside a tokio

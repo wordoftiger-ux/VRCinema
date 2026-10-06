@@ -67,12 +67,49 @@ fn stage_files(
     }
 }
 
+/// Removes the backup folders of earlier swaps (best effort: one still holding a running
+/// program stays until a later call).
+pub fn clean_old_backups(tools_dir: &Path) {
+    let Ok(entries) = fs::read_dir(tools_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(BACKUP_DIR)
+            && entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// A backup folder no earlier swap used: a program replaced earlier may still run from the
+/// previous one (the broadcaster's ffmpeg), so its files can be neither deleted nor replaced.
+fn new_backup_dir(tools_dir: &Path) -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    for n in 0..100u32 {
+        let dir = tools_dir.join(format!("{BACKUP_DIR}-{stamp}-{n}"));
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Nie można utworzyć folderu {}", dir.display()));
+            }
+        }
+    }
+    bail!(
+        "Nie można utworzyć folderu kopii zapasowej w {}",
+        tools_dir.display()
+    )
+}
+
 /// Moves every staged file over its destination. Existing destinations are first moved to a
-/// backup folder; if anything fails all moves are undone.
+/// backup folder of this swap; if anything fails all moves are undone.
 fn swap_in(items: &[(PathBuf, PathBuf)], tools_dir: &Path) -> Result<()> {
-    let backup = tools_dir.join(BACKUP_DIR);
-    let _ = fs::remove_dir_all(&backup);
-    fs::create_dir_all(&backup)?;
+    clean_old_backups(tools_dir);
+    let backup = new_backup_dir(tools_dir)?;
 
     // (destination, backup of the old file if there was one)
     let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
@@ -106,6 +143,7 @@ fn swap_in(items: &[(PathBuf, PathBuf)], tools_dir: &Path) -> Result<()> {
             }
         }
     }
+    // Best effort: a backup still in use is removed by a later swap or at the next start.
     let _ = fs::remove_dir_all(&backup);
     result
 }
@@ -221,6 +259,59 @@ mod tests {
         assert_eq!(fs::read(tools.join("ffmpeg.exe")).unwrap(), b"OLD-FFMPEG");
         assert_eq!(fs::read(tools.join("ffprobe.exe")).unwrap(), b"OLD-FFPROBE");
         assert_eq!(dir_names(&tools), ["ffmpeg.exe", "ffprobe.exe"]);
+    }
+
+    /// Kills the test's child process even when an assertion fails.
+    #[cfg(windows)]
+    struct KillOnDrop(std::process::Child);
+
+    #[cfg(windows)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The broadcaster's ffmpeg keeps running from the file the first update moved away, so
+    /// that backup cannot be deleted; a second update in the same session must still work.
+    #[cfg(windows)]
+    #[test]
+    fn a_second_swap_works_while_a_replaced_program_still_runs() {
+        let system = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
+        let ping = system.join("System32").join("ping.exe");
+        if !ping.is_file() {
+            eprintln!("pomijam: brak ping.exe");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = tmp.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        let running = tools.join("tool.exe");
+        fs::copy(&ping, &running).unwrap();
+        let child = std::process::Command::new(&running)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = KillOnDrop(child);
+
+        let stage = tmp.path().join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        for round in ["NEW-1", "NEW-2", "NEW-3"] {
+            fs::write(stage.join("tool.exe"), round).unwrap();
+            swap_in(&[(stage.join("tool.exe"), running.clone())], &tools)
+                .unwrap_or_else(|e| panic!("{round}: {e:#}"));
+            assert_eq!(fs::read_to_string(&running).unwrap(), round);
+        }
+
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        // Next start: the backups nobody uses any more are cleaned up.
+        clean_old_backups(&tools);
+        assert_eq!(dir_names(&tools), ["tool.exe"]);
     }
 
     #[test]

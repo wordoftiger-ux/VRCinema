@@ -23,6 +23,8 @@ struct Shared {
     /// Cut the next response longer than this after this many body bytes.
     drop_after: Mutex<Option<usize>>,
     ignore_range: AtomicBool,
+    /// Answer a `Range` request with 206 for one byte later than asked.
+    wrong_range_start: AtomicBool,
     requests: Mutex<Vec<(String, Option<String>)>>,
 }
 
@@ -62,6 +64,10 @@ impl TestServer {
 
     pub fn set_ignore_range(&self, ignore: bool) {
         self.shared.ignore_range.store(ignore, Ordering::SeqCst);
+    }
+
+    pub fn set_wrong_range_start(&self, wrong: bool) {
+        self.shared.wrong_range_start.store(wrong, Ordering::SeqCst);
     }
 
     /// `(path, Range header)` of every request so far.
@@ -104,11 +110,14 @@ async fn serve(
             .unwrap();
     };
     let total = data.len();
-    let start = if shared.ignore_range.load(Ordering::SeqCst) {
+    let mut start = if shared.ignore_range.load(Ordering::SeqCst) {
         0
     } else {
         range.as_deref().and_then(parse_range_start).unwrap_or(0)
     };
+    if start > 0 && shared.wrong_range_start.load(Ordering::SeqCst) {
+        start += 1;
+    }
     if start >= total && start > 0 {
         return Response::builder()
             .status(StatusCode::RANGE_NOT_SATISFIABLE)

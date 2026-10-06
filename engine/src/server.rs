@@ -379,19 +379,16 @@ pub async fn run(
     let (handle, engine_task) = if start_channel {
         let (handle, task) =
             start_channel_loop(&config, &db, &resolver, &live, &shared_log).await?;
-        if let Some(loops) = &channel_loops {
-            loops.fetch_add(1, Ordering::SeqCst);
-        }
-        (handle, Some(task))
+        (handle, LoopGuard::new(Some(task), channel_loops))
     } else {
         shared_log("Kanał nie wystartuje: brak narzędzi (ffmpeg). Strony i panel działają.");
-        (idle_engine_handle(), None)
+        (idle_engine_handle(), LoopGuard::new(None, None))
     };
 
     let served = async {
         // The listener only opens once the channel has published its first real playlist.
         tokio::pin!(shutdown);
-        if engine_task.is_some() {
+        if engine_task.has_loop() {
             let mut snapshot = handle.snapshot.clone();
             // A stop requested while starting (e.g. the app gives up waiting) ends it here.
             tokio::select! {
@@ -455,13 +452,67 @@ pub async fn run(
     .await;
 
     // Also when serving never started: the loop must not outlive this call.
-    if let Some(task) = engine_task {
-        task.shutdown().await;
-        if let Some(loops) = &channel_loops {
-            loops.fetch_sub(1, Ordering::SeqCst);
+    engine_task.shutdown().await;
+    served
+}
+
+/// The channel loop of one [`run`] call, counted in `channel_loops` while it runs. Stopped by
+/// [`LoopGuard::shutdown`] — or, when `run` is dropped mid-way (its task aborted), on drop: the
+/// loop then stops in the background and the counter follows once it has ended.
+/// ([`EngineTask`] itself stops nothing when dropped: `spawn_engine` relies on that.)
+struct LoopGuard {
+    task: Option<EngineTask>,
+    loops: Option<Arc<AtomicUsize>>,
+}
+
+impl LoopGuard {
+    fn new(task: Option<EngineTask>, loops: Option<Arc<AtomicUsize>>) -> Self {
+        let loops = task.as_ref().and(loops);
+        if let Some(loops) = &loops {
+            loops.fetch_add(1, Ordering::SeqCst);
+        }
+        Self { task, loops }
+    }
+
+    fn has_loop(&self) -> bool {
+        self.task.is_some()
+    }
+
+    /// Stops the loop and the channel and waits until both are done.
+    async fn shutdown(mut self) {
+        if let Some(task) = &mut self.task {
+            task.request_stop();
+            task.wait().await;
+            self.task = None;
+            if let Some(loops) = self.loops.take() {
+                loops.fetch_sub(1, Ordering::SeqCst);
+            }
         }
     }
-    served
+}
+
+impl Drop for LoopGuard {
+    fn drop(&mut self) {
+        let Some(mut task) = self.task.take() else {
+            return;
+        };
+        task.request_stop();
+        let loops = self.loops.take();
+        let ended = move || {
+            if let Some(loops) = loops {
+                loops.fetch_sub(1, Ordering::SeqCst);
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    task.wait().await;
+                    ended();
+                });
+            }
+            Err(_) => ended(),
+        }
+    }
 }
 
 /// Name of the lock file in DATA_DIR.
@@ -668,6 +719,48 @@ mod tests {
             lines.iter().any(|l| l.contains("Generowanie plansz")),
             "{lines:?}"
         );
+    }
+
+    /// The app aborts a server that takes too long to start: its channel loop must stop too
+    /// (and the loop counter must come back to zero), not run on with nobody to stop it.
+    #[tokio::test]
+    async fn aborting_run_stops_the_channel_loop() {
+        let exe = if cfg!(windows) { ".exe" } else { "" };
+        if !repo_root()
+            .join("bin")
+            .join(format!("ffmpeg{exe}"))
+            .exists()
+        {
+            eprintln!("pomijam: brak bin/ffmpeg");
+            return;
+        }
+        let (tmp, data, _markers) = data_with_markers();
+        let (log, _lines) = capture_log();
+        let loops = Arc::new(AtomicUsize::new(0));
+        let opts = RunOptions {
+            log: Some(log),
+            channel_loops: Some(Arc::clone(&loops)),
+            ..test_opts(tmp.path())
+        };
+        let server = tokio::spawn(run(test_config(&data, 0), opts, std::future::pending()));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        while loops.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the loop did not start in 60 s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while loops.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the channel loop outlived the aborted server"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]

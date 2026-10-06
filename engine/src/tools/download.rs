@@ -140,6 +140,8 @@ pub async fn download_file(
     let (mut downloaded, total) = if resumed {
         (existing, res.content_length().map(|n| n + existing))
     } else if status == StatusCode::PARTIAL_CONTENT {
+        // The partial file cannot be continued from what the server sends: never again.
+        let _ = fs::remove_file(part);
         bail!("Serwer zwrócił nieoczekiwany zakres danych: {url}");
     } else {
         (0, res.content_length())
@@ -154,16 +156,26 @@ pub async fn download_file(
         tokio::fs::File::create(part).await?
     };
     on_progress(downloaded, total);
-    while let Some(chunk) = res
-        .chunk()
-        .await
-        .with_context(|| format!("Pobieranie przerwane: {url}"))?
-    {
-        file.write_all(&chunk).await?;
-        downloaded += chunk.len() as u64;
-        on_progress(downloaded, total);
+    let copied: Result<()> = async {
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .with_context(|| format!("Pobieranie przerwane: {url}"))?
+        {
+            file.write_all(&chunk).await?;
+            downloaded += chunk.len() as u64;
+            on_progress(downloaded, total);
+        }
+        Ok(())
     }
-    file.flush().await?;
+    .await;
+    // tokio finishes a write on its blocking pool after `write_all` returned: wait for it
+    // also when the transfer broke, so the partial file holds every byte reported (the next
+    // attempt resumes from its length).
+    let flushed = file.flush().await;
+    drop(file);
+    copied?;
+    flushed?;
     if let Some(total) = total
         && downloaded != total
     {
@@ -309,6 +321,65 @@ mod tests {
             ranges[1].1.as_deref(),
             Some(format!("bytes={kept}-").as_str())
         );
+    }
+
+    /// Every byte reported before a failed transfer is in the partial file when the call
+    /// returns (the next attempt resumes from its length). tokio hands file writes to its
+    /// blocking pool; here that pool has one thread, kept busy for a moment after every chunk,
+    /// so the last write is still queued when the connection breaks.
+    #[test]
+    fn a_failed_transfer_leaves_every_reported_byte_on_disk() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let server = TestServer::start().await;
+            server.put("f.bin", blob(200_000));
+            server.drop_next_response_after(100_000);
+            let dir = tempfile::tempdir().unwrap();
+            let part = dir.path().join("f.part");
+            let url = format!("{}/f.bin", server.base);
+            let mut last = 0;
+            let err = download_file(&client(), &url, &part, &mut |d, _| {
+                last = d;
+                tokio::task::spawn_blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(100))
+                });
+            })
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("przerwane"), "{err:#}");
+            let on_disk = fs::metadata(&part).unwrap().len();
+            assert_eq!(on_disk, last, "reported {last}, on disk {on_disk}");
+        });
+    }
+
+    #[tokio::test]
+    async fn a_206_from_the_wrong_offset_discards_the_partial_file() {
+        let server = TestServer::start().await;
+        let data = blob(120_000);
+        server.put("f.bin", data.clone());
+        server.set_wrong_range_start(true);
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("f.part");
+        fs::write(&part, &data[..50_000]).unwrap();
+        let url = format!("{}/f.bin", server.base);
+        let err = download_file(&client(), &url, &part, &mut |_, _| {})
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("nieoczekiwany zakres"),
+            "{err:#}"
+        );
+        assert!(!part.exists(), "the partial file must not be resumed again");
+        server.set_wrong_range_start(false);
+        download_file(&client(), &url, &part, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&part).unwrap(), data);
     }
 
     #[tokio::test]

@@ -311,6 +311,9 @@ async fn info_describes_the_app() {
     assert_eq!(info["firstRunCompleted"], false);
     assert_eq!(info["toolsOk"], false);
     assert_eq!(info["channelRunning"], false);
+    // Missing tools are not a failed start.
+    assert_eq!(info["channelError"], Value::Null);
+    assert_eq!(info["restarting"], false);
     assert_eq!(info["encoder"], "libx264");
     assert_eq!(info["update"], Value::Null);
     app.stop().await;
@@ -831,6 +834,11 @@ async fn installing_tools_from_the_local_server_updates_status_and_settings() {
     let info = app.get("/api/desktop/info", &cookie).await;
     assert_eq!(info["toolsOk"], true);
     assert_eq!(info["channelRunning"], false);
+    // The window shows why (the tools are there, but the channel failed to start).
+    let why = info["channelError"].as_str().unwrap_or_default();
+    assert!(!why.is_empty(), "{info}");
+    assert!(app.log_text().contains(why), "{why}");
+    assert_eq!(info["restarting"], false);
     assert!(
         app.log_text().contains("Kanał nie wystartował"),
         "{}",
@@ -1130,6 +1138,62 @@ async fn a_minor_change_keeps_the_stream_running() {
     );
     assert_eq!(app.engine().server_starts(), 1);
     app.stop().await;
+}
+
+#[tokio::test]
+async fn info_says_when_a_restart_is_in_progress() {
+    let app = App::start().await;
+    let core = Arc::clone(&app.engine().core);
+    let cookie = app.window_cookie().await;
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["restarting"], false);
+    let (reached, release) = core.pause_next_start();
+    let restart = tokio::spawn({
+        let core = Arc::clone(&core);
+        async move { core.restart_server().await }
+    });
+    // The new server already answers, but the restart has not finished.
+    reached.await.unwrap();
+    let cookie = app.window_cookie().await;
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["restarting"], true);
+    release.send(()).unwrap();
+    restart.await.unwrap().unwrap();
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["restarting"], false);
+    app.stop().await;
+}
+
+/// Quitting must never hang on a restart that takes long (the window is already hidden and a
+/// second launch only pokes this process): the shutdown gives up after its limit.
+#[tokio::test]
+async fn shutdown_gives_up_waiting_for_a_stuck_restart() {
+    let mut app = App::start().await;
+    let core = Arc::clone(&app.engine().core);
+    let (reached, release) = core.pause_next_start();
+    let restart = tokio::spawn({
+        let core = Arc::clone(&core);
+        async move { core.restart_server().await }
+    });
+    reached.await.unwrap();
+    let engine = app.engine.take().unwrap();
+    let clean = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.shutdown_within(Duration::from_millis(500)),
+    )
+    .await
+    .expect("the shutdown waited for the stuck restart");
+    assert!(!clean);
+    let log = std::fs::read_to_string(app.home.join("logs").join("vrcinema.log")).unwrap();
+    assert!(log.contains("Zatrzymywanie trwa za długo"), "{log}");
+    // The restart that finishes after the shutdown gave up does not leave a server behind.
+    release.send(()).unwrap();
+    let _ = restart.await.unwrap();
+    assert!(
+        core.live().is_none(),
+        "a server was published after the shutdown"
+    );
+    assert!(core.server.lock().await.is_none());
 }
 
 #[tokio::test]

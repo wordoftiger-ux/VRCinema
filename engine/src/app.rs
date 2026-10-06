@@ -35,6 +35,9 @@ const UPDATE_RESTART_DELAY: Duration = Duration::from_millis(500);
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a stopped server may take to finish before its task is aborted.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest wait of [`AppEngine::shutdown`] (a restart in progress, a server slow to stop);
+/// whatever still runs then ends with the process (the job object kills the children).
+pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -234,6 +237,8 @@ pub(crate) struct AppCore {
     live: RwLock<Option<Live>>,
     channel_loops: Arc<AtomicUsize>,
     closing: AtomicBool,
+    /// Why the channel did not start although ffmpeg and ffprobe are there (for the window).
+    channel_error: Mutex<Option<String>>,
     tools_job: Mutex<Option<JoinHandle<()>>>,
     update: Mutex<Option<UpdateInfo>>,
     applying_update: tokio::sync::Mutex<()>,
@@ -286,6 +291,16 @@ impl AppCore {
         self.live().is_some_and(|l| l.channel)
     }
 
+    /// The last start of the channel failed although the tools are there: why.
+    pub(crate) fn channel_error(&self) -> Option<String> {
+        lock(&self.channel_error).clone()
+    }
+
+    /// The server is being started, stopped or restarted right now.
+    pub(crate) fn restarting(&self) -> bool {
+        self.server.try_lock().is_err()
+    }
+
     pub(crate) fn version(&self) -> &Version {
         &self.options.version
     }
@@ -320,15 +335,21 @@ impl AppCore {
         let config = app_config(&settings, &self.home);
         let started = if Self::tools_present(&config) {
             match self.spawn_server(&config, &settings, true).await {
-                Ok(started) => started,
+                Ok(started) => {
+                    *lock(&self.channel_error) = None;
+                    started
+                }
                 Err(e) => {
+                    let why = format!("{e:#}");
                     self.log(&format!(
-                        "Kanał nie wystartował: {e:#}. Serwer działa bez kanału — napraw narzędzia w ustawieniach."
+                        "Kanał nie wystartował: {why}. Serwer działa bez kanału — napraw narzędzia w ustawieniach."
                     ));
+                    *lock(&self.channel_error) = Some(why);
                     self.spawn_server(&config, &settings, false).await?
                 }
             }
         } else {
+            *lock(&self.channel_error) = None;
             self.spawn_server(&config, &settings, false).await?
         };
         let (running, live) = started;
@@ -451,15 +472,22 @@ impl AppCore {
         }
     }
 
-    /// Stops the server and waits until its channel loop, port and data-folder lock are gone.
+    /// Stops the server and waits until its channel loop, port and data-folder lock are gone
+    /// (a server that does not finish in time is aborted).
     async fn stop_server(&self, slot: &mut Option<Running>) {
         self.set_live(None);
         if let Some(running) = slot.take() {
             let _ = running.stop.send(());
-            match running.join.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => self.log(&format!("Serwer zakończył pracę z błędem: {e:#}")),
-                Err(e) => self.log(&format!("Serwer przerwał pracę: {e}")),
+            let mut join = running.join;
+            match tokio::time::timeout(STOP_TIMEOUT, &mut join).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => self.log(&format!("Serwer zakończył pracę z błędem: {e:#}")),
+                Ok(Err(e)) => self.log(&format!("Serwer przerwał pracę: {e}")),
+                Err(_) => {
+                    self.log("Serwer nie zatrzymał się na czas — przerywam go.");
+                    join.abort();
+                    let _ = join.await;
+                }
             }
         }
     }
@@ -475,7 +503,14 @@ impl AppCore {
             }
             core.log("Ponowne uruchamianie serwera...");
             core.stop_server(&mut slot).await;
-            core.start_server(&mut slot).await
+            let started = core.start_server(&mut slot).await;
+            // The program began quitting meanwhile (and gave up waiting for this restart):
+            // no server may stay behind.
+            if core.closing.load(Ordering::SeqCst) {
+                core.stop_server(&mut slot).await;
+                anyhow::bail!("Program jest zamykany.");
+            }
+            started
         })
         .await
         .map_err(|e| anyhow!("Ponowne uruchamianie serwera zostało przerwane: {e}"))?
@@ -749,6 +784,8 @@ impl AppEngine {
             )
             .with_log(log.log_fn()),
         );
+        // Backups of programs that were still running at the last swap (nothing uses them now).
+        crate::tools::install::clean_old_backups(tools.tools_dir());
         settings.tools_installed = tools.status().missing.is_empty();
         settings.save(&home).map_err(|e| {
             anyhow!(
@@ -772,6 +809,7 @@ impl AppEngine {
             live: RwLock::new(None),
             channel_loops: Arc::new(AtomicUsize::new(0)),
             closing: AtomicBool::new(false),
+            channel_error: Mutex::new(None),
             tools_job: Mutex::new(None),
             update: Mutex::new(None),
             applying_update: tokio::sync::Mutex::new(()),
@@ -881,8 +919,15 @@ impl AppEngine {
         self.core.restart_server().await
     }
 
-    /// Stops everything: background jobs, the server, the channel and its processes.
+    /// Stops everything: background jobs, the server, the channel and its processes; gives up
+    /// after [`SHUTDOWN_TIMEOUT`].
     pub async fn shutdown(self) {
+        self.shutdown_within(SHUTDOWN_TIMEOUT).await;
+    }
+
+    /// Like [`Self::shutdown`], waiting at most `limit` (for a restart in progress and for the
+    /// server to stop). Returns false when it gave up; the caller ends the process anyway.
+    pub async fn shutdown_within(self, limit: Duration) -> bool {
         let core = self.core;
         core.closing.store(true, Ordering::SeqCst);
         for task in lock(&core.background).drain(..) {
@@ -891,9 +936,21 @@ impl AppEngine {
         if let Some(job) = lock(&core.tools_job).take() {
             job.abort();
         }
-        let mut slot = core.server.lock().await;
-        core.stop_server(&mut slot).await;
-        core.log("Program zatrzymany.");
+        let stopped = tokio::time::timeout(limit, async {
+            let mut slot = core.server.lock().await;
+            core.stop_server(&mut slot).await;
+        })
+        .await
+        .is_ok();
+        if stopped {
+            core.log("Program zatrzymany.");
+        } else {
+            core.log(&format!(
+                "Zatrzymywanie trwa za długo (ponad {:.1} s) — kończę bez czekania.",
+                limit.as_secs_f32()
+            ));
+        }
+        stopped
     }
 }
 
