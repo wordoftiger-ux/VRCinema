@@ -5,3 +5,5 @@ data/
 .superpowers/
 *.log
 engine/target/
+desktop/target/
+desktop/gen/

@@ -94,9 +94,9 @@ mod job {
     use tokio::process::Child;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -143,7 +143,10 @@ mod job {
                 return None;
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // Members die with the job; only a process started with CREATE_BREAKAWAY_FROM_JOB
+            // (the updated desktop app) may leave it.
+            info.BasicLimitInformation.LimitFlags =
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
             let ok = SetInformationJobObject(
                 handle,
                 JobObjectExtendedLimitInformation,
@@ -158,6 +161,28 @@ mod job {
                 return None;
             }
             Some(handle as usize)
+        }
+    }
+
+    /// The limit flags of the program-wide job (creating it if needed).
+    #[cfg(test)]
+    pub fn limit_flags() -> Option<u32> {
+        use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
+        let job = job();
+        if job == 0 {
+            return None;
+        }
+        // SAFETY: `job` is a valid job handle; `info` outlives the call and has the queried size.
+        unsafe {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            let ok = QueryInformationJobObject(
+                job as HANDLE,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of_mut!(info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            );
+            (ok != 0).then_some(info.BasicLimitInformation.LimitFlags)
         }
     }
 
@@ -355,6 +380,21 @@ mod tests {
             tokio::spawn(async move { run_process(&cmd, &args, Duration::from_secs(10)).await });
         let out = handle.await.unwrap().unwrap();
         assert_eq!(out.stdout.trim(), "hello");
+    }
+
+    /// The desktop app starts its updated self with `CREATE_BREAKAWAY_FROM_JOB`; without
+    /// `BREAKAWAY_OK` the new program would die together with the old one.
+    #[cfg(windows)]
+    #[test]
+    fn job_kills_its_members_but_allows_an_explicit_breakaway() {
+        use windows_sys::Win32::System::JobObjects::{
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+        let flags = job::limit_flags().expect("job object");
+        assert_ne!(flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
+        assert_ne!(flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK, 0);
+        assert_eq!(flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, 0);
     }
 
     #[test]

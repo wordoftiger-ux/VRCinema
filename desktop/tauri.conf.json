@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VRCinema",
+  "version": "0.2.0",
+  "identifier": "io.github.wordoftiger-ux.vrcinema",
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "windows": {
+      "webviewInstallMode": { "type": "skip" }
+    }
+  }
+}
