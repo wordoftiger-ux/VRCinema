@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 14] = [
+const ROUTES: [(&str, &str); 15] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -31,6 +31,7 @@ const ROUTES: [(&str, &str); 14] = [
     ("GET", "/api/desktop/update"),
     ("POST", "/api/desktop/update/apply"),
     ("POST", "/api/desktop/wizard/complete"),
+    ("POST", "/api/desktop/restart"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -404,7 +405,11 @@ async fn put_config_saves_valid_values_and_never_shows_secrets() {
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["publicUrl"], "https://tv.example.com");
-    assert_eq!(res["restarted"], true, "server settings changed");
+    assert_eq!(res["restarted"], false, "only port and lanAccess restart");
+    assert_eq!(
+        res["restartRequired"], true,
+        "slates still show the old address"
+    );
     assert_eq!(res["port"], json!(app.engine().port()));
     assert_eq!(*app.hooks.autostart_calls.lock().unwrap(), vec![true]);
     let saved = app.saved();
@@ -537,6 +542,12 @@ async fn pick_cookies_uses_the_native_dialog_of_the_shell() {
     assert_eq!(res["picked"], true);
     assert_eq!(res["ytdlpCookies"], json!(file.to_string_lossy()));
     assert_eq!(app.saved()["ytdlpCookies"], json!(file.to_string_lossy()));
+    // The next yt-dlp call uses it; the server was not restarted for it.
+    assert_eq!(
+        app.engine().core.live_settings.ytdlp_cookies.get(),
+        Some(file.clone())
+    );
+    assert_eq!(app.engine().server_starts(), 1);
 
     let (status, _) = app.put_config(&cookie, json!({"ytdlpCookies": null})).await;
     assert_eq!(status, StatusCode::OK);
@@ -829,6 +840,11 @@ async fn encoder_detection_needs_ffmpeg_and_falls_back_to_libx264() {
         json!({"detectedEncoder": "libx264", "encoder": "libx264"})
     );
     assert_eq!(app.saved()["detectedEncoder"], "libx264");
+    assert_eq!(
+        app.engine().server_starts(),
+        1,
+        "detection never restarts implicitly"
+    );
     app.stop().await;
 }
 
@@ -948,5 +964,183 @@ async fn applying_an_update_swaps_the_exe_and_asks_the_shell_to_restart() {
         app.hooks.update_restarts.load(Ordering::SeqCst) == 1
     })
     .await;
+    app.stop().await;
+}
+
+// ---------- Live settings, explicit restart (fix round 1) ----------
+
+#[test]
+fn only_the_port_and_network_access_restart_the_server() {
+    let base = AppSettings::default();
+    let changed = |f: &dyn Fn(&mut AppSettings)| {
+        let mut s = base.clone();
+        f(&mut s);
+        needs_restart(&base, &s)
+    };
+    assert!(changed(&|s| s.port = 9000));
+    assert!(changed(&|s| s.lan_access = true));
+    assert!(!changed(&|s| s.public_url = "https://tv.example.com".into()));
+    assert!(!changed(&|s| s.trust_cloudflare = true));
+    assert!(!changed(&|s| s.video_encoder = "h264_nvenc".into()));
+    assert!(!changed(&|s| s.detected_encoder = Some("h264_qsv".into())));
+    assert!(!changed(&|s| s.ytdlp_cookies = Some(PathBuf::from("c.txt"))));
+    assert!(!changed(&|s| s.pixeldrain_api_key = Some("k".into())));
+    assert!(!changed(&|s| s.remote_admin = true));
+}
+
+#[tokio::test]
+async fn minor_settings_take_effect_without_a_restart() {
+    let app = App::start().await;
+    let cookie = app.window_cookie().await;
+    let port = app.engine().port();
+    assert_eq!(app.engine().server_starts(), 1);
+    for body in [
+        json!({"trustCloudflare": true}),
+        json!({"pixeldrainApiKey": "klucz-pd"}),
+        json!({"videoEncoder": "h264_nvenc"}),
+        json!({"autostart": true}),
+        json!({"remoteAdmin": true, "password": "haslo-zdalne-1"}),
+        json!({"publicUrl": "https://tv.example.com"}),
+    ] {
+        let (status, res) = app.put_config(&cookie, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}: {res}");
+        assert_eq!(res["restarted"], false, "{body}");
+    }
+    assert_eq!(app.engine().server_starts(), 1, "no implicit restart");
+    assert_eq!(app.engine().port(), port);
+    let live = &app.engine().core.live_settings;
+    assert!(live.trust_cloudflare.get());
+    assert_eq!(live.encoder.get(), VideoEncoder::H264Nvenc);
+    assert_eq!(live.pixeldrain_api_key.get(), Some("klucz-pd".to_string()));
+    // Links use the new address at once; the slates only after a restart.
+    let panel = app.get("/api/admin/channels/main", &cookie).await;
+    assert_eq!(panel["channelUrl"], "https://tv.example.com/live/main.m3u8");
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["restartRequired"], true);
+
+    let (status, res) = app
+        .call("POST", "/api/desktop/restart", Some(&cookie), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["ok"], true);
+    assert_eq!(res["port"], json!(app.engine().port()));
+    assert_eq!(app.engine().server_starts(), 2);
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["restartRequired"], false);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn trusting_cloudflare_applies_to_the_next_request() {
+    let app = App::start().await;
+    let cookie = app.window_cookie().await;
+    let channel_url = || async {
+        let res = app
+            .http
+            .get(app.url("/api/admin/channels/main"))
+            .header("cookie", &cookie)
+            .header("x-forwarded-host", "tv.example.org")
+            .send()
+            .await
+            .unwrap();
+        let body: Value = res.json().await.unwrap();
+        body["channelUrl"].as_str().unwrap().to_string()
+    };
+    assert!(!channel_url().await.contains("tv.example.org"));
+    let (status, _) = app
+        .put_config(&cookie, json!({"trustCloudflare": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(channel_url().await.contains("tv.example.org"));
+    assert_eq!(app.engine().server_starts(), 1);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_minor_change_keeps_the_stream_running() {
+    let mut linked = false;
+    let app = App::start_with(|home, _| linked = link_real_tools(home)).await;
+    if !linked {
+        eprintln!("pomijam: brak bin/ffmpeg.exe lub nie można utworzyć dowiązania");
+        app.stop().await;
+        return;
+    }
+    let cookie = app.window_cookie().await;
+    // Number of the newest segment: a restarted broadcaster numbers from 0 again.
+    let newest = || async {
+        let text = app
+            .http
+            .get(app.url("/live/main.m3u8"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        text.lines()
+            .filter_map(|l| {
+                l.rsplit('/')
+                    .next()?
+                    .strip_suffix(".ts")?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .max()
+            .unwrap()
+    };
+    // Let the stream run well past what a fresh start publishes.
+    eventually(60, "the stream to advance", || async {
+        newest().await >= 6
+    })
+    .await;
+    let before = newest().await;
+    for body in [
+        json!({"videoEncoder": "libx264"}),
+        json!({"publicUrl": "https://tv.example.com"}),
+        json!({"trustCloudflare": true}),
+    ] {
+        let (status, res) = app.put_config(&cookie, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(res["restarted"], false);
+    }
+    assert!(newest().await >= before, "the stream started over");
+    assert_eq!(
+        app.engine().channel_loop_counter().load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(app.engine().server_starts(), 1);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_remote_switch_during_a_restart_reaches_the_new_server() {
+    let app = App::start().await;
+    let core = Arc::clone(&app.engine().core);
+    let (reached, release) = core.pause_next_start();
+    let restart = tokio::spawn({
+        let core = Arc::clone(&core);
+        async move { core.restart_server().await }
+    });
+    // The new server is up but not yet published: settings changed now must still reach it.
+    reached.await.unwrap();
+    let restarted = core
+        .apply_config(ConfigPatch {
+            remote_admin: Some(true),
+            password: Some("haslo-zdalne-1".into()),
+            trust_cloudflare: Some(true),
+            ..ConfigPatch::default()
+        })
+        .await
+        .unwrap();
+    assert!(!restarted);
+    release.send(()).unwrap();
+    restart.await.unwrap().unwrap();
+    let (status, _) = app.remote_login("haslo-zdalne-1").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the new server enforces the new switch"
+    );
+    assert!(core.live_settings.trust_cloudflare.get());
     app.stop().await;
 }

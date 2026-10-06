@@ -15,6 +15,7 @@ use crate::db::{MAIN_CHANNEL_ID, SettingsRepo, open_database};
 use crate::engine::{EngineHandle, EngineTask, idle_engine_handle, spawn_engine_with};
 use crate::http::{AppState, HttpConfig, build_router};
 use crate::library::MediaLibrary;
+use crate::live::LiveSettings;
 use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
 use crate::pipeline::channel::{Channel, ChannelOptions};
 use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_factory};
@@ -50,6 +51,8 @@ pub struct RunOptions {
     pub configure_state: Option<Box<dyn FnOnce(AppState) -> AppState + Send>>,
     /// Counts running channel loops: +1 once the engine is spawned, -1 after it has stopped.
     pub channel_loops: Option<Arc<AtomicUsize>>,
+    /// Settings that change while the server runs (desktop app); `None`: fixed from `config`.
+    pub live: Option<LiveSettings>,
 }
 
 impl RunOptions {
@@ -65,6 +68,7 @@ impl RunOptions {
             start_channel: true,
             configure_state: None,
             channel_loops: None,
+            live: None,
         }
     }
 }
@@ -145,6 +149,7 @@ fn build_resolver(
     root: &Path,
     library: &Arc<MediaLibrary>,
     fake: Option<&Path>,
+    live: &LiveSettings,
     log: &SharedLogFn,
 ) -> anyhow::Result<Arc<dyn MediaResolver>> {
     if let Some(path) = fake {
@@ -166,7 +171,8 @@ fn build_resolver(
         Box::new(ReqwestHttp::new()?),
         pixeldrain_probe,
         config.pixeldrain_api_key.clone(),
-    );
+    )
+    .with_api_key(live.pixeldrain_api_key.clone());
     let js_runtime = detect_js_runtime(
         config.ytdlp_js_runtime.as_deref(),
         root,
@@ -176,7 +182,8 @@ fn build_resolver(
         config.ytdlp_path.clone(),
         js_runtime,
         config.ytdlp_cookies.clone(),
-    );
+    )
+    .with_cookies(live.ytdlp_cookies.clone());
     let file_probe = |ffprobe: std::path::PathBuf| -> FileDurationProbe {
         Box::new(move |file| {
             let ffprobe = ffprobe.clone();
@@ -243,6 +250,7 @@ async fn start_channel_loop(
     config: &AppConfig,
     db: &Arc<Mutex<rusqlite::Connection>>,
     resolver: &Arc<dyn MediaResolver>,
+    live: &LiveSettings,
     shared_log: &SharedLogFn,
 ) -> anyhow::Result<(EngineHandle, EngineTask)> {
     shared_log("Generowanie plansz...");
@@ -264,6 +272,7 @@ async fn start_channel_loop(
         let resolver = Arc::clone(resolver);
         let config = config.clone();
         let shared_log = Arc::clone(shared_log);
+        let encoder = live.encoder.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -273,7 +282,7 @@ async fn start_channel_loop(
                 resolver: Arc::clone(&resolver),
                 ffmpeg_path: config.ffmpeg_path.clone(),
                 ffprobe_path: config.ffprobe_path.clone(),
-                encoder: config.video_encoder,
+                encoder: encoder.clone(),
                 segment_seconds: config.segment_seconds,
                 clips_dir: config.data_dir.join("clips"),
                 db: Arc::clone(&db),
@@ -328,7 +337,9 @@ pub async fn run(
         start_channel,
         configure_state,
         channel_loops,
+        live,
     } = opts;
+    let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
     let print_banner = custom_log.is_none();
     let shared_log: SharedLogFn = custom_log.unwrap_or_else(|| Arc::new(log));
 
@@ -357,6 +368,7 @@ pub async fn run(
         &root,
         &library,
         fake_resolver.as_deref(),
+        &live,
         &shared_log,
     )?;
 
@@ -365,7 +377,8 @@ pub async fn run(
     std::fs::create_dir_all(&clips_dir)?;
 
     let (handle, engine_task) = if start_channel {
-        let (handle, task) = start_channel_loop(&config, &db, &resolver, &shared_log).await?;
+        let (handle, task) =
+            start_channel_loop(&config, &db, &resolver, &live, &shared_log).await?;
         if let Some(loops) = &channel_loops {
             loops.fetch_add(1, Ordering::SeqCst);
         }
@@ -377,9 +390,17 @@ pub async fn run(
 
     let served = async {
         // The listener only opens once the channel has published its first real playlist.
+        tokio::pin!(shutdown);
         if engine_task.is_some() {
             let mut snapshot = handle.snapshot.clone();
-            snapshot.wait_for(|s| !s.playlist.is_empty()).await?;
+            // A stop requested while starting (e.g. the app gives up waiting) ends it here.
+            tokio::select! {
+                r = snapshot.wait_for(|s| !s.playlist.is_empty()) => { r?; }
+                () = &mut shutdown => {
+                    shared_log("Zamykanie...");
+                    return Ok(());
+                }
+            }
         }
 
         let mut state = AppState::new(
@@ -390,7 +411,8 @@ pub async fn run(
             handle,
         )?
         .with_library(Some(library))
-        .with_log(Arc::clone(&shared_log));
+        .with_log(Arc::clone(&shared_log))
+        .with_live(live.clone());
         if let Some(configure) = configure_state {
             state = configure(state);
         }
@@ -421,7 +443,7 @@ pub async fn run(
         );
         let result = tokio::select! {
             r = serve => r.map_err(anyhow::Error::from),
-            () = shutdown => Ok(()),
+            () = &mut shutdown => Ok(()),
         };
 
         shared_log("Zamykanie...");

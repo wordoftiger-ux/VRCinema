@@ -7,6 +7,7 @@ pub mod engine;
 pub mod home;
 pub mod http;
 pub mod library;
+pub mod live;
 pub mod local_files;
 pub mod logging;
 pub mod pipeline;

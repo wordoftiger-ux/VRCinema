@@ -26,6 +26,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use crate::db::{QueueItem, SettingsRepo};
 use crate::engine::{Command, EngineHandle, Snapshot};
 use crate::library::MediaLibrary;
+use crate::live::{LiveSettings, LiveValue};
 use crate::pipeline::channel::ChannelState;
 use crate::resolver::MediaResolver;
 use crate::rules::{RateLimiter, system_clock};
@@ -78,6 +79,8 @@ pub struct AppState {
     /// The desktop app's engine (`/api/desktop/*`); `None` in `.env` mode, where those routes
     /// do not exist. Weak: the engine owns the server that owns this state.
     desktop: Option<Weak<crate::app::AppCore>>,
+    /// Read per request (`trust_cloudflare`, `public_url`): HttpConfig keeps the start values.
+    live: LiveSettings,
 }
 
 impl AppState {
@@ -116,6 +119,13 @@ impl AppState {
             admin_auth: Arc::new(RwLock::new(admin_auth)),
             desktop_key: Arc::new(DesktopKey::generate().0),
             desktop: None,
+            live: LiveSettings {
+                trust_cloudflare: LiveValue::new(config.trust_cloudflare),
+                public_url: LiveValue::new(config.public_url.clone()),
+                encoder: LiveValue::new(crate::config::VideoEncoder::Libx264),
+                ytdlp_cookies: LiveValue::new(None),
+                pixeldrain_api_key: LiveValue::new(None),
+            },
             config: Arc::new(config),
             channel_id,
             db,
@@ -130,6 +140,13 @@ impl AppState {
 
     pub fn with_library(mut self, library: Option<Arc<MediaLibrary>>) -> Self {
         self.library = library;
+        self
+    }
+
+    /// Shares the settings the desktop app changes at runtime (Cloudflare trust, public
+    /// address, ...); `.env` mode keeps the values from the start.
+    pub fn with_live(mut self, live: LiveSettings) -> Self {
+        self.live = live;
         self
     }
 
@@ -212,7 +229,7 @@ impl AppState {
     }
 
     fn trusted(&self) -> bool {
-        self.config.trust_cloudflare || self.config.trust_proxy
+        self.live.trust_cloudflare.get() || self.config.trust_proxy
     }
 
     /// Key remote-session tokens are signed with: the session secret in `.env` mode; in the app
@@ -467,12 +484,13 @@ impl FromRequestParts<AppState> for Ctx {
             .unwrap_or_default();
         let cfg = &state.config;
         let trust = Trust {
-            cloudflare: cfg.trust_cloudflare,
+            cloudflare: state.live.trust_cloudflare.get(),
             proxy: cfg.trust_proxy,
         };
         let ip = get_client_ip(&parts.headers, &remote, trust);
         let https = is_https(&parts.headers, false, state.trusted());
-        let base_url = if cfg.public_url.is_empty() {
+        let public_url = state.live.public_url.get();
+        let base_url = if public_url.is_empty() {
             let forwarded = state
                 .trusted()
                 .then(|| {
@@ -497,7 +515,7 @@ impl FromRequestParts<AppState> for Ctx {
                 .unwrap_or_else(|| "localhost".to_string());
             format!("{}://{host}", if https { "https" } else { "http" })
         } else {
-            cfg.public_url.clone()
+            public_url
         };
         Ok(Self {
             ip,

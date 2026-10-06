@@ -7,6 +7,8 @@ use base64::Engine as _;
 use serde_json::Value;
 use url::Url;
 
+use crate::live::LiveValue;
+
 use super::{
     MediaMeta, MediaResolver, PlaylistEntry, ProbeFuture, ResolveError, ResolvedStream, StreamInput,
 };
@@ -106,7 +108,8 @@ pub struct PixeldrainResolver {
     pub http: Box<dyn HttpGet>,
     /// File length in seconds (ffprobe), because the pixeldrain API does not provide it.
     pub probe_duration: DurationProbe,
-    pub api_key: Option<String>,
+    /// Read at every request: the desktop app may change it while the server runs.
+    pub api_key: LiveValue<Option<String>>,
 }
 
 struct FileInfo {
@@ -142,12 +145,18 @@ impl PixeldrainResolver {
         Self {
             http,
             probe_duration,
-            api_key,
+            api_key: LiveValue::new(api_key),
         }
     }
 
+    /// Shares the API-key setting with the app (see [`crate::live`]).
+    pub fn with_api_key(mut self, api_key: LiveValue<Option<String>>) -> Self {
+        self.api_key = api_key;
+        self
+    }
+
     fn headers(&self) -> Vec<(String, String)> {
-        match self.api_key.as_deref().filter(|k| !k.is_empty()) {
+        match self.api_key.get().filter(|k| !k.is_empty()) {
             Some(key) => {
                 let token = base64::engine::general_purpose::STANDARD.encode(format!(":{key}"));
                 vec![("Authorization".to_string(), format!("Basic {token}"))]
@@ -460,5 +469,17 @@ mod tests {
             .unwrap();
         assert!(s.inputs[0].headers.is_empty());
         assert_eq!(s.duration_s, None);
+    }
+
+    #[test]
+    fn live_api_key_is_read_at_each_request() {
+        let key = crate::live::LiveValue::new(None);
+        let r = resolver(None, Some("stary")).with_api_key(key.clone());
+        assert!(r.headers().is_empty());
+        key.set(Some("nowy".into()));
+        let headers = r.headers();
+        assert_eq!(headers[0].0, "Authorization");
+        let token = base64::engine::general_purpose::STANDARD.encode(":nowy");
+        assert_eq!(headers[0].1, format!("Basic {token}"));
     }
 }

@@ -17,6 +17,7 @@ use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
 use crate::http::AppState;
 use crate::http::auth::{AdminAuth, DesktopKey};
+use crate::live::LiveSettings;
 use crate::local_files::{AddReport, add_local_files};
 use crate::logging::LogSink;
 use crate::self_update::{self, DEFAULT_API_URL, UpdateInfo};
@@ -30,6 +31,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 /// Lets the answer of `update/apply` reach the window before the shell quits.
 const UPDATE_RESTART_DELAY: Duration = Duration::from_millis(500);
+/// A server that has not started serving by then is given up on (and stopped).
+const START_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a stopped server may take to finish before its task is aborted.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -107,15 +112,11 @@ fn admin_auth(s: &AppSettings) -> AdminAuth {
     }
 }
 
-/// Settings the running server was built with: changing one needs a restart.
+/// Settings the running server cannot take over: only the listening address. Everything else
+/// is read at use time ([`LiveSettings`]); a new public address waits for the next restart
+/// only on the slates ([`AppCore::restart_required`]).
 fn needs_restart(old: &AppSettings, new: &AppSettings) -> bool {
-    old.port != new.port
-        || old.lan_access != new.lan_access
-        || old.public_url != new.public_url
-        || old.trust_cloudflare != new.trust_cloudflare
-        || old.effective_encoder() != new.effective_encoder()
-        || old.ytdlp_cookies != new.ytdlp_cookies
-        || old.pixeldrain_api_key != new.pixeldrain_api_key
+    old.port != new.port || old.lan_access != new.lan_access
 }
 
 /// A validated change of the settings (`PUT /api/desktop/config`, the cookies picker).
@@ -210,6 +211,8 @@ struct Live {
     port: u16,
     state: AppState,
     channel: bool,
+    /// Public address the server started with (drawn on its slates).
+    public_url: String,
 }
 
 pub(crate) struct AppCore {
@@ -235,9 +238,26 @@ pub(crate) struct AppCore {
     update: Mutex<Option<UpdateInfo>>,
     applying_update: tokio::sync::Mutex<()>,
     background: Mutex<Vec<JoinHandle<()>>>,
+    /// Settings read at use time; shared by every server this engine starts.
+    pub(crate) live_settings: LiveSettings,
+    /// How many times a server was started (restarts included).
+    server_starts: AtomicUsize,
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    start_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 impl AppCore {
+    /// Tests: the next start stops right after the new server is up, before it is published;
+    /// the first receiver fires when it gets there, sending on the second lets it go on.
+    #[cfg(test)]
+    pub(crate) fn pause_next_start(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *lock(&self.start_pause) = Some((reached_tx, release_rx));
+        (reached_rx, release_tx)
+    }
+
     pub(crate) fn log(&self, msg: &str) {
         self.log.log(msg);
     }
@@ -319,8 +339,23 @@ impl AppCore {
                 self.log(&format!("{e:#}"));
             }
         }
+        #[cfg(test)]
+        {
+            let pause = lock(&self.start_pause).take();
+            if let Some((reached, release)) = pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
+        let state = live.state.clone();
         self.set_live(Some(live));
+        // Settings saved while this server was starting (while `live` was empty, nobody could
+        // hand them to it): take the current ones now that it is published.
+        let current = self.settings();
+        self.live_settings.apply(&app_config(&current, &self.home));
+        state.set_admin_auth(admin_auth(&current));
         *slot = Some(running);
+        self.server_starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -347,6 +382,7 @@ impl AppCore {
                 state
             })
         };
+        self.live_settings.apply(config);
         let opts = RunOptions {
             fake_resolver: self.options.fake_resolver.clone(),
             update_ytdlp: channel
@@ -358,16 +394,21 @@ impl AppCore {
             start_channel: channel,
             configure_state: Some(configure),
             channel_loops: Some(Arc::clone(&self.channel_loops)),
+            live: Some(self.live_settings.clone()),
             ..RunOptions::new(self.home.clone())
         };
-        let join = tokio::spawn(run(config.clone(), opts, async move {
+        let mut join = tokio::spawn(run(config.clone(), opts, async move {
             let _ = stop_rx.await;
         }));
-        match ready_rx.await {
-            Ok(addr) => {
-                let state = lock(&captured)
-                    .take()
-                    .ok_or_else(|| anyhow!("Serwer nie przekazał swojego stanu."))?;
+        match tokio::time::timeout(START_TIMEOUT, ready_rx).await {
+            Ok(Ok(addr)) => {
+                let Some(state) = lock(&captured).take() else {
+                    // Cannot happen (the state is captured before `ready`); never leave a
+                    // server running that nobody can stop.
+                    let _ = stop_tx.send(());
+                    self.wait_or_abort(&mut join).await;
+                    anyhow::bail!("Serwer nie przekazał swojego stanu.");
+                };
                 Ok((
                     Running {
                         stop: stop_tx,
@@ -377,15 +418,36 @@ impl AppCore {
                         port: addr.port(),
                         state,
                         channel,
+                        public_url: config.public_url.clone(),
                     },
                 ))
             }
             // run() ended before it started serving: its error says why.
-            Err(_) => Err(match join.await {
+            Ok(Err(_)) => Err(match join.await {
                 Ok(Err(e)) => e,
                 Ok(Ok(())) => anyhow!("Serwer zakończył pracę przed startem."),
                 Err(e) => anyhow!("Serwer przerwał pracę: {e}"),
             }),
+            Err(_) => {
+                let _ = stop_tx.send(());
+                self.wait_or_abort(&mut join).await;
+                anyhow::bail!(
+                    "Serwer nie wystartował w ciągu {} s.",
+                    START_TIMEOUT.as_secs()
+                )
+            }
+        }
+    }
+
+    /// Waits for a stopped server task; one that does not finish in time is aborted.
+    async fn wait_or_abort(&self, join: &mut JoinHandle<anyhow::Result<()>>) {
+        if tokio::time::timeout(STOP_TIMEOUT, &mut *join)
+            .await
+            .is_err()
+        {
+            self.log("Serwer nie zatrzymał się na czas — przerywam go.");
+            join.abort();
+            let _ = join.await;
         }
     }
 
@@ -455,9 +517,7 @@ impl AppCore {
         let (old, new) = self
             .update_settings(|s| patch.apply(s, password_hash))
             .map_err(|e| OpError::Failed(format!("{e:#}")))?;
-        if let Some(live) = self.live() {
-            live.state.set_admin_auth(admin_auth(&new));
-        }
+        self.take_over(&new);
         if !needs_restart(&old, &new) {
             return Ok(false);
         }
@@ -482,7 +542,23 @@ impl AppCore {
         Ok(true)
     }
 
-    /// Native picker for the cookies file; the choice is saved (and used after a restart).
+    /// Hands saved settings to the running server: remote-panel access and everything read at
+    /// use time. During a restart (`live` empty) the new server picks them up in
+    /// `start_server`.
+    fn take_over(&self, settings: &AppSettings) {
+        self.live_settings.apply(&app_config(settings, &self.home));
+        if let Some(live) = self.live() {
+            live.state.set_admin_auth(admin_auth(settings));
+        }
+    }
+
+    /// The running server's slates show another public address than the saved one.
+    pub(crate) fn restart_required(&self) -> bool {
+        let saved = app_config(&self.settings(), &self.home).public_url;
+        self.live().is_some_and(|l| l.public_url != saved)
+    }
+
+    /// Native picker for the cookies file; the choice is saved and used by the next yt-dlp call.
     pub(crate) async fn pick_cookies(self: &Arc<Self>) -> Result<Option<PathBuf>, OpError> {
         let hooks = Arc::clone(&self.hooks);
         let picked = tokio::task::spawn_blocking(move || hooks.pick_cookies_file())
@@ -506,8 +582,8 @@ impl AppCore {
             .map_err(|e| OpError::Failed(format!("{e:#}")))
     }
 
-    /// Tests the hardware encoders with the installed ffmpeg and saves the result; a changed
-    /// encoder restarts the server (the channel encodes with it).
+    /// Tests the hardware encoders with the installed ffmpeg and saves the result; the next
+    /// clip uses it (no restart).
     pub(crate) async fn detect_encoder(self: &Arc<Self>) -> Result<VideoEncoder, OpError> {
         let ffmpeg = app_config(&self.settings(), &self.home).ffmpeg_path;
         if !ffmpeg.is_file() {
@@ -518,16 +594,11 @@ impl AppCore {
         let found = crate::tools::detect_encoder(&ffmpeg).await;
         self.log(&format!("Test karty graficznej: {}", found.as_str()));
         let _guard = self.settings_change.lock().await;
-        let (old, new) = self
+        let (_, new) = self
             .update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
             .map_err(|e| OpError::Failed(format!("{e:#}")))?;
-        if old.effective_encoder() != new.effective_encoder()
-            && let Err(e) = self.restart_server().await
-        {
-            return Err(OpError::Failed(format!(
-                "Nie udało się uruchomić serwera z nowym enkoderem: {e:#}"
-            )));
-        }
+        // The next clip uses it; the stream is never interrupted for this.
+        self.take_over(&new);
         Ok(found)
     }
 
@@ -685,6 +756,7 @@ impl AppEngine {
                 home.join(CONFIG_FILE).display()
             )
         })?;
+        let live_settings = LiveSettings::from_config(&app_config(&settings, &home));
         let core = Arc::new(AppCore {
             home,
             hooks,
@@ -704,6 +776,10 @@ impl AppEngine {
             update: Mutex::new(None),
             applying_update: tokio::sync::Mutex::new(()),
             background: Mutex::new(Vec::new()),
+            live_settings,
+            server_starts: AtomicUsize::new(0),
+            #[cfg(test)]
+            start_pause: Mutex::new(None),
         });
         {
             let mut slot = core.server.lock().await;
@@ -783,6 +859,11 @@ impl AppEngine {
     /// A line in the app's log (never pass passwords or the window key).
     pub fn log(&self, msg: &str) {
         self.core.log(msg);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_starts(&self) -> usize {
+        self.core.server_starts.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]

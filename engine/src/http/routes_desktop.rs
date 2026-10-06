@@ -30,6 +30,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/desktop/update", get(update_check))
         .route("/api/desktop/update/apply", post(update_apply))
         .route("/api/desktop/wizard/complete", post(wizard_complete))
+        .route("/api/desktop/restart", post(restart))
 }
 
 impl From<OpError> for ApiError {
@@ -85,6 +86,7 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
         "update": update,
+        "restartRequired": core.restart_required(),
     })))
 }
 
@@ -193,8 +195,9 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
     })
 }
 
-/// Partial update: only the fields present change. A change of the port, network access or
-/// another setting the server is built with restarts it (the answer has the new port).
+/// Partial update: only the fields present change. Only a new port or network access restarts
+/// the server (the answer has the new port); everything else applies to the next request,
+/// resolve or clip. A new public address reaches the slates after a restart: `restartRequired`.
 async fn put_config(
     _: DesktopSession,
     State(state): State<AppState>,
@@ -205,6 +208,7 @@ async fn put_config(
     let restarted = core.apply_config(patch).await?;
     let mut view = config_view(&core);
     view.insert("restarted".into(), json!(restarted));
+    view.insert("restartRequired".into(), json!(core.restart_required()));
     Ok(json_ok(&Value::Object(view)))
 }
 
@@ -335,4 +339,16 @@ async fn wizard_complete(_: DesktopSession, State(state): State<AppState>) -> Ap
     let core = state.desktop()?;
     core.complete_wizard().await?;
     Ok(json_ok(&json!({ "ok": true })))
+}
+
+/// "Uruchom ponownie kanał": the owner decides when the stream is interrupted.
+async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    core.restart_server().await.map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Nie udało się uruchomić serwera ponownie: {e:#}"),
+        )
+    })?;
+    Ok(json_ok(&json!({ "ok": true, "port": core.port() })))
 }

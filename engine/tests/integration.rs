@@ -161,7 +161,7 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
         resolver: Arc::new(PathResolver),
         ffmpeg_path: cfg.ffmpeg_path.clone(),
         ffprobe_path: cfg.ffprobe_path.clone(),
-        encoder: VideoEncoder::Libx264,
+        encoder: vrcinema::live::LiveValue::new(VideoEncoder::Libx264),
         segment_seconds: 4,
         clips_dir: clips_dir.clone(),
         db: Arc::clone(&db),

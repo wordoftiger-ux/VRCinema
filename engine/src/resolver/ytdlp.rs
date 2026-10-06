@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream, StreamInput};
+use crate::live::LiveValue;
 use crate::process::{ProcessError, ProcessOutput, run_process};
 
 /// Prefers H.264 up to 1080p (can be remuxed without transcoding), otherwise anything up to 1080p.
@@ -156,7 +157,8 @@ pub struct YtDlpResolver {
     pub path: PathBuf,
     /// Verbatim value of `--js-runtimes` (e.g. `node:C:\...\node.exe` or `deno`).
     pub js_runtime: Option<String>,
-    pub cookies: Option<PathBuf>,
+    /// Read at every call: the desktop app may change it while the server runs.
+    pub cookies: LiveValue<Option<PathBuf>>,
     pub timeout: Duration,
     pub runner: Box<dyn ProcessRunner>,
 }
@@ -166,10 +168,16 @@ impl YtDlpResolver {
         Self {
             path,
             js_runtime,
-            cookies,
+            cookies: LiveValue::new(cookies),
             timeout: DEFAULT_TIMEOUT,
             runner: Box::new(RealRunner),
         }
+    }
+
+    /// Shares the cookies setting with the app (see [`crate::live`]).
+    pub fn with_cookies(mut self, cookies: LiveValue<Option<PathBuf>>) -> Self {
+        self.cookies = cookies;
+        self
     }
 
     pub fn with_runner(mut self, runner: Box<dyn ProcessRunner>) -> Self {
@@ -187,7 +195,7 @@ impl YtDlpResolver {
             args.push("--js-runtimes".into());
             args.push(runtime.into());
         }
-        if let Some(cookies) = self.cookies.as_ref().filter(|c| !c.as_os_str().is_empty()) {
+        if let Some(cookies) = self.cookies.get().filter(|c| !c.as_os_str().is_empty()) {
             args.push("--cookies".into());
             args.push(cookies.into());
         }
@@ -500,5 +508,19 @@ mod tests {
         let r = YtDlpResolver::new(PathBuf::from("yt-dlp"), None, None);
         assert_send(&r.fetch_meta("https://x"));
         assert_send(&r.resolve("https://x"));
+    }
+
+    #[tokio::test]
+    async fn live_cookies_are_read_at_each_call() {
+        let cookies = crate::live::LiveValue::new(None);
+        let (r, calls) = resolver(ok(fixture("ytdlp-resolve-split.json").to_string()));
+        let r = r.with_cookies(cookies.clone());
+        r.resolve("https://youtu.be/x").await.unwrap();
+        cookies.set(Some(PathBuf::from("nowe.txt")));
+        r.resolve("https://youtu.be/x").await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert!(!calls[0].1.iter().any(|a| a == "--cookies"));
+        let i = calls[1].1.iter().position(|a| a == "--cookies").unwrap();
+        assert_eq!(calls[1].1[i + 1], "nowe.txt");
     }
 }
