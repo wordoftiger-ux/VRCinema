@@ -148,7 +148,7 @@ async fn apply_with(
     release: &Release,
     exe_path: &Path,
     http: &reqwest::Client,
-    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    rename: &(dyn Fn(&Path, &Path) -> io::Result<()> + Sync),
 ) -> Result<()> {
     let new_path = exe_path.with_file_name(NEW_NAME);
     let old_path = exe_path.with_file_name(OLD_NAME);
@@ -186,7 +186,7 @@ fn swap(
     exe_path: &Path,
     new_path: &Path,
     old_path: &Path,
-    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+    rename: &(dyn Fn(&Path, &Path) -> io::Result<()> + Sync),
 ) -> Result<()> {
     if old_path.exists() {
         fs::remove_file(old_path).context("Nie można usunąć poprzedniej kopii programu")?;

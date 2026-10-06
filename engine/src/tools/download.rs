@@ -95,7 +95,7 @@ pub async fn download_file(
     http: &reqwest::Client,
     url: &str,
     part: &Path,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
 ) -> Result<u64> {
     let existing = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     let mut request = http.get(url);

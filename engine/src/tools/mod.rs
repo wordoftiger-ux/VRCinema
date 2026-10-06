@@ -158,6 +158,8 @@ pub struct ToolsManager {
     progress: watch::Sender<ToolsProgress>,
     /// Only one install/update/repair at a time.
     busy: Mutex<()>,
+    /// Where notes go (desktop app: its log); stderr by default.
+    log: crate::pipeline::clip_factory::SharedLogFn,
 }
 
 impl ToolsManager {
@@ -176,7 +178,14 @@ impl ToolsManager {
             sources,
             progress,
             busy: Mutex::new(()),
+            log: std::sync::Arc::new(|m: &str| eprintln!("{m}")),
         }
+    }
+
+    /// Sends the manager's notes to `log` instead of stderr.
+    pub fn with_log(mut self, log: crate::pipeline::clip_factory::SharedLogFn) -> Self {
+        self.log = log;
+        self
     }
 
     pub fn tools_dir(&self) -> &Path {
@@ -294,10 +303,10 @@ impl ToolsManager {
                 sum
             }
             Ok(None) => {
-                eprintln!(
-                    "narzędzia: wydawca nie udostępnia sum kontrolnych dla {}; instalacja bez weryfikacji",
+                (self.log)(&format!(
+                    "Narzędzia: wydawca nie udostępnia sum kontrolnych dla {}; instalacja bez weryfikacji.",
                     tool.name()
-                );
+                ));
                 None
             }
             Err(e) => return Err(e),

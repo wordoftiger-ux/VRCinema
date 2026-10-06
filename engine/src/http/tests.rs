@@ -2118,3 +2118,18 @@ async fn switching_the_panel_on_again_does_not_revive_old_remote_sessions() {
     let res = a.h.send(get("/api/admin/library").cookie(&fresh)).await;
     assert_eq!(res.status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn headless_mode_has_no_desktop_routes() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    for (method, url) in [
+        ("GET", "/api/desktop/info"),
+        ("GET", "/api/desktop/config"),
+        ("POST", "/api/desktop/wizard/complete"),
+    ] {
+        let res = h.send(call(method, url).cookie(&cookie)).await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{method} {url}");
+        assert_eq!(res.json()["error"], "Not Found");
+    }
+}

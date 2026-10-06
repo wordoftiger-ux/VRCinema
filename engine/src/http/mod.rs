@@ -3,10 +3,11 @@
 pub mod auth;
 pub mod client_ip;
 mod routes_admin;
+mod routes_desktop;
 mod routes_public;
 mod routes_stream;
 
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;
 
 use axum::Router;
@@ -74,6 +75,9 @@ pub struct AppState {
     /// Changes at runtime (settings of the desktop app), hence behind a lock.
     admin_auth: Arc<RwLock<AdminAuth>>,
     desktop_key: Arc<DesktopKey>,
+    /// The desktop app's engine (`/api/desktop/*`); `None` in `.env` mode, where those routes
+    /// do not exist. Weak: the engine owns the server that owns this state.
+    desktop: Option<Weak<crate::app::AppCore>>,
 }
 
 impl AppState {
@@ -111,6 +115,7 @@ impl AppState {
         Ok(Self {
             admin_auth: Arc::new(RwLock::new(admin_auth)),
             desktop_key: Arc::new(DesktopKey::generate().0),
+            desktop: None,
             config: Arc::new(config),
             channel_id,
             db,
@@ -157,6 +162,22 @@ impl AppState {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Turns on the `/api/desktop/*` routes, backed by the app engine.
+    pub(crate) fn with_desktop(mut self, core: Weak<crate::app::AppCore>) -> Self {
+        self.desktop = Some(core);
+        self
+    }
+
+    /// The app engine behind the desktop routes (503 while it is going away).
+    pub(crate) fn desktop(&self) -> Result<Arc<crate::app::AppCore>, ApiError> {
+        self.desktop
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "Aplikacja jest zamykana.")
+            })
     }
 
     pub fn desktop_key(&self) -> &Arc<DesktopKey> {
@@ -242,7 +263,6 @@ impl AppState {
 
 /// Extractor for routes only the app window may use (`/api/desktop/*`): a remote session is
 /// 403, no session 401.
-#[allow(dead_code)] // first user: the `/api/desktop/*` routes of the next task
 pub(crate) struct DesktopSession;
 
 impl FromRequestParts<AppState> for DesktopSession {
@@ -552,10 +572,17 @@ pub fn build_router(state: AppState) -> Router {
         state.clone(),
         routes_admin::require_admin,
     ));
+    // Only in the desktop app: the headless server keeps answering 404 there, as in stage 1.
+    let desktop = if state.desktop.is_some() {
+        routes_desktop::router()
+    } else {
+        Router::new()
+    };
     Router::new()
         .merge(routes_public::router())
         .merge(routes_stream::router())
         .merge(admin)
+        .merge(desktop)
         .route("/static/{*path}", get(static_file))
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)

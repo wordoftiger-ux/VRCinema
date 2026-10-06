@@ -28,6 +28,9 @@ pub struct AppSettings {
     pub first_run_completed: bool,
     pub tools_installed: bool,
     pub skipped_update_version: Option<String>,
+    /// Raised each time the remote panel is switched on or gets a new password: remote
+    /// sessions signed under an older epoch stop working (see `http::auth`).
+    pub remote_session_epoch: u64,
 }
 
 impl Default for AppSettings {
@@ -48,6 +51,7 @@ impl Default for AppSettings {
             first_run_completed: false,
             tools_installed: false,
             skipped_update_version: None,
+            remote_session_epoch: 0,
         }
     }
 }
@@ -110,6 +114,19 @@ impl AppSettings {
             let _ = std::fs::remove_file(&tmp);
         })
     }
+
+    /// The encoder the channel uses: `auto` means the detected one; anything unknown or
+    /// undetected falls back to libx264.
+    pub fn effective_encoder(&self) -> VideoEncoder {
+        match self.video_encoder.as_str() {
+            "auto" => self
+                .detected_encoder
+                .as_deref()
+                .and_then(VideoEncoder::parse),
+            name => VideoEncoder::parse(name),
+        }
+        .unwrap_or(VideoEncoder::Libx264)
+    }
 }
 
 /// The engine configuration for the desktop app: tools in `<home>/tools`, data in
@@ -118,14 +135,7 @@ impl AppSettings {
 pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
     let exe = if cfg!(windows) { ".exe" } else { "" };
     let tools = home.join("tools");
-    let video_encoder = match settings.video_encoder.as_str() {
-        "auto" => settings
-            .detected_encoder
-            .as_deref()
-            .and_then(VideoEncoder::parse),
-        name => VideoEncoder::parse(name),
-    }
-    .unwrap_or(VideoEncoder::Libx264);
+    let video_encoder = settings.effective_encoder();
     let deno = tools.join(format!("deno{exe}"));
     AppConfig {
         port: settings.port,
