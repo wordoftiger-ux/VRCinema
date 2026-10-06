@@ -103,6 +103,7 @@ impl AppState {
             AdminAuth::App {
                 remote_enabled: false,
                 password_hash: None,
+                session_epoch: 0,
             }
         } else {
             AdminAuth::PlainPassword(config.admin_password.clone())
@@ -193,23 +194,45 @@ impl AppState {
         self.config.trust_cloudflare || self.config.trust_proxy
     }
 
+    /// Key remote-session tokens are signed with: the session secret in `.env` mode; in the app
+    /// one derived from it, the password hash and the epoch (a new password or switching the
+    /// panel on again ends the remote sessions issued before).
+    pub(crate) fn remote_session_secret(&self, auth: &AdminAuth) -> String {
+        match auth {
+            AdminAuth::PlainPassword(_) => self.config.session_secret.clone(),
+            AdminAuth::App {
+                password_hash,
+                session_epoch,
+                ..
+            } => auth::remote_session_secret(
+                &self.config.session_secret,
+                password_hash.as_deref(),
+                *session_epoch,
+            ),
+        }
+    }
+
     /// Kind of the valid session on the request, if any. With the remote panel switched off
     /// only window sessions count (a remote cookie issued earlier stops working).
     fn session(&self, headers: &HeaderMap) -> Option<SessionKind> {
         let cookies = parse_cookies(headers.get(COOKIE).and_then(|v| v.to_str().ok()));
-        let kind = session_kind(
-            cookies.get(SESSION_COOKIE).map(String::as_str),
-            &self.config.session_secret,
-            crate::db::now_ms().max(0) as u64,
-        )?;
-        let remote_off = matches!(
-            self.admin_auth(),
-            AdminAuth::App {
-                remote_enabled: false,
-                ..
+        let token = cookies.get(SESSION_COOKIE).map(String::as_str);
+        let now = crate::db::now_ms().max(0) as u64;
+        let auth = self.admin_auth();
+        match &auth {
+            AdminAuth::PlainPassword(_) => session_kind(token, &self.config.session_secret, now),
+            AdminAuth::App { remote_enabled, .. } => {
+                // Window sessions: the plain secret. Remote ones: only the derived key.
+                if session_kind(token, &self.config.session_secret, now)
+                    == Some(SessionKind::Desktop)
+                {
+                    return Some(SessionKind::Desktop);
+                }
+                let key = self.remote_session_secret(&auth);
+                (*remote_enabled && session_kind(token, &key, now) == Some(SessionKind::Remote))
+                    .then_some(SessionKind::Remote)
             }
-        );
-        (kind == SessionKind::Desktop || !remote_off).then_some(kind)
+        }
     }
 
     fn is_admin(&self, headers: &HeaderMap) -> bool {

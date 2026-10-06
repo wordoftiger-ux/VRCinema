@@ -20,7 +20,7 @@ use tower::ServiceExt;
 use super::auth::{
     AdminAuth, DesktopKey, SESSION_TTL_MS, SessionKind, check_password,
     create_desktop_session_token, create_session_token, hash_password, parse_cookies,
-    session_cookie, session_kind, verify_password, verify_session_token,
+    remote_session_secret, session_cookie, session_kind, verify_password, verify_session_token,
 };
 use super::client_ip::{Trust, get_client_ip, is_https};
 use super::{AppState, DesktopSession, HttpConfig, build_router};
@@ -1711,6 +1711,7 @@ fn remote_off() -> AdminAuth {
     AdminAuth::App {
         remote_enabled: false,
         password_hash: None,
+        session_epoch: 0,
     }
 }
 
@@ -1718,6 +1719,7 @@ fn remote_on(password: &str) -> AdminAuth {
     AdminAuth::App {
         remote_enabled: true,
         password_hash: Some(hash_password(password)),
+        session_epoch: 0,
     }
 }
 
@@ -1902,6 +1904,7 @@ async fn disabled_remote_panel_refuses_login_without_counting_it() {
     let (a, _) = app_harness(AdminAuth::App {
         remote_enabled: false,
         password_hash: Some(hash_password("sekret")),
+        session_epoch: 0,
     });
     for _ in 0..7 {
         let res = remote_login(&a, "sekret").await;
@@ -1919,6 +1922,7 @@ async fn enabled_remote_panel_without_a_password_is_refused() {
     let (a, _) = app_harness(AdminAuth::App {
         remote_enabled: true,
         password_hash: None,
+        session_epoch: 0,
     });
     let res = remote_login(&a, "").await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
@@ -1939,9 +1943,18 @@ async fn enabled_remote_panel_checks_the_argon2_hash_and_keeps_the_limiter() {
     assert_eq!(ok.status, StatusCode::OK);
     let cookie = cookie_of(&ok);
     let now = crate::db::now_ms() as u64;
+    let AdminAuth::App { password_hash, .. } = a.state.admin_auth() else {
+        panic!("app mode");
+    };
+    // Signed with the key derived from the password hash, not with the plain secret.
+    let remote_key = remote_session_secret(SECRET, password_hash.as_deref(), 0);
+    assert_eq!(
+        session_kind(cookie.strip_prefix("vrcinema_session="), &remote_key, now),
+        Some(SessionKind::Remote)
+    );
     assert_eq!(
         session_kind(cookie.strip_prefix("vrcinema_session="), SECRET, now),
-        Some(SessionKind::Remote)
+        None
     );
     for p in [json!("zle"), json!(5), json!(null), json!("tajne")] {
         let res = login("9.9.9.9", p).await;
@@ -2025,4 +2038,83 @@ async fn an_empty_configured_password_never_authenticates() {
         assert_eq!(res.header("set-cookie"), "");
     }
     assert!(!check_password(Some(""), ""));
+}
+
+// ---------- Remote sessions follow the password and the panel switch (app mode) ----------
+
+#[test]
+fn remote_session_key_depends_on_secret_hash_and_epoch() {
+    let k = remote_session_secret(SECRET, Some("$argon2id$a"), 0);
+    assert!(!k.is_empty());
+    assert_ne!(k, SECRET);
+    assert_eq!(k, remote_session_secret(SECRET, Some("$argon2id$a"), 0));
+    assert_ne!(k, remote_session_secret(SECRET, Some("$argon2id$b"), 0));
+    assert_ne!(k, remote_session_secret(SECRET, Some("$argon2id$a"), 1));
+    assert_ne!(k, remote_session_secret("inny", Some("$argon2id$a"), 0));
+    assert_ne!(k, remote_session_secret(SECRET, None, 0));
+}
+
+#[tokio::test]
+async fn headless_remote_tokens_stay_signed_with_the_session_secret() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let now = crate::db::now_ms() as u64;
+    assert_eq!(
+        session_kind(
+            cookie.strip_prefix("vrcinema_session="),
+            &"s".repeat(64),
+            now
+        ),
+        Some(SessionKind::Remote)
+    );
+}
+
+#[tokio::test]
+async fn a_new_password_ends_remote_sessions_but_not_the_window() {
+    let (a, key) = app_harness(remote_on("sekret-1"));
+    let desktop_cookie = window_cookie(&a, &key).await;
+    let old_remote = cookie_of(&remote_login(&a, "sekret-1").await);
+    let ok =
+        a.h.send(get("/api/admin/library").cookie(&old_remote))
+            .await;
+    assert_eq!(ok.status, StatusCode::OK);
+
+    a.state.set_admin_auth(remote_on("sekret-2"));
+    let stale =
+        a.h.send(get("/api/admin/library").cookie(&old_remote))
+            .await;
+    assert_eq!(stale.status, StatusCode::UNAUTHORIZED);
+    let window =
+        a.h.send(get("/api/admin/library").cookie(&desktop_cookie))
+            .await;
+    assert_eq!(window.status, StatusCode::OK);
+
+    assert_eq!(
+        remote_login(&a, "sekret-1").await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let fresh = cookie_of(&remote_login(&a, "sekret-2").await);
+    let res = a.h.send(get("/api/admin/library").cookie(&fresh)).await;
+    assert_eq!(res.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn switching_the_panel_on_again_does_not_revive_old_remote_sessions() {
+    let hash = hash_password("sekret");
+    let auth = |remote_enabled: bool, session_epoch: u64| AdminAuth::App {
+        remote_enabled,
+        password_hash: Some(hash.clone()),
+        session_epoch,
+    };
+    let (a, _) = app_harness(auth(true, 0));
+    let old_remote = cookie_of(&remote_login(&a, "sekret").await);
+    a.state.set_admin_auth(auth(false, 0));
+    a.state.set_admin_auth(auth(true, 1));
+    let res =
+        a.h.send(get("/api/admin/library").cookie(&old_remote))
+            .await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    let fresh = cookie_of(&remote_login(&a, "sekret").await);
+    let res = a.h.send(get("/api/admin/library").cookie(&fresh)).await;
+    assert_eq!(res.status, StatusCode::OK);
 }

@@ -181,6 +181,7 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
     if let AdminAuth::App {
         remote_enabled,
         password_hash,
+        ..
     } = &auth
         && (!remote_enabled || password_hash.is_none())
     {
@@ -218,7 +219,7 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
         }
     }
     let now = crate::db::now_ms().max(0) as u64;
-    let token = create_session_token(&state.config.session_secret, SESSION_TTL_MS, now);
+    let token = create_session_token(&state.remote_session_secret(&auth), SESSION_TTL_MS, now);
     let cookie = session_cookie(&token, ctx.https, SESSION_TTL_MS / 1000);
     Ok(with_cookie(&cookie))
 }

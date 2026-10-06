@@ -62,7 +62,22 @@ pub enum AdminAuth {
     App {
         remote_enabled: bool,
         password_hash: Option<String>,
+        /// Raised whenever the remote panel is switched on again; part of the key remote
+        /// sessions are signed with (see [`remote_session_secret`]).
+        session_epoch: u64,
     },
+}
+
+/// Key for remote-session tokens in the app: derived from the session secret, the current
+/// password hash and the epoch, so a new password or switching the panel on again ends every
+/// remote session issued before. Window sessions keep using the plain session secret.
+pub fn remote_session_secret(
+    session_secret: &str,
+    password_hash: Option<&str>,
+    epoch: u64,
+) -> String {
+    let hash = password_hash.map_or_else(|| "-".to_string(), |h| format!("+{h}"));
+    sign(&format!("remote-session.{epoch}.{hash}"), session_secret)
 }
 
 /// Jednorazowy klucz otwierający sesję okna.

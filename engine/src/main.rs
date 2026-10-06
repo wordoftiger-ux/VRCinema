@@ -127,11 +127,9 @@ async fn main() -> ExitCode {
     // Read after .env was applied; an empty value counts as unset (like TS).
     let fake_resolver = fake_resolver_file(&env);
     let opts = RunOptions {
-        root,
         update_ytdlp: fake_resolver.is_none(),
-        port_fallback: false,
         fake_resolver,
-        ready: None,
+        ..RunOptions::new(root)
     };
     match run(config, opts, shutdown_signal()).await {
         Ok(()) => ExitCode::SUCCESS,

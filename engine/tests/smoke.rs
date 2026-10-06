@@ -57,11 +57,9 @@ async fn serves_playlist_with_three_segments() {
     let (ready_tx, ready_rx) = oneshot::channel();
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let opts = RunOptions {
-        root,
         fake_resolver: Some(fake),
-        update_ytdlp: false,
-        port_fallback: false,
         ready: Some(ready_tx),
+        ..RunOptions::new(root)
     };
     let server = tokio::spawn(run(config, opts, async {
         let _ = stop_rx.await;

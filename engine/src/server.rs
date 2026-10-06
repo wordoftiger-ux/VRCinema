@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
 use crate::db::{MAIN_CHANNEL_ID, SettingsRepo, open_database};
-use crate::engine::spawn_engine_with;
+use crate::engine::{EngineHandle, EngineTask, idle_engine_handle, spawn_engine_with};
 use crate::http::{AppState, HttpConfig, build_router};
 use crate::library::MediaLibrary;
 use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
@@ -39,6 +40,33 @@ pub struct RunOptions {
     pub port_fallback: bool,
     /// Receives the address the HTTP listener is bound to, once it accepts connections.
     pub ready: Option<oneshot::Sender<SocketAddr>>,
+    /// Where log lines go (desktop app: its log file); `None` prints to stdout like stage 1.
+    pub log: Option<SharedLogFn>,
+    /// Desktop app without working tools: serve pages and API, but no channel loop (and no
+    /// slates, which need ffmpeg). The headless server always runs the channel.
+    pub start_channel: bool,
+    /// Last touch on the HTTP state before it is served (desktop app: auth, window key, the
+    /// `/api/desktop/*` routes; it also keeps a clone to steer the running server).
+    pub configure_state: Option<Box<dyn FnOnce(AppState) -> AppState + Send>>,
+    /// Counts running channel loops: +1 once the engine is spawned, -1 after it has stopped.
+    pub channel_loops: Option<Arc<AtomicUsize>>,
+}
+
+impl RunOptions {
+    /// Stage-1 behaviour for `root`: channel on, no port fallback, stdout log.
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            fake_resolver: None,
+            update_ytdlp: false,
+            port_fallback: false,
+            ready: None,
+            log: None,
+            start_channel: true,
+            configure_state: None,
+            channel_loops: None,
+        }
+    }
 }
 
 /// yt-dlp JS runtime: the configured value verbatim, else `node` from PATH, else
@@ -117,6 +145,7 @@ fn build_resolver(
     root: &Path,
     library: &Arc<MediaLibrary>,
     fake: Option<&Path>,
+    log: &SharedLogFn,
 ) -> anyhow::Result<Arc<dyn MediaResolver>> {
     if let Some(path) = fake {
         log(&format!(
@@ -169,8 +198,17 @@ fn build_resolver(
 /// How many ports after the configured one are tried when the fallback is on.
 pub const PORT_FALLBACK_SPAN: u16 = 20;
 
-/// Binds `host:port`. With `fallback`, a taken port moves on to the next ones (up to
-/// [`PORT_FALLBACK_SPAN`] further); otherwise it fails with the Polish "port in use" error.
+/// With the fallback on, a bind error of this kind moves on to the next port: taken, or
+/// refused (Windows reserves ranges for Hyper-V/WSL, and binding there is "access denied").
+fn try_next_port(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+    )
+}
+
+/// Binds `host:port`. With `fallback`, a taken (or refused) port moves on to the next ones (up
+/// to [`PORT_FALLBACK_SPAN`] further); otherwise it fails with the Polish "port in use" error.
 pub async fn bind_listener(
     host: &str,
     port: u16,
@@ -185,7 +223,7 @@ pub async fn bind_listener(
     loop {
         match tokio::net::TcpListener::bind((host, candidate)).await {
             Ok(listener) => return Ok(listener),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && candidate < last => {
+            Err(e) if try_next_port(e.kind()) && candidate < last => {
                 candidate += 1;
             }
             Err(e) => {
@@ -200,47 +238,14 @@ pub async fn bind_listener(
     }
 }
 
-/// Starts everything and serves until `shutdown` completes, then stops cleanly.
-pub async fn run(
-    config: AppConfig,
-    opts: RunOptions,
-    shutdown: impl Future<Output = ()>,
-) -> anyhow::Result<()> {
-    let RunOptions {
-        root,
-        fake_resolver,
-        update_ytdlp,
-        port_fallback,
-        ready,
-    } = opts;
-
-    // Before anything in DATA_DIR is touched: fail fast on a taken port, then make sure no
-    // other server uses this data folder. The listener is not served until the first real
-    // playlist exists; until then the OS backlog holds early connections.
-    let listener = bind_listener(&config.host, config.port, port_fallback).await?;
-    // Held until the server stops (for `main`: the process lifetime).
-    let _data_lock = lock_data_dir(&config.data_dir)?;
-
-    let db = Arc::new(Mutex::new(open_database(
-        &config.data_dir.join("vrcinema.db"),
-    )?));
-
-    let library = Arc::new(MediaLibrary::new(config.media_dirs.clone()));
-    for r in library.roots() {
-        if !r.path.exists() {
-            log(&format!(
-                "Uwaga: folder z MEDIA_DIRS nie istnieje: {}",
-                r.path.display()
-            ));
-        }
-    }
-    let resolver = build_resolver(&config, &root, &library, fake_resolver.as_deref())?;
-
-    let clips_dir = config.data_dir.join("clips");
-    let _ = std::fs::remove_dir_all(&clips_dir);
-    std::fs::create_dir_all(&clips_dir)?;
-
-    log("Generowanie plansz...");
+/// Generates the slates and spawns the supervised channel loop.
+async fn start_channel_loop(
+    config: &AppConfig,
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    resolver: &Arc<dyn MediaResolver>,
+    shared_log: &SharedLogFn,
+) -> anyhow::Result<(EngineHandle, EngineTask)> {
+    shared_log("Generowanie plansz...");
     let slates = generate_slates(&SlateOptions {
         ffmpeg_path: config.ffmpeg_path.clone(),
         font_file: config.font_file.clone(),
@@ -254,12 +259,11 @@ pub async fn run(
     })
     .await?;
 
-    let shared_log: SharedLogFn = Arc::new(log);
     let build = {
-        let db = Arc::clone(&db);
-        let resolver = Arc::clone(&resolver);
+        let db = Arc::clone(db);
+        let resolver = Arc::clone(resolver);
         let config = config.clone();
-        let shared_log = Arc::clone(&shared_log);
+        let shared_log = Arc::clone(shared_log);
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -304,47 +308,138 @@ pub async fn run(
             (broadcaster, Channel::new(options))
         }
     };
-    let (handle, task) = spawn_engine_with(build, log);
+    let engine_log = Arc::clone(shared_log);
+    Ok(spawn_engine_with(build, move |m: &str| engine_log(m)))
+}
 
-    // The listener only opens once the channel has published its first real playlist.
-    let mut snapshot = handle.snapshot.clone();
-    snapshot.wait_for(|s| !s.playlist.is_empty()).await?;
+/// Starts everything and serves until `shutdown` completes, then stops cleanly.
+pub async fn run(
+    config: AppConfig,
+    opts: RunOptions,
+    shutdown: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
+    let RunOptions {
+        root,
+        fake_resolver,
+        update_ytdlp,
+        port_fallback,
+        ready,
+        log: custom_log,
+        start_channel,
+        configure_state,
+        channel_loops,
+    } = opts;
+    let print_banner = custom_log.is_none();
+    let shared_log: SharedLogFn = custom_log.unwrap_or_else(|| Arc::new(log));
 
-    let state = AppState::new(
-        HttpConfig::from(&config),
-        MAIN_CHANNEL_ID,
-        Arc::clone(&db),
-        resolver,
-        handle,
-    )?
-    .with_library(Some(library))
-    .with_log(Arc::clone(&shared_log));
-    let router = build_router(state);
+    // Before anything in DATA_DIR is touched: fail fast on a taken port, then make sure no
+    // other server uses this data folder. The listener is not served until the first real
+    // playlist exists; until then the OS backlog holds early connections.
+    let listener = bind_listener(&config.host, config.port, port_fallback).await?;
+    // Held until the server stops (for `main`: the process lifetime).
+    let _data_lock = lock_data_dir(&config.data_dir)?;
 
-    let addr = listener.local_addr()?;
-    println!("{}", banner(&config, addr.port()));
-    if let Some(ready) = ready {
-        let _ = ready.send(addr);
+    let db = Arc::new(Mutex::new(open_database(
+        &config.data_dir.join("vrcinema.db"),
+    )?));
+
+    let library = Arc::new(MediaLibrary::new(config.media_dirs.clone()));
+    for r in library.roots() {
+        if !r.path.exists() {
+            shared_log(&format!(
+                "Uwaga: folder z MEDIA_DIRS nie istnieje: {}",
+                r.path.display()
+            ));
+        }
     }
+    let resolver = build_resolver(
+        &config,
+        &root,
+        &library,
+        fake_resolver.as_deref(),
+        &shared_log,
+    )?;
 
-    let updater =
-        update_ytdlp.then(|| spawn_updater(config.ytdlp_path.clone(), Arc::clone(&shared_log)));
+    let clips_dir = config.data_dir.join("clips");
+    let _ = std::fs::remove_dir_all(&clips_dir);
+    std::fs::create_dir_all(&clips_dir)?;
 
-    let serve = axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    );
-    let result = tokio::select! {
-        r = serve => r.map_err(anyhow::Error::from),
-        () = shutdown => Ok(()),
+    let (handle, engine_task) = if start_channel {
+        let (handle, task) = start_channel_loop(&config, &db, &resolver, &shared_log).await?;
+        if let Some(loops) = &channel_loops {
+            loops.fetch_add(1, Ordering::SeqCst);
+        }
+        (handle, Some(task))
+    } else {
+        shared_log("Kanał nie wystartuje: brak narzędzi (ffmpeg). Strony i panel działają.");
+        (idle_engine_handle(), None)
     };
 
-    log("Zamykanie...");
-    if let Some(updater) = updater {
-        updater.abort();
+    let served = async {
+        // The listener only opens once the channel has published its first real playlist.
+        if engine_task.is_some() {
+            let mut snapshot = handle.snapshot.clone();
+            snapshot.wait_for(|s| !s.playlist.is_empty()).await?;
+        }
+
+        let mut state = AppState::new(
+            HttpConfig::from(&config),
+            MAIN_CHANNEL_ID,
+            Arc::clone(&db),
+            resolver,
+            handle,
+        )?
+        .with_library(Some(library))
+        .with_log(Arc::clone(&shared_log));
+        if let Some(configure) = configure_state {
+            state = configure(state);
+        }
+        let router = build_router(state);
+
+        let addr = listener.local_addr()?;
+        let text = banner(&config, addr.port());
+        if print_banner {
+            println!("{text}");
+        } else if start_channel {
+            shared_log(&text);
+        } else {
+            shared_log(&format!(
+                "Serwer działa bez kanału: http://localhost:{}/admin",
+                addr.port()
+            ));
+        }
+        if let Some(ready) = ready {
+            let _ = ready.send(addr);
+        }
+
+        let updater =
+            update_ytdlp.then(|| spawn_updater(config.ytdlp_path.clone(), Arc::clone(&shared_log)));
+
+        let serve = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        );
+        let result = tokio::select! {
+            r = serve => r.map_err(anyhow::Error::from),
+            () = shutdown => Ok(()),
+        };
+
+        shared_log("Zamykanie...");
+        if let Some(updater) = updater {
+            updater.abort();
+        }
+        result
     }
-    task.shutdown().await;
-    result
+    .await;
+
+    // Also when serving never started: the loop must not outlive this call.
+    if let Some(task) = engine_task {
+        task.shutdown().await;
+        if let Some(loops) = &channel_loops {
+            loops.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    served
 }
 
 /// Name of the lock file in DATA_DIR.
@@ -435,12 +530,122 @@ mod tests {
         let fake = tmp.join("fake.json");
         std::fs::write(&fake, "{}").unwrap();
         RunOptions {
-            root: repo_root(),
             fake_resolver: Some(fake),
-            update_ytdlp: false,
-            port_fallback: false,
-            ready: None,
+            ..RunOptions::new(repo_root())
         }
+    }
+
+    #[test]
+    fn the_fallback_skips_taken_and_refused_ports_only() {
+        use std::io::ErrorKind;
+        assert!(try_next_port(ErrorKind::AddrInUse));
+        assert!(try_next_port(ErrorKind::PermissionDenied));
+        assert!(!try_next_port(ErrorKind::AddrNotAvailable));
+        assert!(!try_next_port(ErrorKind::InvalidInput));
+    }
+
+    fn capture_log() -> (SharedLogFn, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&lines);
+        (
+            Arc::new(move |m: &str| sink.lock().unwrap().push(m.to_string())),
+            lines,
+        )
+    }
+
+    async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
+        let res = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+        let status = res.status().as_u16();
+        (status, res.text().await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn without_the_channel_pages_and_api_are_served_at_once() {
+        let (tmp, data, _markers) = data_with_markers();
+        let mut config = test_config(&data, 0);
+        // No tools at all: slates would fail if they were attempted.
+        config.ffmpeg_path = tmp.path().join("brak").join("ffmpeg.exe");
+        config.ffprobe_path = tmp.path().join("brak").join("ffprobe.exe");
+        let (log, lines) = capture_log();
+        let loops = Arc::new(AtomicUsize::new(0));
+        let configured = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&configured);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let opts = RunOptions {
+            ready: Some(ready_tx),
+            log: Some(log),
+            start_channel: false,
+            channel_loops: Some(Arc::clone(&loops)),
+            configure_state: Some(Box::new(move |s: AppState| {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                s
+            })),
+            ..test_opts(tmp.path())
+        };
+        let server = tokio::spawn(run(config, opts, async {
+            let _ = stop_rx.await;
+        }));
+        let addr = tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx)
+            .await
+            .expect("server did not start in 10 s")
+            .unwrap();
+        assert!(configured.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(http_get(addr, "/").await.0, 200);
+        let (status, body) = http_get(addr, "/api/channels/main/state").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(loops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        let lines = lines.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains("Zamykanie")),
+            "the injected log is used: {lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("Generowanie plansz")));
+    }
+
+    #[tokio::test]
+    async fn the_channel_loop_counter_follows_the_engine() {
+        let exe = if cfg!(windows) { ".exe" } else { "" };
+        if !repo_root()
+            .join("bin")
+            .join(format!("ffmpeg{exe}"))
+            .exists()
+        {
+            eprintln!("pomijam: brak bin/ffmpeg");
+            return;
+        }
+        let (tmp, data, _markers) = data_with_markers();
+        let (log, lines) = capture_log();
+        let loops = Arc::new(AtomicUsize::new(0));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let opts = RunOptions {
+            ready: Some(ready_tx),
+            log: Some(log),
+            channel_loops: Some(Arc::clone(&loops)),
+            ..test_opts(tmp.path())
+        };
+        let server = tokio::spawn(run(test_config(&data, 0), opts, async {
+            let _ = stop_rx.await;
+        }));
+        let addr = tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
+            .await
+            .expect("server did not start in 60 s")
+            .unwrap();
+        assert_eq!(loops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let (status, body) = http_get(addr, "/live/main.m3u8").await;
+        assert_eq!(status, 200);
+        assert!(body.contains(".ts"), "{body}");
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        assert_eq!(loops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let lines = lines.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains("Generowanie plansz")),
+            "{lines:?}"
+        );
     }
 
     #[tokio::test]

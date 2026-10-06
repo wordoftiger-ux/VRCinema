@@ -154,6 +154,14 @@ where
     )
 }
 
+/// A handle with no loop behind it (desktop app without working tools): the snapshot stays at
+/// the empty placeholder and every command is refused (and logged by the sender).
+pub fn idle_engine_handle() -> EngineHandle {
+    let (commands, _) = mpsc::channel(1);
+    let (_, snapshot) = watch::channel(Arc::new(Snapshot::starting()));
+    EngineHandle { commands, snapshot }
+}
+
 impl Snapshot {
     /// Placeholder until the first channel has published its initial segments.
     fn starting() -> Self {
