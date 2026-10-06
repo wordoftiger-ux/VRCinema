@@ -15,6 +15,11 @@ pub fn parse_sums(text: &str, name: &str) -> Option<String> {
     let is_hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
     let mut bare = Vec::new();
     for line in text.lines() {
+        // `Hash : <hex>` (a PowerShell Get-FileHash listing, as Deno publishes it).
+        let line = match line.split_once(':') {
+            Some((label, rest)) if label.trim().eq_ignore_ascii_case("hash") => rest,
+            _ => line,
+        };
         let mut parts = line.split_whitespace();
         let (Some(hash), second) = (parts.next(), parts.next()) else {
             continue;
@@ -204,6 +209,15 @@ mod tests {
             parse_sums(&format!("{H1}  deno.zip"), "deno.zip").unwrap(),
             H1
         );
+    }
+
+    #[test]
+    fn powershell_get_filehash_listing_is_a_bare_hash() {
+        // What Deno really publishes as `*.zip.sha256sum` (Get-FileHash | Format-List).
+        let text = format!(
+            "\r\nAlgorithm : SHA256\r\nHash      : {H2}\r\nPath      : C:\\a\\deno\\deno.zip\r\n\r\n"
+        );
+        assert_eq!(parse_sums(&text, "deno.zip").unwrap(), H2.to_lowercase());
     }
 
     #[test]
