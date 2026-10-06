@@ -20,6 +20,7 @@ use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_fa
 use crate::pipeline::probe::probe_duration;
 use crate::pipeline::slates::{SlateOptions, generate_slates};
 use crate::resolver::fake::FakeResolver;
+use crate::resolver::file::FileResolver;
 use crate::resolver::local::{FileDurationProbe, LocalResolver};
 use crate::resolver::pixeldrain::{DurationProbe, PixeldrainResolver, ReqwestHttp};
 use crate::resolver::ytdlp::YtDlpResolver;
@@ -147,18 +148,22 @@ fn build_resolver(
         js_runtime,
         config.ytdlp_cookies.clone(),
     );
-    let local: Option<Box<dyn MediaResolver>> = library.enabled().then(|| {
-        let probe: FileDurationProbe = Box::new(move |file| {
+    let file_probe = |ffprobe: std::path::PathBuf| -> FileDurationProbe {
+        Box::new(move |file| {
             let ffprobe = ffprobe.clone();
             Box::pin(async move { probe_duration(&ffprobe, &file.to_string_lossy(), &[]).await })
-        });
-        Box::new(LocalResolver::new(Arc::clone(library), probe)) as Box<dyn MediaResolver>
+        })
+    };
+    let local: Option<Box<dyn MediaResolver>> = library.enabled().then(|| {
+        Box::new(LocalResolver::new(
+            Arc::clone(library),
+            file_probe(ffprobe.clone()),
+        )) as Box<dyn MediaResolver>
     });
-    Ok(Arc::new(CompositeResolver::new(
-        Box::new(pixeldrain),
-        Box::new(ytdlp),
-        local,
-    )))
+    Ok(Arc::new(
+        CompositeResolver::new(Box::new(pixeldrain), Box::new(ytdlp), local)
+            .with_file(Box::new(FileResolver::new(file_probe(ffprobe)))),
+    ))
 }
 
 /// How many ports after the configured one are tried when the fallback is on.

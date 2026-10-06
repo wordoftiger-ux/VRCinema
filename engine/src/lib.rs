@@ -6,6 +6,7 @@ pub mod engine;
 pub mod home;
 pub mod http;
 pub mod library;
+pub mod local_files;
 pub mod pipeline;
 pub mod process;
 pub mod resolver;

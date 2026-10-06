@@ -3,6 +3,7 @@
 //! Port of `src/resolver/{types,index}.ts`.
 
 pub mod fake;
+pub mod file;
 pub mod local;
 pub mod pixeldrain;
 pub mod types;
@@ -41,12 +42,14 @@ pub trait MediaResolver: Send + Sync {
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError>;
 }
 
-/// Routes disk files (`local:`) to the file module, pixeldrain hosts to their own module and
+/// Routes disk files (`local:` library files, `file:` absolute paths) to the file modules, pixeldrain hosts to their own module and
 /// everything else to yt-dlp.
 pub struct CompositeResolver {
     pub pixeldrain: Box<dyn MediaResolver>,
     pub ytdlp: Box<dyn MediaResolver>,
     pub local: Option<Box<dyn MediaResolver>>,
+    /// Files given by absolute path (`file:`), created only by the desktop window.
+    pub file: Option<Box<dyn MediaResolver>>,
 }
 
 impl CompositeResolver {
@@ -59,7 +62,13 @@ impl CompositeResolver {
             pixeldrain,
             ytdlp,
             local,
+            file: None,
         }
+    }
+
+    pub fn with_file(mut self, file: Box<dyn MediaResolver>) -> Self {
+        self.file = Some(file);
+        self
     }
 
     fn pick(&self, url: &str) -> Result<&dyn MediaResolver, ResolveError> {
@@ -69,6 +78,15 @@ impl CompositeResolver {
                 None => Err(ResolveError::new(
                     "Pliki z dysku są wyłączone (brak MEDIA_DIRS w .env).",
                 )),
+            };
+        }
+        if url
+            .get(..5)
+            .is_some_and(|p| p.eq_ignore_ascii_case("file:"))
+        {
+            return match &self.file {
+                Some(file) => Ok(file.as_ref()),
+                None => Err(ResolveError::new("Pliki z pełną ścieżką są niedostępne.")),
             };
         }
         let parsed = url::Url::parse(url)
@@ -155,6 +173,25 @@ mod tests {
         assert!(c.resolve("local:0/a.mp4").await.is_err());
     }
 
+    #[tokio::test]
+    async fn routes_file_urls_to_the_file_resolver() {
+        let c =
+            CompositeResolver::new(tag("pd"), tag("yt"), Some(tag("local"))).with_file(tag("file"));
+        assert_eq!(title(&c, "file:///D:/Filmy/Odcinek%201.mkv").await, "file");
+        assert_eq!(
+            c.resolve("file:///D:/Filmy/a.mkv").await.unwrap().title,
+            "file"
+        );
+        assert_eq!(title(&c, "local:0/a.mp4").await, "local");
+        assert_eq!(title(&c, "https://youtu.be/x").await, "yt");
+    }
+
+    #[tokio::test]
+    async fn file_urls_without_a_file_resolver_never_reach_ytdlp() {
+        let c = CompositeResolver::new(tag("pd"), tag("yt"), None);
+        assert!(c.fetch_meta("file:///D:/a.mkv").await.is_err());
+        assert!(c.resolve("FILE:///D:/a.mkv").await.is_err());
+    }
     #[tokio::test]
     async fn malformed_url_is_an_error_not_a_panic() {
         let c = CompositeResolver::new(tag("pd"), tag("yt"), None);

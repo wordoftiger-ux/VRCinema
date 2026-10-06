@@ -118,14 +118,22 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             requester_ip: None,
         };
     let added = if meta.is_playlist {
-        let entries = meta.entries.as_deref().unwrap_or_default();
-        let entries = &entries[..entries.len().min(MAX_PLAYLIST_ITEMS)];
+        // Only http(s) entries: `file:` (and `local:`) items are never created through HTTP,
+        // whatever a playlist extractor returns.
+        let entries: Vec<_> = meta
+            .entries
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| parse_source_url(&e.url).is_some())
+            .take(MAX_PLAYLIST_ITEMS)
+            .collect();
         if entries.is_empty() {
             return Err(ApiError::bad_request("Playlista jest pusta."));
         }
         state.with_db(|c| {
             let q = QueueRepo::new(c);
-            for e in entries {
+            for e in &entries {
                 q.add(&new_item(
                     e.url.clone(),
                     e.title.clone(),

@@ -180,6 +180,18 @@ fn sort_keys(name: &str) -> Vec<SortKey> {
     keys
 }
 
+/// Natural order of file names (see [`SortKey`]); ties fall back to the plain byte order.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    sort_keys(a).cmp(&sort_keys(b)).then_with(|| a.cmp(b))
+}
+
+/// True when the path's file name has a video extension.
+pub fn is_video_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_video_file)
+}
+
 /// Folders with the owner's videos. Every path is checked so it cannot leave them.
 pub struct MediaLibrary {
     dirs: Vec<PathBuf>,

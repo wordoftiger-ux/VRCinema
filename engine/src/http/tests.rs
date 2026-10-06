@@ -900,6 +900,93 @@ async fn admin_adding_a_playlist_expands_it_into_items() {
 }
 
 #[tokio::test]
+async fn file_urls_never_enter_through_the_public_request() {
+    let h = Harness::new();
+    h.metas.lock().unwrap().insert(
+        "file:///C:/Filmy/a.mp4".into(),
+        Ok(video("Plik z dysku", 60.0)),
+    );
+    for url in ["file:///C:/Filmy/a.mp4", "FILE:///C:/Filmy/a.mp4"] {
+        let res = h.request_default(url).await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{url}");
+    }
+    assert!(queued_titles(&h).is_empty());
+    assert!(h.list(ItemStatus::PendingApproval).is_empty());
+}
+
+#[tokio::test]
+async fn file_urls_never_enter_through_the_admin_panel() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    h.metas.lock().unwrap().insert(
+        "file:///C:/Filmy/a.mp4".into(),
+        Ok(video("Plik z dysku", 60.0)),
+    );
+    let res = h
+        .send(
+            call("POST", "/api/admin/channels/main/items")
+                .cookie(&cookie)
+                .json(json!({"url": "file:///C:/Filmy/a.mp4"})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(res.error(), "To nie wygląda na poprawny link (http/https).");
+    assert!(queued_titles(&h).is_empty());
+}
+
+#[tokio::test]
+async fn playlist_entries_with_file_urls_are_dropped_when_expanding() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let entry = |url: &str, title: &str| PlaylistEntry {
+        url: url.into(),
+        title: title.into(),
+        duration_s: Some(5.0),
+    };
+    let playlist = |entries| {
+        Ok(MediaMeta {
+            title: "PL".into(),
+            duration_s: None,
+            is_live: false,
+            is_playlist: true,
+            entries: Some(entries),
+        })
+    };
+    h.metas.lock().unwrap().insert(
+        "https://youtube.com/playlist?list=mix".into(),
+        playlist(vec![
+            entry("file:///C:/Windows/system32/a.mp4", "Zly 1"),
+            entry("https://youtu.be/p1", "Dobry"),
+            entry("FILE:///C:/b.mp4", "Zly 2"),
+            entry("local:0/Film.mp4", "Zly 3"),
+        ]),
+    );
+    h.metas.lock().unwrap().insert(
+        "https://youtube.com/playlist?list=files".into(),
+        playlist(vec![entry("file:///C:/a.mp4", "Zly")]),
+    );
+    let add = |url: &str| {
+        h.send(
+            call("POST", "/api/admin/channels/main/items")
+                .cookie(&cookie)
+                .json(json!({"url": url})),
+        )
+    };
+    let res = add("https://youtube.com/playlist?list=files").await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(res.error(), "Playlista jest pusta.");
+    let res = add("https://youtube.com/playlist?list=mix").await;
+    assert_eq!(res.status, StatusCode::CREATED);
+    assert_eq!(res.json(), json!({"added": 1, "title": "PL"}));
+    assert_eq!(queued_titles(&h), ["Dobry"]);
+    assert!(
+        h.list(ItemStatus::Queued)
+            .iter()
+            .all(|i| i.source_url.starts_with("https://"))
+    );
+    assert_eq!(h.commands(), vec![Command::QueueChanged]);
+}
+#[tokio::test]
 async fn admin_can_add_a_live_stream_and_a_film_from_any_domain() {
     let h = Harness::new();
     let cookie = h.login().await;
