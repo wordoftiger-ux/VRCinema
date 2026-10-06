@@ -15,6 +15,35 @@ Polish version: [README.pl.md](README.pl.md). The web interface is currently in 
 > **Intended for private watching with friends.** Whoever runs the server is responsible for what it streams.
 > Re-streaming content you don't have rights to may break copyright law and the terms of the sites you stream from.
 
+## Desktop app (Windows)
+
+`VRCinema.exe` is the whole server in one window: no Node.js, no installer, no `.env` file.
+
+- **Download** `VRCinema.exe` from the [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) page (about 18 MB) and put it anywhere, for example on the desktop. Windows 10/11, 64-bit; it needs the Microsoft Edge WebView2 Runtime, which is already part of Windows 11 and most Windows 10 installations (the app tells you where to get it if it is missing).
+- **First run**: a wizard downloads the tools (ffmpeg, yt-dlp and the Deno runtime that YouTube needs, about 250 MB in total) into `%LOCALAPPDATA%\VRCinema`, tests your graphics card to pick the encoder (NVIDIA, Intel, AMD or CPU) and starts the channel. After that the app opens straight to the panel.
+- **SmartScreen**: the file is not code-signed, so Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**.
+- **Adding films**: drag video files or whole folders onto the window, or paste links in the panel. Dropped files are played from where they are on your disk.
+- **Tray**: closing the window keeps the channel running in the tray (a balloon tells you the first time). The tray menu opens the panel, copies the channel link, skips the current film and quits. **Quit** from the tray stops the channel and every ffmpeg process.
+- **Remote panel**: off by default; the panel is reachable only from this computer. To manage the channel from another device, enable it in the **Ustawienia** tab and set a password.
+- **Updates**: the app checks for a newer `VRCinema.exe` at start and every 24 hours and offers to install it (the file is verified with its SHA-256 and the old one is kept until the new one runs). This needs the repository's releases to be public.
+- **Data**: everything is in `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Set `VRCINEMA_HOME` to use another folder. Deleting the folder resets the app.
+- **Size and memory** (measured, release build): `VRCinema.exe` is 18.2 MB. With the window open it uses about 40 MB itself plus about 340 MB for the WebView2 processes that draw the window; ffmpeg is separate.
+- **No window** (a server, Docker): see [VPS with Docker](#vps-with-docker) and [Rust version](#rust-version-experimental) below; the headless `vrcinema` server is unchanged.
+
+### Owner's manual test checklist
+
+These need a person at the screen and are not covered by the automatic tests:
+
+- [ ] Clean Windows account (or a PC that never had the app): first run from an empty folder, wizard, first film plays.
+- [ ] Drag and drop end to end: one file, several files, a folder, a non-video file (skipped); the page shows the result and the film plays.
+- [ ] Following a port change: change the port in **Ustawienia**; the window reloads on the new address.
+- [ ] Cookies picker: choose a cookies file in **Ustawienia** and add a link that needs it.
+- [ ] Autostart on/off: with Windows it starts in the tray without a window; off removes it.
+- [ ] Update restart: install a locally served newer release; the app restarts and the old file disappears.
+- [ ] Link clicks: external links in the panel open in the default browser, the window stays on the app.
+- [ ] Tray menu items: open panel, copy link, skip, quit; double click on the icon.
+- [ ] Close-to-tray balloon: closing the window hides it and shows the notice once; a second launch brings the window back.
+
 ## Requirements
 
 - Windows 10/11 or Linux (macOS works with ffmpeg from Homebrew).

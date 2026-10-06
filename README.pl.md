@@ -14,6 +14,35 @@ English version: [README.md](README.md).
 > **Program jest do prywatnego oglądania ze znajomymi.** Za puszczane treści odpowiada osoba, która uruchamia serwer.
 > Retransmisja cudzych utworów bez praw może naruszać prawo autorskie i regulaminy serwisów, z których pochodzą.
 
+## Aplikacja na pulpit (Windows)
+
+`VRCinema.exe` to cały serwer w jednym oknie: bez Node.js, bez instalatora, bez pliku `.env`.
+
+- **Pobranie**: `VRCinema.exe` ze strony [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) (około 18 MB). Połóż go gdziekolwiek, np. na pulpicie. Windows 10/11, 64-bitowy; potrzebny jest składnik Microsoft Edge WebView2 Runtime, który jest w Windows 11 i w większości instalacji Windows 10 (jeśli go brakuje, program podpowie, skąd go wziąć).
+- **Pierwsze uruchomienie**: kreator pobiera narzędzia (ffmpeg, yt-dlp i środowisko Deno potrzebne dla YouTube, razem około 250 MB) do `%LOCALAPPDATA%\VRCinema`, sprawdza kartę graficzną i wybiera enkoder (NVIDIA, Intel, AMD albo procesor), po czym uruchamia kanał. Potem program od razu otwiera panel.
+- **SmartScreen**: plik nie jest podpisany certyfikatem, więc Windows może pokazać „System Windows chronił ten komputer”. Kliknij **Więcej informacji**, potem **Uruchom mimo to**.
+- **Dodawanie filmów**: przeciągnij pliki wideo lub całe foldery na okno albo wklej linki w panelu. Przeciągnięte pliki są odtwarzane z miejsca, w którym leżą na dysku.
+- **Zasobnik**: zamknięcie okna zostawia kanał w zasobniku (za pierwszym razem pokaże się dymek). Menu zasobnika otwiera panel, kopiuje link kanału, pomija bieżący film i kończy program. **Zakończ** zatrzymuje kanał i wszystkie procesy ffmpeg.
+- **Panel zdalny**: domyślnie wyłączony; panel jest dostępny tylko z tego komputera. Aby zarządzać kanałem z innego urządzenia, włącz go w zakładce **Ustawienia** i ustaw hasło.
+- **Aktualizacje**: program sprawdza, czy jest nowszy `VRCinema.exe`, przy starcie i co 24 godziny, i proponuje instalację (plik jest weryfikowany sumą SHA-256, a stary zostaje, dopóki nowy się nie uruchomi). Wymaga to publicznych wydań w repozytorium.
+- **Dane**: wszystko leży w `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Zmienna `VRCINEMA_HOME` wskazuje inny folder. Usunięcie folderu przywraca stan początkowy.
+- **Rozmiar i pamięć** (zmierzone, wersja release): `VRCinema.exe` ma 18,2 MB. Przy otwartym oknie sam zajmuje około 40 MB, a procesy WebView2 rysujące okno około 340 MB; ffmpeg to osobny proces.
+- **Bez okna** (serwer, Docker): zobacz [VPS (Linux, Docker)](#vps-linux-docker) i [Wersja w Rust](#wersja-w-rust-eksperymentalna) niżej; serwer `vrcinema` bez okna działa jak dotąd.
+
+### Lista testów ręcznych dla właściciela
+
+Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
+
+- [ ] Czyste konto Windows (albo komputer, na którym programu nigdy nie było): pierwsze uruchomienie z pustego folderu, kreator, pierwszy film leci.
+- [ ] Przeciąganie od początku do końca: jeden plik, kilka plików, folder, plik niebędący filmem (pomijany); strona pokazuje wynik, film leci.
+- [ ] Podążanie za zmianą portu: zmień port w **Ustawieniach**; okno przeładowuje się pod nowym adresem.
+- [ ] Wybór pliku cookies: wskaż plik w **Ustawieniach** i dodaj link, który go wymaga.
+- [ ] Autostart włącz/wyłącz: z Windows program startuje w zasobniku bez okna; wyłączenie usuwa wpis.
+- [ ] Restart po aktualizacji: zainstaluj nowsze wydanie podstawione lokalnie; program uruchamia się ponownie, a stary plik znika.
+- [ ] Kliknięcia w linki: zewnętrzne linki w panelu otwierają się w domyślnej przeglądarce, okno zostaje przy programie.
+- [ ] Pozycje menu zasobnika: otwórz panel, kopiuj link, pomiń, zakończ; dwuklik w ikonę.
+- [ ] Dymek przy zamknięciu do zasobnika: zamknięcie okna chowa je i pokazuje komunikat raz; drugie uruchomienie przywraca okno.
+
 ## Wymagania
 
 - Windows 10/11, Linux albo macOS.
