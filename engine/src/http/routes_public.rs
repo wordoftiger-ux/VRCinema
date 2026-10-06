@@ -12,8 +12,8 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 
 use super::auth::{
-    AdminAuth, SESSION_TTL_MS, check_password, create_desktop_session_token, create_session_token,
-    session_cookie, verify_password,
+    AdminAuth, SESSION_TTL_MS, app_hint_cookie, check_password, create_desktop_session_token,
+    create_session_token, session_cookie, verify_password,
 };
 use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, asset_response, json_ok, json_response, num_json,
@@ -253,6 +253,9 @@ async fn desktop_login(
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         headers.insert(SET_COOKIE, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&app_hint_cookie(ctx.https, SESSION_TTL_MS / 1000)) {
+        headers.append(SET_COOKIE, value);
     }
     res
 }

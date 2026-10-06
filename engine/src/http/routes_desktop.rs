@@ -5,10 +5,13 @@
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Map, Value, json};
 
-use super::{ApiError, ApiResult, AppState, DesktopSession, JsonBody, json_ok, json_response};
+use super::{
+    ApiError, ApiResult, AppState, DesktopSession, JsonBody, asset_response, json_ok, json_response,
+};
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
 use crate::tools::Tool;
 
@@ -17,6 +20,7 @@ const MIN_PASSWORD_CHARS: usize = 8;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
+        .route("/wizard", get(wizard_page))
         .route("/api/desktop/info", get(info))
         .route("/api/desktop/config", get(get_config).put(put_config))
         .route("/api/desktop/tools", get(tools_status))
@@ -351,4 +355,11 @@ async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult 
         )
     })?;
     Ok(json_ok(&json!({ "ok": true, "port": core.port() })))
+}
+
+/// The first-run wizard page (`public/wizard.html`); like the API it needs the window session.
+async fn wizard_page(_: DesktopSession) -> Response {
+    asset_response("wizard.html").unwrap_or_else(|| {
+        ApiError::new(StatusCode::NOT_FOUND, "Nie znaleziono strony").into_response()
+    })
 }

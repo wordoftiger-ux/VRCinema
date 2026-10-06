@@ -581,6 +581,26 @@ async fn the_log_route_returns_the_tail_without_the_window_key() {
     app.stop().await;
 }
 
+#[tokio::test]
+async fn the_wizard_page_is_served_to_the_window_only() {
+    let app = App::start().await;
+    let res = app.http.get(app.url("/wizard")).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let cookie = app.window_cookie().await;
+    let res = app
+        .http
+        .get(app.url("/wizard"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let ctype = res.headers()["content-type"].to_str().unwrap().to_string();
+    assert!(ctype.starts_with("text/html"), "{ctype}");
+    assert!(res.text().await.unwrap().contains("id=\"wizard\""));
+    app.stop().await;
+}
+
 // ---------- Restart (Review Focus 5) ----------
 
 #[tokio::test]

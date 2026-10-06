@@ -32,6 +32,14 @@
       </div>
     </header>
 
+    <div id="app-banners" class="app-only"></div>
+    <p class="notice app-only" id="drop-notice" role="status"></p>
+    <nav class="tabs app-only" role="tablist">
+      <button type="button" role="tab" id="tab-btn-channel" aria-selected="true" aria-controls="tab-channel">Kanał</button>
+      <button type="button" role="tab" id="tab-btn-settings" aria-selected="false" aria-controls="tab-settings">Ustawienia</button>
+    </nav>
+
+    <div id="tab-channel" role="tabpanel">
     <section class="monitor" id="monitor">
       <video class="preview" id="preview" muted playsinline controls></video>
       <p class="tally" data-tally data-status="idle">Przerwa</p>
@@ -47,6 +55,7 @@
     </section>
 
     <h2>Dodaj film lub playlistę</h2>
+    <p class="muted small app-only drop-hint" style="margin:-4px 0 12px">Przeciągnij pliki wideo na to okno, aby dodać je do kolejki.</p>
     <form class="stack" id="add-form">
       <div class="row">
         <input type="url" name="url" required placeholder="Link do filmu, playlisty YouTube albo listy pixeldrain" aria-label="Link" style="flex:1 1 320px">
@@ -55,7 +64,7 @@
       <p class="notice" id="add-notice" role="status"></p>
     </form>
 
-    <div id="library-block" class="hidden">
+    <div id="library-block" class="hidden headless-only">
       <h2>Pliki z dysku</h2>
       <div class="row" style="align-items:flex-end">
         <label style="flex:0 1 240px">Folder
@@ -81,11 +90,12 @@
       <input type="text" id="channel-url" readonly aria-label="Link kanału">
       <button type="button" class="quiet" id="copy-channel">Kopiuj</button>
     </div>
-    <p class="muted small" style="margin-top:8px">Ten link wklejasz do odtwarzacza w VRChat. Musi być adresem publicznym, np. z Cloudflare Tunnel. Ustaw go jako PUBLIC_URL w pliku .env.</p>
+    <p class="muted small" id="channel-hint" style="margin-top:8px">Ten link wklejasz do odtwarzacza w VRChat. Musi być adresem publicznym, np. z Cloudflare Tunnel. Ustaw go jako PUBLIC_URL w pliku .env.</p>
 
     <h2>Historia</h2>
     <ul class="plain" id="history"></ul>
 
+    <div id="channel-settings-block">
     <h2>Ustawienia</h2>
     <form class="stack" id="settings-form">
       <label>Dozwolone serwisy dla widzów, po jednym w linii
@@ -113,17 +123,129 @@
       <div><button type="submit">Zapisz ustawienia</button></div>
       <p class="notice" id="settings-notice" role="status"></p>
     </form>
+    </div>
+    </div>
+
+    <div id="tab-settings" class="app-only hidden" role="tabpanel" aria-labelledby="tab-btn-settings">
+      <section class="settings-block">
+        <h2>Ogólne</h2>
+        <div class="stack">
+          <label class="check"><input type="checkbox" id="set-autostart"> Uruchamiaj VRCinema razem z Windows</label>
+          <label class="check"><input type="checkbox" id="set-lan"> Pozwól otwierać stronę z innych urządzeń w sieci domowej</label>
+          <form id="port-form" class="row">
+            <label class="grow">Port serwera
+              <input type="number" id="set-port" min="1024" max="65535" step="1" required>
+            </label>
+            <button type="submit" class="fit">Zapisz port</button>
+          </form>
+          <p class="muted small">Zmiana portu albo dostępu z sieci uruchamia serwer ponownie. Film na antenie zostanie wtedy na chwilę przerwany, a link kanału dostanie nowy port.</p>
+          <p class="notice" id="general-notice" role="status"></p>
+        </div>
+      </section>
+
+      <section class="settings-block">
+        <h2>Panel zdalny</h2>
+        <div class="stack">
+          <label class="check"><input type="checkbox" id="set-remote"> Pozwól zalogować się do panelu hasłem z innych urządzeń (np. przez adres publiczny)</label>
+          <p class="muted small">Okno tej aplikacji nie potrzebuje hasła. Hasło chroni tylko dostęp zdalny.</p>
+          <p id="password-state" class="small" style="margin:0"></p>
+          <form id="password-form" class="row">
+            <label class="grow">Nowe hasło (co najmniej 8 znaków)
+              <input type="password" id="set-password" autocomplete="new-password" required minlength="8">
+            </label>
+            <button type="submit" class="fit">Ustaw hasło</button>
+          </form>
+          <p class="notice" id="remote-notice" role="status"></p>
+        </div>
+      </section>
+
+      <div id="channel-slot"></div>
+
+      <section class="settings-block">
+        <h2>Narzędzia</h2>
+        <div id="tools-list"></div>
+        <div id="tools-progress"></div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" class="quiet fit" id="tools-repair">Napraw narzędzia</button>
+        </div>
+        <h2 style="font-size:1rem">Karta graficzna</h2>
+        <div class="row">
+          <label class="grow">Konwersja obrazu
+            <select id="set-encoder">
+              <option value="auto">Automatycznie (zalecane)</option>
+              <option value="h264_nvenc">Karta NVIDIA (NVENC)</option>
+              <option value="h264_qsv">Karta Intel (Quick Sync)</option>
+              <option value="h264_amf">Karta AMD (AMF)</option>
+              <option value="libx264">Procesor (libx264)</option>
+            </select>
+          </label>
+          <button type="button" class="quiet fit" id="encoder-detect">Test karty</button>
+        </div>
+        <p class="muted small" id="encoder-state" style="margin-top:8px"></p>
+        <p class="notice" id="encoder-notice" role="status"></p>
+        <p class="notice" id="tools-notice" role="status"></p>
+      </section>
+
+      <section class="settings-block">
+        <h2>Zaawansowane</h2>
+        <div class="stack">
+          <form id="public-url-form" class="row">
+            <label class="grow">Adres publiczny kanału
+              <input type="url" id="set-public-url" placeholder="https://twoja-nazwa.trycloudflare.com">
+            </label>
+            <button type="submit" class="fit">Zapisz</button>
+          </form>
+          <div>
+            <div class="muted small" style="margin-bottom:4px">Plik cookies dla yt-dlp (filmy wymagające zalogowania)</div>
+            <p class="path-value" id="cookies-path"></p>
+            <div class="row">
+              <button type="button" class="quiet fit" id="cookies-pick">Wybierz plik…</button>
+              <button type="button" class="quiet fit hidden" id="cookies-clear">Nie używaj pliku</button>
+            </div>
+          </div>
+          <form id="pixeldrain-form" class="row">
+            <label class="grow">Klucz API pixeldrain (opcjonalnie)
+              <input type="password" id="set-pixeldrain" autocomplete="off">
+            </label>
+            <button type="submit" class="fit">Zapisz</button>
+          </form>
+          <label class="check"><input type="checkbox" id="set-trust"> Ufaj nagłówkom Cloudflare (potrzebne, gdy kanał działa za Cloudflare Tunnel i ma widzieć prawdziwe adresy widzów)</label>
+          <p class="notice" id="advanced-notice" role="status"></p>
+        </div>
+      </section>
+
+      <section class="settings-block">
+        <h2>Dziennik</h2>
+        <pre class="log" id="log-view" tabindex="0" aria-label="Ostatnie wpisy dziennika"></pre>
+        <div class="row">
+          <button type="button" class="quiet fit" id="log-refresh">Odśwież</button>
+          <button type="button" class="quiet fit" id="log-copy">Kopiuj</button>
+        </div>
+        <p class="notice" id="log-notice" role="status"></p>
+      </section>
+
+      <section class="settings-block">
+        <h2>O programie</h2>
+        <p id="about-version" style="margin-bottom:10px"></p>
+        <div id="about-update"></div>
+        <div class="row">
+          <button type="button" class="quiet fit" id="about-check">Sprawdź aktualizacje</button>
+        </div>
+        <p class="notice" id="about-notice" role="status"></p>
+      </section>
+    </div>
   </section>
 </main>
 
 <script type="module">
-  import { api, el, fmtTime, renderMonitor, setupCopy, notice } from '/static/common.js';
+  import { api, el, fmtTime, renderMonitor, setupCopy, notice, isAppWindow } from '/static/common.js';
 
   const $ = (id) => document.getElementById(id);
   const loginView = $('login');
   const panelView = $('panel');
   let settingsLoaded = false;
   let lastData = null;
+  let appMode = false; // okno aplikacji VRCinema.exe (sesja okna), nie zwykła przeglądarka
 
   function showLogin() {
     panelView.classList.add('hidden');
@@ -396,7 +518,13 @@
       fillSettings(d.settings);
       settingsLoaded = true;
     }
-    if (!lib.loaded) loadLibrary(0, '');
+    if (!appMode && !lib.loaded) loadLibrary(0, '');
+  }
+
+  // Okno aplikacji: zakładka Ustawienia, paski i przeciąganie plików (desktop.js). Przeglądarka bez
+  // znacznika okna nie pobiera tego pliku i nie pyta o /api/desktop.
+  if (isAppWindow()) {
+    appMode = await (await import('/static/desktop.js')).start({ refreshQueue: () => refresh() });
   }
 
   refresh();

@@ -209,3 +209,116 @@ select {
   width: 100%;
 }
 select:focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
+
+/* ---------- Aplikacja okienkowa: zakładki, paski, kreator ---------- */
+.app-only { display: none !important; }
+
+.tabs { display: flex; gap: 6px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.tabs button {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  padding: 10px 16px;
+  margin-bottom: -1px;
+}
+.tabs button[aria-selected='true'] { color: var(--text); border-bottom-color: var(--amber); }
+
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--amber);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin: 0 0 12px;
+}
+.banner.err { border-left-color: var(--tally); }
+.banner p { margin: 0; flex: 1 1 260px; }
+.banner .banner-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.drop-hint { margin: 14px 0 0; }
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgb(27 29 42 / 0.88);
+  pointer-events: none;
+}
+.drop-overlay div {
+  font: 800 clamp(1.4rem, 4vw, 2.2rem) var(--display);
+  padding: 48px 56px;
+  border: 3px dashed var(--amber);
+  border-radius: 20px;
+  color: var(--amber);
+  text-align: center;
+}
+
+.settings-block {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 4px 20px 20px;
+  margin-bottom: 18px;
+}
+.settings-block h2 { margin: 18px 0 12px; font-size: 1.15rem; }
+.settings-block .row { align-items: flex-end; }
+.settings-block .row > .grow { flex: 1 1 220px; }
+.settings-block .row > .fit { flex: 0 0 auto; }
+.kv { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.kv .name { overflow-wrap: anywhere; }
+.kv .state { color: var(--muted); font-size: 0.92rem; text-align: right; }
+.path-value { font: 0.9rem ui-monospace, Consolas, monospace; overflow-wrap: anywhere; color: var(--muted); margin: 0 0 8px; }
+pre.log {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 12px;
+  margin: 0 0 10px;
+  max-height: 340px;
+  overflow: auto;
+  font: 0.82rem/1.45 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bar { height: 10px; border-radius: 5px; background: var(--panel-2); overflow: hidden; margin-top: 6px; }
+.bar span { display: block; height: 100%; width: 0; background: var(--amber); border-radius: 5px; }
+.bar.indeterminate span { width: 35%; animation: bar-move 1.2s ease-in-out infinite alternate; }
+@keyframes bar-move { from { margin-left: 0; } to { margin-left: 65%; } }
+@media (prefers-reduced-motion: reduce) { .bar.indeterminate span { animation: none; margin-left: 30%; } }
+
+.tool-row { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.tool-row:last-child { border-bottom: 0; }
+.tool-row .head { display: flex; justify-content: space-between; gap: 12px; }
+.tool-row .state { color: var(--muted); font-size: 0.92rem; text-align: right; }
+.tool-row[data-kind='ready'] .state { color: var(--ok); }
+.tool-row[data-kind='error'] .state { color: var(--tally); }
+.tool-row[data-kind='waiting'] { opacity: 0.6; }
+
+/* Kreator */
+.steps { display: flex; gap: 8px; margin: 6px 0 26px; padding: 0; list-style: none; }
+.steps li { flex: 1; height: 5px; border-radius: 3px; background: var(--panel-2); }
+.steps li.done, .steps li.current { background: var(--amber); }
+.steps li.current { box-shadow: 0 0 0 3px rgb(242 184 75 / 0.22); }
+.wizard h1 { font-size: 1.9rem; letter-spacing: -0.02em; margin-bottom: 14px; }
+.wizard .step-no { color: var(--muted); font-size: 0.9rem; margin: 0 0 6px; }
+.wizard .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
+.wizard .result { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+.wizard .result strong { display: block; font: 700 1.25rem var(--display); margin-bottom: 4px; }
+.wizard ol.howto-list { padding-left: 1.3em; margin: 0 0 16px; }
+.wizard ol.howto-list li { margin-bottom: 10px; }
+code { font: 0.9em ui-monospace, Consolas, monospace; background: var(--panel-2); padding: 2px 6px; border-radius: 5px; overflow-wrap: anywhere; }
+
+@media (max-width: 520px) {
+  .tabs button { padding: 10px 12px; }
+  .settings-block { padding: 2px 14px 16px; }
+  .drop-overlay div { padding: 32px 24px; }
+}

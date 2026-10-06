@@ -1850,6 +1850,30 @@ async fn window_key_logs_in_once_and_redirects_without_the_key() {
 }
 
 #[tokio::test]
+async fn window_login_also_sets_a_script_readable_hint_cookie() {
+    let (a, key) = app_harness(remote_off());
+    let res = a.h.send(get(&format!("/desktop-login?key={key}"))).await;
+    assert_eq!(res.status, StatusCode::FOUND);
+    let all: Vec<String> = res
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(all.len(), 2, "{all:?}");
+    // The session cookie stays first and HttpOnly; the hint is only a page-side marker.
+    assert!(all[0].starts_with("vrcinema_session=") && all[0].contains("HttpOnly"));
+    assert!(all[1].starts_with("vrcinema_app=1;"), "{}", all[1]);
+    assert!(!all[1].contains("HttpOnly"));
+}
+
+#[tokio::test]
+async fn headless_server_has_no_wizard_page() {
+    let h = Harness::new();
+    assert_eq!(h.send(get("/wizard")).await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn window_login_cookie_is_secure_behind_a_trusted_https_proxy() {
     let (key, first) = DesktopKey::generate();
     let k = Arc::new(key);

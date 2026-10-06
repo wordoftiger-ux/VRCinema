@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pierwsze uruchomienie</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="wizard">
+<main id="wizard">
+  <ol class="steps" id="steps" aria-label="Postęp kreatora"><li></li><li></li><li></li><li></li></ol>
+  <div id="step"></div>
+</main>
+
+<script type="module">
+  import { apiRetry, el, notice, encoderLabel, toolProgressList, TOOL_ORDER, watchToolsJob } from '/static/common.js';
+
+  const stepRoot = document.getElementById('step');
+  const dots = [...document.querySelectorAll('#steps li')];
+  let info = null;
+
+  function show(n, ...content) {
+    dots.forEach((d, i) => {
+      d.classList.toggle('done', i < n - 1);
+      d.classList.toggle('current', i === n - 1);
+    });
+    stepRoot.replaceChildren(el('p', { class: 'step-no' }, `Krok ${n} z 4`), ...content);
+    window.scrollTo(0, 0);
+    stepRoot.querySelector('h1')?.focus();
+  }
+
+  const heading = (text) => el('h1', { tabindex: '-1' }, text);
+  const actions = (...buttons) => el('div', { class: 'actions' }, ...buttons);
+
+  // ---------- 1. Powitanie ----------
+  function welcome() {
+    show(1,
+      heading('Witaj w VRCinema'),
+      el('p', {}, 'Ten program prowadzi własny kanał wideo na żywo dla VRChat: Ty dodajesz filmy do kolejki, a odtwarzacz w świecie VRChat pokazuje je jeden po drugim.'),
+      el('p', {}, 'Zanim zaczniemy, trzeba jednorazowo pobrać kilka programów pomocniczych i sprawdzić, czy komputer poradzi sobie z konwersją obrazu na karcie graficznej. Zajmie to kilka minut, a dalej poprowadzę Cię krok po kroku.'),
+      actions(el('button', { type: 'button', onclick: tools }, 'Zaczynamy')));
+  }
+
+  // ---------- 2. Narzędzia ----------
+  async function tools() {
+    const list = toolProgressList(TOOL_ORDER);
+    const status = el('p', { class: 'notice', role: 'status' });
+    const next = el('button', { type: 'button', class: 'hidden', onclick: encoder }, 'Dalej');
+    const retry = el('button', { type: 'button', class: 'hidden' }, 'Spróbuj ponownie');
+    const later = el('button', { type: 'button', class: 'quiet hidden', onclick: finish }, 'Pomiń i przejdź do panelu');
+    show(2,
+      heading('Pobieranie narzędzi'),
+      el('p', {}, 'Pobieram programy, z których korzysta kanał. Nie zamykaj okna.'),
+      list.root, status, actions(next, retry, later));
+
+    let missing;
+    async function start() {
+      retry.classList.add('hidden');
+      later.classList.add('hidden');
+      notice(status, '');
+      try {
+        const t = await apiRetry('GET', '/api/desktop/tools');
+        missing = t.missing;
+        if (t.ok) return done(list, status, next, []);
+        try {
+          await apiRetry('POST', '/api/desktop/tools/install');
+        } catch (err) {
+          if (err.status !== 409) throw err; // zadanie już trwa: tylko je obserwujemy
+        }
+        await watch();
+      } catch (err) {
+        failed(err.message);
+      }
+    }
+
+    async function watch() {
+      const p = await watchToolsJob((progress) => list.update(missing, progress));
+      if (p.error) return failed(p.error);
+      const t = await apiRetry('GET', '/api/desktop/tools');
+      if (t.ok) return done(list, status, next, missing);
+      return failed('Nie wszystkie narzędzia zostały zainstalowane.');
+    }
+
+    function failed(message) {
+      notice(status, `Nie udało się pobrać narzędzi: ${message}`, 'err');
+      retry.classList.remove('hidden');
+      later.classList.remove('hidden');
+      retry.onclick = start;
+    }
+
+    start();
+  }
+
+  function done(list, status, next, missing) {
+    list.update(missing, { done: true, running: false, error: null, tool: '' });
+    notice(status, missing.length ? 'Wszystkie narzędzia są gotowe.' : 'Narzędzia są już zainstalowane.', 'ok');
+    next.classList.remove('hidden');
+    next.focus();
+  }
+
+  // ---------- 3. Karta graficzna ----------
+  async function encoder() {
+    const status = el('p', { class: 'notice', role: 'status' }, 'Sprawdzam kartę graficzną. To potrwa kilka sekund…');
+    const result = el('div', { class: 'result hidden' });
+    const next = el('button', { type: 'button', class: 'hidden', onclick: watching }, 'Dalej');
+    const retry = el('button', { type: 'button', class: 'quiet hidden' }, 'Spróbuj ponownie');
+    show(3,
+      heading('Test karty graficznej'),
+      el('p', {}, 'Konwersja obrazu na karcie graficznej jest dużo lżejsza dla komputera niż na procesorze. Sprawdzam, co da się wykorzystać.'),
+      status, result, actions(next, retry));
+
+    async function run() {
+      retry.classList.add('hidden');
+      result.classList.add('hidden');
+      notice(status, 'Sprawdzam kartę graficzną. To potrwa kilka sekund…');
+      try {
+        const r = await apiRetry('POST', '/api/desktop/encoder/detect');
+        const gpu = r.encoder !== 'libx264';
+        result.replaceChildren(
+          el('strong', {}, encoderLabel(r.encoder)),
+          el('span', { class: 'muted' }, gpu ? 'Karta graficzna zajmie się konwersją obrazu.' : 'Nie znaleziono obsługiwanej karty, więc obraz konwertuje procesor. Kanał będzie działał, tylko mocniej obciąży komputer.'));
+        result.classList.remove('hidden');
+        notice(status, '');
+        next.textContent = 'Dalej';
+        next.classList.remove('hidden', 'quiet');
+        next.focus();
+      } catch (err) {
+        notice(status, `Test się nie udał: ${err.message}`, 'err');
+        retry.classList.remove('hidden');
+        next.classList.remove('hidden');
+        next.textContent = 'Pomiń ten krok';
+        next.classList.add('quiet');
+      }
+    }
+    retry.onclick = run;
+    run();
+  }
+
+  // ---------- 4. VRChat ----------
+  function watching() {
+    const port = info?.port ?? 8080;
+    const url = el('input', { type: 'url', name: 'publicUrl', placeholder: 'https://twoja-nazwa.trycloudflare.com', autocomplete: 'off', value: info?.publicUrl ?? '' });
+    const status = el('p', { class: 'notice', role: 'status' });
+    const finishButton = el('button', { type: 'submit' }, 'Zakończ i otwórz panel');
+    const form = el('form', { class: 'stack' },
+      el('label', {}, 'Adres publiczny (możesz go podać później w panelu)', url),
+      status, actions(finishButton));
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      finishButton.disabled = true;
+      try {
+        if (url.value.trim()) await apiRetry('PUT', '/api/desktop/config', { publicUrl: url.value });
+        await finish();
+      } catch (err) {
+        notice(status, err.message, 'err');
+        finishButton.disabled = false;
+      }
+    });
+    show(4,
+      heading('Jak oglądać w VRChat'),
+      el('ol', { class: 'howto-list' },
+        el('li', {}, 'W VRChat włącz w ustawieniach opcję ', el('strong', {}, 'Allow Untrusted URLs'), ' (zezwalaj na niezaufane adresy). Bez niej odtwarzacz w świecie nie otworzy Twojego kanału.'),
+        el('li', {}, 'Kanał działa na tym komputerze pod adresem ', el('code', {}, `http://127.0.0.1:${port}`), '. Ten adres widzisz tylko Ty, więc VRChat potrzebuje adresu publicznego, dostępnego z internetu.'),
+        el('li', {}, 'Najprościej dostać go z darmowego programu cloudflared. ',
+          el('a', { href: 'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/', target: '_blank', rel: 'noopener' }, 'Pobierz cloudflared'),
+          ', otwórz wiersz poleceń w folderze z plikiem i uruchom: ',
+          el('code', {}, `cloudflared tunnel --url http://127.0.0.1:${port}`),
+          '. Program wypisze adres kończący się na ', el('code', {}, 'trycloudflare.com'), '.'),
+        el('li', {}, 'Wklej ten adres poniżej. Link do wklejenia w odtwarzaczu VRChat zobaczysz potem w panelu, w sekcji „Link kanału”.')),
+      form);
+    url.focus({ preventScroll: true });
+  }
+
+  async function finish() {
+    await apiRetry('POST', '/api/desktop/wizard/complete');
+    location.href = '/admin';
+  }
+
+  // ---------- Start ----------
+  (async () => {
+    try {
+      info = await apiRetry('GET', '/api/desktop/info');
+    } catch {
+      location.replace('/admin'); // to nie okno aplikacji (albo sesja wygasła)
+      return;
+    }
+    if (info.firstRunCompleted) {
+      location.replace('/admin');
+      return;
+    }
+    welcome();
+  })();
+</script>
+</body>
+</html>
