@@ -42,7 +42,10 @@ These need a person at the screen and are not covered by the automatic tests:
 - [ ] Update restart: install a locally served newer release; the app restarts and the old file disappears.
 - [ ] Link clicks: external links in the panel open in the default browser, the window stays on the app.
 - [ ] Tray menu items: open panel, copy link, skip, quit; double click on the icon.
-- [ ] Close-to-tray balloon: closing the window hides it and shows the notice once; a second launch brings the window back.
+- [ ] Close-to-tray balloon: closing the window hides it and shows the notice once.
+- [ ] Second launch: with the app running (window hidden in the tray, or minimized), start `VRCinema.exe` again; the existing window comes back to the front and no second copy starts (also after **Zakończ**: a new launch starts normally within a few seconds).
+- [ ] Remote panel: in **Ustawienia** set a password and switch the remote panel on (with access from the network or a public address); log in from another device (e.g. a phone) at `/admin`; a wrong password is refused; switching the panel off or changing the password logs that device out.
+- [ ] Repair banner: with broken tools (e.g. replace `tools\ffmpeg.exe` in the data folder with an empty file and restart the app) the panel shows "Kanał nie wystartował…" with **Uruchom ponownie kanał** and **Napraw narzędzia**; repairing brings the channel back.
 
 ## Requirements
 

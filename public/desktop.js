@@ -10,6 +10,7 @@ let info = null; // GET /api/desktop/info
 let config = null; // GET /api/desktop/config
 let updateOffer = null; // { version, notes } albo null
 let toolsJobRunning = false;
+let restartInProgress = false; // „Uruchom ponownie kanał” czeka na odpowiedź
 let hooks = {};
 
 const plural = (n, one, few, many) => (n === 1 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
@@ -92,13 +93,20 @@ function banner(kind, text, ...buttons) {
 }
 
 function renderBanners() {
-  const key = JSON.stringify([info.restartRequired, info.toolsOk, updateOffer?.version, toolsJobRunning]);
+  const restarting = info.restarting || restartInProgress;
+  const key = JSON.stringify([info.restartRequired, info.toolsOk, info.channelRunning, info.channelError, restarting, updateOffer?.version, toolsJobRunning]);
   if (key === bannerKey) return;
   bannerKey = key;
   const list = [];
-  if (!info.toolsOk) {
-    list.push(banner('err', 'Brakuje narzędzi albo są uszkodzone, więc kanał nie nadaje.',
-      el('button', { type: 'button', disabled: toolsJobRunning, onclick: () => runToolsJob('repair') }, 'Napraw narzędzia')));
+  const repairButton = () => el('button', { type: 'button', disabled: toolsJobRunning, onclick: () => runToolsJob('repair') }, 'Napraw narzędzia');
+  // W trakcie ponownego uruchamiania kanał chwilowo nie działa: to nie jest awaria.
+  if (!restarting && !info.toolsOk) {
+    list.push(banner('err', 'Brakuje narzędzi, więc kanał nie nadaje.', repairButton()));
+  } else if (!restarting && !info.channelRunning) {
+    const why = info.channelError ? ` Powód: ${info.channelError}` : '';
+    list.push(banner('err', `Kanał nie wystartował, choć narzędzia są pobrane — mogą być uszkodzone.${why}`,
+      el('button', { type: 'button', disabled: toolsJobRunning, onclick: restartChannel }, 'Uruchom ponownie kanał'),
+      repairButton()));
   }
   if (info.restartRequired) {
     list.push(banner('', 'Część zmian zadziała dopiero po ponownym uruchomieniu kanału. Film na antenie zostanie wtedy przerwany.',
@@ -116,10 +124,13 @@ async function restartChannel(e) {
   const button = e.currentTarget;
   button.disabled = true;
   button.textContent = 'Uruchamiam ponownie…';
+  restartInProgress = true;
   try {
     await api('POST', '/api/desktop/restart');
   } catch (err) {
     if (err.status !== undefined) alert(err.message);
+  } finally {
+    restartInProgress = false;
   }
   await settle();
 }

@@ -41,7 +41,10 @@ Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
 - [ ] Restart po aktualizacji: zainstaluj nowsze wydanie podstawione lokalnie; program uruchamia się ponownie, a stary plik znika.
 - [ ] Kliknięcia w linki: zewnętrzne linki w panelu otwierają się w domyślnej przeglądarce, okno zostaje przy programie.
 - [ ] Pozycje menu zasobnika: otwórz panel, kopiuj link, pomiń, zakończ; dwuklik w ikonę.
-- [ ] Dymek przy zamknięciu do zasobnika: zamknięcie okna chowa je i pokazuje komunikat raz; drugie uruchomienie przywraca okno.
+- [ ] Dymek przy zamknięciu do zasobnika: zamknięcie okna chowa je i pokazuje komunikat raz.
+- [ ] Drugie uruchomienie: przy działającym programie (okno schowane do zasobnika albo zminimalizowane) uruchom `VRCinema.exe` jeszcze raz; istniejące okno wraca na wierzch i nie startuje druga kopia (także po **Zakończ**: nowe uruchomienie startuje normalnie w ciągu kilku sekund).
+- [ ] Panel zdalny: w **Ustawieniach** ustaw hasło i włącz panel zdalny (z dostępem z sieci albo adresem publicznym); zaloguj się z innego urządzenia (np. telefonu) pod `/admin`; złe hasło jest odrzucane; wyłączenie panelu albo zmiana hasła wylogowuje to urządzenie.
+- [ ] Pasek naprawy: przy uszkodzonych narzędziach (np. zamień `tools\ffmpeg.exe` w folderze danych na pusty plik i uruchom program ponownie) panel pokazuje „Kanał nie wystartował…” z przyciskami **Uruchom ponownie kanał** i **Napraw narzędzia**; naprawa przywraca kanał.
 
 ## Wymagania
 
