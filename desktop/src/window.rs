@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use tauri::webview::NewWindowResponse;
 use tauri::{
     AppHandle, DragDropEvent, Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -18,6 +19,48 @@ const PORT_CHECK: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HIDDEN_TITLE: &str = "VRCinema";
 const HIDDEN_TEXT: &str = "VRCinema działa w tle — kanał nadal nadaje.";
+
+/// Where an address opened from the panel goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkPolicy {
+    /// The app's own server (`http://127.0.0.1`, any port: the port may change): in the window.
+    InApp,
+    /// Any other http(s) address — `localhost` too, whose cookies are not the window's
+    /// session: the default browser.
+    Browser,
+    /// Everything else (`file:`, `data:`, `javascript:`, `about:`…): nowhere.
+    Block,
+}
+
+pub fn link_policy(url: &Url) -> LinkPolicy {
+    match url.scheme() {
+        "http" if url.host_str() == Some("127.0.0.1") => LinkPolicy::InApp,
+        "http" | "https" => LinkPolicy::Browser,
+        _ => LinkPolicy::Block,
+    }
+}
+
+/// Top-level navigation of the window: only the app's own server; other web addresses go to
+/// the browser instead.
+fn allow_navigation(url: &Url) -> bool {
+    match link_policy(url) {
+        LinkPolicy::InApp => true,
+        LinkPolicy::Browser => {
+            crate::open_in_browser(url.as_str());
+            false
+        }
+        LinkPolicy::Block => false,
+    }
+}
+
+/// `target="_blank"` and `window.open`: never a second app window; web addresses (the
+/// app's own pages included) open in the browser.
+fn new_window(url: Url) -> NewWindowResponse<tauri::Wry> {
+    if link_policy(&url) != LinkPolicy::Block {
+        crate::open_in_browser(url.as_str());
+    }
+    NewWindowResponse::Deny
+}
 
 /// `http://127.0.0.1:<port>/desktop-login?key=<key>`
 pub fn login_url(port: u16, key: &str) -> Url {
@@ -100,6 +143,8 @@ fn create(app: &AppHandle, url: Url) -> tauri::Result<()> {
         .inner_size(1100.0, 800.0)
         .min_inner_size(480.0, 600.0)
         .center()
+        .on_navigation(allow_navigation)
+        .on_new_window(|url, _features| new_window(url))
         // The WebView2 profile stays with the rest of the app's data.
         .data_directory(app.state::<Shell>().home.join(WEBVIEW_DIR))
         .build()?;
@@ -211,6 +256,45 @@ pub fn spawn_port_follow(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy(url: &str) -> LinkPolicy {
+        link_policy(&Url::parse(url).unwrap())
+    }
+
+    #[test]
+    fn the_apps_own_server_stays_in_the_window_on_any_port() {
+        assert_eq!(policy("http://127.0.0.1:8080/admin"), LinkPolicy::InApp);
+        assert_eq!(policy("http://127.0.0.1:8181/"), LinkPolicy::InApp);
+        assert_eq!(
+            policy("http://127.0.0.1:9000/desktop-login?key=x"),
+            LinkPolicy::InApp
+        );
+    }
+
+    #[test]
+    fn other_web_addresses_open_in_the_browser() {
+        assert_eq!(policy("https://evil.example/"), LinkPolicy::Browser);
+        assert_eq!(
+            policy("https://tv.example.com/live/main.m3u8"),
+            LinkPolicy::Browser
+        );
+        assert_eq!(policy("https://127.0.0.1:8080/"), LinkPolicy::Browser);
+        assert_eq!(policy("http://localhost:8080/admin"), LinkPolicy::Browser);
+        assert_eq!(policy("http://127.0.0.2:8080/"), LinkPolicy::Browser);
+        assert_eq!(
+            policy("http://127.0.0.1.evil.example/"),
+            LinkPolicy::Browser
+        );
+    }
+
+    #[test]
+    fn non_web_addresses_are_blocked() {
+        assert_eq!(policy("file:///C:/Windows/win.ini"), LinkPolicy::Block);
+        assert_eq!(policy("data:text/html,hi"), LinkPolicy::Block);
+        assert_eq!(policy("javascript:alert(1)"), LinkPolicy::Block);
+        assert_eq!(policy("about:blank"), LinkPolicy::Block);
+        assert_eq!(policy("ms-settings:privacy"), LinkPolicy::Block);
+    }
 
     #[test]
     fn login_url_points_at_the_local_server_with_the_key() {

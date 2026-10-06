@@ -139,6 +139,12 @@ pub fn quit(app: &AppHandle, relaunch: Option<PathBuf>) {
 fn start_updated(exe: &Path) {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg(ARG_AFTER_UPDATE);
+    spawn_outside_job(cmd);
+}
+
+/// Starts `cmd` outside this program's job object when possible (it must outlive us: the
+/// updated program, a browser started for a link), else as a plain child.
+fn spawn_outside_job(mut cmd: std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -150,6 +156,13 @@ fn start_updated(exe: &Path) {
         cmd.creation_flags(0);
     }
     let _ = cmd.spawn();
+}
+
+/// Opens an http(s) address in the user's default browser.
+pub fn open_in_browser(url: &str) {
+    let mut cmd = std::process::Command::new("rundll32");
+    cmd.args(["url.dll,FileProtocolHandler", url]);
+    spawn_outside_job(cmd);
 }
 
 fn message_box(text: &str, buttons: rfd::MessageButtons) -> rfd::MessageDialogResult {
@@ -173,9 +186,7 @@ fn webview2_missing() {
          Otworzyć teraz stronę pobierania?"
     );
     if message_box(&text, rfd::MessageButtons::YesNo) == rfd::MessageDialogResult::Yes {
-        let _ = std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", WEBVIEW2_URL])
-            .spawn();
+        open_in_browser(WEBVIEW2_URL);
     }
 }
 
