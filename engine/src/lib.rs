@@ -11,6 +11,7 @@ pub mod pipeline;
 pub mod process;
 pub mod resolver;
 pub mod rules;
+pub mod self_update;
 pub mod server;
 pub mod setup;
 pub mod tools;
