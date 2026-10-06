@@ -23,27 +23,45 @@ const HIDDEN_TEXT: &str = "VRCinema działa w tle — kanał nadal nadaje.";
 /// Where an address opened from the panel goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkPolicy {
-    /// The app's own server (`http://127.0.0.1`, any port: the port may change): in the window.
+    /// The app's own server (`http://127.0.0.1` on its port, or on the port the window is
+    /// moving to after a port change): in the window.
     InApp,
-    /// Any other http(s) address — `localhost` too, whose cookies are not the window's
-    /// session: the default browser.
+    /// Any other http(s) address — `localhost` and other local ports too, whose cookies are
+    /// not the window's session: the default browser.
     Browser,
     /// Everything else (`file:`, `data:`, `javascript:`, `about:`…): nowhere.
     Block,
 }
 
-pub fn link_policy(url: &Url) -> LinkPolicy {
+pub fn link_policy(url: &Url, app_ports: &[u16]) -> LinkPolicy {
+    let own_port = url
+        .port_or_known_default()
+        .is_some_and(|p| app_ports.contains(&p));
     match url.scheme() {
-        "http" if url.host_str() == Some("127.0.0.1") => LinkPolicy::InApp,
+        "http" if url.host_str() == Some("127.0.0.1") && own_port => LinkPolicy::InApp,
         "http" | "https" => LinkPolicy::Browser,
         _ => LinkPolicy::Block,
     }
 }
 
+/// The ports of the app's own server: the engine's and the one the window was last sent to
+/// (they differ while the window follows a port change).
+fn app_ports(app: &AppHandle) -> Vec<u16> {
+    let shell = app.state::<Shell>();
+    let mut ports = Vec::with_capacity(2);
+    if let Some(port) = shell.with_engine(|e| e.port()) {
+        ports.push(port);
+    }
+    if let Some(port) = *shell.window_port() {
+        ports.push(port);
+    }
+    ports
+}
+
 /// Top-level navigation of the window: only the app's own server; other web addresses go to
 /// the browser instead.
-fn allow_navigation(url: &Url) -> bool {
-    match link_policy(url) {
+fn allow_navigation(app: &AppHandle, url: &Url) -> bool {
+    match link_policy(url, &app_ports(app)) {
         LinkPolicy::InApp => true,
         LinkPolicy::Browser => {
             crate::open_in_browser(url.as_str());
@@ -55,8 +73,8 @@ fn allow_navigation(url: &Url) -> bool {
 
 /// `target="_blank"` and `window.open`: never a second app window; web addresses (the
 /// app's own pages included) open in the browser.
-fn new_window(url: Url) -> NewWindowResponse<tauri::Wry> {
-    if link_policy(&url) != LinkPolicy::Block {
+fn new_window(app: &AppHandle, url: Url) -> NewWindowResponse<tauri::Wry> {
+    if link_policy(&url, &app_ports(app)) != LinkPolicy::Block {
         crate::open_in_browser(url.as_str());
     }
     NewWindowResponse::Deny
@@ -138,13 +156,15 @@ pub fn open_panel(app: &AppHandle) {
 }
 
 fn create(app: &AppHandle, url: Url) -> tauri::Result<()> {
+    let nav_app = app.clone();
+    let new_window_app = app.clone();
     let window = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(url))
         .title("VRCinema")
         .inner_size(1100.0, 800.0)
         .min_inner_size(480.0, 600.0)
         .center()
-        .on_navigation(allow_navigation)
-        .on_new_window(|url, _features| new_window(url))
+        .on_navigation(move |url| allow_navigation(&nav_app, url))
+        .on_new_window(move |url, _features| new_window(&new_window_app, url))
         // The WebView2 profile stays with the rest of the app's data.
         .data_directory(app.state::<Shell>().home.join(WEBVIEW_DIR))
         .build()?;
@@ -257,17 +277,38 @@ pub fn spawn_port_follow(app: AppHandle) {
 mod tests {
     use super::*;
 
+    /// The app's server listens on 8181 (and the window is moving to 9000 in one test).
     fn policy(url: &str) -> LinkPolicy {
-        link_policy(&Url::parse(url).unwrap())
+        link_policy(&Url::parse(url).unwrap(), &[8181])
     }
 
     #[test]
-    fn the_apps_own_server_stays_in_the_window_on_any_port() {
-        assert_eq!(policy("http://127.0.0.1:8080/admin"), LinkPolicy::InApp);
+    fn the_apps_own_server_stays_in_the_window() {
+        assert_eq!(policy("http://127.0.0.1:8181/admin"), LinkPolicy::InApp);
         assert_eq!(policy("http://127.0.0.1:8181/"), LinkPolicy::InApp);
+        // During a port change: the port the window is following, too.
+        assert_eq!(
+            link_policy(
+                &Url::parse("http://127.0.0.1:9000/desktop-login?key=x").unwrap(),
+                &[8181, 9000]
+            ),
+            LinkPolicy::InApp
+        );
+    }
+
+    #[test]
+    fn other_local_ports_open_in_the_browser() {
+        // Another program's local server: not the window's session, not the window's content.
+        assert_eq!(policy("http://127.0.0.1:8080/admin"), LinkPolicy::Browser);
         assert_eq!(
             policy("http://127.0.0.1:9000/desktop-login?key=x"),
-            LinkPolicy::InApp
+            LinkPolicy::Browser
+        );
+        assert_eq!(policy("http://127.0.0.1/"), LinkPolicy::Browser);
+        // Nothing known yet (quitting): nothing local stays in the window.
+        assert_eq!(
+            link_policy(&Url::parse("http://127.0.0.1:8181/").unwrap(), &[]),
+            LinkPolicy::Browser
         );
     }
 

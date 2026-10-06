@@ -9,6 +9,7 @@ mod window;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use vrcinema::app::{AppEngine, AppOptions};
 use semver::Version;
@@ -22,6 +23,10 @@ const ARG_AFTER_UPDATE: &str = "--after-update";
 const UPDATE_API_ENV: &str = "VRCINEMA_UPDATE_API_URL";
 /// How many times to wait for the old program to go away after an update (each wait ~5 s).
 const AFTER_UPDATE_WAITS: usize = 4;
+/// Longest wait for the engine when quitting (a folder drop in progress, a restart).
+const QUIT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Extra time for the window shell to end before the process is ended outright.
+const QUIT_GRACE: Duration = Duration::from_secs(10);
 
 /// Command line of `VRCinema.exe`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -107,11 +112,32 @@ pub fn quit(app: &AppHandle, relaunch: Option<PathBuf>) {
     if let Some(w) = app.get_webview_window(window::MAIN) {
         let _ = w.hide();
     }
+    // The window is hidden and second launches only poke this process: it must end. Should
+    // the orderly way below get stuck anywhere, this ends it (the job object takes ffmpeg and
+    // yt-dlp along) — after starting the updated program, if that was the point.
+    let started_new = Arc::new(AtomicBool::new(false));
+    {
+        let relaunch = relaunch.clone();
+        let started_new = Arc::clone(&started_new);
+        spawn_watchdog(QUIT_TIMEOUT + QUIT_GRACE, move || {
+            if let Some(exe) = relaunch
+                && !started_new.swap(true, Ordering::SeqCst)
+            {
+                start_updated(&exe);
+            }
+            std::process::exit(0);
+        });
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let engine = app.state::<Shell>().engine.write().await.take();
-        if let Some(engine) = engine {
-            engine.shutdown().await;
+        let shell = app.state::<Shell>();
+        let stopped = stop_engine(&shell.engine, QUIT_TIMEOUT, |engine, left| {
+            engine.shutdown_within(left)
+        })
+        .await;
+        if !stopped {
+            // The log is closed with the engine (or the engine is still busy): stderr only.
+            eprintln!("VRCinema: zatrzymywanie trwało za długo — kończę bez czekania.");
         }
         match relaunch {
             Some(exe) => {
@@ -121,7 +147,9 @@ pub fn quit(app: &AppHandle, relaunch: Option<PathBuf>) {
                     // program does not find this one "already running". `process::exit` skips
                     // the Exit event, which would release it a second time.
                     tauri_plugin_single_instance::destroy(&handle);
-                    start_updated(&exe);
+                    if !started_new.swap(true, Ordering::SeqCst) {
+                        start_updated(&exe);
+                    }
                     handle.cleanup_before_exit();
                     std::process::exit(0);
                 });
@@ -188,6 +216,46 @@ fn webview2_missing() {
     if message_box(&text, rfd::MessageButtons::YesNo) == rfd::MessageDialogResult::Yes {
         open_in_browser(WEBVIEW2_URL);
     }
+}
+
+/// Takes the engine out of `slot` and stops it with `stop(engine, time left)`, all within
+/// `limit`. False when it gave up (the slot stayed locked, e.g. by a long folder drop, or the
+/// engine did not stop in time): the program then ends anyway.
+pub async fn stop_engine<E, F, Fut>(
+    slot: &tokio::sync::RwLock<Option<E>>,
+    limit: Duration,
+    stop: F,
+) -> bool
+where
+    F: FnOnce(E, Duration) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + limit;
+    let Ok(mut guard) = tokio::time::timeout_at(deadline, slot.write()).await else {
+        return false;
+    };
+    let Some(engine) = guard.take() else {
+        return true;
+    };
+    drop(guard);
+    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+    tokio::time::timeout_at(deadline, stop(engine, left))
+        .await
+        .unwrap_or(false)
+}
+
+/// Runs `on_expire` after `after` on its own thread, unless the process ended before.
+fn spawn_watchdog(after: Duration, on_expire: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        on_expire();
+    });
+}
+
+/// Removes `VRCinema.old.exe` left by an update, in the background (it may take a while for the
+/// old program to go away).
+fn spawn_update_cleanup(exe: PathBuf) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || finish_update(&exe))
 }
 
 /// After an update: waits until the old program is gone (its renamed file can be deleted
@@ -269,10 +337,10 @@ fn start(
 fn main() {
     let args = Args::parse(std::env::args().skip(1));
     let exe = std::env::current_exe().ok();
-    if args.after_update
-        && let Some(exe) = &exe
-    {
-        finish_update(exe);
+    // Also on a normal start: a previous cleanup may have failed (the old program was still
+    // running then). Never delays the start.
+    if let Some(exe) = &exe {
+        spawn_update_cleanup(exe.clone());
     }
     if tauri::webview_version().is_err() {
         webview2_missing();
@@ -365,6 +433,95 @@ mod tests {
             }
         );
         assert_eq!(Args::parse(["--AUTOSTART", "autostart"]), Args::default());
+    }
+
+    /// A folder drop holds the engine (read lock) for as long as it takes: quitting must not
+    /// wait for it without end.
+    #[test]
+    fn quitting_gives_up_on_an_engine_held_by_a_long_drop() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let slot = Arc::new(tokio::sync::RwLock::new(Some("engine")));
+            let held = Arc::clone(&slot).read_owned().await;
+            let started = std::time::Instant::now();
+            let stopped = tokio::time::timeout(
+                Duration::from_secs(5),
+                stop_engine(&slot, Duration::from_millis(300), |_, _| async { true }),
+            )
+            .await
+            .expect("quitting waited for the drop");
+            assert!(!stopped);
+            assert!(started.elapsed() < Duration::from_secs(2));
+            drop(held);
+        });
+    }
+
+    #[test]
+    fn quitting_gives_up_on_an_engine_that_does_not_stop() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let slot = tokio::sync::RwLock::new(Some("engine"));
+            let stopped = tokio::time::timeout(
+                Duration::from_secs(5),
+                stop_engine(&slot, Duration::from_millis(300), |_, _| {
+                    std::future::pending::<bool>()
+                }),
+            )
+            .await
+            .expect("quitting waited for the engine");
+            assert!(!stopped);
+            assert!(slot.read().await.is_none(), "the engine was taken out");
+        });
+    }
+
+    #[test]
+    fn quitting_stops_the_engine_with_the_time_left() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let slot = tokio::sync::RwLock::new(Some("engine"));
+            let mut given = None;
+            let stopped = stop_engine(&slot, Duration::from_secs(20), |e, left| {
+                given = Some((e, left));
+                async { true }
+            })
+            .await;
+            assert!(stopped);
+            let (engine, left) = given.unwrap();
+            assert_eq!(engine, "engine");
+            assert!(left <= Duration::from_secs(20) && left > Duration::from_secs(19));
+        });
+    }
+
+    #[test]
+    fn the_watchdog_fires_after_its_delay() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        spawn_watchdog(Duration::from_millis(200), move || {
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the watchdog did not fire");
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    #[test]
+    fn a_leftover_old_program_is_removed_on_any_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("VRCinema.exe");
+        std::fs::write(&exe, b"new").unwrap();
+        std::fs::write(tmp.path().join("VRCinema.old.exe"), b"old").unwrap();
+        spawn_update_cleanup(exe.clone()).join().unwrap();
+        assert!(!tmp.path().join("VRCinema.old.exe").exists());
+        assert!(exe.exists());
     }
 
     #[test]

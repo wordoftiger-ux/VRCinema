@@ -2754,6 +2754,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-single-instance",
+ "tempfile",
  "tokio",
  "windows-sys 0.61.2",
 ]
