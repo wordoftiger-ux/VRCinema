@@ -76,6 +76,40 @@ pub fn contain_this_process() -> io::Result<()> {
     Ok(())
 }
 
+/// The job of one process started by [`spawn_in_own_job`]: dropping it (or this program
+/// ending, which closes the handle) kills that process.
+pub struct OwnJob {
+    #[cfg(windows)]
+    handle: usize,
+}
+
+impl Drop for OwnJob {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        job::close(self.handle);
+    }
+}
+
+/// Spawns `cmd` (built with [`command`]) in a job of its own instead of the program-wide one,
+/// for a program that starts processes which must outlive it and us — `cloudflared tunnel
+/// login` opens the owner's browser, which must never die with this program. Windows: the
+/// child is started outside the program-wide job (`CREATE_BREAKAWAY_FROM_JOB`, which that job
+/// allows) and put alone into a new job with `KILL_ON_JOB_CLOSE` (it dies with the returned
+/// [`OwnJob`] or with this program) and `SILENT_BREAKAWAY_OK` (whatever it starts is in no job
+/// of ours). Elsewhere: a plain spawn (`kill_on_drop`).
+pub fn spawn_in_own_job(cmd: &mut Command) -> io::Result<(Child, OwnJob)> {
+    #[cfg(windows)]
+    return job::spawn_own(cmd);
+    #[cfg(not(windows))]
+    Ok((cmd.spawn()?, OwnJob {}))
+}
+
+/// Tests: whether process `pid` is in the program-wide job (`None`: cannot tell).
+#[cfg(all(test, windows))]
+pub(crate) fn in_program_job(pid: u32) -> Option<bool> {
+    job::contains(pid)
+}
+
 /// Attaches an already spawned child to the program-wide job object (Windows,
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). Best effort; a no-op on other platforms.
 pub fn assign_to_job(child: &Child) {
@@ -91,12 +125,13 @@ mod job {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use tokio::process::Child;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use tokio::process::{Child, Command};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -132,7 +167,15 @@ mod job {
     }
 
     fn create() -> Option<usize> {
-        // SAFETY: plain Win32 calls with valid arguments; `info` outlives the call.
+        // Members die with the job; only a process started with CREATE_BREAKAWAY_FROM_JOB
+        // (the updated desktop app, the login's cloudflared) may leave it.
+        create_with(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+    }
+
+    /// A new job with these limit flags.
+    fn create_with(flags: u32) -> Option<usize> {
+        // SAFETY: plain Win32 calls with valid arguments; `info` outlives the call; a handle
+        // that cannot be set up is closed once.
         unsafe {
             let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if handle.is_null() {
@@ -143,10 +186,7 @@ mod job {
                 return None;
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            // Members die with the job; only a process started with CREATE_BREAKAWAY_FROM_JOB
-            // (the updated desktop app) may leave it.
-            info.BasicLimitInformation.LimitFlags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            info.BasicLimitInformation.LimitFlags = flags;
             let ok = SetInformationJobObject(
                 handle,
                 JobObjectExtendedLimitInformation,
@@ -158,9 +198,54 @@ mod job {
                     "job object: SetInformationJobObject failed: {}",
                     Error::last_os_error()
                 );
+                CloseHandle(handle);
                 return None;
             }
             Some(handle as usize)
+        }
+    }
+
+    /// See [`super::spawn_in_own_job`].
+    pub fn spawn_own(cmd: &mut Command) -> std::io::Result<(Child, super::OwnJob)> {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        // Out of the program-wide job (which allows that), so its own children are born
+        // outside every job of ours.
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            // This process sits in a job (not ours) that allows no breakaway: start it inside.
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                cmd.spawn()?
+            }
+            Err(e) => return Err(e),
+        };
+        // Killed when the job closes; whatever it starts is silently left out of the job.
+        let handle =
+            create_with(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)
+                .unwrap_or(0);
+        if handle != 0
+            && let Some(process) = child.raw_handle()
+        {
+            // SAFETY: both handles are valid for the duration of the call.
+            if unsafe { AssignProcessToJobObject(handle as HANDLE, process as HANDLE) } == 0 {
+                eprintln!(
+                    "job object: AssignProcessToJobObject failed: {}",
+                    Error::last_os_error()
+                );
+            }
+        }
+        // Without its own job it still dies with its handle (`kill_on_drop`).
+        Ok((child, super::OwnJob { handle }))
+    }
+
+    /// Closes a job made by [`spawn_own`] (its process dies with it).
+    pub fn close(handle: usize) {
+        if handle != 0 {
+            // SAFETY: the handle came from CreateJobObjectW and is closed once.
+            unsafe { CloseHandle(handle as HANDLE) };
         }
     }
 
@@ -183,6 +268,31 @@ mod job {
                 std::ptr::null_mut(),
             );
             (ok != 0).then_some(info.BasicLimitInformation.LimitFlags)
+        }
+    }
+
+    /// Whether process `pid` is in the program-wide job (`None`: cannot tell).
+    #[cfg(test)]
+    pub fn contains(pid: u32) -> Option<bool> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let job = job();
+        if job == 0 {
+            return None;
+        }
+        // SAFETY: plain Win32 calls; the process handle is closed once.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let mut result = 0;
+            let ok = IsProcessInJob(process, job as HANDLE, &mut result);
+            CloseHandle(process);
+            (ok != 0).then_some(result != 0)
         }
     }
 
@@ -395,6 +505,31 @@ mod tests {
         assert_ne!(flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, 0);
         assert_ne!(flags & JOB_OBJECT_LIMIT_BREAKAWAY_OK, 0);
         assert_eq!(flags & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, 0);
+    }
+
+    /// A process in a job of its own dies when that job is dropped (its handle is still held
+    /// here, so nothing else killed it).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn closing_its_own_job_kills_the_process() {
+        let (cmd, args) = sleeper();
+        let mut command = command(&cmd);
+        command.args(&args);
+        let (mut child, job) = spawn_in_own_job(&mut command).unwrap();
+        let pid = child.id().unwrap();
+        assert_eq!(in_program_job(pid), Some(false), "not in the program's job");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), child.wait())
+                .await
+                .is_err(),
+            "still running"
+        );
+        drop(job);
+        // The sleeper runs 60 s; the job's close ends it at once (exit code 0: the job's).
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("the job's close killed it")
+            .unwrap();
     }
 
     #[test]

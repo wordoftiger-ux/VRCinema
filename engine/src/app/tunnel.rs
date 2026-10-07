@@ -16,8 +16,8 @@ use crate::live::{PublicAccess, apply_tunnel, tunnel_address};
 use crate::pipeline::slates::SlateAddress;
 use crate::tools::Tool;
 use crate::tunnel::named::{
-    self, CERT_FILE, ErrorCode, NO_CLOUDFLARED, NamedError, NamedPaths, Operation, Progress, Step,
-    default_user_dir, is_tunnel_id,
+    self, CERT_FILE, CertSource, ErrorCode, LoginEvent, NO_CLOUDFLARED, NamedError, NamedPaths,
+    Operation, Progress, Step, default_user_dir, is_tunnel_id,
 };
 use crate::tunnel::{NamedTunnel, TunnelConfig, TunnelMode, TunnelState};
 
@@ -26,6 +26,7 @@ pub(crate) const TUNNEL_DIR: &str = "tunnel";
 
 const MISSING: &str = NO_CLOUDFLARED;
 const LOGGED_IN: &str = "Połączono z Cloudflare. Teraz wpisz adres stałego linku.";
+const LOGGED_IN_BEFORE: &str = "Połączono z Cloudflare przez wcześniejsze logowanie programu cloudflared na tym komputerze: obowiązują konto i domena wybrane wtedy. Teraz wpisz adres stałego linku w tej domenie. (Aby użyć innego konta, usuń certyfikat z folderu .cloudflared w swoim profilu i połącz się ponownie.)";
 const BACK_TO_QUICK: &str = "Działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Pliki stałego linku zostały — możesz do niego wrócić.";
 const UPDATING: &str = "Trwa aktualizacja programu cloudflared — tunel wróci za chwilę.";
 const NAMED_FALLBACK: &str = "Brak plików stałego linku — działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Ustaw stały link ponownie.";
@@ -333,14 +334,20 @@ impl AppCore {
         let task = tokio::spawn(async move {
             let log = core.log.log_fn();
             let named = &core.named;
-            let on_url = |url: String| {
-                named.set_login_url(url);
-                named.step(Step::WaitingForBrowser, Step::WaitingForBrowser.message(""));
+            let on_event = |event: LoginEvent| match event {
+                LoginEvent::Url(url) => {
+                    named.set_login_url(url);
+                    named.step(Step::WaitingForBrowser, Step::WaitingForBrowser.message(""));
+                }
+                LoginEvent::BrowserOpened(opened) => named.set_browser_opened(opened),
             };
             let timeout = core.options.named_tunnel.login_timeout;
-            let result = named::login(&paths, timeout, cancelled, on_url, &log)
+            let result = named::login(&paths, timeout, cancelled, on_event, &log)
                 .await
-                .map(|_| LOGGED_IN.to_string());
+                .map(|source| match source {
+                    CertSource::Moved => LOGGED_IN.to_string(),
+                    CertSource::Copied => LOGGED_IN_BEFORE.to_string(),
+                });
             named.finish(&result);
             drop(busy);
         });

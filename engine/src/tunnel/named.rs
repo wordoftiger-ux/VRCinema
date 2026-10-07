@@ -9,6 +9,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -236,6 +237,9 @@ pub struct Progress {
     pub code: Option<ErrorCode>,
     /// The Cloudflare login page while the login waits for the owner (the window opens it).
     pub login_url: Option<String>,
+    /// cloudflared says it opened the browser itself (`Some(false)`: the window should open
+    /// `login_url`); `None` until it says either.
+    pub browser_opened: Option<bool>,
 }
 
 /// One operation of the permanent link at a time, its progress and the login's cancel.
@@ -244,11 +248,24 @@ pub struct NamedSetup {
     busy: Arc<tokio::sync::Mutex<()>>,
     progress: Mutex<Progress>,
     cancel: Mutex<Option<oneshot::Sender<()>>>,
+    /// The lock is held by a tools job replacing cloudflared.
+    tools: Arc<AtomicBool>,
 }
 
 /// Held while an operation runs; others are refused meanwhile.
 pub struct Busy {
     _guard: OwnedMutexGuard<()>,
+    /// Set while a tools job holds it.
+    tools: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        // Before the lock goes: whoever gets it next never sees a stale flag.
+        if let Some(tools) = &self.tools {
+            tools.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -258,15 +275,23 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl NamedSetup {
     /// Starts `operation` (progress `running`), or [`ErrorCode::Busy`] while another runs.
     pub fn begin(&self, operation: Operation) -> Result<Busy, NamedError> {
-        let guard = Arc::clone(&self.busy)
-            .try_lock_owned()
-            .map_err(|_| NamedError::new(ErrorCode::Busy, BUSY))?;
+        let guard = Arc::clone(&self.busy).try_lock_owned().map_err(|_| {
+            let why = if self.tools.load(Ordering::SeqCst) {
+                TOOLS_BUSY
+            } else {
+                BUSY
+            };
+            NamedError::new(ErrorCode::Busy, why)
+        })?;
         *lock(&self.progress) = Progress {
             operation: Some(operation),
             phase: Phase::Running,
             ..Progress::default()
         };
-        Ok(Busy { _guard: guard })
+        Ok(Busy {
+            _guard: guard,
+            tools: None,
+        })
     }
 
     pub fn progress(&self) -> Progress {
@@ -278,6 +303,21 @@ impl NamedSetup {
         let mut progress = lock(&self.progress);
         progress.step = Some(step);
         progress.message = Some(message.into());
+    }
+
+    pub fn set_browser_opened(&self, opened: bool) {
+        lock(&self.progress).browser_opened = Some(opened);
+    }
+
+    /// Held by a tools job that replaces cloudflared (update, repair): the wizard's operations
+    /// are refused meanwhile, with a message saying why. `None` while an operation runs.
+    pub fn hold_for_tools(&self) -> Option<Busy> {
+        let guard = Arc::clone(&self.busy).try_lock_owned().ok()?;
+        self.tools.store(true, Ordering::SeqCst);
+        Some(Busy {
+            _guard: guard,
+            tools: Some(Arc::clone(&self.tools)),
+        })
     }
 
     pub fn set_login_url(&self, url: String) {
@@ -302,6 +342,7 @@ impl NamedSetup {
         let mut progress = lock(&self.progress);
         progress.step = None;
         progress.login_url = None;
+        progress.browser_opened = None;
         match result {
             Ok(message) => {
                 progress.phase = Phase::Done;
@@ -331,21 +372,35 @@ pub enum CertSource {
     Copied,
 }
 
-/// `cloudflared tunnel login`: reports the login page through `on_url` as soon as cloudflared
-/// prints it, waits (at most `timeout`, or until `cancel` fires or is dropped) for the
-/// certificate, then puts it into `<home>/tunnel/cert.pem`.
+/// What `tunnel login` reports while it waits for the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginEvent {
+    /// The Cloudflare login page.
+    Url(String),
+    /// cloudflared opened the browser itself (`false`: it asks to open the page by hand).
+    BrowserOpened(bool),
+}
+
+/// `cloudflared tunnel login`: reports the login page (and whether cloudflared opened the
+/// browser) through `on_event` as soon as cloudflared prints it, waits (at most `timeout`, or
+/// until `cancel` fires or is dropped) for the certificate, then puts it into
+/// `<home>/tunnel/cert.pem`.
 ///
 /// The certificate's rule: cloudflared writes it into its own folder (`user_dir`). A certificate
-/// this login wrote is **moved** (no copy stays behind). One that was already there before the
-/// login belongs to the owner — cloudflared then refuses to log in again and ends at once — so
-/// it is **copied** and the owner's file is left alone.
+/// this login wrote is **moved** (no copy stays behind) — also when a cancel or the time limit
+/// came just after cloudflared wrote it, so it never passes for the owner's own next time. One
+/// that was already there before the login belongs to the owner — cloudflared then refuses to
+/// log in again and ends at once — so it is **copied** and the owner's file is left alone.
+///
+/// cloudflared runs in a job of its own ([`crate::process::spawn_in_own_job`]): it dies with
+/// the login (or the app), the browser it opens never does.
 ///
 /// The login page is never logged: it leads to the certificate.
 pub async fn login(
     paths: &NamedPaths,
     timeout: Duration,
     mut cancel: oneshot::Receiver<()>,
-    mut on_url: impl FnMut(String),
+    mut on_event: impl FnMut(LoginEvent),
     log: &SharedLogFn,
 ) -> Result<CertSource, NamedError> {
     check_cloudflared(paths)?;
@@ -357,7 +412,8 @@ pub async fn login(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crate::process::spawn(&mut command).map_err(cannot_start)?;
+    // Dropped on every way out of here: cloudflared dies with it.
+    let (mut child, _job) = crate::process::spawn_in_own_job(&mut command).map_err(cannot_start)?;
     log(&format!(
         "Stały link: logowanie do Cloudflare (cloudflared, pid {}) — czekam na potwierdzenie w przeglądarce.",
         child.id().unwrap_or(0)
@@ -379,11 +435,13 @@ pub async fn login(
             biased;
             _ = &mut cancel => {
                 kill(&mut child).await;
+                keep_late_cert(paths, &user_cert, existed, log);
                 log("Stały link: logowanie do Cloudflare anulowano.");
                 return Err(NamedError::new(ErrorCode::Cancelled, "Logowanie do Cloudflare anulowano."));
             }
             _ = &mut deadline => {
                 kill(&mut child).await;
+                keep_late_cert(paths, &user_cert, existed, log);
                 log(&format!(
                     "Stały link: logowanie do Cloudflare nie zakończyło się w ciągu {}.",
                     human(timeout)
@@ -399,9 +457,12 @@ pub async fn login(
             line = lines.recv(), if open => match line {
                 None => open = false,
                 Some(line) => {
+                    if let Some(opened) = browser_opened_in(&line) {
+                        on_event(LoginEvent::BrowserOpened(opened));
+                    }
                     if !url_seen && let Some(url) = login_url_in(&line) {
                         url_seen = true;
-                        on_url(url);
+                        on_event(LoginEvent::Url(url));
                     }
                     remember(&mut last, &line, true);
                 }
@@ -464,6 +525,40 @@ pub async fn login(
     Ok(source)
 }
 
+/// After a cancel or the time limit: a certificate this login wrote just before is moved into
+/// `<home>/tunnel` like a finished login's (left in cloudflared's folder, it would pass for the
+/// owner's own next time).
+fn keep_late_cert(paths: &NamedPaths, user_cert: &Path, existed: bool, log: &SharedLogFn) {
+    if existed || !non_empty(user_cert) {
+        return;
+    }
+    let target = paths.cert();
+    match move_file(user_cert, &target) {
+        Ok(()) => log(&format!(
+            "Stały link: certyfikat zapisany tuż przed przerwaniem logowania przeniesiony z {} do {}.",
+            user_cert.display(),
+            target.display()
+        )),
+        Err(e) => log(&format!(
+            "Stały link: nie można przenieść certyfikatu z {} do {}: {e}",
+            user_cert.display(),
+            target.display()
+        )),
+    }
+}
+
+/// Whether a line of `tunnel login` says cloudflared opened the browser (`Some(true)`) or asks
+/// to open the page by hand (`Some(false)`).
+fn browser_opened_in(line: &str) -> Option<bool> {
+    if line.contains("A browser window should have opened") {
+        Some(true)
+    } else if line.contains("Please open the following URL") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// `cloudflared tunnel create vrcinema` (an existing `vrcinema` is reused, its credentials fetched
 /// with `tunnel token --cred-file`), the credentials stored as `<home>/tunnel/<id>.json`, then
 /// `tunnel route dns [--overwrite-dns] <id> <hostname>`. Returns the tunnel's id.
@@ -480,9 +575,10 @@ pub async fn create(
 ) -> Result<String, NamedError> {
     check_cloudflared(paths)?;
     let cert = check_cert(paths)?;
-    std::fs::create_dir_all(&paths.dir).map_err(|e| failed(format!("{e}")))?;
+    std::fs::create_dir_all(&paths.dir)
+        .map_err(|e| failed(format!("Nie można utworzyć folderu tunelu: {e}")))?;
     let new = paths.dir.join(NEW_CREDENTIALS);
-    let _ = std::fs::remove_file(&new);
+    let _ = remove_file(&new);
 
     on_step(Step::CreatingTunnel);
     let out = run(
@@ -540,13 +636,13 @@ pub async fn create(
         }
     }
     let Some(id) = credentials_id(&new) else {
-        let _ = std::fs::remove_file(&new);
+        let _ = remove_file(&new);
         return Err(failed(
             "cloudflared nie zapisał poprawnych poświadczeń tunelu. Spróbuj ponownie.",
         ));
     };
     let credentials = paths.credentials(&id);
-    std::fs::rename(&new, &credentials).map_err(|e| {
+    replace_file(&new, &credentials).map_err(|e| {
         failed(format!(
             "Nie można zapisać poświadczeń tunelu w folderze programu: {e}"
         ))
@@ -585,11 +681,11 @@ pub async fn create(
         });
     }
     // A name outside the certificate's domain gets that domain appended by Cloudflare.
-    if let Some(record) = added_cname(&out.text)
+    if let Some(record) = routed_record(&out.text)
         && !record.eq_ignore_ascii_case(hostname)
     {
         log(&format!(
-            "Stały link: {hostname} nie należy do domeny z logowania — Cloudflare utworzył rekord {record}."
+            "Stały link: {hostname} nie należy do domeny z logowania — Cloudflare ustawił rekord {record}."
         ));
         return Err(no_domain(hostname, Some(&record)));
     }
@@ -651,13 +747,15 @@ pub fn remove_files(dir: &Path) -> std::io::Result<()> {
         let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
         let ours = name == CERT_FILE || name.ends_with(".json") || name.ends_with(".tmp");
         if ours && entry.file_type()?.is_file() {
-            std::fs::remove_file(entry.path())?;
+            remove_file(&entry.path())?;
         }
     }
     Ok(())
 }
 
 const BUSY: &str = "Trwa już inna operacja stałego linku — poczekaj, aż się skończy.";
+const TOOLS_BUSY: &str =
+    "Trwa aktualizacja lub naprawa programu cloudflared — spróbuj ponownie, gdy się skończy.";
 /// Credentials of a tunnel whose id is not known yet.
 const NEW_CREDENTIALS: &str = "vrcinema-new.json";
 /// The longest part of cloudflared's output put into a message.
@@ -701,7 +799,7 @@ fn no_domain(hostname: &str, record: Option<&str>) -> NamedError {
     );
     if let Some(record) = record {
         message.push_str(&format!(
-            " Cloudflare utworzył zamiast niego rekord {record} — usuń go w panelu Cloudflare (DNS)."
+            " Cloudflare ustawił zamiast niego rekord {record} — usuń go w panelu Cloudflare (DNS)."
         ));
     }
     NamedError::new(ErrorCode::NoDomain, message)
@@ -872,18 +970,58 @@ fn zone_missing(output: &str) -> bool {
         .any(|p| output.contains(p))
 }
 
-/// The record `route dns` made (`Added CNAME <name> …`).
-fn added_cname(output: &str) -> Option<String> {
-    let (_, rest) = output.split_once("Added CNAME ")?;
-    rest.split_whitespace().next().map(str::to_string)
+/// The record a successful `route dns` names, from any of cloudflared's three summaries
+/// (`DNSRouteResult::SuccessSummary`): `Added CNAME <name> which will route to this tunnel`,
+/// `<name> is already configured to route to your tunnel`, `<name> updated to route to your
+/// tunnel`.
+fn routed_record(output: &str) -> Option<String> {
+    const AFTER: [&str; 2] = [
+        " is already configured to route to your tunnel",
+        " updated to route to your tunnel",
+    ];
+    output.lines().find_map(|line| {
+        if let Some((_, rest)) = line.split_once("Added CNAME ") {
+            return rest.split_whitespace().next().map(str::to_string);
+        }
+        AFTER.iter().find_map(|after| {
+            let (before, _) = line.split_once(after)?;
+            before.split_whitespace().last().map(str::to_string)
+        })
+    })
 }
 
-/// `delete` failed because there is no such tunnel.
+/// Moves `from` over `to`, also when `to` is read-only (cloudflared writes credentials
+/// read-only, so a second attempt meets the first one's file).
+fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    remove_file(to)?;
+    std::fs::rename(from, to)
+}
+
+/// Removes `path`, also when it is read-only; a missing file is fine.
+fn remove_file(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        metadata => metadata?,
+    };
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        #[allow(clippy::permissions_set_readonly_false)] // Windows: clears the attribute only
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// `delete` failed because there is no such tunnel (and not because something else was not
+/// found: then the files stay).
 fn tunnel_missing(output: &str) -> bool {
     let output = output.to_ascii_lowercase();
-    ["neither the id nor the name", "not found", "does not exist"]
-        .iter()
-        .any(|p| output.contains(p))
+    output.contains("neither the id nor the name")
+        || output.contains("tunnel not found")
+        || output.contains(&format!("tunnel {TUNNEL_NAME} not found"))
 }
 
 /// The tunnel id in a credentials file (read for that field only, never shown).
@@ -982,18 +1120,64 @@ mod tests {
         assert!(tunnel_missing(
             "vrcinema is neither the ID nor the name of any of your tunnels"
         ));
+        assert!(tunnel_missing("ERR tunnel vrcinema not found"));
         assert!(!tunnel_missing("Unauthorized"));
-        assert_eq!(
-            added_cname(
-                "2026-10-07T10:00:01Z INF Added CNAME kanal.example.com.inna.pl which will route to this tunnel tunnelID=x"
-            )
-            .as_deref(),
-            Some("kanal.example.com.inna.pl")
-        );
-        assert_eq!(
-            added_cname("INF kanal.example.com is already configured to route to your tunnel"),
-            None
-        );
+        // Something else not found is not a missing tunnel: the files must stay.
+        for other in [
+            "Cannot determine default origin certificate path. No file cert.pem found",
+            "Error: TUNNEL_ORIGIN_CERT not found",
+            "zone not found",
+            "404 Not Found",
+            "the system cannot find the file: credentials do not exist",
+        ] {
+            assert!(!tunnel_missing(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn reads_the_record_from_every_dns_route_summary() {
+        for (line, record) in [
+            (
+                "2026-10-07T10:00:01Z INF Added CNAME kanal.example.com.inna.pl which will route to this tunnel tunnelID=x",
+                "kanal.example.com.inna.pl",
+            ),
+            (
+                "2026-10-07T10:00:01Z INF kanal.example.com.inna.pl is already configured to route to your tunnel tunnelID=x",
+                "kanal.example.com.inna.pl",
+            ),
+            (
+                "2026-10-07T10:00:01Z INF kanal.example.com updated to route to your tunnel tunnelID=x",
+                "kanal.example.com",
+            ),
+        ] {
+            let output = format!("\n{line}\n");
+            assert_eq!(routed_record(&output).as_deref(), Some(record), "{line}");
+        }
+        assert_eq!(routed_record("INF Starting\n"), None);
+    }
+
+    #[test]
+    fn credentials_replace_a_read_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("6ff42ae2-765d-4adf-8112-31c55c1551ef.json");
+        let new = dir.path().join("vrcinema-new.json");
+        for (path, text) in [(&old, "stare"), (&new, "nowe")] {
+            std::fs::write(path, text).unwrap();
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        replace_file(&new, &old).unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "nowe");
+        assert!(!new.exists());
+        // Nothing to replace.
+        std::fs::write(&new, "jeszcze").unwrap();
+        let fresh = dir.path().join("0aa42ae2-765d-4adf-8112-31c55c1551ef.json");
+        replace_file(&new, &fresh).unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "jeszcze");
+        remove_file(&new).unwrap();
+        remove_file(&old).unwrap();
+        assert!(!old.exists());
     }
 
     #[test]
@@ -1022,6 +1206,11 @@ mod tests {
         std::fs::write(dir.path().join(format!("{id}.json")), "{}").unwrap();
         std::fs::write(dir.path().join("vrcinema-new.json"), "{}").unwrap();
         std::fs::write(dir.path().join("notatka.txt"), "x").unwrap();
+        // cloudflared writes credentials read-only.
+        let credentials = dir.path().join(format!("{id}.json"));
+        let mut permissions = std::fs::metadata(&credentials).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&credentials, permissions).unwrap();
         remove_files(dir.path()).unwrap();
         let left: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -1054,6 +1243,10 @@ mod tests {
             p.login_url.as_deref(),
             Some("https://dash.cloudflare.com/x")
         );
+        assert_eq!(p.browser_opened, None);
+        setup.set_browser_opened(true);
+        assert_eq!(setup.progress().browser_opened, Some(true));
+        assert!(setup.hold_for_tools().is_none(), "a login runs");
         let (tx, mut rx) = oneshot::channel();
         setup.set_cancel(tx);
         assert!(setup.cancel_login());
@@ -1065,10 +1258,30 @@ mod tests {
             (p.phase, p.code),
             (Phase::Cancelled, Some(ErrorCode::Cancelled))
         );
-        assert_eq!((p.step, p.login_url), (None, None));
+        assert_eq!((p.step, p.login_url, p.browser_opened), (None, None, None));
         assert!(!setup.cancel_login());
-        let _again = setup.begin(Operation::Create).unwrap();
+        let again = setup.begin(Operation::Create).unwrap();
         assert_eq!(setup.progress().phase, Phase::Running);
         assert_eq!(setup.progress().code, None);
+        drop(again);
+    }
+
+    #[test]
+    fn a_cloudflared_update_and_the_wizard_exclude_each_other() {
+        let setup = NamedSetup::default();
+        let held = setup.hold_for_tools().unwrap();
+        let refused = setup.begin(Operation::Login).err().unwrap();
+        assert_eq!(refused.code, ErrorCode::Busy);
+        assert!(
+            refused.message.contains("cloudflared"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(setup.progress().phase, Phase::Idle, "nothing started");
+        drop(held);
+        let busy = setup.begin(Operation::Login).unwrap();
+        assert!(setup.hold_for_tools().is_none());
+        drop(busy);
+        assert!(setup.hold_for_tools().is_some());
     }
 }

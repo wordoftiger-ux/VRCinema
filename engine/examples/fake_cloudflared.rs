@@ -165,6 +165,16 @@ fn main() {
     let log = dir.join("fake_cloudflared.log");
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // The process a login starts (stands for the browser): lives for the given time.
+    if args.first().map(String::as_str) == Some("--fake-child") {
+        let _lock = exclusive(&dir.join("child.lock"));
+        std::fs::write(dir.join("child.pid"), std::process::id().to_string())
+            .expect("write child.pid");
+        let ms = args.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(ms));
+        return;
+    }
+
     if let Some(command) = management::command_of(&args) {
         append(
             &log,
@@ -248,16 +258,20 @@ fn main() {
 /// Like the real cloudflared, `create`, `token`, `route` and `delete` fail without an existing
 /// `--origincert` file, and output goes to stderr (log lines) and stdout (results).
 ///
-/// - `login`: `url` (printed like cloudflared does), `delay_ms` (the owner in the browser),
-///   `wait_forever`, `cert_dir`, `cert` (contents), `exit_code` + `stderr` (a failure). An
-///   existing non-empty `cert_dir\cert.pem` ends the login at once (the real one refuses to
-///   overwrite it). The process holds `login.lock` exclusively for its whole life.
+/// - `login`: `url` (printed like cloudflared does; `browser`: with the "A browser window should
+///   have opened" wording), `delay_ms` (the owner in the browser), `wait_forever`, `cert_dir`,
+///   `cert` (contents), `wait_after_cert` (keeps running after writing it), `exit_code` +
+///   `stderr` (a failure), `spawn_child_ms` (starts an ordinary child of its own — the browser —
+///   living that long, holding `child.lock`, its PID in `child.pid`). An existing non-empty
+///   `cert_dir\cert.pem` ends the login at once (the real one refuses to overwrite it). The
+///   process holds `login.lock` exclusively for its whole life.
 /// - `create`: `exists` (a tunnel `vrcinema` is already there), `id`, `secret` (written into the
-///   credentials file), `error`.
+///   credentials file, read-only like the real one's), `error`.
 /// - `token`: `id`, `secret` (default: `create`'s), `error`. Without `--cred-file` it prints the
 ///   token (the secret) on stdout, like the real one.
 /// - `route`: `taken` (another DNS record has the name; `--overwrite-dns` replaces it), `zone`
-///   (the certificate's domain: a host outside it gets `<host>.<zone>`), `error`.
+///   (the certificate's domain: a host outside it gets `<host>.<zone>`), `result`
+///   (`"unchanged"` / `"updated"`: the other two success summaries), `error`.
 /// - `delete`: `missing` (no such tunnel), `error`.
 mod management {
     use std::path::{Path, PathBuf};
@@ -298,6 +312,13 @@ mod management {
         cert: Option<String>,
         exit_code: i32,
         stderr: Vec<String>,
+        /// cloudflared opened the browser itself (its message says so).
+        browser: bool,
+        /// Starts a process of its own that lives this long (the browser it opens), holding
+        /// `child.lock` and writing its PID to `child.pid`.
+        spawn_child_ms: Option<u64>,
+        /// Writes the certificate, then keeps running (a cancel that comes too late).
+        wait_after_cert: bool,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -322,6 +343,8 @@ mod management {
     struct Route {
         taken: bool,
         zone: Option<String>,
+        /// `"unchanged"` / `"updated"`: the record already existed (default: added).
+        result: Option<String>,
         error: Option<String>,
     }
 
@@ -374,6 +397,15 @@ mod management {
         .to_string()
     }
 
+    /// Like cloudflared (`os.WriteFile(…, 0400)`): the credentials end up read-only, and an
+    /// existing read-only file cannot be overwritten.
+    fn write_credentials(path: &str, contents: &str) {
+        std::fs::write(path, contents).expect("write the credentials");
+        let mut permissions = std::fs::metadata(path).expect("credentials").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions).expect("make the credentials read-only");
+    }
+
     fn fail(message: &str) -> i32 {
         eprintln!("{message}");
         1
@@ -413,8 +445,7 @@ mod management {
                 let Some(path) = flag(args, "--credentials-file") else {
                     return fail("fake: --credentials-file is required");
                 };
-                std::fs::write(path, credentials(&create_id, &create_secret))
-                    .expect("write the credentials");
+                write_credentials(path, &credentials(&create_id, &create_secret));
                 eprintln!(
                     "2026-10-07T10:00:00Z INF Tunnel credentials written to {path}. cloudflared chose this file based on where your origin certificate was found. Keep this file secret. To revoke these credentials, delete the tunnel."
                 );
@@ -429,8 +460,7 @@ mod management {
                 let secret = script.token.secret.clone().unwrap_or(create_secret);
                 match flag(args, "--cred-file") {
                     Some(path) => {
-                        std::fs::write(path, credentials(&id, &secret))
-                            .expect("write the credentials");
+                        write_credentials(path, &credentials(&id, &secret));
                     }
                     None => print!("token-{secret}"),
                 }
@@ -455,9 +485,15 @@ mod management {
                     }
                     _ => host.to_string(),
                 };
-                eprintln!(
-                    "2026-10-07T10:00:01Z INF Added CNAME {record} which will route to this tunnel tunnelID={tunnel}"
-                );
+                // cloudflared's three success summaries (`DNSRouteResult::SuccessSummary`).
+                let summary = match script.route.result.as_deref() {
+                    Some("unchanged") => {
+                        format!("{record} is already configured to route to your tunnel")
+                    }
+                    Some("updated") => format!("{record} updated to route to your tunnel"),
+                    _ => format!("Added CNAME {record} which will route to this tunnel"),
+                };
+                eprintln!("2026-10-07T10:00:01Z INF {summary} tunnelID={tunnel}");
                 0
             }
             "delete" => {
@@ -477,6 +513,8 @@ mod management {
         }
     }
 
+    // The child it may start (the browser) is never waited for: it outlives the login.
+    #[allow(clippy::zombie_processes)]
     fn login(dir: &Path, login: &Login) -> i32 {
         let _lock = super::exclusive(&dir.join("login.lock"));
         let Some(cert_dir) = &login.cert_dir else {
@@ -491,9 +529,27 @@ mod management {
             return 0;
         }
         if let Some(url) = &login.url {
-            eprintln!(
-                "Please open the following URL and log in with your Cloudflare account:\n\n{url}\n\nLeave cloudflared running to download the cert automatically."
-            );
+            if login.browser {
+                eprintln!(
+                    "A browser window should have opened at the following URL:\n\n{url}\n\nIf the browser failed to open, please visit the URL above directly in your browser."
+                );
+            } else {
+                eprintln!(
+                    "Please open the following URL and log in with your Cloudflare account:\n\n{url}\n\nLeave cloudflared running to download the cert automatically."
+                );
+            }
+        }
+        if let Some(ms) = login.spawn_child_ms {
+            // Like the browser cloudflared opens: an ordinary child, no special flags, never
+            // waited for (it outlives this process).
+            let exe = std::env::current_exe().expect("current_exe");
+            std::process::Command::new(exe)
+                .args(["--fake-child", &ms.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("start the child");
         }
         if login.wait_forever {
             loop {
@@ -510,6 +566,11 @@ mod management {
         std::fs::create_dir_all(cert_dir).expect("create the certificate folder");
         let contents = login.cert.clone().unwrap_or_else(|| "fake-cert".into());
         std::fs::write(&cert, contents).expect("write the certificate");
+        if login.wait_after_cert {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
         println!(
             "You have successfully logged in.\nIf you wish to copy your credentials to a server, they have been saved to:\n{}",
             cert.display()

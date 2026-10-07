@@ -136,6 +136,8 @@ async fn logging_in_shows_the_login_page_and_moves_the_certificate_into_the_app(
     })
     .await;
     assert_eq!(waiting["step"], "waiting_for_browser", "{waiting}");
+    // "Please open the following URL": cloudflared did not open it, the window must.
+    assert_eq!(waiting["browserOpened"], false, "{waiting}");
     assert!(
         waiting["message"]
             .as_str()
@@ -188,6 +190,9 @@ async fn an_owners_existing_cloudflared_certificate_is_copied_and_left_in_place(
     })
     .await;
     assert_eq!(done["state"], "done", "{done}");
+    // The owner learns that an earlier login (its account and domain) is used.
+    let message = done["message"].as_str().unwrap();
+    assert!(message.contains("wcześniejsze logowanie"), "{message}");
     assert_eq!(
         std::fs::read_to_string(tunnel_dir(&app).join("cert.pem")).unwrap(),
         "certyfikat-wlasciciela"
@@ -198,6 +203,202 @@ async fn an_owners_existing_cloudflared_certificate_is_copied_and_left_in_place(
         "the owner's own file stays"
     );
     app.stop().await;
+}
+
+/// The grandchild the fake login starts (stands for the browser cloudflared opens) holds
+/// `child.lock` while it lives.
+fn child_running(home: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    let lock = home.join("tools").join("child.lock");
+    lock.exists()
+        && std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(&lock)
+            .is_err()
+}
+
+/// Review item: the browser cloudflared opens must never be in a job of ours (closing the job
+/// or quitting the app would kill the owner's browser); cloudflared itself dies with the login.
+#[tokio::test]
+async fn the_login_cloudflared_dies_with_the_login_but_the_browser_it_opens_does_not() {
+    let app = start(Setup {
+        commands: json!({"login": {
+            "url": LOGIN_URL,
+            "browser": true,
+            "wait_forever": true,
+            "spawn_child_ms": 6000,
+        }}),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    app.call("POST", LOGIN, Some(&cookie), None).await;
+    let waiting = wait_progress(&app, &cookie, "the login page", |p| {
+        p["loginUrl"] == LOGIN_URL
+    })
+    .await;
+    assert_eq!(waiting["browserOpened"], true, "{waiting}");
+    super::eventually(10, "the browser stand-in", || async {
+        child_running(&app.home)
+    })
+    .await;
+    let pid: u32 = std::fs::read_to_string(app.home.join("tools").join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        crate::process::in_program_job(pid),
+        Some(false),
+        "the browser must not be in the program's job"
+    );
+    let (status, _) = app
+        .call("POST", LOGIN, Some(&cookie), Some(json!({"cancel": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    super::eventually(10, "the login's exit", || async {
+        !login_running(&app.home)
+    })
+    .await;
+    assert!(child_running(&app.home), "the browser stand-in was killed");
+    let home = app.home.clone();
+    // The temporary folder cannot go entirely while the stand-in runs from it.
+    app.stop().await;
+    assert!(child_running(&home), "quitting killed the browser stand-in");
+    // It ends on its own; then what is left of the temporary folder goes.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child_running(&home) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = std::fs::remove_dir_all(home.parent().unwrap());
+}
+
+#[tokio::test]
+async fn quitting_the_app_during_a_login_stops_its_cloudflared() {
+    let app = start(Setup {
+        commands: json!({"login": {"url": LOGIN_URL, "wait_forever": true}}),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    app.call("POST", LOGIN, Some(&cookie), None).await;
+    wait_progress(&app, &cookie, "the login page", |p| {
+        p["loginUrl"] == LOGIN_URL
+    })
+    .await;
+    assert!(login_running(&app.home));
+    let home = app.home.clone();
+    app.stop().await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while login_running(&home) {
+        assert!(
+            Instant::now() < deadline,
+            "the login's cloudflared outlived the app"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A cancel that comes after cloudflared already wrote the certificate: the certificate is not
+/// left in cloudflared's folder (where it would pass for the owner's next time).
+#[tokio::test]
+async fn a_certificate_written_just_before_a_cancel_is_not_left_behind() {
+    let app = start(Setup {
+        commands: json!({"login": {"url": LOGIN_URL, "cert": CERT_SECRET, "wait_after_cert": true}}),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    app.call("POST", LOGIN, Some(&cookie), None).await;
+    let user_cert = user_dir(&app).join("cert.pem");
+    super::eventually(10, "the certificate", || async { user_cert.is_file() }).await;
+    let (status, _) = app
+        .call("POST", LOGIN, Some(&cookie), Some(json!({"cancel": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let cancelled = wait_progress(&app, &cookie, "the cancel", |p| p["state"] != "running").await;
+    assert_eq!(cancelled["state"], "cancelled", "{cancelled}");
+    assert!(!user_cert.exists(), "left in cloudflared's folder");
+    assert_eq!(
+        std::fs::read_to_string(tunnel_dir(&app).join("cert.pem")).unwrap(),
+        CERT_SECRET
+    );
+    assert_eq!(cancelled["loggedIn"], true);
+    app.stop().await;
+}
+
+/// A cloudflared update or repair replaces the program the wizard runs: never both at once.
+#[tokio::test]
+async fn a_cloudflared_update_and_the_wizard_never_run_together() {
+    // During a login: no update or repair of cloudflared.
+    let app = start(Setup {
+        commands: json!({"login": {"url": LOGIN_URL, "wait_forever": true}}),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    app.call("POST", LOGIN, Some(&cookie), None).await;
+    wait_progress(&app, &cookie, "the login page", |p| {
+        p["loginUrl"] == LOGIN_URL
+    })
+    .await;
+    for (path, body) in [
+        (
+            "/api/desktop/tools/update",
+            Some(json!({"tool": "cloudflared"})),
+        ),
+        ("/api/desktop/tools/repair", None),
+    ] {
+        let (status, res) = app.call("POST", path, Some(&cookie), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {res}");
+        assert!(
+            res["error"].as_str().unwrap().contains("stałego linku"),
+            "{path}: {res}"
+        );
+    }
+    app.stop().await;
+
+    // During an update of cloudflared (hanging on a silent server): no wizard operation.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", silent.local_addr().unwrap());
+    let app = App::start_with(|_, o| {
+        o.tool_sources.cloudflared_base = base.clone();
+        o.tool_sources.cloudflared_release_api = format!("{base}/release-api");
+    })
+    .await;
+    let cookie = app.window_cookie().await;
+    let (status, res) = app
+        .call(
+            "POST",
+            "/api/desktop/tools/update",
+            Some(&cookie),
+            Some(json!({"tool": "cloudflared"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{res}");
+    for (path, body) in [
+        (LOGIN, None),
+        (CREATE, Some(json!({"hostname": NAMED_HOST}))),
+        (QUICK, None),
+        (DELETE, None),
+    ] {
+        let (status, res) = app.call("POST", path, Some(&cookie), body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {res}");
+        assert_eq!(res["code"], "busy", "{path}: {res}");
+        assert!(
+            res["error"].as_str().unwrap().contains("cloudflared"),
+            "{path}: {res}"
+        );
+    }
+    assert_eq!(app.get(PROGRESS, &cookie).await["state"], "idle");
+    app.stop().await;
+    drop(silent);
 }
 
 #[tokio::test]
@@ -560,6 +761,34 @@ async fn a_host_outside_the_accounts_domain_asks_for_a_domain() {
     assert!(body["helpUrl"].as_str().unwrap().starts_with("https://"));
     assert_eq!(app.saved()["tunnelMode"], "quick");
     assert_eq!(app.get(PROGRESS, &cookie).await["code"], "no_domain");
+
+    // A retry finds the stray record already there (or updates it): cloudflared succeeds with
+    // another summary, and the host is still not routed. (The retry also replaces the
+    // read-only credentials of the first attempt.)
+    for result in ["unchanged", "updated"] {
+        std::fs::write(
+            app.home
+                .join("tools")
+                .join("fake_cloudflared_commands.json"),
+            json!({"route": {"zone": "moja-domena.pl", "result": result}}).to_string(),
+        )
+        .unwrap();
+        let (status, body) = create(&app, &cookie, json!({"hostname": NAMED_HOST})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{result}: {body}");
+        assert_eq!(body["code"], "no_domain", "{result}: {body}");
+        assert_eq!(app.saved()["tunnelMode"], "quick", "{result}");
+    }
+    // In the domain, an existing record of this tunnel is fine.
+    std::fs::write(
+        app.home
+            .join("tools")
+            .join("fake_cloudflared_commands.json"),
+        json!({"route": {"zone": "example.com", "result": "unchanged"}}).to_string(),
+    )
+    .unwrap();
+    let (status, body) = create(&app, &cookie, json!({"hostname": NAMED_HOST})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(app.saved()["tunnelMode"], "named");
     app.stop().await;
 }
 

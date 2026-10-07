@@ -162,7 +162,6 @@ pub(crate) struct ConfigPatch {
     pub skipped_update_version: Option<Option<String>>,
     pub tunnel_enabled: Option<bool>,
     pub tunnel_mode: Option<TunnelModeSetting>,
-    pub named_tunnel_hostname: Option<Option<String>>,
     pub pause_on_tunnel_loss: Option<bool>,
     pub pause_when_no_viewers: Option<bool>,
 }
@@ -205,9 +204,6 @@ impl ConfigPatch {
         }
         if let Some(v) = self.tunnel_mode {
             s.tunnel_mode = v;
-        }
-        if let Some(v) = self.named_tunnel_hostname {
-            s.named_tunnel_hostname = v;
         }
         if let Some(v) = self.pause_on_tunnel_loss {
             s.pause_on_tunnel_loss = v;
@@ -795,22 +791,38 @@ impl AppCore {
             .is_some_and(|h| !h.is_finished())
     }
 
-    /// Starts a tools job in the background; `false` when one is already running.
-    pub(crate) fn start_tools_job(self: &Arc<Self>, job: ToolsJob) -> bool {
+    /// Starts a tools job in the background; refused (why, in Polish) while one is already
+    /// running, or — for a job that replaces cloudflared — while the permanent-link wizard runs
+    /// cloudflared (which in turn refuses its operations until the job is done).
+    pub(crate) fn start_tools_job(self: &Arc<Self>, job: ToolsJob) -> Result<(), &'static str> {
         let mut slot = lock(&self.tools_job);
         if slot.as_ref().is_some_and(|h| !h.is_finished()) {
-            return false;
+            return Err("Trwa już pobieranie narzędzi.");
         }
+        let wizard_hold = if Self::replaces_cloudflared(job) {
+            Some(self.named.hold_for_tools().ok_or(
+                "Trwa operacja stałego linku (logowanie do Cloudflare lub ustawianie adresu) — spróbuj ponownie, gdy się skończy.",
+            )?)
+        } else {
+            None
+        };
         let core = Arc::clone(self);
-        *slot = Some(tokio::spawn(async move { core.run_tools_job(job).await }));
-        true
+        *slot = Some(tokio::spawn(async move {
+            let _wizard_hold = wizard_hold;
+            core.run_tools_job(job).await;
+        }));
+        Ok(())
+    }
+
+    /// The job swaps `cloudflared.exe`.
+    fn replaces_cloudflared(job: ToolsJob) -> bool {
+        matches!(job, ToolsJob::Update(Tool::Cloudflared) | ToolsJob::Repair)
     }
 
     async fn run_tools_job(self: Arc<Self>, job: ToolsJob) {
         // A running cloudflared.exe would be moved aside by the swap and keep running the old
         // program (the configuration looks unchanged): stop it first, start it after.
-        let replaces_cloudflared =
-            matches!(job, ToolsJob::Update(Tool::Cloudflared) | ToolsJob::Repair);
+        let replaces_cloudflared = Self::replaces_cloudflared(job);
         if replaces_cloudflared {
             self.tunnel_held.store(true, Ordering::SeqCst);
             self.sync_tunnel().await;

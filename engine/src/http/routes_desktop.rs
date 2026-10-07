@@ -169,7 +169,8 @@ fn optional_text(map: &Map<String, Value>, key: &str) -> Result<Option<Option<St
     }
 }
 
-/// The accepted subset of the settings; read-only and unknown fields are ignored.
+/// The accepted subset of the settings; read-only and unknown fields are ignored (among them
+/// `namedTunnelHostname`: the permanent-link wizard sets it together with the tunnel's id).
 fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
     let Value::Object(map) = body else {
         return Err(ApiError::bad_request("Niepoprawne ustawienia."));
@@ -237,18 +238,6 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
                 })?,
         ),
     };
-    let named_tunnel_hostname = match optional_text(map, "namedTunnelHostname")? {
-        Some(Some(host)) => {
-            let host = host.to_ascii_lowercase();
-            if !is_hostname(&host) {
-                return Err(ApiError::bad_request(
-                    "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-                ));
-            }
-            Some(Some(host))
-        }
-        other => other,
-    };
     Ok(ConfigPatch {
         port,
         lan_access: flag(map, "lanAccess")?,
@@ -263,7 +252,6 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         skipped_update_version: optional_text(map, "skippedUpdateVersion")?,
         tunnel_enabled: flag(map, "tunnelEnabled")?,
         tunnel_mode,
-        named_tunnel_hostname,
         pause_on_tunnel_loss: flag(map, "pauseOnTunnelLoss")?,
         pause_when_no_viewers: flag(map, "pauseWhenNoViewers")?,
     })
@@ -331,12 +319,8 @@ async fn tools_status(_: DesktopSession, State(state): State<AppState>) -> ApiRe
 
 fn start_job(state: &AppState, job: ToolsJob) -> ApiResult {
     let core = state.desktop()?;
-    if !core.start_tools_job(job) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "Trwa już pobieranie narzędzi.",
-        ));
-    }
+    core.start_tools_job(job)
+        .map_err(|why| ApiError::new(StatusCode::CONFLICT, why))?;
     Ok(json_response(
         StatusCode::ACCEPTED,
         &json!({ "started": true }),
@@ -504,7 +488,9 @@ fn invalid(message: &str) -> Response {
 }
 
 /// `state`: idle | running | done | failed | cancelled; `step` while running; `code` after a
-/// failure (see [`ErrorCode`]); `loginUrl` while the login waits for the owner; `loggedIn`: the
+/// failure (see [`ErrorCode`]); `loginUrl` while the login waits for the owner, `browserOpened`
+/// whether cloudflared opened it in the browser itself (`false`: the window opens it, `null`:
+/// not known yet); `loggedIn`: the
 /// certificate is there (the next step can start).
 fn named_progress_view(core: &AppCore) -> Value {
     let (p, logged_in) = core.named_progress();
@@ -517,6 +503,7 @@ fn named_progress_view(core: &AppCore) -> Value {
         "code": p.code.map(|c| c.as_str()),
         "helpUrl": help_url(p.code),
         "loginUrl": p.login_url,
+        "browserOpened": p.browser_opened,
         "loggedIn": logged_in,
     })
 }

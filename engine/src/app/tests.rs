@@ -406,34 +406,6 @@ async fn put_config_rejects_bad_values_and_saves_nothing() {
             "Tryb tunelu musi mieć wartość quick albo named.",
         ),
         (
-            json!({"namedTunnelHostname": "https://kanal.example.com"}),
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ),
-        (
-            json!({"namedTunnelHostname": "bez-kropki"}),
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ),
-        (
-            json!({"namedTunnelHostname": "zły host.example.com"}),
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ),
-        (
-            json!({"namedTunnelHostname": "-a.example.com"}),
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ),
-        (
-            json!({"namedTunnelHostname": "192.168.0.1"}),
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ),
-        (
-            json!({"namedTunnelHostname": "kanal.example.123"}),
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ),
-        (
-            json!({"namedTunnelHostname": 5}),
-            "Pole namedTunnelHostname musi być tekstem.",
-        ),
-        (
             json!({"pauseOnTunnelLoss": "tak"}),
             "Pole pauseOnTunnelLoss musi mieć wartość true albo false.",
         ),
@@ -543,18 +515,24 @@ async fn the_tunnel_settings_are_saved_shown_and_need_no_restart() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["restarted"], false);
     assert_eq!(res["tunnelMode"], "named");
-    assert_eq!(res["namedTunnelHostname"], "kanal.example.com");
+    // The host name belongs to the permanent-link wizard (with the tunnel's id): read-only here.
+    assert_eq!(res["namedTunnelHostname"], Value::Null);
     assert_eq!(res["pauseOnTunnelLoss"], false);
     assert_eq!(res["pauseWhenNoViewers"], true);
     let saved = app.saved();
     assert_eq!(saved["tunnelMode"], "named");
-    assert_eq!(saved["namedTunnelHostname"], "kanal.example.com");
+    assert_eq!(saved["namedTunnelHostname"], Value::Null);
     assert_eq!(saved["pauseWhenNoViewers"], true);
+    // Like the other read-only fields, anything there is ignored.
     let (status, res) = app
-        .put_config(&cookie, json!({"namedTunnelHostname": null}))
+        .put_config(
+            &cookie,
+            json!({"namedTunnelHostname": 5, "tunnelMode": "quick"}),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(app.saved()["namedTunnelHostname"], Value::Null);
+    assert_eq!(app.saved()["tunnelMode"], "quick");
     assert_eq!(app.engine().server_starts(), 1);
     app.stop().await;
 }
