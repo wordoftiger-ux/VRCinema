@@ -473,6 +473,24 @@ async fn segment_must_be_in_the_snapshot_and_on_disk() {
     assert_eq!(h.send(get("/live/main/5.ts")).await.status, StatusCode::OK);
 }
 
+/// Spec section 8: a served segment is a viewer; the playlist and a missing segment are not.
+#[tokio::test]
+async fn a_served_segment_counts_as_a_viewer() {
+    let viewers = Arc::new(crate::auto_pause::ViewerActivity::new());
+    let h = Harness::with_state(config(), {
+        let viewers = Arc::clone(&viewers);
+        move |s| s.with_viewers(viewers)
+    });
+    assert_eq!(h.send(get("/live/main.m3u8")).await.status, StatusCode::OK);
+    assert_eq!(
+        h.send(get("/live/main/6.ts")).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert!(viewers.last_fetch().is_none());
+    assert_eq!(h.send(get("/live/main/5.ts")).await.status, StatusCode::OK);
+    assert!(viewers.last_fetch().is_some());
+}
+
 // ---------- zgłoszenia publiczne ----------
 
 #[tokio::test]

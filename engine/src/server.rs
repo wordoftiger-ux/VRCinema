@@ -53,6 +53,9 @@ pub struct RunOptions {
     pub channel_loops: Option<Arc<AtomicUsize>>,
     /// Settings that change while the server runs (desktop app); `None`: fixed from `config`.
     pub live: Option<LiveSettings>,
+    /// Desktop app: the tunnel is enabled but has no address yet, so the start-up idle slate
+    /// says "Łączenie z internetem…" (with `config.public_url` empty).
+    pub slates_connecting: bool,
 }
 
 impl RunOptions {
@@ -69,6 +72,7 @@ impl RunOptions {
             configure_state: None,
             channel_loops: None,
             live: None,
+            slates_connecting: false,
         }
     }
 }
@@ -269,6 +273,7 @@ async fn start_channel_loop(
     resolver: &Arc<dyn MediaResolver>,
     live: &LiveSettings,
     shared_log: &SharedLogFn,
+    connecting: bool,
 ) -> anyhow::Result<(EngineHandle, EngineTask)> {
     shared_log("Generowanie plansz...");
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -277,6 +282,7 @@ async fn start_channel_loop(
         font_file: config.font_file.clone(),
         dir: config.data_dir.join("slates"),
         request_url: request_url(&config.public_url),
+        connecting,
         segment_seconds: config.segment_seconds,
         generation: 0,
     })
@@ -353,6 +359,7 @@ pub async fn run(
         configure_state,
         channel_loops,
         live,
+        slates_connecting,
     } = opts;
     let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
     let print_banner = custom_log.is_none();
@@ -392,8 +399,15 @@ pub async fn run(
     std::fs::create_dir_all(&clips_dir)?;
 
     let (handle, engine_task) = if start_channel {
-        let (handle, task) =
-            start_channel_loop(&config, &db, &resolver, &live, &shared_log).await?;
+        let (handle, task) = start_channel_loop(
+            &config,
+            &db,
+            &resolver,
+            &live,
+            &shared_log,
+            slates_connecting,
+        )
+        .await?;
         (handle, LoopGuard::new(Some(task), channel_loops))
     } else {
         shared_log("Kanał nie wystartuje: brak narzędzi (ffmpeg). Strony i panel działają.");

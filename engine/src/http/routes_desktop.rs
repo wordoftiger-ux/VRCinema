@@ -1,5 +1,5 @@
 //! Routes only the app window may use (`/api/desktop/*`, spec 9): settings, tools, encoder
-//! test, cookies picker, log, program updates, the first-run wizard. Every handler takes
+//! test, cookies picker, log, program updates, the first-run wizard, the tunnel. Every handler takes
 //! [`DesktopSession`] first: no session is 401, a remote session 403.
 
 use axum::Router;
@@ -13,7 +13,9 @@ use super::{
     ApiError, ApiResult, AppState, DesktopSession, JsonBody, asset_response, json_ok, json_response,
 };
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
+use crate::app_settings::TunnelModeSetting;
 use crate::tools::Tool;
+use crate::tunnel::TunnelState;
 
 const ENCODERS: [&str; 5] = ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf"];
 const MIN_PASSWORD_CHARS: usize = 8;
@@ -35,6 +37,8 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/desktop/update/apply", post(update_apply))
         .route("/api/desktop/wizard/complete", post(wizard_complete))
         .route("/api/desktop/restart", post(restart))
+        .route("/api/desktop/tunnel", get(tunnel))
+        .route("/api/desktop/tunnel/restart", post(tunnel_restart))
 }
 
 impl From<OpError> for ApiError {
@@ -65,11 +69,37 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
         "firstRunCompleted": s.first_run_completed,
         "toolsInstalled": s.tools_installed,
         "skippedUpdateVersion": s.skipped_update_version,
+        "tunnelEnabled": s.tunnel_enabled,
+        "tunnelMode": s.tunnel_mode.as_str(),
+        "namedTunnelHostname": s.named_tunnel_hostname,
+        "pauseOnTunnelLoss": s.pause_on_tunnel_loss,
+        "pauseWhenNoViewers": s.pause_when_no_viewers,
     });
     match view {
         Value::Object(map) => map,
         _ => Map::new(),
     }
+}
+
+/// The tunnel for the window: state, address, mode, host name, warning. Never the paths or
+/// contents of the named tunnel's files.
+fn tunnel_view(core: &AppCore) -> Value {
+    let info = core.tunnel_info();
+    let (state, url, message) = match info.state {
+        TunnelState::Off => ("off", None, None),
+        TunnelState::Connecting => ("connecting", None, None),
+        TunnelState::Online { url } => ("online", Some(url), None),
+        TunnelState::Reconnecting => ("reconnecting", None, None),
+        TunnelState::Error { message } => ("error", None, Some(message)),
+    };
+    json!({
+        "state": state,
+        "url": url,
+        "message": message,
+        "mode": info.mode.as_str(),
+        "hostname": info.hostname,
+        "warning": info.warning,
+    })
 }
 
 async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
@@ -78,6 +108,8 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
     let update = core
         .offered_update()
         .map(|r| json!({ "version": r.version.to_string(), "notes": r.notes }));
+    let (paused, reasons) = core.pause_state();
+    let reasons: Vec<&str> = reasons.iter().map(|r| r.as_str()).collect();
     Ok(json_ok(&json!({
         "version": core.version().to_string(),
         "port": core.port(),
@@ -92,6 +124,9 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
         "update": update,
+        "tunnel": tunnel_view(&core),
+        "paused": paused,
+        "pauseReasons": reasons,
     })))
 }
 
@@ -185,6 +220,28 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
             ));
         }
     };
+    let tunnel_mode = match map.get("tunnelMode") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(TunnelModeSetting::parse)
+                .ok_or_else(|| {
+                    ApiError::bad_request("Tryb tunelu musi mieć wartość quick albo named.")
+                })?,
+        ),
+    };
+    let named_tunnel_hostname = match optional_text(map, "namedTunnelHostname")? {
+        Some(Some(host)) => {
+            let host = host.to_ascii_lowercase();
+            if !is_hostname(&host) {
+                return Err(ApiError::bad_request(
+                    "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+                ));
+            }
+            Some(Some(host))
+        }
+        other => other,
+    };
     Ok(ConfigPatch {
         port,
         lan_access: flag(map, "lanAccess")?,
@@ -197,7 +254,27 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         autostart: flag(map, "autostart")?,
         trust_cloudflare: flag(map, "trustCloudflare")?,
         skipped_update_version: optional_text(map, "skippedUpdateVersion")?,
+        tunnel_enabled: flag(map, "tunnelEnabled")?,
+        tunnel_mode,
+        named_tunnel_hostname,
+        pause_on_tunnel_loss: flag(map, "pauseOnTunnelLoss")?,
+        pause_when_no_viewers: flag(map, "pauseWhenNoViewers")?,
     })
+}
+
+/// A DNS host name with at least two labels (`kanal.example.com`): letters, digits and inner
+/// hyphens, labels of 1–63 characters, 253 in total. No scheme, port or path.
+fn is_hostname(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    host.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|l| {
+            (1..=63).contains(&l.len())
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
 }
 
 /// Partial update: only the fields present change. Only a new port or network access restarts
@@ -355,6 +432,25 @@ async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult 
         )
     })?;
     Ok(json_ok(&json!({ "ok": true, "port": core.port() })))
+}
+
+/// The tunnel's state, address, mode and host name (`warning`: the named mode fell back to
+/// quick).
+async fn tunnel(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    Ok(json_ok(&tunnel_view(&core)))
+}
+
+/// A new cloudflared (a quick tunnel gets a new address); 409 while the tunnel is off.
+async fn tunnel_restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    if !core.restart_tunnel().await {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Tunel jest wyłączony — włącz go w ustawieniach.",
+        ));
+    }
+    Ok(json_ok(&tunnel_view(&core)))
 }
 
 /// The first-run wizard page (`public/wizard.html`); like the API it needs the window session.

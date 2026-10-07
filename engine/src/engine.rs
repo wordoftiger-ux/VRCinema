@@ -6,7 +6,7 @@
 //! directly: it sends [`Command`]s and reads the latest snapshot.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +26,8 @@ use crate::pipeline::slates::Slates;
 pub enum Command {
     Skip,
     QueueChanged,
-    /// Adds a pause reason; the channel pauses while any reason is active.
+    /// Adds a pause reason; the channel pauses while any reason is active. The loop keeps the
+    /// active reasons, so a channel rebuilt after a crash starts paused too.
     Pause(PauseReason),
     /// Clears a pause reason; the channel resumes once none is left.
     Resume(PauseReason),
@@ -171,6 +172,7 @@ where
         stop: stop_rx,
         log,
         slates: None,
+        pause_reasons: BTreeSet::new(),
     };
     let join = tokio::spawn(supervisor.run());
     let handle = EngineHandle {
@@ -253,6 +255,9 @@ struct Supervisor<F, L> {
     /// The newest slate set handed over with [`Command::ReplaceSlates`]; every rebuilt channel
     /// gets it before it starts.
     slates: Option<Slates>,
+    /// Pause reasons active right now (from [`Command::Pause`] / [`Command::Resume`]); a rebuilt
+    /// channel gets them before it starts, so it does not air films while one is active.
+    pause_reasons: BTreeSet<PauseReason>,
 }
 
 impl<C, F, L> Supervisor<F, L>
@@ -342,7 +347,14 @@ where
         if let Some(slates) = self.slates.clone() {
             core.channel.replace_slates(slates);
         }
-        match guarded(|| core.start()) {
+        let reasons = self.pause_reasons.clone();
+        let started = guarded(|| {
+            for reason in reasons {
+                core.channel.pause(reason);
+            }
+            core.start()
+        });
+        match started {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Exit::Failed(e.to_string()),
             Err(panic) => return Exit::Failed(panic),
@@ -365,8 +377,15 @@ where
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Exit::Shutdown,
                 };
-                if let Command::ReplaceSlates(slates) = &command {
-                    self.slates = Some(slates.clone());
+                match &command {
+                    Command::ReplaceSlates(slates) => self.slates = Some(slates.clone()),
+                    Command::Pause(reason) => {
+                        self.pause_reasons.insert(*reason);
+                    }
+                    Command::Resume(reason) => {
+                        self.pause_reasons.remove(reason);
+                    }
+                    Command::Skip | Command::QueueChanged => {}
                 }
                 match guarded(|| core.apply(command)) {
                     Ok(Ok(())) => {}
@@ -1267,6 +1286,43 @@ mod tests {
         assert_eq!(
             *env.probe.events.lock().unwrap(),
             ["start", "slates g7", "stop", "slates g7", "start"]
+        );
+    }
+
+    /// A channel rebuilt after a crash must not air films while a pause reason is still active:
+    /// the loop remembers the reasons and hands them to the new channel before it starts.
+    #[tokio::test(start_paused = true)]
+    async fn a_rebuilt_channel_starts_with_the_active_pause_reasons() {
+        let env = Env::new();
+        // Call 5 of next() panics (around the 8 s mark), long after the commands below.
+        env.probe.panic_at_next.store(5, Ordering::SeqCst);
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        for command in [
+            Command::Pause(PauseReason::Tunnel),
+            Command::Pause(PauseReason::NoViewers),
+            Command::Resume(PauseReason::NoViewers),
+        ] {
+            handle.commands.send(command).await.unwrap();
+        }
+        next_snapshot(&mut handle.snapshot).await;
+        let probe = Arc::clone(&env.probe);
+        wait_until(&mut handle.snapshot, |s| {
+            probe.builds.load(Ordering::SeqCst) == 2 && !s.segments.is_empty()
+        })
+        .await;
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            [
+                "start",
+                "pause tunnel",
+                "pause no_viewers",
+                "resume no_viewers",
+                "stop",
+                // Only the reason still active, before the start.
+                "pause tunnel",
+                "start"
+            ]
         );
     }
 

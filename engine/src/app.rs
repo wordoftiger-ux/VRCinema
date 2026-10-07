@@ -1,5 +1,6 @@
 //! The engine inside the desktop app: settings from `config.json`, the HTTP server with the
-//! channel (restarted when the port or another server setting changes), the tools jobs and the
+//! channel (restarted when the port or another server setting changes), the tools jobs, the
+//! built-in tunnel with the automatic pause (`app::tunnel`, `crate::auto_pause`) and the
 //! program updates. The `/api/desktop/*` routes (`http::routes_desktop`) call into [`AppCore`].
 
 use std::path::PathBuf;
@@ -9,10 +10,13 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use semver::Version;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::app_settings::{AppSettings, CONFIG_FILE, app_config};
+use crate::app_settings::{AppSettings, CONFIG_FILE, TunnelModeSetting, app_config};
+use crate::auto_pause::{
+    AutoPause, AutoPauseSettings, AutoPauseTimings, CommandTarget, ViewerActivity,
+};
 use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
 use crate::http::AppState;
@@ -20,10 +24,16 @@ use crate::http::auth::{AdminAuth, DesktopKey};
 use crate::live::LiveSettings;
 use crate::local_files::{AddReport, add_local_files};
 use crate::logging::LogSink;
+use crate::pipeline::channel::PauseReason;
 use crate::pipeline::slates::{SlateSwapper, SwapOutcome};
 use crate::self_update::{self, DEFAULT_API_URL, UpdateInfo};
 use crate::server::{RunOptions, run};
 use crate::tools::{Tool, ToolSources, ToolsManager};
+use crate::tunnel::{TunnelConfig, TunnelManager, TunnelState, TunnelTimings};
+
+mod tunnel;
+
+use tunnel::TunnelNotes;
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -93,6 +103,10 @@ pub struct AppOptions {
     pub tool_sources: ToolSources,
     /// Tests: a `FakeResolver` file instead of the real resolvers.
     pub fake_resolver: Option<PathBuf>,
+    /// Timings of the tunnel manager (tests shorten them).
+    pub tunnel_timings: TunnelTimings,
+    /// Timings of the automatic pause (tests shorten them).
+    pub auto_pause_timings: AutoPauseTimings,
 }
 
 impl Default for AppOptions {
@@ -103,6 +117,8 @@ impl Default for AppOptions {
             check_updates: true,
             tool_sources: ToolSources::default(),
             fake_resolver: None,
+            tunnel_timings: TunnelTimings::default(),
+            auto_pause_timings: AutoPauseTimings::default(),
         }
     }
 }
@@ -139,6 +155,11 @@ pub(crate) struct ConfigPatch {
     pub autostart: Option<bool>,
     pub trust_cloudflare: Option<bool>,
     pub skipped_update_version: Option<Option<String>>,
+    pub tunnel_enabled: Option<bool>,
+    pub tunnel_mode: Option<TunnelModeSetting>,
+    pub named_tunnel_hostname: Option<Option<String>>,
+    pub pause_on_tunnel_loss: Option<bool>,
+    pub pause_when_no_viewers: Option<bool>,
 }
 
 impl ConfigPatch {
@@ -173,6 +194,21 @@ impl ConfigPatch {
         }
         if let Some(v) = self.skipped_update_version {
             s.skipped_update_version = v;
+        }
+        if let Some(v) = self.tunnel_enabled {
+            s.tunnel_enabled = v;
+        }
+        if let Some(v) = self.tunnel_mode {
+            s.tunnel_mode = v;
+        }
+        if let Some(v) = self.named_tunnel_hostname {
+            s.named_tunnel_hostname = v;
+        }
+        if let Some(v) = self.pause_on_tunnel_loss {
+            s.pause_on_tunnel_loss = v;
+        }
+        if let Some(v) = self.pause_when_no_viewers {
+            s.pause_when_no_viewers = v;
         }
         let new_password = password_hash.is_some();
         if let Some(hash) = password_hash {
@@ -248,6 +284,22 @@ pub(crate) struct AppCore {
     pub(crate) live_settings: LiveSettings,
     /// How many times a server was started (restarts included).
     server_starts: AtomicUsize,
+    /// Serializes the computation and hand-over of the live settings.
+    live_apply: Mutex<()>,
+    /// cloudflared (spec section 7); stopped when the app quits.
+    tunnel: TunnelManager,
+    /// What the tunnel was last asked to run (`None`: stopped); the lock serializes changes.
+    tunnel_running: tokio::sync::Mutex<Option<TunnelConfig>>,
+    tunnel_notes: Mutex<TunnelNotes>,
+    /// The tunnel's state as the window sees it: `Off` while switched off, an error while it
+    /// cannot run, else the manager's state.
+    tunnel_view: watch::Sender<TunnelState>,
+    /// The settings the automatic pause follows.
+    auto_pause: watch::Sender<AutoPauseSettings>,
+    /// Segment fetches of every server this engine starts.
+    viewers: Arc<ViewerActivity>,
+    /// A new channel is on: the automatic pause hands it the active reasons now.
+    pause_kick: Arc<Notify>,
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     start_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
@@ -302,6 +354,14 @@ impl AppCore {
         self.server.try_lock().is_err()
     }
 
+    /// Whether the channel holds films back right now, and why.
+    pub(crate) fn pause_state(&self) -> (bool, Vec<PauseReason>) {
+        self.live().map_or((false, Vec::new()), |l| {
+            let snapshot = l.state.engine.snapshot.borrow();
+            (snapshot.state.paused, snapshot.state.pause_reasons.clone())
+        })
+    }
+
     pub(crate) fn version(&self) -> &Version {
         &self.options.version
     }
@@ -333,9 +393,13 @@ impl AppCore {
     /// are there (and work), otherwise without it, so the window can repair the tools.
     async fn start_server(self: &Arc<Self>, slot: &mut Option<Running>) -> anyhow::Result<()> {
         let settings = self.settings();
-        let config = app_config(&settings, &self.home);
+        // The address in effect (the tunnel's while it is enabled) is drawn on the slates.
+        let (config, connecting) = self.effective_config(&settings);
         let started = if Self::tools_present(&config) {
-            match self.spawn_server(&config, &settings, true).await {
+            match self
+                .spawn_server(&config, &settings, true, connecting)
+                .await
+            {
                 Ok(started) => {
                     *lock(&self.channel_error) = None;
                     started
@@ -346,12 +410,14 @@ impl AppCore {
                         "Kanał nie wystartował: {why}. Serwer działa bez kanału — napraw narzędzia w ustawieniach."
                     ));
                     *lock(&self.channel_error) = Some(why);
-                    self.spawn_server(&config, &settings, false).await?
+                    self.spawn_server(&config, &settings, false, connecting)
+                        .await?
                 }
             }
         } else {
             *lock(&self.channel_error) = None;
-            self.spawn_server(&config, &settings, false).await?
+            self.spawn_server(&config, &settings, false, connecting)
+                .await?
         };
         let (running, live) = started;
         if live.port != settings.port {
@@ -369,23 +435,25 @@ impl AppCore {
                 let _ = release.await;
             }
         }
-        let state = live.state.clone();
         self.set_live(Some(live));
-        // Settings saved while this server was starting (while `live` was empty, nobody could
-        // hand them to it): take the current ones now that it is published.
-        let current = self.settings();
-        self.live_settings.apply(&app_config(&current, &self.home));
-        state.set_admin_auth(admin_auth(&current));
+        // Settings saved (or a tunnel address found) while this server was starting, while
+        // `live` was empty and nobody could hand them to it: take the current ones now.
+        self.apply_live();
         *slot = Some(running);
         self.server_starts.fetch_add(1, Ordering::SeqCst);
+        // The new channel starts without pause reasons and with the start-up slates.
+        self.pause_kick.notify_one();
+        self.refresh_slates();
         Ok(())
     }
 
+    /// `connecting`: the tunnel is enabled but has no address yet (for the idle slate).
     async fn spawn_server(
         self: &Arc<Self>,
         config: &AppConfig,
         settings: &AppSettings,
         channel: bool,
+        connecting: bool,
     ) -> anyhow::Result<(Running, Live)> {
         let (ready_tx, ready_rx) = oneshot::channel();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -395,11 +463,13 @@ impl AppCore {
             let auth = admin_auth(settings);
             let key = Arc::clone(&self.desktop_key);
             let core = Arc::downgrade(self);
+            let viewers = Arc::clone(&self.viewers);
             Box::new(move |state: AppState| {
                 let state = state
                     .with_admin_auth(auth)
                     .with_desktop_key(key)
-                    .with_desktop(core);
+                    .with_desktop(core)
+                    .with_viewers(viewers);
                 *lock(&captured) = Some(state.clone());
                 state
             })
@@ -417,6 +487,7 @@ impl AppCore {
             configure_state: Some(configure),
             channel_loops: Some(Arc::clone(&self.channel_loops)),
             live: Some(self.live_settings.clone()),
+            slates_connecting: connecting,
             ..RunOptions::new(self.home.clone())
         };
         let mut join = tokio::spawn(run(config.clone(), opts, async move {
@@ -440,7 +511,8 @@ impl AppCore {
                         port: addr.port(),
                         state,
                         channel,
-                        slates: channel.then(|| Arc::new(SlateSwapper::for_config(config))),
+                        slates: channel
+                            .then(|| Arc::new(SlateSwapper::for_config(config, connecting))),
                     },
                 ))
             }
@@ -511,6 +583,9 @@ impl AppCore {
                 core.stop_server(&mut slot).await;
                 anyhow::bail!("Program jest zamykany.");
             }
+            drop(slot);
+            // A new port (or the next free one): the tunnel follows the server.
+            core.sync_tunnel().await;
             started
         })
         .await
@@ -553,11 +628,12 @@ impl AppCore {
         let (old, new) = self
             .update_settings(|s| patch.apply(s, password_hash))
             .map_err(|e| OpError::Failed(format!("{e:#}")))?;
-        self.take_over(&new);
+        self.apply_live();
         if !needs_restart(&old, &new) {
-            if old.public_url != new.public_url {
-                self.refresh_slates();
-            }
+            // Switched on or off, another mode: the tunnel follows (an unchanged one is left
+            // alone). The address in effect may have changed: the slates follow it.
+            self.sync_tunnel().await;
+            self.refresh_slates();
             return Ok(false);
         }
         if let Err(e) = self.restart_server().await {
@@ -581,20 +657,36 @@ impl AppCore {
         Ok(true)
     }
 
-    /// Hands saved settings to the running server: remote-panel access and everything read at
-    /// use time. During a restart (`live` empty) the new server picks them up in
-    /// `start_server`.
-    fn take_over(&self, settings: &AppSettings) {
-        self.live_settings.apply(&app_config(settings, &self.home));
+    /// Hands the saved settings to the running server: remote-panel access and everything read
+    /// at use time, with the public address and Cloudflare trust in effect (the tunnel's while
+    /// it is enabled), and to the automatic pause. During a restart (`live` empty) the new
+    /// server picks them up in `start_server`.
+    fn apply_live(&self) {
+        // Computed and handed over under one lock: a stale computation never wins.
+        let _guard = lock(&self.live_apply);
+        let settings = self.settings();
+        let (config, _) = self.effective_config(&settings);
+        self.live_settings.apply(&config);
         if let Some(live) = self.live() {
-            live.state.set_admin_auth(admin_auth(settings));
+            live.state.set_admin_auth(admin_auth(&settings));
         }
+        let pause = AutoPauseSettings {
+            tunnel_enabled: settings.tunnel_enabled,
+            pause_on_tunnel_loss: settings.pause_on_tunnel_loss,
+            pause_when_no_viewers: settings.pause_when_no_viewers,
+        };
+        self.auto_pause.send_if_modified(|current| {
+            let changed = *current != pause;
+            *current = pause;
+            changed
+        });
     }
 
-    /// The public address changed: makes the slates for the saved address in the background and
-    /// hands them to the running channel (no restart, no break in the stream). A failure leaves
-    /// the previous slates on air and is logged. During a restart nothing is done: the new
-    /// server starts from the saved settings.
+    /// The public address in effect may have changed: makes the slates for it in the
+    /// background and hands them to the running channel (no restart, no break in the stream);
+    /// nothing is made when the set on air already shows it. A failure leaves the previous
+    /// slates on air and is logged. During a restart nothing is done: the new server starts
+    /// with the current address and refreshes once it is published.
     fn refresh_slates(self: &Arc<Self>) {
         if self.closing.load(Ordering::SeqCst) {
             return;
@@ -611,8 +703,8 @@ impl AppCore {
         let Some(swapper) = live.slates.clone() else {
             return;
         };
-        // The address saved by the time the swap runs (read under its lock): quick edits collapse.
-        let current = || app_config(&self.settings(), &self.home).public_url;
+        // The address in effect when the swap runs (read under its lock): quick changes collapse.
+        let current = || self.slate_address();
         match swapper.swap_to(current, &live.state.engine.commands).await {
             SwapOutcome::Unchanged => {}
             SwapOutcome::Replaced { generation } => self.log(&format!(
@@ -660,11 +752,10 @@ impl AppCore {
         let found = crate::tools::detect_encoder(&ffmpeg).await;
         self.log(&format!("Test karty graficznej: {}", found.as_str()));
         let _guard = self.settings_change.lock().await;
-        let (_, new) = self
-            .update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
+        self.update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
             .map_err(|e| OpError::Failed(format!("{e:#}")))?;
         // The next clip uses it; the stream is never interrupted for this.
-        self.take_over(&new);
+        self.apply_live();
         Ok(found)
     }
 
@@ -693,6 +784,8 @@ impl AppCore {
         };
         if let Err(e) = result {
             self.log(&format!("Narzędzia ({what}): błąd — {e:#}"));
+            // cloudflared may have come before the failure.
+            self.sync_tunnel().await;
             return;
         }
         self.log(&format!("Narzędzia ({what}): gotowe."));
@@ -708,6 +801,8 @@ impl AppCore {
         {
             self.log(&format!("{e:#}"));
         }
+        // Now cloudflared is there (a running tunnel is left alone).
+        self.sync_tunnel().await;
     }
 
     /// Asks GitHub for a newer program. Problems (no network, private repository) are only
@@ -825,6 +920,9 @@ impl AppEngine {
             )
         })?;
         let live_settings = LiveSettings::from_config(&app_config(&settings, &home));
+        let tunnel = TunnelManager::new()
+            .with_timings(options.tunnel_timings.clone())
+            .with_log(log.log_fn());
         let core = Arc::new(AppCore {
             home,
             hooks,
@@ -847,9 +945,20 @@ impl AppEngine {
             background: Mutex::new(Vec::new()),
             live_settings,
             server_starts: AtomicUsize::new(0),
+            live_apply: Mutex::new(()),
+            tunnel,
+            tunnel_running: tokio::sync::Mutex::new(None),
+            tunnel_notes: Mutex::new(TunnelNotes::default()),
+            tunnel_view: watch::channel(TunnelState::Off).0,
+            auto_pause: watch::channel(AutoPauseSettings::default()).0,
+            viewers: Arc::new(ViewerActivity::new()),
+            pause_kick: Arc::new(Notify::new()),
             #[cfg(test)]
             start_pause: Mutex::new(None),
         });
+        // The tunnel's state as the window sees it, and the address in effect from the start.
+        core.update_tunnel_view();
+        core.apply_live();
         {
             let mut slot = core.server.lock().await;
             if let Err(e) = core.start_server(&mut slot).await {
@@ -857,6 +966,11 @@ impl AppEngine {
                 return Err(e);
             }
         }
+        let watcher = tokio::spawn(follow_tunnel(Arc::downgrade(&core), core.tunnel.state()));
+        lock(&core.background).push(watcher);
+        let auto_pause = tokio::spawn(auto_pause(&core).run());
+        lock(&core.background).push(auto_pause);
+        core.sync_tunnel().await;
         if core.options.check_updates {
             let weak = Arc::downgrade(&core);
             let checks = tokio::spawn(async move { update_checks(weak).await });
@@ -973,9 +1087,14 @@ impl AppEngine {
         if let Some(job) = lock(&core.tools_job).take() {
             job.abort();
         }
+        // cloudflared is stopped alongside the server (not after it: a stuck restart must not
+        // keep it running); a restart that finishes later finds `closing` and stops it too.
         let stopped = tokio::time::timeout(limit, async {
-            let mut slot = core.server.lock().await;
-            core.stop_server(&mut slot).await;
+            let server = async {
+                let mut slot = core.server.lock().await;
+                core.stop_server(&mut slot).await;
+            };
+            tokio::join!(server, core.sync_tunnel());
         })
         .await
         .is_ok();
@@ -1000,6 +1119,36 @@ async fn update_checks(core: Weak<AppCore>) {
         c.check_update().await;
         drop(c);
         tokio::time::sleep(UPDATE_INTERVAL).await;
+    }
+}
+
+/// Every change of the tunnel manager's state reaches the window, the address in effect and
+/// the slates, while the engine lives.
+async fn follow_tunnel(core: Weak<AppCore>, mut states: watch::Receiver<TunnelState>) {
+    while states.changed().await.is_ok() {
+        let Some(core) = core.upgrade() else {
+            return;
+        };
+        core.update_tunnel_view();
+    }
+}
+
+/// The automatic pause for this engine: it follows the settings, the tunnel as the window sees
+/// it and the segment fetches, and talks to whichever channel runs.
+fn auto_pause(core: &Arc<AppCore>) -> AutoPause {
+    let weak = Arc::downgrade(core);
+    let target: CommandTarget = Arc::new(move || {
+        let live = weak.upgrade()?.live()?;
+        live.channel.then(|| live.state.engine.commands.clone())
+    });
+    AutoPause {
+        timings: core.options.auto_pause_timings.clone(),
+        settings: core.auto_pause.subscribe(),
+        tunnel: core.tunnel_view.subscribe(),
+        viewers: Arc::clone(&core.viewers),
+        target,
+        kick: Arc::clone(&core.pause_kick),
+        log: core.log.log_fn(),
     }
 }
 

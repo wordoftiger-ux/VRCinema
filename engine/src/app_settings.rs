@@ -31,6 +31,50 @@ pub struct AppSettings {
     /// Raised each time the remote panel is switched on or gets a new password: remote
     /// sessions signed under an older epoch stop working (see `http::auth`).
     pub remote_session_epoch: u64,
+    /// Built-in Cloudflare tunnel (spec section 7).
+    pub tunnel_enabled: bool,
+    pub tunnel_mode: TunnelModeSetting,
+    /// Host name of the named tunnel (`kanal.example.com`), set by the permanent-link wizard.
+    pub named_tunnel_hostname: Option<String>,
+    /// Pause the channel when the tunnel is lost for 10 s (spec section 8).
+    pub pause_on_tunnel_loss: bool,
+    /// Pause the channel when nobody fetched a segment for 30 s.
+    pub pause_when_no_viewers: bool,
+}
+
+/// `tunnelMode` in `config.json`: `"quick"` or `"named"` (anything else reads as quick).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelModeSetting {
+    /// A random `trycloudflare.com` address, new on every start.
+    #[default]
+    Quick,
+    /// The permanent link on the owner's own domain.
+    Named,
+}
+
+impl TunnelModeSetting {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Named => "named",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "quick" => Some(Self::Quick),
+            "named" => Some(Self::Named),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TunnelModeSetting {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Self::parse(&text).unwrap_or_default())
+    }
 }
 
 impl Default for AppSettings {
@@ -52,6 +96,11 @@ impl Default for AppSettings {
             tools_installed: false,
             skipped_update_version: None,
             remote_session_epoch: 0,
+            tunnel_enabled: true,
+            tunnel_mode: TunnelModeSetting::Quick,
+            named_tunnel_hostname: None,
+            pause_on_tunnel_loss: true,
+            pause_when_no_viewers: false,
         }
     }
 }
@@ -184,6 +233,53 @@ mod tests {
         assert_eq!(d.video_encoder, "auto");
         assert!(!d.first_run_completed && !d.tools_installed);
         assert!(d.admin_password_hash.is_none() && d.skipped_update_version.is_none());
+        // Spec section 7: the tunnel is on by default, quick, pausing when it is lost.
+        assert!(d.tunnel_enabled);
+        assert_eq!(d.tunnel_mode, TunnelModeSetting::Quick);
+        assert!(d.named_tunnel_hostname.is_none());
+        assert!(d.pause_on_tunnel_loss);
+        assert!(!d.pause_when_no_viewers);
+    }
+
+    #[test]
+    fn tunnel_fields_round_trip_in_camel_case_and_default_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A stage-2 file has none of them.
+        std::fs::write(tmp.path().join("config.json"), "{\"port\": 8123}").unwrap();
+        let (mut s, warning) = AppSettings::load(tmp.path());
+        assert!(warning.is_none());
+        assert!(s.tunnel_enabled && s.pause_on_tunnel_loss && !s.pause_when_no_viewers);
+        s.tunnel_enabled = false;
+        s.tunnel_mode = TunnelModeSetting::Named;
+        s.named_tunnel_hostname = Some("kanal.example.com".into());
+        s.pause_on_tunnel_loss = false;
+        s.pause_when_no_viewers = true;
+        s.save(tmp.path()).unwrap();
+        let text = std::fs::read_to_string(tmp.path().join("config.json")).unwrap();
+        for field in [
+            "\"tunnelEnabled\": false",
+            "\"tunnelMode\": \"named\"",
+            "\"namedTunnelHostname\": \"kanal.example.com\"",
+            "\"pauseOnTunnelLoss\": false",
+            "\"pauseWhenNoViewers\": true",
+        ] {
+            assert!(text.contains(field), "{field} missing in {text}");
+        }
+        assert_eq!(AppSettings::load(tmp.path()).0, s);
+    }
+
+    #[test]
+    fn an_unknown_tunnel_mode_falls_back_to_quick() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            "{\"port\": 8123, \"tunnelMode\": \"inny\"}",
+        )
+        .unwrap();
+        let (s, warning) = AppSettings::load(tmp.path());
+        assert!(warning.is_none(), "{warning:?}");
+        assert_eq!(s.port, 8123);
+        assert_eq!(s.tunnel_mode, TunnelModeSetting::Quick);
     }
 
     #[test]

@@ -153,6 +153,7 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
         font_file: cfg.font_file.clone(),
         dir: work_dir.join("slates"),
         request_url: String::new(),
+        connecting: false,
         segment_seconds: 4,
         generation: 0,
     })
@@ -376,6 +377,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
         font_file: cfg.font_file.clone(),
         dir: work_dir.join("slates"),
         request_url: String::new(),
+        connecting: false,
         segment_seconds: 4,
         generation: 0,
     })

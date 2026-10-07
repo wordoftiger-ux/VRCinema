@@ -23,6 +23,7 @@ use rusqlite::Connection;
 use serde_json::{Map, Value, json};
 use tower_http::catch_panic::CatchPanicLayer;
 
+use crate::auto_pause::ViewerActivity;
 use crate::db::{QueueItem, SettingsRepo};
 use crate::engine::{Command, EngineHandle, Snapshot};
 use crate::library::MediaLibrary;
@@ -81,6 +82,8 @@ pub struct AppState {
     desktop: Option<Weak<crate::app::AppCore>>,
     /// Read per request (`trust_cloudflare`, `public_url`): HttpConfig keeps the start values.
     live: LiveSettings,
+    /// Segment fetches (viewers), for the automatic pause of the app.
+    pub(crate) viewers: Arc<ViewerActivity>,
 }
 
 impl AppState {
@@ -132,6 +135,7 @@ impl AppState {
             resolver,
             engine,
             library: None,
+            viewers: Arc::new(ViewerActivity::new()),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -147,6 +151,12 @@ impl AppState {
     /// address, ...); `.env` mode keeps the values from the start.
     pub fn with_live(mut self, live: LiveSettings) -> Self {
         self.live = live;
+        self
+    }
+
+    /// Shares the record of segment fetches with the app's automatic pause.
+    pub fn with_viewers(mut self, viewers: Arc<ViewerActivity>) -> Self {
+        self.viewers = viewers;
         self
     }
 

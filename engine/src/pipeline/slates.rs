@@ -75,9 +75,36 @@ pub struct SlateOptions {
     /// Address of the request page shown (as text and as a QR code) on the idle slate; empty:
     /// no address, no code.
     pub request_url: String,
+    /// Without an address: the tunnel is connecting, the idle slate says "Łączenie z
+    /// internetem…" instead of the usual hint.
+    pub connecting: bool,
     pub segment_seconds: u32,
     /// Number of the set being made (see [`Slates::generation`]).
     pub generation: u32,
+}
+
+/// What the idle slate is made for: the public address (QR code and text of the request page)
+/// or none, and then whether the tunnel is still connecting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SlateAddress {
+    /// No trailing slash; empty: no public address.
+    pub public_url: String,
+    pub connecting: bool,
+}
+
+impl From<String> for SlateAddress {
+    fn from(public_url: String) -> Self {
+        Self {
+            public_url,
+            connecting: false,
+        }
+    }
+}
+
+impl From<&str> for SlateAddress {
+    fn from(public_url: &str) -> Self {
+        public_url.to_string().into()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -99,15 +126,17 @@ pub fn request_url(public_url: &str) -> String {
     }
 }
 
-fn texts(kind: SlateKind, request_url: &str) -> (String, String) {
+fn texts(kind: SlateKind, request_url: &str, connecting: bool) -> (String, String) {
     match kind {
         SlateKind::Idle => (
             "Brak filmów w kolejce".to_string(),
-            if request_url.is_empty() {
-                "Dodaj film na stronie zgłoszeń".to_string()
-            } else {
+            if !request_url.is_empty() {
                 // Under the QR code: just the address.
                 request_url.to_string()
+            } else if connecting {
+                "Łączenie z internetem…".to_string()
+            } else {
+                "Dodaj film na stronie zgłoszeń".to_string()
             },
         ),
         SlateKind::Buffering => (
@@ -189,7 +218,7 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
     let mut with_text = false;
     if Path::new(&o.font_file).exists() {
         std::fs::copy(&o.font_file, dir.join("font.ttf"))?;
-        let (title, subtitle) = texts(kind, &o.request_url);
+        let (title, subtitle) = texts(kind, &o.request_url, o.connecting);
         std::fs::write(dir.join("title.txt"), title)?;
         std::fs::write(dir.join("subtitle.txt"), subtitle)?;
         with_text = true;
@@ -276,8 +305,8 @@ impl SetDir {
 }
 
 struct SwapState {
-    /// Public address the set on air was made for.
-    public_url: String,
+    /// What the set on air was made for.
+    address: SlateAddress,
     generation: u32,
     dir: SetDir,
 }
@@ -322,14 +351,21 @@ impl Drop for SlateSwapper {
 }
 
 impl SlateSwapper {
-    /// `root` is the slates folder, `initial_url` the public address the start-up set was made for.
-    pub fn new(options: &SlateOptions, root: PathBuf, initial_url: String, hold: Duration) -> Self {
+    /// `root` is the slates folder, `initial` what the start-up set was made for.
+    pub fn new(
+        options: &SlateOptions,
+        root: PathBuf,
+        initial: impl Into<SlateAddress>,
+        hold: Duration,
+    ) -> Self {
+        let mut initial: SlateAddress = initial.into();
+        initial.connecting &= initial.public_url.is_empty();
         Self {
             ffmpeg_path: options.ffmpeg_path.clone(),
             font_file: options.font_file.clone(),
             segment_seconds: options.segment_seconds,
             state: tokio::sync::Mutex::new(SwapState {
-                public_url: initial_url,
+                address: initial,
                 generation: options.generation,
                 dir: SetDir::Root(root.clone()),
             }),
@@ -340,8 +376,8 @@ impl SlateSwapper {
     }
 
     /// The swapper for a channel started with `config` (start-up set: generation 0 in
-    /// `<data>/slates`, made for `config.public_url`).
-    pub fn for_config(config: &AppConfig) -> Self {
+    /// `<data>/slates`, made for `config.public_url` and `connecting`, see [`SlateOptions`]).
+    pub fn for_config(config: &AppConfig, connecting: bool) -> Self {
         let root = config.data_dir.join("slates");
         // The old set stays until its segments left the playlist (`window_size` segments) and the
         // broadcaster's retention (`RETAIN_S`), plus a margin.
@@ -352,31 +388,38 @@ impl SlateSwapper {
             font_file: config.font_file.clone(),
             dir: root.clone(),
             request_url: request_url(&config.public_url),
+            connecting,
             segment_seconds: config.segment_seconds,
             generation: 0,
         };
-        Self::new(&options, root, config.public_url.clone(), hold)
+        let initial = SlateAddress {
+            public_url: config.public_url.clone(),
+            connecting,
+        };
+        Self::new(&options, root, initial, hold)
     }
 
     /// Makes the set for `public_url` and hands it to the loop behind `commands`. Calls are
     /// serialized; one for the address already on air does nothing.
     pub async fn swap(&self, public_url: &str, commands: &mpsc::Sender<Command>) -> SwapOutcome {
-        self.swap_to(|| public_url.to_string(), commands).await
+        self.swap_to(|| public_url, commands).await
     }
 
     /// Like [`Self::swap`], with the address read once the lock is held: of several racing
     /// swaps the one that runs last sees the newest address, so a stale one never wins.
-    pub async fn swap_to(
+    pub async fn swap_to<A: Into<SlateAddress>>(
         &self,
-        current_url: impl FnOnce() -> String,
+        current: impl FnOnce() -> A,
         commands: &mpsc::Sender<Command>,
     ) -> SwapOutcome {
         let mut state = self.state.lock().await;
-        let public_url = current_url();
-        let public_url = public_url.as_str();
-        if state.public_url == public_url {
+        let mut address: SlateAddress = current().into();
+        // "Connecting" only matters without an address.
+        address.connecting &= address.public_url.is_empty();
+        if state.address == address {
             return SwapOutcome::Unchanged;
         }
+        let public_url = address.public_url.as_str();
         let generation = state.generation + 1;
         let dir = self.root.join(format!("g{generation}"));
         let made = generate_slates(&SlateOptions {
@@ -384,6 +427,7 @@ impl SlateSwapper {
             font_file: self.font_file.clone(),
             dir: dir.clone(),
             request_url: request_url(public_url),
+            connecting: address.connecting,
             segment_seconds: self.segment_seconds,
             generation,
         })
@@ -400,7 +444,7 @@ impl SlateSwapper {
             return SwapOutcome::Failed("Pętla kanału nie działa.".to_string());
         }
         let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
-        state.public_url = public_url.to_string();
+        state.address = address;
         state.generation = generation;
         // The old segments may still be in the playlist and in the retention window.
         let hold = self.hold;
@@ -442,6 +486,7 @@ mod tests {
             font_file: default_font(),
             dir: dir.to_path_buf(),
             request_url: url.into(),
+            connecting: false,
             segment_seconds: 4,
             generation,
         }
@@ -514,18 +559,18 @@ mod tests {
     #[test]
     fn slate_texts_match_the_original() {
         assert_eq!(
-            texts(SlateKind::Idle, "https://tv.example.com/"),
+            texts(SlateKind::Idle, "https://tv.example.com/", false),
             (
                 "Brak filmów w kolejce".to_string(),
                 "https://tv.example.com/".to_string()
             )
         );
         assert_eq!(
-            texts(SlateKind::Idle, "").1,
+            texts(SlateKind::Idle, "", false).1,
             "Dodaj film na stronie zgłoszeń"
         );
         assert_eq!(
-            texts(SlateKind::Buffering, "x"),
+            texts(SlateKind::Buffering, "x", false),
             (
                 "Buforowanie…".to_string(),
                 "Film zaraz się zacznie".to_string()
@@ -536,10 +581,43 @@ mod tests {
     #[test]
     fn pause_slate_text_is_polish_with_an_empty_subtitle() {
         assert_eq!(
-            texts(SlateKind::Pause, "https://tv.example.com/"),
+            texts(SlateKind::Pause, "https://tv.example.com/", false),
             ("Pauza — wracamy za chwilę".to_string(), String::new())
         );
         assert_eq!(SlateKind::Pause.as_str(), "pause");
+    }
+
+    /// Spec section 6: while the tunnel connects the idle slate says so instead of the hint.
+    #[test]
+    fn while_the_tunnel_connects_the_idle_slate_says_so() {
+        assert_eq!(
+            texts(SlateKind::Idle, "", true),
+            (
+                "Brak filmów w kolejce".to_string(),
+                "Łączenie z internetem…".to_string()
+            )
+        );
+        // An address always wins.
+        assert_eq!(
+            texts(SlateKind::Idle, "https://tv.example.com/", true).1,
+            "https://tv.example.com/"
+        );
+        assert_eq!(
+            texts(SlateKind::Pause, "", true),
+            ("Pauza — wracamy za chwilę".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn a_slate_address_from_text_is_not_connecting() {
+        assert_eq!(
+            SlateAddress::from("https://a.example.com"),
+            SlateAddress {
+                public_url: "https://a.example.com".into(),
+                connecting: false
+            }
+        );
+        assert_eq!(SlateAddress::default(), SlateAddress::from(String::new()));
     }
 
     #[test]
@@ -713,7 +791,7 @@ mod tests {
 
     fn swapper(ffmpeg: PathBuf, root: &Path, url: &str, hold: Duration) -> SlateSwapper {
         let o = options(ffmpeg, root, "", 0);
-        SlateSwapper::new(&o, root.to_path_buf(), url.into(), hold)
+        SlateSwapper::new(&o, root.to_path_buf(), url, hold)
     }
 
     #[tokio::test]
@@ -773,6 +851,60 @@ mod tests {
         };
         assert_eq!(third.generation, 2);
         assert!(qr_in_segment(&ffmpeg, &third.idle[0].path, 1.0).is_empty());
+    }
+
+    /// No address in both, but "connecting" is a different slate: it is swapped in, once.
+    #[tokio::test]
+    async fn a_connecting_tunnel_swaps_in_the_connecting_slate() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let swapper = swapper(ffmpeg.clone(), root.path(), "", Duration::from_secs(3600));
+        let (tx, mut rx) = mpsc::channel(4);
+        let connecting = || SlateAddress {
+            public_url: String::new(),
+            connecting: true,
+        };
+        assert_eq!(
+            swapper.swap_to(connecting, &tx).await,
+            SwapOutcome::Replaced { generation: 1 }
+        );
+        let Ok(Command::ReplaceSlates(set)) = rx.try_recv() else {
+            panic!("the connecting set was not handed over");
+        };
+        assert!(qr_in_segment(&ffmpeg, &set.idle[0].path, 1.0).is_empty());
+        if default_font().exists() {
+            let sub =
+                std::fs::read_to_string(root.path().join("g1").join("idle").join("subtitle.txt"))
+                    .unwrap();
+            assert_eq!(sub, "Łączenie z internetem…");
+        }
+        assert_eq!(
+            swapper.swap_to(connecting, &tx).await,
+            SwapOutcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn the_swapper_for_a_connecting_start_knows_its_initial_slate() {
+        let config = crate::config::AppConfig {
+            public_url: String::new(),
+            ..crate::app_settings::app_config(
+                &crate::app_settings::AppSettings::default(),
+                Path::new("H"),
+            )
+        };
+        let swapper = SlateSwapper::for_config(&config, true);
+        let state = swapper.state.try_lock().unwrap();
+        assert_eq!(
+            state.address,
+            SlateAddress {
+                public_url: String::new(),
+                connecting: true
+            }
+        );
     }
 
     #[tokio::test]

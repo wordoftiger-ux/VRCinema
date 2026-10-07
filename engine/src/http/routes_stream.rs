@@ -43,6 +43,8 @@ async fn segment(State(state): State<AppState>, Path(name): Path<String>) -> Res
     let Ok(bytes) = tokio::fs::read(snapshot.live_dir.join(&name)).await else {
         return missing();
     };
+    // Someone is watching (the app's own preview too): the automatic pause counts this.
+    state.viewers.segment_fetched();
     let mut res = bytes.into_response();
     let headers = res.headers_mut();
     headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));

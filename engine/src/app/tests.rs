@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 15] = [
+const ROUTES: [(&str, &str); 17] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -32,6 +32,8 @@ const ROUTES: [(&str, &str); 15] = [
     ("POST", "/api/desktop/update/apply"),
     ("POST", "/api/desktop/wizard/complete"),
     ("POST", "/api/desktop/restart"),
+    ("GET", "/api/desktop/tunnel"),
+    ("POST", "/api/desktop/tunnel/restart"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -63,6 +65,7 @@ fn test_options(tmp: &Path) -> AppOptions {
             cloudflared_release_api: format!("{NOWHERE}/release-api"),
         },
         fake_resolver: Some(fake),
+        ..AppOptions::default()
     }
 }
 
@@ -111,8 +114,13 @@ impl App {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         crate::home::ensure_home(&home).unwrap();
-        // Port 0: never the owner's 8080, never a fixed test port.
-        std::fs::write(home.join("config.json"), "{\"port\": 0}").unwrap();
+        // Port 0: never the owner's 8080, never a fixed test port. The tunnel is off unless a
+        // test switches it on (`tunnel` tests): the manual address and trust apply.
+        std::fs::write(
+            home.join("config.json"),
+            "{\"port\": 0, \"tunnelEnabled\": false}",
+        )
+        .unwrap();
         let mut options = test_options(tmp.path());
         prepare(&home, &mut options);
         let hooks = Arc::new(FakeHooks::default());
@@ -318,6 +326,10 @@ async fn info_describes_the_app() {
     assert_eq!(info["restarting"], false);
     assert_eq!(info["encoder"], "libx264");
     assert_eq!(info["update"], Value::Null);
+    assert_eq!(info["tunnel"]["state"], "off");
+    assert_eq!(info["tunnel"]["url"], Value::Null);
+    assert_eq!(info["paused"], false);
+    assert_eq!(info["pauseReasons"], json!([]));
     app.stop().await;
 }
 
@@ -371,6 +383,46 @@ async fn put_config_rejects_bad_values_and_saves_nothing() {
             "Pole pixeldrainApiKey musi być tekstem.",
         ),
         (json!([1, 2]), "Niepoprawne ustawienia."),
+        (
+            json!({"tunnelEnabled": "tak"}),
+            "Pole tunnelEnabled musi mieć wartość true albo false.",
+        ),
+        (
+            json!({"tunnelMode": "inny"}),
+            "Tryb tunelu musi mieć wartość quick albo named.",
+        ),
+        (
+            json!({"tunnelMode": 1}),
+            "Tryb tunelu musi mieć wartość quick albo named.",
+        ),
+        (
+            json!({"namedTunnelHostname": "https://kanal.example.com"}),
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ),
+        (
+            json!({"namedTunnelHostname": "bez-kropki"}),
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ),
+        (
+            json!({"namedTunnelHostname": "zły host.example.com"}),
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ),
+        (
+            json!({"namedTunnelHostname": "-a.example.com"}),
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ),
+        (
+            json!({"namedTunnelHostname": 5}),
+            "Pole namedTunnelHostname musi być tekstem.",
+        ),
+        (
+            json!({"pauseOnTunnelLoss": "tak"}),
+            "Pole pauseOnTunnelLoss musi mieć wartość true albo false.",
+        ),
+        (
+            json!({"pauseWhenNoViewers": 1}),
+            "Pole pauseWhenNoViewers musi mieć wartość true albo false.",
+        ),
         // One bad field: the good one next to it is not saved either.
         (
             json!({"publicUrl": "https://tv.example.com", "port": 1}),
@@ -446,6 +498,46 @@ async fn put_config_saves_valid_values_and_never_shows_secrets() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(app.saved()["pixeldrainApiKey"], Value::Null);
     assert_eq!(app.saved()["skippedUpdateVersion"], Value::Null);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn the_tunnel_settings_are_saved_shown_and_need_no_restart() {
+    let app = App::start().await;
+    let cookie = app.window_cookie().await;
+    let view = app.get("/api/desktop/config", &cookie).await;
+    assert_eq!(view["tunnelEnabled"], false, "the harness switches it off");
+    assert_eq!(view["tunnelMode"], "quick");
+    assert_eq!(view["namedTunnelHostname"], Value::Null);
+    assert_eq!(view["pauseOnTunnelLoss"], true);
+    assert_eq!(view["pauseWhenNoViewers"], false);
+    let (status, res) = app
+        .put_config(
+            &cookie,
+            json!({
+                "tunnelMode": "named",
+                "namedTunnelHostname": " Kanal.Example.com ",
+                "pauseOnTunnelLoss": false,
+                "pauseWhenNoViewers": true,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["restarted"], false);
+    assert_eq!(res["tunnelMode"], "named");
+    assert_eq!(res["namedTunnelHostname"], "kanal.example.com");
+    assert_eq!(res["pauseOnTunnelLoss"], false);
+    assert_eq!(res["pauseWhenNoViewers"], true);
+    let saved = app.saved();
+    assert_eq!(saved["tunnelMode"], "named");
+    assert_eq!(saved["namedTunnelHostname"], "kanal.example.com");
+    assert_eq!(saved["pauseWhenNoViewers"], true);
+    let (status, res) = app
+        .put_config(&cookie, json!({"namedTunnelHostname": null}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(app.saved()["namedTunnelHostname"], Value::Null);
+    assert_eq!(app.engine().server_starts(), 1);
     app.stop().await;
 }
 
@@ -1290,3 +1382,5 @@ async fn a_remote_switch_during_a_restart_reaches_the_new_server() {
     assert!(core.live_settings.trust_cloudflare.get());
     app.stop().await;
 }
+
+mod tunnel;

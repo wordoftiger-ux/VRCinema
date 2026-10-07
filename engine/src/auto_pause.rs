@@ -1,0 +1,573 @@
+//! Automatic pause (spec section 8): the channel holds films back while nobody can watch them.
+//!
+//! - Tunnel loss: the tunnel is enabled but not online for at least 10 s → `Pause(Tunnel)`;
+//!   online again → `Resume(Tunnel)`. Only with `pauseOnTunnelLoss`.
+//! - No viewers: no segment fetched (`/live/main/<n>.ts`) for at least 30 s →
+//!   `Pause(NoViewers)`; the first fetch → `Resume(NoViewers)` at once. Only with
+//!   `pauseWhenNoViewers`.
+//!
+//! The controller sends its reasons to whichever channel loop runs: a new loop (server restarted)
+//! gets every active reason again. A loop that rebuilds its channel after a crash re-applies the
+//! reasons itself (`engine.rs`).
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{Notify, mpsc, watch};
+use tokio::time::Instant;
+
+use crate::engine::Command;
+use crate::pipeline::channel::PauseReason;
+use crate::pipeline::clip_factory::SharedLogFn;
+use crate::tunnel::TunnelState;
+
+/// Timings of the controller; the defaults are the spec's, tests shorten them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoPauseTimings {
+    /// The tunnel may be down this long before the channel pauses (10 s).
+    pub tunnel_loss: Duration,
+    /// Without a segment fetch for this long the channel pauses (30 s).
+    pub no_viewers: Duration,
+    /// Longest time between two checks (a restarted server's channel gets the active reasons
+    /// within it; commands the loop could not take yet are sent again).
+    pub recheck: Duration,
+}
+
+impl Default for AutoPauseTimings {
+    fn default() -> Self {
+        Self {
+            tunnel_loss: Duration::from_secs(10),
+            no_viewers: Duration::from_secs(30),
+            recheck: Duration::from_secs(1),
+        }
+    }
+}
+
+/// The settings the controller follows (`config.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AutoPauseSettings {
+    pub tunnel_enabled: bool,
+    pub pause_on_tunnel_loss: bool,
+    pub pause_when_no_viewers: bool,
+}
+
+/// When a viewer last fetched a segment. Recording is a store and a wake-up: cheap enough for
+/// every segment request.
+#[derive(Debug)]
+pub struct ViewerActivity {
+    base: Instant,
+    /// Milliseconds after `base` of the latest fetch, plus one; 0: none yet.
+    last_ms: AtomicU64,
+    fetched: Notify,
+}
+
+impl Default for ViewerActivity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ViewerActivity {
+    pub fn new() -> Self {
+        Self {
+            base: Instant::now(),
+            last_ms: AtomicU64::new(0),
+            fetched: Notify::new(),
+        }
+    }
+
+    /// A viewer (the in-app preview too) fetched a segment.
+    pub fn segment_fetched(&self) {
+        let ms = u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
+        self.last_ms.store(ms + 1, Ordering::Relaxed);
+        self.fetched.notify_one();
+    }
+
+    /// The latest fetch, if any.
+    pub fn last_fetch(&self) -> Option<Instant> {
+        match self.last_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(self.base + Duration::from_millis(ms - 1)),
+        }
+    }
+}
+
+/// The command queue of the channel loop running right now (`None`: no channel, e.g. while the
+/// server restarts or runs without tools).
+pub type CommandTarget = Arc<dyn Fn() -> Option<mpsc::Sender<Command>> + Send + Sync>;
+
+/// The controller; [`AutoPause::run`] drives it until the tunnel or settings sender is gone.
+pub struct AutoPause {
+    pub timings: AutoPauseTimings,
+    pub settings: watch::Receiver<AutoPauseSettings>,
+    /// State of the tunnel as the app shows it.
+    pub tunnel: watch::Receiver<TunnelState>,
+    pub viewers: Arc<ViewerActivity>,
+    pub target: CommandTarget,
+    /// Asks for a check now (a new server published its channel).
+    pub kick: Arc<Notify>,
+    pub log: SharedLogFn,
+}
+
+/// What has been sent to which channel loop.
+#[derive(Default)]
+struct Delivered {
+    to: Option<mpsc::Sender<Command>>,
+    reasons: BTreeSet<PauseReason>,
+}
+
+impl AutoPause {
+    pub async fn run(mut self) {
+        let mut settings = *self.settings.borrow_and_update();
+        // Since when the tunnel (enabled) has not been online.
+        let mut down_since: Option<Instant> = None;
+        // Since when "no viewers" is watched: a fetch before it does not count against it.
+        let mut watching_since = Instant::now();
+        let mut active = BTreeSet::new();
+        let mut delivered = Delivered::default();
+        loop {
+            let now = Instant::now();
+            let fresh = *self.settings.borrow_and_update();
+            if fresh.pause_when_no_viewers && !settings.pause_when_no_viewers {
+                watching_since = now;
+            }
+            settings = fresh;
+            let online = matches!(*self.tunnel.borrow_and_update(), TunnelState::Online { .. });
+            if settings.tunnel_enabled && !online {
+                down_since.get_or_insert(now);
+            } else {
+                down_since = None;
+            }
+
+            let mut wanted = BTreeSet::new();
+            let mut next_check = now + self.timings.recheck;
+            if settings.tunnel_enabled
+                && settings.pause_on_tunnel_loss
+                && let Some(since) = down_since
+            {
+                let at = since + self.timings.tunnel_loss;
+                if now >= at {
+                    wanted.insert(PauseReason::Tunnel);
+                } else {
+                    next_check = next_check.min(at);
+                }
+            }
+            if settings.pause_when_no_viewers {
+                let seen = self
+                    .viewers
+                    .last_fetch()
+                    .map_or(watching_since, |f| f.max(watching_since));
+                let at = seen + self.timings.no_viewers;
+                if now >= at {
+                    wanted.insert(PauseReason::NoViewers);
+                } else {
+                    next_check = next_check.min(at);
+                }
+            }
+            self.log_changes(&active, &wanted);
+            active = wanted;
+            self.deliver(&active, &mut delivered);
+
+            tokio::select! {
+                changed = self.tunnel.changed() => if changed.is_err() { return },
+                changed = self.settings.changed() => if changed.is_err() { return },
+                () = self.viewers.fetched.notified() => {}
+                () = self.kick.notified() => {}
+                () = tokio::time::sleep_until(next_check) => {}
+            }
+        }
+    }
+
+    fn log_changes(&self, before: &BTreeSet<PauseReason>, after: &BTreeSet<PauseReason>) {
+        for reason in after.difference(before) {
+            let message = match reason {
+                PauseReason::Tunnel => format!(
+                    "Automatyczna pauza: tunel nie działa od {} s — filmy czekają na powrót internetu.",
+                    self.timings.tunnel_loss.as_secs()
+                ),
+                PauseReason::NoViewers => format!(
+                    "Automatyczna pauza: nikt nie ogląda od {} s — filmy czekają na widza.",
+                    self.timings.no_viewers.as_secs()
+                ),
+            };
+            (self.log)(&message);
+        }
+        for reason in before.difference(after) {
+            (self.log)(match reason {
+                PauseReason::Tunnel => "Koniec pauzy z powodu tunelu.",
+                PauseReason::NoViewers => "Koniec pauzy z powodu braku widzów.",
+            });
+        }
+    }
+
+    /// Brings the running channel loop to `wanted`: a new loop starts from no reasons; a command
+    /// the loop cannot take now (full queue) is sent again on a later check.
+    fn deliver(&self, wanted: &BTreeSet<PauseReason>, delivered: &mut Delivered) {
+        let target = (self.target)();
+        let same = match (&target, &delivered.to) {
+            (Some(new), Some(old)) => new.same_channel(old),
+            _ => false,
+        };
+        if !same {
+            delivered.reasons.clear();
+            delivered.to = target.clone();
+        }
+        let Some(tx) = target else {
+            return;
+        };
+        let pauses = wanted.difference(&delivered.reasons).copied();
+        let resumes = delivered.reasons.difference(wanted).copied();
+        let commands: Vec<(PauseReason, Command)> = pauses
+            .map(|r| (r, Command::Pause(r)))
+            .chain(resumes.map(|r| (r, Command::Resume(r))))
+            .collect();
+        for (reason, command) in commands {
+            let pause = matches!(command, Command::Pause(_));
+            match tx.try_send(command) {
+                Ok(()) => {
+                    if pause {
+                        delivered.reasons.insert(reason);
+                    } else {
+                        delivered.reasons.remove(&reason);
+                    }
+                }
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Closed(_)) => {
+                    *delivered = Delivered::default();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct Env {
+        settings: watch::Sender<AutoPauseSettings>,
+        tunnel: watch::Sender<TunnelState>,
+        viewers: Arc<ViewerActivity>,
+        target: Arc<Mutex<Option<mpsc::Sender<Command>>>>,
+        rx: mpsc::Receiver<Command>,
+        kick: Arc<Notify>,
+        logs: Arc<Mutex<Vec<String>>>,
+    }
+
+    const ON_LOSS: AutoPauseSettings = AutoPauseSettings {
+        tunnel_enabled: true,
+        pause_on_tunnel_loss: true,
+        pause_when_no_viewers: false,
+    };
+
+    const ON_NO_VIEWERS: AutoPauseSettings = AutoPauseSettings {
+        tunnel_enabled: false,
+        pause_on_tunnel_loss: true,
+        pause_when_no_viewers: true,
+    };
+
+    fn online() -> TunnelState {
+        TunnelState::Online {
+            url: "https://a.trycloudflare.com".into(),
+        }
+    }
+
+    fn start(settings: AutoPauseSettings, tunnel: TunnelState) -> Env {
+        let (settings_tx, settings_rx) = watch::channel(settings);
+        let (tunnel_tx, tunnel_rx) = watch::channel(tunnel);
+        let (tx, rx) = mpsc::channel(64);
+        let target = Arc::new(Mutex::new(Some(tx)));
+        let viewers = Arc::new(ViewerActivity::new());
+        let kick = Arc::new(Notify::new());
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let controller = AutoPause {
+            timings: AutoPauseTimings::default(),
+            settings: settings_rx,
+            tunnel: tunnel_rx,
+            viewers: Arc::clone(&viewers),
+            target: {
+                let target = Arc::clone(&target);
+                Arc::new(move || target.lock().unwrap().clone())
+            },
+            kick: Arc::clone(&kick),
+            log: {
+                let logs = Arc::clone(&logs);
+                Arc::new(move |m: &str| logs.lock().unwrap().push(m.to_string()))
+            },
+        };
+        tokio::spawn(controller.run());
+        Env {
+            settings: settings_tx,
+            tunnel: tunnel_tx,
+            viewers,
+            target,
+            rx,
+            kick,
+            logs,
+        }
+    }
+
+    impl Env {
+        /// Everything sent so far.
+        fn sent(&mut self) -> Vec<Command> {
+            let mut all = Vec::new();
+            while let Ok(c) = self.rx.try_recv() {
+                all.push(c);
+            }
+            all
+        }
+    }
+
+    /// Lets the (paused) clock run for `ms` milliseconds.
+    async fn after_ms(ms: u64) {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
+    /// Review Focus 4: a loss shorter than 10 s does not pause.
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_loss_shorter_than_10_s_does_not_pause() {
+        let mut env = start(ON_LOSS, online());
+        after_ms(5_000).await;
+        env.tunnel.send_replace(TunnelState::Reconnecting);
+        after_ms(9_000).await;
+        env.tunnel.send_replace(TunnelState::Error {
+            message: "x".into(),
+        });
+        after_ms(900).await;
+        env.tunnel.send_replace(online());
+        after_ms(60_000).await;
+        assert!(env.sent().is_empty());
+    }
+
+    /// Review Focus 4: 10 s without the tunnel pause; online again resumes at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_loss_of_10_s_pauses_and_the_return_resumes() {
+        let mut env = start(ON_LOSS, online());
+        after_ms(1_000).await;
+        env.tunnel.send_replace(TunnelState::Reconnecting);
+        after_ms(9_900).await;
+        assert!(env.sent().is_empty(), "paused before 10 s");
+        after_ms(200).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        // Further states without the tunnel change nothing.
+        env.tunnel.send_replace(TunnelState::Connecting);
+        after_ms(30_000).await;
+        assert!(env.sent().is_empty());
+        env.tunnel.send_replace(online());
+        after_ms(10).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::Tunnel)]);
+        assert!(
+            env.logs.lock().unwrap().iter().any(|l| l.contains("tunel")),
+            "{:?}",
+            env.logs.lock().unwrap()
+        );
+    }
+
+    /// A tunnel that never came up counts from the start.
+    #[tokio::test(start_paused = true)]
+    async fn a_tunnel_that_never_comes_up_pauses_after_10_s() {
+        let mut env = start(ON_LOSS, TunnelState::Connecting);
+        after_ms(9_900).await;
+        assert!(env.sent().is_empty());
+        after_ms(200).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_tunnel_pause_when_switched_off_or_the_tunnel_is_disabled() {
+        let mut env = start(
+            AutoPauseSettings {
+                pause_on_tunnel_loss: false,
+                ..ON_LOSS
+            },
+            TunnelState::Reconnecting,
+        );
+        after_ms(60_000).await;
+        assert!(env.sent().is_empty());
+        // Tunnel switched off: its state is `Off`, which is no loss.
+        env.settings.send_replace(AutoPauseSettings {
+            tunnel_enabled: false,
+            ..ON_LOSS
+        });
+        env.tunnel.send_replace(TunnelState::Off);
+        after_ms(60_000).await;
+        assert!(env.sent().is_empty());
+    }
+
+    /// Switching the option off while paused for it resumes at once.
+    #[tokio::test(start_paused = true)]
+    async fn switching_the_option_off_resumes_its_reason() {
+        let mut env = start(ON_LOSS, TunnelState::Reconnecting);
+        after_ms(10_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        env.settings.send_replace(AutoPauseSettings {
+            pause_on_tunnel_loss: false,
+            ..ON_LOSS
+        });
+        after_ms(10).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::Tunnel)]);
+        // Disabling the tunnel also clears it.
+        env.settings.send_replace(ON_LOSS);
+        after_ms(10_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        env.settings.send_replace(AutoPauseSettings {
+            tunnel_enabled: false,
+            ..ON_LOSS
+        });
+        after_ms(10).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::Tunnel)]);
+    }
+
+    /// 30 s without a segment fetch pause; the next fetch resumes without waiting for a check.
+    #[tokio::test(start_paused = true)]
+    async fn thirty_seconds_without_viewers_pause_and_a_fetch_resumes_at_once() {
+        let mut env = start(ON_NO_VIEWERS, TunnelState::Off);
+        after_ms(20_000).await;
+        env.viewers.segment_fetched();
+        after_ms(29_900).await;
+        assert!(env.sent().is_empty(), "the fetch at 20 s restarts the 30 s");
+        after_ms(200).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::NoViewers)]);
+        after_ms(500).await;
+        env.viewers.segment_fetched();
+        // Well under the 1 s recheck: the fetch itself wakes the controller.
+        after_ms(1).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::NoViewers)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn steady_viewers_never_pause_and_the_option_off_never_pauses() {
+        let mut env = start(ON_NO_VIEWERS, TunnelState::Off);
+        for _ in 0..30 {
+            after_ms(4_000).await;
+            env.viewers.segment_fetched();
+        }
+        assert!(env.sent().is_empty());
+        env.settings.send_replace(AutoPauseSettings {
+            pause_when_no_viewers: false,
+            ..ON_NO_VIEWERS
+        });
+        after_ms(120_000).await;
+        assert!(env.sent().is_empty());
+    }
+
+    /// Switching "no viewers" on starts its 30 s from that moment, not from the last fetch.
+    #[tokio::test(start_paused = true)]
+    async fn switching_no_viewers_on_counts_from_that_moment() {
+        let mut env = start(
+            AutoPauseSettings {
+                pause_when_no_viewers: false,
+                ..ON_NO_VIEWERS
+            },
+            TunnelState::Off,
+        );
+        after_ms(120_000).await;
+        env.settings.send_replace(ON_NO_VIEWERS);
+        after_ms(29_900).await;
+        assert!(env.sent().is_empty());
+        after_ms(200).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::NoViewers)]);
+    }
+
+    /// Both reasons: each is paused and resumed on its own (the channel resumes when none is
+    /// left).
+    #[tokio::test(start_paused = true)]
+    async fn both_reasons_are_tracked_separately() {
+        let mut env = start(
+            AutoPauseSettings {
+                tunnel_enabled: true,
+                pause_on_tunnel_loss: true,
+                pause_when_no_viewers: true,
+            },
+            TunnelState::Reconnecting,
+        );
+        after_ms(10_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        after_ms(20_000).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::NoViewers)]);
+        env.tunnel.send_replace(online());
+        after_ms(10).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::Tunnel)]);
+        env.viewers.segment_fetched();
+        after_ms(1).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::NoViewers)]);
+    }
+
+    /// A new channel loop (the server restarted) starts without reasons: the active ones are
+    /// sent to it again; without any loop nothing is sent.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_channel_gets_the_active_reasons_again() {
+        let mut env = start(ON_LOSS, TunnelState::Reconnecting);
+        after_ms(10_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        // Server restarting: no channel.
+        *env.target.lock().unwrap() = None;
+        after_ms(5_000).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        *env.target.lock().unwrap() = Some(tx);
+        env.kick.notify_one();
+        after_ms(1).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Command::Pause(PauseReason::Tunnel))
+        );
+        // Sent once, not on every check.
+        after_ms(5_000).await;
+        assert!(rx.try_recv().is_err());
+        assert!(env.sent().is_empty(), "the old loop got nothing more");
+    }
+
+    /// Without a kick the next periodic check finds the new loop.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_channel_is_found_by_the_periodic_check() {
+        let mut env = start(ON_LOSS, TunnelState::Reconnecting);
+        after_ms(10_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        let (tx, mut rx) = mpsc::channel(64);
+        *env.target.lock().unwrap() = Some(tx);
+        after_ms(1_100).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Command::Pause(PauseReason::Tunnel))
+        );
+    }
+
+    /// A full command queue: the command is sent again on a later check, not lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_full_queue_is_retried() {
+        let mut env = start(ON_LOSS, TunnelState::Reconnecting);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Command::Skip).unwrap();
+        *env.target.lock().unwrap() = Some(tx);
+        after_ms(10_100).await;
+        assert_eq!(rx.try_recv().ok(), Some(Command::Skip));
+        after_ms(1_100).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Command::Pause(PauseReason::Tunnel))
+        );
+        assert!(env.sent().is_empty());
+    }
+
+    #[test]
+    fn viewer_activity_remembers_the_latest_fetch() {
+        let activity = ViewerActivity::new();
+        assert!(activity.last_fetch().is_none());
+        activity.segment_fetched();
+        let first = activity.last_fetch().unwrap();
+        assert!(first <= Instant::now());
+        assert!(Instant::now().duration_since(first) < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn default_timings_are_the_spec() {
+        let t = AutoPauseTimings::default();
+        assert_eq!(t.tunnel_loss, Duration::from_secs(10));
+        assert_eq!(t.no_viewers, Duration::from_secs(30));
+    }
+}
