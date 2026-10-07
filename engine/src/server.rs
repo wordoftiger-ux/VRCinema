@@ -20,7 +20,7 @@ use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
 use crate::pipeline::channel::{Channel, ChannelOptions};
 use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_factory};
 use crate::pipeline::probe::probe_duration;
-use crate::pipeline::slates::{SlateOptions, generate_slates};
+use crate::pipeline::slates::{RETAIN_S, SlateOptions, generate_slates, request_url};
 use crate::resolver::fake::FakeResolver;
 use crate::resolver::file::FileResolver;
 use crate::resolver::local::{FileDurationProbe, LocalResolver};
@@ -245,6 +245,23 @@ pub async fn bind_listener(
     }
 }
 
+/// Folders of slate sets made while an earlier server ran (`g1`, `g2`, ...): nothing airs them now.
+fn remove_swapped_slate_sets(slates_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(slates_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let swapped = name
+            .strip_prefix('g')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if swapped {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Generates the slates and spawns the supervised channel loop.
 async fn start_channel_loop(
     config: &AppConfig,
@@ -254,16 +271,14 @@ async fn start_channel_loop(
     shared_log: &SharedLogFn,
 ) -> anyhow::Result<(EngineHandle, EngineTask)> {
     shared_log("Generowanie plansz...");
+    remove_swapped_slate_sets(&config.data_dir.join("slates"));
     let slates = generate_slates(&SlateOptions {
         ffmpeg_path: config.ffmpeg_path.clone(),
         font_file: config.font_file.clone(),
         dir: config.data_dir.join("slates"),
-        request_url: if config.public_url.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", config.public_url)
-        },
+        request_url: request_url(&config.public_url),
         segment_seconds: config.segment_seconds,
+        generation: 0,
     })
     .await?;
 
@@ -309,7 +324,7 @@ async fn start_channel_loop(
                             .get(MAIN_CHANNEL_ID)
                             .map_or(true, |s| s.discontinuity_tags)
                     }),
-                    retain_s: Some(60),
+                    retain_s: Some(RETAIN_S),
                     log: Some(boxed_log()),
                 },
                 monotonic_clock(),

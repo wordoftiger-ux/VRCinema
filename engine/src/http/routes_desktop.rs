@@ -92,7 +92,8 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
         "update": update,
-        "restartRequired": core.restart_required(),
+        // Nothing waits for a restart any more (port and network access restart at once).
+        "restartRequired": false,
     })))
 }
 
@@ -203,7 +204,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
 
 /// Partial update: only the fields present change. Only a new port or network access restarts
 /// the server (the answer has the new port); everything else applies to the next request,
-/// resolve or clip. A new public address reaches the slates after a restart: `restartRequired`.
+/// resolve or clip; a new public address also redraws the slates in the background.
 async fn put_config(
     _: DesktopSession,
     State(state): State<AppState>,
@@ -214,7 +215,7 @@ async fn put_config(
     let restarted = core.apply_config(patch).await?;
     let mut view = config_view(&core);
     view.insert("restarted".into(), json!(restarted));
-    view.insert("restartRequired".into(), json!(core.restart_required()));
+    view.insert("restartRequired".into(), json!(false));
     Ok(json_ok(&Value::Object(view)))
 }
 

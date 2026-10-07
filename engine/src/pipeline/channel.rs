@@ -352,6 +352,14 @@ impl Channel {
         self.finish_current(ItemStatus::Played, Some(SKIPPED))
     }
 
+    /// Airs `slates` from now on (a new address was drawn on them). Films are not touched; the
+    /// next slate segment comes from the new set, from its first segment, under a new source key.
+    pub fn replace_slates(&mut self, slates: Slates) {
+        self.o.slates = slates;
+        self.slate_index = [0; 3];
+        self.last_slate_kind = None;
+    }
+
     /// Called after queue changes (removal, reorder, approval).
     pub fn on_queue_changed(&mut self) -> anyhow::Result<()> {
         if let Some(id) = self.current.as_ref().map(|c| c.item.id) {
@@ -681,7 +689,7 @@ impl Channel {
         Ok(SourceSegment {
             path: seg.path.clone(),
             duration: seg.duration,
-            source_key: kind.as_str().to_string(),
+            source_key: self.o.slates.source_key(kind),
             index: index as u64,
         })
     }
@@ -911,6 +919,7 @@ mod tests {
             idle: vec![info("/slates/idle/0.ts", 0), info("/slates/idle/1.ts", 1)],
             buffering: vec![info("/slates/buf/0.ts", 0)],
             pause: vec![info("/slates/pause/0.ts", 0), info("/slates/pause/1.ts", 1)],
+            generation: 0,
         }
     }
 
@@ -1659,6 +1668,79 @@ mod tests {
         e.channel.skip().unwrap();
         let s = e.next();
         assert_eq!((s.source_key.as_str(), s.index), ("idle", 0));
+    }
+
+    // ---------- Slate replacement ----------
+
+    fn replacement_slates(generation: u32) -> Slates {
+        let dir = format!("/slates/g{generation}");
+        Slates {
+            idle: vec![info(&format!("{dir}/idle/0.ts"), 0)],
+            buffering: vec![info(&format!("{dir}/buf/0.ts"), 0)],
+            pause: vec![
+                info(&format!("{dir}/pause/0.ts"), 0),
+                info(&format!("{dir}/pause/1.ts"), 1),
+            ],
+            generation,
+        }
+    }
+
+    #[tokio::test]
+    async fn replaced_slates_air_from_the_new_set_with_a_new_source_key() {
+        let mut e = setup();
+        assert_eq!(e.next().index, 0);
+        let before = e.next();
+        assert_eq!((before.source_key.as_str(), before.index), ("idle", 1));
+        e.channel.replace_slates(replacement_slates(1));
+        let after = e.next();
+        assert_eq!(after.source_key, "idle-g1");
+        assert_eq!(after.index, 0, "the new set starts from its first segment");
+        assert_eq!(after.path, PathBuf::from("/slates/g1/idle/0.ts"));
+        assert_eq!(e.next().source_key, "idle-g1");
+        // Another replacement: yet another key.
+        e.channel.replace_slates(replacement_slates(2));
+        assert_eq!(e.next().source_key, "idle-g2");
+    }
+
+    #[tokio::test]
+    async fn replacing_slates_does_not_touch_the_airing_film() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h = e.air(&a, 2).await;
+        e.channel.replace_slates(replacement_slates(1));
+        assert!(!h.disposed());
+        assert_eq!(e.channel.current_item_id(), Some(a.id));
+        h.produce(1);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn the_pause_slate_survives_a_replacement_and_resume_still_works() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(e.key(), "pause");
+        e.channel.replace_slates(replacement_slates(1));
+        let s = e.next();
+        assert_eq!((s.source_key.as_str(), s.index), ("pause-g1", 0));
+        assert_eq!(s.path, PathBuf::from("/slates/g1/pause/0.ts"));
+        assert_eq!(e.next().index, 1);
+        // The paused film is remembered across the replacement and resumes from 12 s.
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering-g1");
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 12.0,
+                attempt: 0
+            }
+        );
+        e.factory.handle(1).produce(2);
+        assert_eq!(e.key(), format!("{}-r1", clip_key(&a, 0)));
     }
 
     // ---------- Pause and resume ----------

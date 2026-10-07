@@ -20,6 +20,7 @@ use crate::http::auth::{AdminAuth, DesktopKey};
 use crate::live::LiveSettings;
 use crate::local_files::{AddReport, add_local_files};
 use crate::logging::LogSink;
+use crate::pipeline::slates::{SlateSwapper, SwapOutcome};
 use crate::self_update::{self, DEFAULT_API_URL, UpdateInfo};
 use crate::server::{RunOptions, run};
 use crate::tools::{Tool, ToolSources, ToolsManager};
@@ -116,8 +117,8 @@ fn admin_auth(s: &AppSettings) -> AdminAuth {
 }
 
 /// Settings the running server cannot take over: only the listening address. Everything else
-/// is read at use time ([`LiveSettings`]); a new public address waits for the next restart
-/// only on the slates ([`AppCore::restart_required`]).
+/// is read at use time ([`LiveSettings`]); a new public address also reaches the slates live
+/// ([`AppCore::refresh_slates`]).
 fn needs_restart(old: &AppSettings, new: &AppSettings) -> bool {
     old.port != new.port || old.lan_access != new.lan_access
 }
@@ -214,8 +215,8 @@ struct Live {
     port: u16,
     state: AppState,
     channel: bool,
-    /// Public address the server started with (drawn on its slates).
-    public_url: String,
+    /// Replaces the slate set when the public address changes (`None` without a channel).
+    slates: Option<Arc<SlateSwapper>>,
 }
 
 pub(crate) struct AppCore {
@@ -439,7 +440,7 @@ impl AppCore {
                         port: addr.port(),
                         state,
                         channel,
-                        public_url: config.public_url.clone(),
+                        slates: channel.then(|| Arc::new(SlateSwapper::for_config(config))),
                     },
                 ))
             }
@@ -554,6 +555,9 @@ impl AppCore {
             .map_err(|e| OpError::Failed(format!("{e:#}")))?;
         self.take_over(&new);
         if !needs_restart(&old, &new) {
+            if old.public_url != new.public_url {
+                self.refresh_slates();
+            }
             return Ok(false);
         }
         if let Err(e) = self.restart_server().await {
@@ -587,10 +591,37 @@ impl AppCore {
         }
     }
 
-    /// The running server's slates show another public address than the saved one.
-    pub(crate) fn restart_required(&self) -> bool {
-        let saved = app_config(&self.settings(), &self.home).public_url;
-        self.live().is_some_and(|l| l.public_url != saved)
+    /// The public address changed: makes the slates for the saved address in the background and
+    /// hands them to the running channel (no restart, no break in the stream). A failure leaves
+    /// the previous slates on air and is logged. During a restart nothing is done: the new
+    /// server starts from the saved settings.
+    fn refresh_slates(self: &Arc<Self>) {
+        if self.closing.load(Ordering::SeqCst) {
+            return;
+        }
+        let core = Arc::clone(self);
+        let task = tokio::spawn(async move { core.swap_slates().await });
+        let mut background = lock(&self.background);
+        background.retain(|t| !t.is_finished());
+        background.push(task);
+    }
+
+    async fn swap_slates(&self) {
+        let Some(live) = self.live() else { return };
+        let Some(swapper) = live.slates.clone() else {
+            return;
+        };
+        // The address saved by now, not the one that triggered this: quick edits collapse.
+        let url = app_config(&self.settings(), &self.home).public_url;
+        match swapper.swap(&url, &live.state.engine.commands).await {
+            SwapOutcome::Unchanged => {}
+            SwapOutcome::Replaced { generation } => self.log(&format!(
+                "Plansze odświeżone dla nowego adresu publicznego (zestaw {generation})."
+            )),
+            SwapOutcome::Failed(why) => self.log(&format!(
+                "Nie udało się odświeżyć plansz: {why}. Zostają poprzednie plansze."
+            )),
+        }
     }
 
     /// Native picker for the cookies file; the choice is saved and used by the next yt-dlp call.
@@ -871,7 +902,13 @@ impl AppEngine {
     }
 
     fn send(&self, live: &Live, command: Command) {
-        if live.state.engine.commands.try_send(command).is_err() {
+        if live
+            .state
+            .engine
+            .commands
+            .try_send(command.clone())
+            .is_err()
+        {
             self.core.log(&format!(
                 "Kanał nie działa — polecenie {command:?} pominięte."
             ));

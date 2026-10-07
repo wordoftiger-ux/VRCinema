@@ -412,8 +412,8 @@ async fn put_config_saves_valid_values_and_never_shows_secrets() {
     assert_eq!(res["publicUrl"], "https://tv.example.com");
     assert_eq!(res["restarted"], false, "only port and lanAccess restart");
     assert_eq!(
-        res["restartRequired"], true,
-        "slates still show the old address"
+        res["restartRequired"], false,
+        "the slates take the new address live"
     );
     assert_eq!(res["port"], json!(app.engine().port()));
     assert_eq!(*app.hooks.autostart_calls.lock().unwrap(), vec![true]);
@@ -1047,11 +1047,11 @@ async fn minor_settings_take_effect_without_a_restart() {
     assert!(live.trust_cloudflare.get());
     assert_eq!(live.encoder.get(), VideoEncoder::H264Nvenc);
     assert_eq!(live.pixeldrain_api_key.get(), Some("klucz-pd".to_string()));
-    // Links use the new address at once; the slates only after a restart.
+    // Links and slates use the new address at once (the slates in the background).
     let panel = app.get("/api/admin/channels/main", &cookie).await;
     assert_eq!(panel["channelUrl"], "https://tv.example.com/live/main.m3u8");
     let info = app.get("/api/desktop/info", &cookie).await;
-    assert_eq!(info["restartRequired"], true);
+    assert_eq!(info["restartRequired"], false);
 
     let (status, res) = app
         .call("POST", "/api/desktop/restart", Some(&cookie), None)
@@ -1144,6 +1144,70 @@ async fn a_minor_change_keeps_the_stream_running() {
         1
     );
     assert_eq!(app.engine().server_starts(), 1);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_new_public_address_replaces_the_slates_live() {
+    let mut linked = false;
+    let app = App::start_with(|home, _| linked = link_real_tools(home)).await;
+    if !linked {
+        eprintln!("pomijam: brak bin/ffmpeg.exe lub nie można utworzyć dowiązania");
+        app.stop().await;
+        return;
+    }
+    let cookie = app.window_cookie().await;
+    let slates = app.home.join("data").join("slates");
+    // The tag line (not `#EXT-X-DISCONTINUITY-SEQUENCE`).
+    const TAG: &str = "#EXT-X-DISCONTINUITY\n";
+    let playlist = || async {
+        app.http
+            .get(app.url("/live/main.m3u8"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    };
+    eventually(60, "the stream to start", || async {
+        playlist().await.contains("#EXTINF")
+    })
+    .await;
+    assert!(!playlist().await.contains(TAG));
+    assert!(
+        !slates.join("idle").join("qr.png").exists(),
+        "no address, no code"
+    );
+
+    let (status, res) = app
+        .put_config(&cookie, json!({"publicUrl": "https://tv.example.com"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["restarted"], false);
+    assert_eq!(res["restartRequired"], false);
+    // The new set appears in a folder of its own and goes on air as one discontinuity.
+    eventually(90, "the new slate set", || async {
+        slates.join("g1").join("idle").join("qr.png").is_file()
+    })
+    .await;
+    eventually(60, "the new set on air", || async {
+        playlist().await.contains(TAG)
+    })
+    .await;
+    // A second change makes a third set (and no code without an address).
+    let (status, _) = app.put_config(&cookie, json!({"publicUrl": ""})).await;
+    assert_eq!(status, StatusCode::OK);
+    eventually(90, "the second slate set", || async {
+        slates.join("g2").join("idle").join("title.txt").is_file()
+    })
+    .await;
+    assert!(!slates.join("g2").join("idle").join("qr.png").exists());
+    assert_eq!(app.engine().server_starts(), 1, "no restart");
+    assert_eq!(
+        app.engine().channel_loop_counter().load(Ordering::SeqCst),
+        1
+    );
     app.stop().await;
 }
 

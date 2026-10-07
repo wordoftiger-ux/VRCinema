@@ -221,7 +221,7 @@ impl AppState {
 
     /// Fire-and-forget: HTTP never waits for the engine loop.
     fn send_command(&self, command: Command) {
-        if let Err(e) = self.engine.commands.try_send(command) {
+        if let Err(e) = self.engine.commands.try_send(command.clone()) {
             (self.log)(&format!(
                 "Nie można przekazać polecenia {command:?} do kanału: {e}"
             ));

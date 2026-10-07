@@ -1,14 +1,30 @@
-//! Idle and buffering slates, pre-rendered once at start-up. Port of `src/pipeline/slates.ts`.
+//! Idle, buffering and pause slates, pre-rendered in the background and swappable while the
+//! channel airs. Port of `src/pipeline/slates.ts`, extended with the QR code of the request page.
 
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
+use std::time::Duration;
 
-use crate::config::VideoEncoder;
+use tokio::sync::mpsc;
+
+use crate::config::{AppConfig, VideoEncoder};
+use crate::engine::Command;
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::resolver::types::StreamInput;
 
 const SLATE_SECONDS: u32 = 8;
+/// Width of the QR image in a 1080p frame (the largest whole-pixel module size that fits).
+const QR_TARGET_PX: u32 = 400;
+/// White border around the code, in modules (the QR standard asks for 4).
+const QR_QUIET_MODULES: u32 = 4;
+/// The code is placed in ffmpeg's working directory under this name.
+const QR_FILE: &str = "qr.png";
+/// How long the broadcaster keeps segments that left the playlist (`retain_s` in server.rs).
+pub const RETAIN_S: u64 = 60;
+/// Extra time before an old slate set is deleted.
+const SWAP_MARGIN_S: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlateKind {
@@ -19,6 +35,8 @@ pub enum SlateKind {
 }
 
 impl SlateKind {
+    pub const ALL: [SlateKind; 3] = [SlateKind::Idle, SlateKind::Buffering, SlateKind::Pause];
+
     pub fn as_str(self) -> &'static str {
         match self {
             SlateKind::Idle => "idle",
@@ -28,11 +46,25 @@ impl SlateKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Slates {
     pub idle: Vec<SegmentInfo>,
     pub buffering: Vec<SegmentInfo>,
     pub pause: Vec<SegmentInfo>,
+    /// Which set this is: 0 for the one made at start-up, then 1, 2, ... for every live
+    /// replacement. It is part of the source keys, so the broadcaster sees a new set as a
+    /// different source (a discontinuity) even when the same kind of slate airs on.
+    pub generation: u32,
+}
+
+impl Slates {
+    /// Source key of `kind` in this set (`idle`, then `idle-g1`, `idle-g2`, ...).
+    pub fn source_key(&self, kind: SlateKind) -> String {
+        match self.generation {
+            0 => kind.as_str().to_string(),
+            n => format!("{}-g{n}", kind.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,9 +72,12 @@ pub struct SlateOptions {
     pub ffmpeg_path: PathBuf,
     pub font_file: PathBuf,
     pub dir: PathBuf,
-    /// Address of the request page shown on the idle slate.
+    /// Address of the request page shown (as text and as a QR code) on the idle slate; empty:
+    /// no address, no code.
     pub request_url: String,
     pub segment_seconds: u32,
+    /// Number of the set being made (see [`Slates::generation`]).
+    pub generation: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +90,15 @@ pub enum SlateError {
     Io(#[from] std::io::Error),
 }
 
+/// Address of the request page for a public address (no trailing slash); empty stays empty.
+pub fn request_url(public_url: &str) -> String {
+    if public_url.is_empty() {
+        String::new()
+    } else {
+        format!("{public_url}/")
+    }
+}
+
 fn texts(kind: SlateKind, request_url: &str) -> (String, String) {
     match kind {
         SlateKind::Idle => (
@@ -62,7 +106,8 @@ fn texts(kind: SlateKind, request_url: &str) -> (String, String) {
             if request_url.is_empty() {
                 "Dodaj film na stronie zgłoszeń".to_string()
             } else {
-                format!("Dodaj film: {request_url}")
+                // Under the QR code: just the address.
+                request_url.to_string()
             },
         ),
         SlateKind::Buffering => (
@@ -73,22 +118,64 @@ fn texts(kind: SlateKind, request_url: &str) -> (String, String) {
     }
 }
 
-/// lavfi filter: dark 1080p30 background and two centred texts. Texts and font are read from
-/// files in ffmpeg's working directory, which sidesteps path and character escaping.
-pub fn slate_filter(with_text: bool, seconds: u32) -> String {
+/// PNG of the QR code for `text`: error correction M, a quiet zone of [`QR_QUIET_MODULES`]
+/// modules, whole-pixel modules, about [`QR_TARGET_PX`] px wide.
+pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
+    use image::{ImageFormat, Luma};
+    use qrcode::{Color, EcLevel, QrCode};
+
+    let failed = |message: String| SlateError::Failed {
+        kind: SlateKind::Idle.as_str(),
+        message,
+    };
+    let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
+        .map_err(|e| failed(format!("kod QR: {e}")))?;
+    let modules = u32::try_from(code.width()).unwrap_or(u32::MAX);
+    let total = modules + 2 * QR_QUIET_MODULES;
+    let scale = (QR_TARGET_PX / total).max(1);
+    let colors = code.to_colors();
+    let image = image::ImageBuffer::from_fn(total * scale, total * scale, |x, y| {
+        let (mx, my) = (x / scale, y / scale);
+        let inside = |v: u32| (QR_QUIET_MODULES..QR_QUIET_MODULES + modules).contains(&v);
+        let dark = inside(mx)
+            && inside(my)
+            && colors[((my - QR_QUIET_MODULES) * modules + (mx - QR_QUIET_MODULES)) as usize]
+                == Color::Dark;
+        Luma([if dark { 0u8 } else { 255u8 }])
+    });
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, ImageFormat::Png)
+        .map_err(|e| failed(format!("zapis kodu QR: {e}")))?;
+    Ok(png.into_inner())
+}
+
+/// lavfi filter: dark 1080p30 background and two centred texts, with the QR code between them
+/// when `with_qr`. Texts, font and code are read from files in ffmpeg's working directory,
+/// which sidesteps path and character escaping.
+pub fn slate_filter(with_text: bool, with_qr: bool, seconds: u32) -> String {
     let base = format!("color=c=0x14161c:s=1920x1080:r=30:d={seconds}");
-    if !with_text {
-        return base;
+    let (title_y, subtitle_y) = if with_qr {
+        ("110", "700")
+    } else {
+        ("(h/2)-90", "(h/2)+30")
+    };
+    let mut chain = vec![base];
+    if with_text {
+        let common = "fontfile=font.ttf:x=(w-text_w)/2";
+        chain.push(format!(
+            "drawtext={common}:fontcolor=white:textfile=title.txt:fontsize=72:y={title_y}"
+        ));
+        chain.push(format!(
+            "drawtext={common}:fontcolor=0xb8bcc8:textfile=subtitle.txt:fontsize=40:y={subtitle_y}"
+        ));
     }
-    let common = "fontfile=font.ttf:x=(w-text_w)/2";
-    [
-        base,
-        format!("drawtext={common}:fontcolor=white:textfile=title.txt:fontsize=72:y=(h/2)-90"),
-        format!(
-            "drawtext={common}:fontcolor=0xb8bcc8:textfile=subtitle.txt:fontsize=40:y=(h/2)+30"
-        ),
-    ]
-    .join(",")
+    let chain = chain.join(",");
+    if with_qr {
+        format!("{chain}[bg];movie={QR_FILE}[qr];[bg][qr]overlay=x=(W-w)/2:y=250")
+    } else {
+        chain
+    }
 }
 
 async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentInfo>, SlateError> {
@@ -112,9 +199,13 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
             o.font_file.display()
         );
     }
+    let with_qr = kind == SlateKind::Idle && !o.request_url.is_empty();
+    if with_qr {
+        std::fs::write(dir.join(QR_FILE), qr_png(&o.request_url)?)?;
+    }
     let args = build_clip_args(&ClipArgsOptions {
         inputs: vec![StreamInput {
-            url: slate_filter(with_text, SLATE_SECONDS),
+            url: slate_filter(with_text, with_qr, SLATE_SECONDS),
             headers: vec![],
         }],
         input_format: Some("lavfi".into()),
@@ -157,7 +248,159 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
         idle: idle?,
         buffering: buffering?,
         pause: pause?,
+        generation: o.generation,
     })
+}
+
+/// Where the set on air lives: the three kind folders of the start-up set sit directly in the
+/// slates folder (`Root`), every later set has a folder of its own (`Own`).
+#[derive(Debug, Clone)]
+enum SetDir {
+    Root(PathBuf),
+    Own(PathBuf),
+}
+
+impl SetDir {
+    fn remove(&self) {
+        match self {
+            SetDir::Root(root) => {
+                for kind in SlateKind::ALL {
+                    let _ = std::fs::remove_dir_all(root.join(kind.as_str()));
+                }
+            }
+            SetDir::Own(dir) => {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+}
+
+struct SwapState {
+    /// Public address the set on air was made for.
+    public_url: String,
+    generation: u32,
+    dir: SetDir,
+}
+
+/// What [`SlateSwapper::swap`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwapOutcome {
+    /// The set on air already shows this address.
+    Unchanged,
+    /// A new set was made and handed to the channel loop.
+    Replaced { generation: u32 },
+    /// Nothing changed: the previous set stays on air.
+    Failed(String),
+}
+
+/// Replaces the slate set of a running channel when the public address changes: the new set is
+/// made in a folder of its own, handed to the channel loop ([`Command::ReplaceSlates`]) and the
+/// old folder is deleted only after its segments left the playlist and the retention window.
+pub struct SlateSwapper {
+    ffmpeg_path: PathBuf,
+    font_file: PathBuf,
+    root: PathBuf,
+    segment_seconds: u32,
+    /// How long the old set's folder is kept after the swap.
+    hold: Duration,
+    state: tokio::sync::Mutex<SwapState>,
+    /// Pending deletions of old sets; dropped with the swapper (a restarted server starts a
+    /// fresh swapper and wipes the old folders itself, and must not lose its own to these).
+    removals: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for SlateSwapper {
+    fn drop(&mut self) {
+        let removals = self
+            .removals
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        for task in removals.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+impl SlateSwapper {
+    /// `root` is the slates folder, `initial_url` the public address the start-up set was made for.
+    pub fn new(options: &SlateOptions, root: PathBuf, initial_url: String, hold: Duration) -> Self {
+        Self {
+            ffmpeg_path: options.ffmpeg_path.clone(),
+            font_file: options.font_file.clone(),
+            segment_seconds: options.segment_seconds,
+            state: tokio::sync::Mutex::new(SwapState {
+                public_url: initial_url,
+                generation: options.generation,
+                dir: SetDir::Root(root.clone()),
+            }),
+            root,
+            hold,
+            removals: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The swapper for a channel started with `config` (start-up set: generation 0 in
+    /// `<data>/slates`, made for `config.public_url`).
+    pub fn for_config(config: &AppConfig) -> Self {
+        let root = config.data_dir.join("slates");
+        // The old set stays until its segments left the playlist (`window_size` segments) and the
+        // broadcaster's retention (`RETAIN_S`), plus a margin.
+        let window = (config.window_size as u64) * u64::from(config.segment_seconds);
+        let hold = Duration::from_secs(window + RETAIN_S + SWAP_MARGIN_S);
+        let options = SlateOptions {
+            ffmpeg_path: config.ffmpeg_path.clone(),
+            font_file: config.font_file.clone(),
+            dir: root.clone(),
+            request_url: request_url(&config.public_url),
+            segment_seconds: config.segment_seconds,
+            generation: 0,
+        };
+        Self::new(&options, root, config.public_url.clone(), hold)
+    }
+
+    /// Makes the set for `public_url` and hands it to the loop behind `commands`. Calls are
+    /// serialized; one for the address already on air does nothing.
+    pub async fn swap(&self, public_url: &str, commands: &mpsc::Sender<Command>) -> SwapOutcome {
+        let mut state = self.state.lock().await;
+        if state.public_url == public_url {
+            return SwapOutcome::Unchanged;
+        }
+        let generation = state.generation + 1;
+        let dir = self.root.join(format!("g{generation}"));
+        let made = generate_slates(&SlateOptions {
+            ffmpeg_path: self.ffmpeg_path.clone(),
+            font_file: self.font_file.clone(),
+            dir: dir.clone(),
+            request_url: request_url(public_url),
+            segment_seconds: self.segment_seconds,
+            generation,
+        })
+        .await;
+        let slates = match made {
+            Ok(slates) => slates,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return SwapOutcome::Failed(e.to_string());
+            }
+        };
+        if commands.send(Command::ReplaceSlates(slates)).await.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return SwapOutcome::Failed("Pętla kanału nie działa.".to_string());
+        }
+        let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
+        state.public_url = public_url.to_string();
+        state.generation = generation;
+        // The old segments may still be in the playlist and in the retention window.
+        let hold = self.hold;
+        let removal = tokio::spawn(async move {
+            tokio::time::sleep(hold).await;
+            old.remove();
+        });
+        let mut removals = self.removals.lock().unwrap_or_else(PoisonError::into_inner);
+        removals.retain(|t| !t.is_finished());
+        removals.push(removal);
+        SwapOutcome::Replaced { generation }
+    }
 }
 
 #[cfg(test)]
@@ -181,20 +424,78 @@ mod tests {
         }
     }
 
+    fn options(ffmpeg: PathBuf, dir: &Path, url: &str, generation: u32) -> SlateOptions {
+        SlateOptions {
+            ffmpeg_path: ffmpeg,
+            font_file: default_font(),
+            dir: dir.to_path_buf(),
+            request_url: url.into(),
+            segment_seconds: 4,
+            generation,
+        }
+    }
+
+    /// Decodes the QR codes found in a grey image.
+    fn decode_qr(gray: &image::GrayImage) -> Vec<String> {
+        let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
+            gray.width() as usize,
+            gray.height() as usize,
+            |x, y| gray.get_pixel(x as u32, y as u32).0[0],
+        );
+        prepared
+            .detect_grids()
+            .into_iter()
+            .filter_map(|g| g.decode().ok().map(|(_, text)| text))
+            .collect()
+    }
+
+    /// Frame at `at_s` seconds into a slate segment, decoded for QR codes.
+    fn qr_in_segment(ffmpeg: &Path, segment: &Path, at_s: f64) -> Vec<String> {
+        let frame = segment.with_extension(format!("{at_s}.png"));
+        // Output seeking (`-ss` after `-i`): the segment's timestamps do not start at 0.
+        let out = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(segment)
+            .args(["-ss", &at_s.to_string(), "-frames:v", "1"])
+            .arg(&frame)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        decode_qr(&image::open(&frame).unwrap().to_luma8())
+    }
+
     #[test]
     fn filter_with_font_draws_two_texts_from_files() {
-        let f = slate_filter(true, 8);
+        let f = slate_filter(true, false, 8);
         assert!(f.contains("textfile=title.txt"));
         assert!(f.contains("textfile=subtitle.txt"));
         assert!(f.contains("fontfile=font.ttf"));
         assert!(f.starts_with("color=c=0x14161c:s=1920x1080:r=30:d=8"));
+        assert!(!f.contains("movie="), "no code without an address");
     }
 
     #[test]
     fn filter_without_font_is_background_only() {
         assert_eq!(
-            slate_filter(false, 8),
+            slate_filter(false, false, 8),
             "color=c=0x14161c:s=1920x1080:r=30:d=8"
+        );
+    }
+
+    #[test]
+    fn filter_with_a_code_overlays_it_between_the_two_texts() {
+        let f = slate_filter(true, true, 8);
+        assert!(f.contains("movie=qr.png"), "{f}");
+        assert!(f.contains("overlay=x=(W-w)/2:y=250"), "{f}");
+        // The code is independent of the font: it still shows on a text-less slate.
+        let bare = slate_filter(false, true, 8);
+        assert!(
+            bare.contains("movie=qr.png") && !bare.contains("drawtext"),
+            "{bare}"
         );
     }
 
@@ -204,7 +505,7 @@ mod tests {
             texts(SlateKind::Idle, "https://tv.example.com/"),
             (
                 "Brak filmów w kolejce".to_string(),
-                "Dodaj film: https://tv.example.com/".to_string()
+                "https://tv.example.com/".to_string()
             )
         );
         assert_eq!(
@@ -229,15 +530,74 @@ mod tests {
         assert_eq!(SlateKind::Pause.as_str(), "pause");
     }
 
+    #[test]
+    fn request_url_is_the_public_address_with_a_slash() {
+        assert_eq!(request_url(""), "");
+        assert_eq!(
+            request_url("https://tv.example.com"),
+            "https://tv.example.com/"
+        );
+    }
+
+    #[test]
+    fn source_keys_are_unique_per_generation() {
+        let mut s = Slates::default();
+        assert_eq!(s.source_key(SlateKind::Idle), "idle");
+        assert_eq!(s.source_key(SlateKind::Pause), "pause");
+        s.generation = 3;
+        assert_eq!(s.source_key(SlateKind::Idle), "idle-g3");
+        assert_eq!(s.source_key(SlateKind::Buffering), "buffering-g3");
+    }
+
+    #[test]
+    fn qr_png_decodes_to_the_address_with_a_quiet_zone_and_about_400_px() {
+        for url in [
+            "https://tv.example.com/",
+            "https://abc-def-ghi-jkl-mno.trycloudflare.com/",
+            "http://192.168.0.12:8080/",
+        ] {
+            let png = qr_png(url).unwrap();
+            let gray = image::load_from_memory(&png).unwrap().to_luma8();
+            assert_eq!(gray.width(), gray.height());
+            assert!((300..=400).contains(&gray.width()), "{}", gray.width());
+            assert_eq!(decode_qr(&gray), vec![url.to_string()]);
+            // Quiet zone: the first dark pixel is 4 whole modules from the edge, and the code
+            // is symmetric (same border on the far side).
+            let first_dark = gray
+                .enumerate_pixels()
+                .find(|(_, _, p)| p.0[0] == 0)
+                .map(|(x, y, _)| x.min(y))
+                .unwrap();
+            let last_dark = gray
+                .enumerate_pixels()
+                .filter(|(_, _, p)| p.0[0] == 0)
+                .map(|(x, y, _)| x.max(y))
+                .max()
+                .unwrap();
+            assert!(first_dark % QR_QUIET_MODULES == 0 && first_dark >= QR_QUIET_MODULES);
+            assert_eq!(gray.width() - 1 - last_dark, first_dark);
+            // Error correction level M: the code carries format bits for M (decoded level).
+            let code =
+                qrcode::QrCode::with_error_correction_level(url, qrcode::EcLevel::M).unwrap();
+            let module = first_dark / QR_QUIET_MODULES;
+            assert_eq!(
+                gray.width() / module,
+                code.width() as u32 + 2 * QR_QUIET_MODULES
+            );
+        }
+    }
+
     #[tokio::test]
     async fn broken_ffmpeg_reports_the_polish_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = generate_slates(&SlateOptions {
-            ffmpeg_path: "definitely-not-a-real-program-xyz".into(),
             font_file: dir.path().join("brak.ttf"),
-            dir: dir.path().to_path_buf(),
-            request_url: String::new(),
-            segment_seconds: 4,
+            ..options(
+                "definitely-not-a-real-program-xyz".into(),
+                dir.path(),
+                "",
+                0,
+            )
         })
         .await
         .unwrap_err();
@@ -256,15 +616,9 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let font = default_font();
-        let slates = generate_slates(&SlateOptions {
-            ffmpeg_path: ffmpeg,
-            font_file: font.clone(),
-            dir: dir.path().to_path_buf(),
-            request_url: "https://tv.example.com/".into(),
-            segment_seconds: 4,
-        })
-        .await
-        .unwrap();
+        let slates = generate_slates(&options(ffmpeg, dir.path(), "https://tv.example.com/", 0))
+            .await
+            .unwrap();
         for segments in [&slates.idle, &slates.buffering, &slates.pause] {
             assert!(!segments.is_empty());
             let total: f64 = segments.iter().map(|s| s.duration).sum();
@@ -277,7 +631,7 @@ mod tests {
             assert_eq!(title, "Brak filmów w kolejce");
             let sub =
                 std::fs::read_to_string(dir.path().join("idle").join("subtitle.txt")).unwrap();
-            assert_eq!(sub, "Dodaj film: https://tv.example.com/");
+            assert_eq!(sub, "https://tv.example.com/");
             let pause =
                 std::fs::read_to_string(dir.path().join("pause").join("title.txt")).unwrap();
             assert_eq!(pause, "Pauza — wracamy za chwilę");
@@ -292,11 +646,8 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let slates = generate_slates(&SlateOptions {
-            ffmpeg_path: ffmpeg,
             font_file: dir.path().join("brak.ttf"),
-            dir: dir.path().to_path_buf(),
-            request_url: String::new(),
-            segment_seconds: 4,
+            ..options(ffmpeg, dir.path(), "", 0)
         })
         .await
         .unwrap();
@@ -304,5 +655,240 @@ mod tests {
             !slates.idle.is_empty() && !slates.buffering.is_empty() && !slates.pause.is_empty()
         );
         assert!(!dir.path().join("idle").join("title.txt").exists());
+    }
+
+    /// Review Focus 3: the code on the airing slate is readable and leads to the request page.
+    #[tokio::test]
+    async fn the_idle_slate_shows_a_qr_code_that_decodes_to_the_request_page() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let url = "https://tv-przyklad.trycloudflare.com/";
+        let slates = generate_slates(&options(ffmpeg.clone(), dir.path(), url, 0))
+            .await
+            .unwrap();
+        let first = &slates.idle[0].path;
+        let wanted = vec![url.to_string()];
+        assert_eq!(qr_in_segment(&ffmpeg, first, 0.0), wanted, "first frame");
+        assert_eq!(qr_in_segment(&ffmpeg, first, 3.0), wanted, "later frame");
+        let last = &slates.idle.last().unwrap().path;
+        assert_eq!(qr_in_segment(&ffmpeg, last, 1.0), wanted, "last segment");
+        // Only the idle slate has a code.
+        assert!(qr_in_segment(&ffmpeg, &slates.pause[0].path, 1.0).is_empty());
+        assert!(qr_in_segment(&ffmpeg, &slates.buffering[0].path, 1.0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_an_address_the_idle_slate_has_no_code() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let slates = generate_slates(&options(ffmpeg.clone(), dir.path(), "", 0))
+            .await
+            .unwrap();
+        assert!(!dir.path().join("idle").join(QR_FILE).exists());
+        assert!(qr_in_segment(&ffmpeg, &slates.idle[0].path, 1.0).is_empty());
+        if default_font().exists() {
+            let sub =
+                std::fs::read_to_string(dir.path().join("idle").join("subtitle.txt")).unwrap();
+            assert_eq!(sub, "Dodaj film na stronie zgłoszeń");
+        }
+    }
+
+    fn swapper(ffmpeg: PathBuf, root: &Path, url: &str, hold: Duration) -> SlateSwapper {
+        let o = options(ffmpeg, root, "", 0);
+        SlateSwapper::new(&o, root.to_path_buf(), url.into(), hold)
+    }
+
+    #[tokio::test]
+    async fn a_swap_makes_a_new_set_in_its_own_folder_that_decodes_to_the_new_address() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let first = generate_slates(&options(
+            ffmpeg.clone(),
+            root.path(),
+            "https://stary.example.com/",
+            0,
+        ))
+        .await
+        .unwrap();
+        let swapper = swapper(
+            ffmpeg.clone(),
+            root.path(),
+            "https://stary.example.com",
+            Duration::from_secs(3600),
+        );
+        let (tx, mut rx) = mpsc::channel(4);
+
+        // Same address: nothing to do.
+        assert_eq!(
+            swapper.swap("https://stary.example.com", &tx).await,
+            SwapOutcome::Unchanged
+        );
+        assert!(rx.try_recv().is_err());
+
+        assert_eq!(
+            swapper.swap("https://nowy.example.com", &tx).await,
+            SwapOutcome::Replaced { generation: 1 }
+        );
+        let Ok(Command::ReplaceSlates(second)) = rx.try_recv() else {
+            panic!("the new set was not handed over");
+        };
+        assert_eq!(second.generation, 1);
+        assert_eq!(second.source_key(SlateKind::Idle), "idle-g1");
+        assert!(second.idle[0].path.starts_with(root.path().join("g1")));
+        assert_eq!(
+            qr_in_segment(&ffmpeg, &second.idle[0].path, 1.0),
+            vec!["https://nowy.example.com/".to_string()]
+        );
+        // The set on air keeps its files (the hold is an hour).
+        assert!(first.idle[0].path.exists());
+
+        // A second change makes generation 2 and clears the code with the address.
+        assert_eq!(
+            swapper.swap("", &tx).await,
+            SwapOutcome::Replaced { generation: 2 }
+        );
+        let Ok(Command::ReplaceSlates(third)) = rx.try_recv() else {
+            panic!("the third set was not handed over");
+        };
+        assert_eq!(third.generation, 2);
+        assert!(qr_in_segment(&ffmpeg, &third.idle[0].path, 1.0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_old_set_is_deleted_only_after_the_hold() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let first = generate_slates(&options(ffmpeg.clone(), root.path(), "", 0))
+            .await
+            .unwrap();
+        let hold = Duration::from_secs(4);
+        let swapper = swapper(ffmpeg, root.path(), "", hold);
+        let (tx, mut rx) = mpsc::channel(4);
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            swapper.swap("https://a.example.com", &tx).await,
+            SwapOutcome::Replaced { .. }
+        ));
+        let Ok(Command::ReplaceSlates(second)) = rx.try_recv() else {
+            panic!("no set");
+        };
+        // Start-up set: its three folders sit in the root; they stay while the hold runs.
+        assert!(first.idle[0].path.exists());
+        assert!(root.path().join("pause").is_dir());
+
+        let gone = tokio::time::timeout(Duration::from_secs(30), async {
+            while root.path().join("idle").exists() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "the old folders were never removed");
+        assert!(started.elapsed() >= hold, "removed before the hold ended");
+        for kind in SlateKind::ALL {
+            assert!(!root.path().join(kind.as_str()).exists());
+        }
+        // The new set is untouched.
+        assert!(second.idle[0].path.exists());
+
+        // Swapping again removes the previous *own* folder (g1) after the hold.
+        assert!(matches!(
+            swapper.swap("https://b.example.com", &tx).await,
+            SwapOutcome::Replaced { generation: 2 }
+        ));
+        assert!(root.path().join("g1").is_dir());
+        let gone = tokio::time::timeout(Duration::from_secs(30), async {
+            while root.path().join("g1").exists() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "g1 was never removed");
+        assert!(root.path().join("g2").is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_failed_generation_keeps_the_previous_set_and_reports_why() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("idle")).unwrap();
+        let swapper = swapper(
+            "definitely-not-a-real-program-xyz".into(),
+            root.path(),
+            "https://stary.example.com",
+            Duration::from_millis(10),
+        );
+        let (tx, mut rx) = mpsc::channel(4);
+        let outcome = swapper.swap("https://nowy.example.com", &tx).await;
+        let SwapOutcome::Failed(why) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(why.contains("Nie udało się wygenerować planszy"), "{why}");
+        assert!(rx.try_recv().is_err(), "nothing may reach the loop");
+        // The old set and its folders are untouched even after the hold would have passed.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(root.path().join("idle").is_dir());
+        assert!(
+            !root.path().join("g1").exists(),
+            "the half-made folder is cleaned up"
+        );
+        // The address on air did not change: the same request is tried again, not skipped.
+        assert!(matches!(
+            swapper.swap("https://nowy.example.com", &tx).await,
+            SwapOutcome::Failed(_)
+        ));
+        assert_eq!(
+            swapper.swap("https://stary.example.com", &tx).await,
+            SwapOutcome::Unchanged
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_swapper_cancels_the_pending_deletion() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        generate_slates(&options(ffmpeg.clone(), root.path(), "", 0))
+            .await
+            .unwrap();
+        let swapper = swapper(ffmpeg, root.path(), "", Duration::from_secs(1));
+        let (tx, _rx) = mpsc::channel(4);
+        assert!(matches!(
+            swapper.swap("https://a.example.com", &tx).await,
+            SwapOutcome::Replaced { .. }
+        ));
+        // A restarted server wipes the folders itself and must not lose its new ones to a
+        // deletion the old server scheduled.
+        drop(swapper);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(root.path().join("idle").is_dir());
+    }
+    #[tokio::test]
+    async fn a_stopped_loop_fails_the_swap_and_keeps_the_old_folder() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("idle")).unwrap();
+        let swapper = swapper(ffmpeg, root.path(), "", Duration::from_millis(10));
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let outcome = swapper.swap("https://nowy.example.com", &tx).await;
+        assert!(matches!(outcome, SwapOutcome::Failed(_)), "{outcome:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(root.path().join("idle").is_dir());
     }
 }

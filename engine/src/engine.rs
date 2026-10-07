@@ -1,5 +1,5 @@
 //! Channel engine loop and its supervisor (replaces the Node `setInterval(250 ms)` that drove
-//! `Broadcaster.tick()` with the Channel as its source).
+//! `Broadcaster.tick()` dts.windows(2).all(|w| w[0] <= w[1]) && dts.first() < dts.last()ith the Channel as its source).
 //!
 //! One task owns the `Broadcaster` and the `Channel`. Every 250 ms it drains the commands sent by
 //! HTTP, ticks the broadcaster and publishes a fresh [`Snapshot`]. HTTP never calls the Channel
@@ -19,9 +19,10 @@ use tokio::time::MissedTickBehavior;
 
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
 use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
+use crate::pipeline::slates::Slates;
 
 /// Requests from HTTP, applied by the loop between ticks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Skip,
     QueueChanged,
@@ -29,6 +30,9 @@ pub enum Command {
     Pause(PauseReason),
     /// Clears a pause reason; the channel resumes once none is left.
     Resume(PauseReason),
+    /// Airs another slate set from now on (a new public address is drawn on it). The loop
+    /// keeps it, so a channel rebuilt after a crash starts with the newest set.
+    ReplaceSlates(Slates),
 }
 
 /// What HTTP reads: the state right after the latest tick.
@@ -57,6 +61,7 @@ pub trait ChannelControl: SegmentSource + Send {
     fn on_queue_changed(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self, reason: PauseReason);
     fn resume(&mut self, reason: PauseReason);
+    fn replace_slates(&mut self, slates: Slates);
     fn state(&self) -> ChannelState;
     fn prefetched_item_id(&self) -> Option<i64>;
     /// The queue item being aired right now (not the one viewers see, which lags behind).
@@ -83,6 +88,9 @@ impl ChannelControl for Channel {
     }
     fn resume(&mut self, reason: PauseReason) {
         Channel::resume(self, reason)
+    }
+    fn replace_slates(&mut self, slates: Slates) {
+        Channel::replace_slates(self, slates)
     }
     fn state(&self) -> ChannelState {
         Channel::state(self)
@@ -162,6 +170,7 @@ where
         snapshot: snapshot_tx,
         stop: stop_rx,
         log,
+        slates: None,
     };
     let join = tokio::spawn(supervisor.run());
     let handle = EngineHandle {
@@ -241,6 +250,9 @@ struct Supervisor<F, L> {
     snapshot: watch::Sender<Arc<Snapshot>>,
     stop: watch::Receiver<bool>,
     log: L,
+    /// The newest slate set handed over with [`Command::ReplaceSlates`]; every rebuilt channel
+    /// gets it before it starts.
+    slates: Option<Slates>,
 }
 
 impl<C, F, L> Supervisor<F, L>
@@ -327,6 +339,9 @@ where
 
     /// Starts the pair and ticks it every 250 ms until shutdown or a failure.
     async fn run_core(&mut self, core: &mut Core<C>) -> Exit {
+        if let Some(slates) = self.slates.clone() {
+            core.channel.replace_slates(slates);
+        }
         match guarded(|| core.start()) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Exit::Failed(e.to_string()),
@@ -350,6 +365,9 @@ where
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Exit::Shutdown,
                 };
+                if let Command::ReplaceSlates(slates) = &command {
+                    self.slates = Some(slates.clone());
+                }
                 match guarded(|| core.apply(command)) {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => (self.log)(&format!("Polecenie kanału nie powiodło się: {e}")),
@@ -395,6 +413,10 @@ impl<C: ChannelControl> Core<C> {
             }
             Command::Resume(reason) => {
                 self.channel.resume(reason);
+                Ok(())
+            }
+            Command::ReplaceSlates(slates) => {
+                self.channel.replace_slates(slates);
                 Ok(())
             }
         }
@@ -447,7 +469,6 @@ mod tests {
     use crate::pipeline::broadcaster::{BroadcasterOptions, PublishedSegment, SourceSegment};
     use crate::pipeline::channel::{BoxFuture, ChannelOptions, ClipFactory, ClipHandle};
     use crate::pipeline::segmenter::SegmentInfo;
-    use crate::pipeline::slates::Slates;
     use std::path::Path;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -605,6 +626,9 @@ mod tests {
         }
         fn resume(&mut self, reason: PauseReason) {
             self.probe.event(format!("resume {}", reason.as_str()));
+        }
+        fn replace_slates(&mut self, slates: Slates) {
+            self.probe.event(format!("slates g{}", slates.generation));
         }
         fn state(&self) -> ChannelState {
             ChannelState {
@@ -1048,6 +1072,7 @@ mod tests {
             idle: slate_in(dir, "idle.ts"),
             buffering: slate_in(dir, "buffering.ts"),
             pause: slate_in(dir, "pause.ts"),
+            generation: 0,
         }
     }
 
@@ -1177,6 +1202,7 @@ mod tests {
                 idle: slate_in(&slates_dir, "idle.ts"),
                 buffering: slate_in(&slates_dir, "buffering.ts"),
                 pause: slate_in(&slates_dir, "pause.ts"),
+                generation: 0,
             };
             let channel = Channel::new(ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -1210,6 +1236,128 @@ mod tests {
         assert_eq!(
             skipped.error.as_deref(),
             Some("Pominięty przez właściciela")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replace_slates_reaches_the_channel_and_a_rebuilt_channel_starts_with_the_newest_set() {
+        let env = Env::new();
+        // Call 5 of next() panics (around the 8 s mark), long after the command below.
+        env.probe.panic_at_next.store(5, Ordering::SeqCst);
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        let slates = Slates {
+            generation: 7,
+            ..Slates::default()
+        };
+        handle
+            .commands
+            .send(Command::ReplaceSlates(slates))
+            .await
+            .unwrap();
+        next_snapshot(&mut handle.snapshot).await;
+        assert_eq!(*env.probe.events.lock().unwrap(), ["start", "slates g7"]);
+
+        let probe = Arc::clone(&env.probe);
+        wait_until(&mut handle.snapshot, |s| {
+            probe.builds.load(Ordering::SeqCst) == 2 && !s.segments.is_empty()
+        })
+        .await;
+        // The rebuilt channel got the set before it started.
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            ["start", "slates g7", "stop", "slates g7", "start"]
+        );
+    }
+
+    /// Two segments per kind, so the idle list loops like the real 8 s slates do.
+    fn slate_set(dir: &Path, generation: u32) -> Slates {
+        let two = |name: &str| -> Vec<SegmentInfo> {
+            (0..2)
+                .map(|index| {
+                    let path = dir.join(format!("g{generation}-{name}-{index}.ts"));
+                    std::fs::write(&path, ts_with_pts(126_000)).unwrap();
+                    SegmentInfo {
+                        path,
+                        duration: 4.0,
+                        index,
+                    }
+                })
+                .collect()
+        };
+        Slates {
+            idle: two("idle"),
+            buffering: two("buffering"),
+            pause: two("pause"),
+            generation,
+        }
+    }
+
+    /// A live swap of the slate set is one discontinuity: the playlist keeps growing without a
+    /// gap, and the rewritten timestamps never go backwards across the join.
+    #[tokio::test(start_paused = true)]
+    async fn a_live_slate_swap_is_a_single_discontinuity_without_a_timestamp_regression() {
+        use crate::pipeline::tsrewrite::min_dts;
+        let live = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let db = Arc::new(Mutex::new(
+            crate::db::open_database(Path::new(":memory:")).unwrap(),
+        ));
+        let slates_dir = src.path().to_path_buf();
+        let live_dir = live.path().join("main");
+        let mut handle = spawn_engine(move || {
+            let channel = Channel::new(ChannelOptions::new(
+                MAIN_CHANNEL_ID,
+                Arc::clone(&db),
+                Arc::new(PendingFactory),
+                slate_set(&slates_dir, 0),
+            ));
+            let options = BroadcasterOptions {
+                dir: live_dir.clone(),
+                window_size: 30,
+                segment_seconds: 4.0,
+                path_prefix: "main/".to_string(),
+                discontinuity_tags: Box::new(|| true),
+                retain_s: None,
+                log: None,
+            };
+            (Broadcaster::new(options, tokio_clock()), channel)
+        });
+        let tags = |s: &Snapshot| s.playlist.matches("#EXT-X-DISCONTINUITY\n").count();
+        let first = wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        // Let the 2-segment idle slate loop at least once: still no discontinuity.
+        let looped = wait_until(&mut handle.snapshot, |s| names(s).len() >= 6).await;
+        assert_eq!(tags(&first), 0);
+        assert_eq!(tags(&looped), 0, "{}", looped.playlist);
+
+        handle
+            .commands
+            .send(Command::ReplaceSlates(slate_set(src.path(), 1)))
+            .await
+            .unwrap();
+        let swapped = wait_until(&mut handle.snapshot, |s| tags(s) == 1).await;
+        // It goes on from there, still one discontinuity.
+        let later = wait_until(&mut handle.snapshot, |s| {
+            names(s).len() >= names(&swapped).len() + 3
+        })
+        .await;
+        assert_eq!(tags(&later), 1, "{}", later.playlist);
+        let sequence = |s: &Snapshot| {
+            s.playlist
+                .lines()
+                .find_map(|l| l.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap()
+        };
+        assert!(sequence(&later) >= sequence(&swapped), "sequence went back");
+
+        let dts: Vec<u64> = names(&later)
+            .iter()
+            .map(|n| min_dts(&std::fs::read(later.live_dir.join(n)).unwrap()).unwrap())
+            .collect();
+        assert!(
+            dts.windows(2).all(|w| w[0] <= w[1]) && dts.first() < dts.last(),
+            "timestamps went backwards (the one-packet test segments of a source share a PTS): {dts:?}"
         );
     }
 }
