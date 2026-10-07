@@ -4,7 +4,7 @@
 //! Rule: `next()` always returns something — a clip segment or a slate — so the channel never
 //! goes silent.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -54,6 +54,8 @@ pub enum ChannelStatus {
     Starting,
     Playing,
     Buffering,
+    /// Viewers see the pause slate. The queue item stays `playing` in the database.
+    Paused,
 }
 
 impl ChannelStatus {
@@ -63,6 +65,26 @@ impl ChannelStatus {
             Self::Starting => "starting",
             Self::Playing => "playing",
             Self::Buffering => "buffering",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+/// Why the channel is paused. The channel airs films again once no reason is active.
+/// Stage 4 adds `Manual`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PauseReason {
+    /// The tunnel is being set up or restarted.
+    Tunnel,
+    /// Nobody is watching.
+    NoViewers,
+}
+
+impl PauseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tunnel => "tunnel",
+            Self::NoViewers => "no_viewers",
         }
     }
 }
@@ -80,8 +102,15 @@ pub struct NowPlaying {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChannelState {
+    /// What viewers see (lags `viewer_lag_segments` behind). `Paused` shows the paused film in
+    /// `current` with the position it will resume from.
     pub status: ChannelStatus,
     pub current: Option<NowPlaying>,
+    /// A pause reason is active and the channel is holding films back right now (not lagged).
+    /// False while a live stream keeps airing through a pause request.
+    pub paused: bool,
+    /// Active pause reasons, in a stable order.
+    pub pause_reasons: Vec<PauseReason>,
 }
 
 pub struct ChannelOptions {
@@ -219,10 +248,18 @@ struct Launch {
     result: Result<Box<dyn ClipHandle>, String>,
 }
 
+/// A non-live film taken off the air by a pause; resumed from `position_s`.
+struct Parked {
+    item: QueueItem,
+    position_s: f64,
+    attempt: u32,
+}
+
 fn slate_slot(kind: SlateKind) -> usize {
     match kind {
         SlateKind::Idle => 0,
         SlateKind::Buffering => 1,
+        SlateKind::Pause => 2,
     }
 }
 
@@ -242,7 +279,10 @@ pub struct Channel {
     now: ClockFn,
     current: Option<ActiveClip>,
     prefetched: Option<ActiveClip>,
-    slate_index: [usize; 2],
+    /// The film a pause took off the air (its clip is disposed; the queue item stays playing).
+    parked: Option<Parked>,
+    pause_reasons: BTreeSet<PauseReason>,
+    slate_index: [usize; 3],
     last_slate_kind: Option<SlateKind>,
     previous_clip_segment: Option<PathBuf>,
     pending_meta: HashMap<PathBuf, SegmentMeta>,
@@ -261,7 +301,9 @@ impl Channel {
             now,
             current: None,
             prefetched: None,
-            slate_index: [0; 2],
+            parked: None,
+            pause_reasons: BTreeSet::new(),
+            slate_index: [0; 3],
             last_slate_kind: None,
             previous_clip_segment: None,
             pending_meta: HashMap::new(),
@@ -279,6 +321,7 @@ impl Channel {
     }
 
     pub fn stop(&mut self) {
+        self.parked = None;
         for mut clip in [self.current.take(), self.prefetched.take()]
             .into_iter()
             .flatten()
@@ -288,6 +331,12 @@ impl Channel {
     }
 
     pub fn skip(&mut self) -> anyhow::Result<()> {
+        if let Some(p) = self.parked.take() {
+            // Paused film: its clip is already gone. The channel stays paused for the next one.
+            return self
+                .queue(|q| q.finish(p.item.id, ItemStatus::Played, Some(SKIPPED)))
+                .map(|_| ());
+        }
         self.finish_current(ItemStatus::Played, Some(SKIPPED))
     }
 
@@ -297,6 +346,12 @@ impl Channel {
             let fresh = self.queue(|q| q.get(id))?;
             if fresh.is_none_or(|f| f.status != ItemStatus::Playing) {
                 self.drop_current();
+            }
+        }
+        if let Some(id) = self.parked.as_ref().map(|p| p.item.id) {
+            let fresh = self.queue(|q| q.get(id))?;
+            if fresh.is_none_or(|f| f.status != ItemStatus::Playing) {
+                self.parked = None;
             }
         }
         if let Some(id) = self.prefetched.as_ref().map(|c| c.item.id) {
@@ -311,39 +366,91 @@ impl Channel {
 
     /// What viewers see, `viewer_lag_segments` behind the newest published segment.
     pub fn state(&self) -> ChannelState {
-        let idle = ChannelState {
-            status: ChannelStatus::Idle,
-            current: None,
-        };
         let lag = self
             .o
             .viewer_lag_segments
             .unwrap_or(DEFAULT_VIEWER_LAG_SEGMENTS);
-        let Some(meta) = self.aired.get(self.aired.len().saturating_sub(lag)) else {
-            return idle;
-        };
-        match (meta.kind, &meta.item) {
-            (MetaKind::Slate(SlateKind::Idle), _) => idle,
-            (_, None) => ChannelState {
-                status: ChannelStatus::Buffering,
-                current: None,
-            },
-            (kind, Some(item)) => ChannelState {
-                status: if kind == MetaKind::Clip {
-                    ChannelStatus::Playing
-                } else {
-                    ChannelStatus::Buffering
-                },
-                current: Some(NowPlaying {
+        let (status, current) = match self.aired.get(self.aired.len().saturating_sub(lag)) {
+            None => (ChannelStatus::Idle, None),
+            Some(meta) => {
+                let now_playing = meta.item.as_ref().map(|item| NowPlaying {
                     item_id: item.id,
                     title: item.title.clone(),
                     duration_s: item.duration_s,
                     position_s: js_round(meta.position_s),
                     requester_name: item.requester_name.clone(),
                     is_live: item.is_live,
-                }),
-            },
+                });
+                match (meta.kind, now_playing) {
+                    (MetaKind::Slate(SlateKind::Idle), _) => (ChannelStatus::Idle, None),
+                    (MetaKind::Slate(SlateKind::Pause), current) => {
+                        (ChannelStatus::Paused, current)
+                    }
+                    (_, None) => (ChannelStatus::Buffering, None),
+                    (MetaKind::Clip, current) => (ChannelStatus::Playing, current),
+                    (MetaKind::Slate(SlateKind::Buffering), current) => {
+                        (ChannelStatus::Buffering, current)
+                    }
+                }
+            }
+        };
+        ChannelState {
+            status,
+            current,
+            paused: self.is_holding_back(),
+            pause_reasons: self.pause_reasons.iter().copied().collect(),
         }
+    }
+
+    /// Takes the current film off the air and shows the pause slate until every reason is
+    /// resumed. A live stream is not paused (it keeps airing; the next film waits for the
+    /// resume). The queue item stays `playing`; the clip is disposed, the position remembered.
+    pub fn pause(&mut self, reason: PauseReason) {
+        let first = self.pause_reasons.is_empty();
+        self.pause_reasons.insert(reason);
+        if !first {
+            return;
+        }
+        // The prefetched film would only sit there; it is prefetched again after the resume.
+        self.drop_prefetched();
+        if self.current.as_ref().is_none_or(|c| c.item.is_live) {
+            return;
+        }
+        if let Some(mut c) = self.current.take() {
+            self.log(&format!(
+                "Pauza ({}): film #{} \"{}\" wstrzymany na {:.0} s",
+                reason.as_str(),
+                c.item.id,
+                c.item.title,
+                c.position_s()
+            ));
+            c.dispose();
+            self.parked = Some(Parked {
+                position_s: c.position_s(),
+                attempt: c.attempt,
+                item: c.item,
+            });
+        }
+    }
+
+    /// Clears `reason`; once no reason is left the paused film restarts from where it stopped
+    /// (behind the buffering slate) and queued films start again.
+    pub fn resume(&mut self, reason: PauseReason) {
+        if !self.pause_reasons.remove(&reason) || !self.pause_reasons.is_empty() {
+            return;
+        }
+        if let Some(p) = self.parked.take() {
+            self.log(&format!(
+                "Wznowienie: film #{} \"{}\" od {:.0} s",
+                p.item.id, p.item.title, p.position_s
+            ));
+            self.current = Some(self.launch(p.item, p.position_s, p.attempt));
+        }
+    }
+
+    /// A pause reason is active and no live stream keeps airing through it.
+    fn is_holding_back(&self) -> bool {
+        !self.pause_reasons.is_empty() && !self.current.as_ref().is_some_and(|c| c.item.is_live)
     }
 
     /// The item being started in the background ahead of time (shown in the admin panel).
@@ -412,6 +519,9 @@ impl Channel {
             .saturating_mul(1000);
         for _ in 0..NEXT_GUARD {
             if self.current.is_none() {
+                if !self.pause_reasons.is_empty() {
+                    return self.paused_slate();
+                }
                 self.promote()?;
             }
             let Some(c) = self.current.as_mut() else {
@@ -469,10 +579,23 @@ impl Channel {
         self.slate(SlateKind::Idle)
     }
 
+    /// Nothing airs while a pause reason is active. The pause slate explains why a film is held
+    /// back; with nothing waiting in the queue the usual idle slate stays.
+    fn paused_slate(&mut self) -> anyhow::Result<SourceSegment> {
+        let channel_id = self.o.channel_id;
+        let waiting = self.parked.is_some() || self.queue(|q| q.next_queued(channel_id))?.is_some();
+        self.slate(if waiting {
+            SlateKind::Pause
+        } else {
+            SlateKind::Idle
+        })
+    }
+
     fn slate(&mut self, kind: SlateKind) -> anyhow::Result<SourceSegment> {
         let list = match kind {
             SlateKind::Idle => &self.o.slates.idle,
             SlateKind::Buffering => &self.o.slates.buffering,
+            SlateKind::Pause => &self.o.slates.pause,
         };
         if list.is_empty() {
             anyhow::bail!("Plansza \"{}\" nie ma fragmentów.", kind.as_str());
@@ -487,9 +610,14 @@ impl Channel {
         let seg = &list[index];
         let item = match kind {
             SlateKind::Buffering => self.current.as_ref().map(|c| c.item.clone()),
+            SlateKind::Pause => self.parked.as_ref().map(|p| p.item.clone()),
             SlateKind::Idle => None,
         };
-        let position_s = self.current.as_ref().map_or(0.0, ActiveClip::position_s);
+        let position_s = match (&self.current, &self.parked) {
+            (Some(c), _) => c.position_s(),
+            (None, Some(p)) if kind == SlateKind::Pause => p.position_s,
+            _ => 0.0,
+        };
         self.pending_meta.insert(
             seg.path.clone(),
             SegmentMeta {
@@ -729,6 +857,7 @@ mod tests {
         Slates {
             idle: vec![info("/slates/idle/0.ts", 0), info("/slates/idle/1.ts", 1)],
             buffering: vec![info("/slates/buf/0.ts", 0)],
+            pause: vec![info("/slates/pause/0.ts", 0), info("/slates/pause/1.ts", 1)],
         }
     }
 
@@ -977,6 +1106,32 @@ mod tests {
         }
         fn advance(&self, ms: u64) {
             self.now.fetch_add(ms, Ordering::SeqCst);
+        }
+        /// `next()` followed by the broadcaster's `on_published`, so `state()` sees it.
+        fn publish(&mut self) -> SourceSegment {
+            let s = self.next();
+            self.channel.on_published(&PublishedSegment {
+                path: s.path.clone(),
+                duration: s.duration,
+                source_key: s.source_key.clone(),
+                index: s.index,
+                seq: 0,
+                channel_time: 0.0,
+            });
+            s
+        }
+        /// Starts `a` and airs `segments` clip segments (4 s each) of it.
+        async fn air(&mut self, item: &QueueItem, segments: usize) -> Fake {
+            self.next();
+            self.flush().await;
+            let last = self.factory.lock().handles.len() - 1;
+            let h = self.factory.handle(last);
+            assert_eq!(h.item_id(), item.id);
+            h.produce(segments);
+            for _ in 0..segments {
+                assert_eq!(self.key(), clip_key(item, 0));
+            }
+            h
         }
         /// Lets the spawned clip starts run, then hands their results to the channel.
         async fn flush(&mut self) {
@@ -1451,5 +1606,264 @@ mod tests {
         e.channel.skip().unwrap();
         let s = e.next();
         assert_eq!((s.source_key.as_str(), s.index), ("idle", 0));
+    }
+
+    // ---------- Pause and resume ----------
+
+    #[tokio::test]
+    async fn pause_remembers_the_position_stops_the_clip_and_airs_pause_slates() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await; // 12 s aired
+        e.channel.pause(PauseReason::Tunnel);
+        assert!(h0.disposed());
+        let (s1, s2, s3) = (e.next(), e.next(), e.next());
+        assert_eq!(
+            [&s1.source_key, &s2.source_key, &s3.source_key],
+            ["pause", "pause", "pause"]
+        );
+        assert_eq!([s1.index, s2.index, s3.index], [0, 1, 0]);
+        // The database keeps the film as playing, and no other film was started.
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        assert_eq!(e.factory.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_relaunches_the_same_film_from_the_remembered_position() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(e.key(), "pause");
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 12.0,
+                attempt: 0
+            }
+        );
+        e.factory.handle(1).produce(2);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        assert_eq!(e.channel.current_item_id(), Some(a.id));
+    }
+
+    #[tokio::test]
+    async fn state_shows_the_paused_film_with_its_position_and_the_reasons() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.next();
+        e.flush().await;
+        e.factory.handle(0).produce(3);
+        for _ in 0..3 {
+            e.publish();
+        }
+        e.channel.pause(PauseReason::Tunnel);
+        e.channel.pause(PauseReason::NoViewers);
+        for _ in 0..4 {
+            e.publish();
+        }
+        let st = e.channel.state();
+        assert_eq!(st.status, ChannelStatus::Paused);
+        assert!(st.paused);
+        assert_eq!(
+            st.pause_reasons,
+            [PauseReason::Tunnel, PauseReason::NoViewers]
+        );
+        let cur = st.current.unwrap();
+        assert_eq!((cur.item_id, cur.position_s), (a.id, 12));
+        e.channel.resume(PauseReason::Tunnel);
+        e.channel.resume(PauseReason::NoViewers);
+        assert!(!e.channel.state().paused);
+        assert!(e.channel.state().pause_reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_two_reasons_the_film_resumes_only_after_both_are_cleared() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 2).await;
+        e.channel.pause(PauseReason::Tunnel);
+        e.channel.pause(PauseReason::NoViewers);
+        // The same reason twice is one reason.
+        e.channel.pause(PauseReason::NoViewers);
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 1);
+        e.channel.resume(PauseReason::NoViewers);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 2);
+        assert_eq!(e.factory.calls()[1].start_at_s, 8.0);
+    }
+
+    #[tokio::test]
+    async fn resuming_without_a_pause_does_nothing() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h = e.air(&a, 2).await;
+        e.channel.resume(PauseReason::Tunnel);
+        assert!(!h.disposed());
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_live_stream_keeps_airing_through_a_pause_and_the_next_film_waits() {
+        let mut e = setup();
+        let live = e.add("live", None, true);
+        let b = e.add_item("b");
+        let h = e.air(&live, 2).await;
+        e.channel.pause(PauseReason::NoViewers);
+        assert!(!h.disposed());
+        assert!(!e.channel.state().paused);
+        h.produce(1);
+        assert_eq!(e.key(), clip_key(&live, 0));
+        // The stream ends: the queued film is held back behind the pause slate.
+        h.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "pause");
+        assert_eq!(e.get(live.id).status, ItemStatus::Played);
+        assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+        assert!(e.channel.state().paused);
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 1);
+        e.channel.resume(PauseReason::NoViewers);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn pausing_an_empty_queue_keeps_the_idle_slate_and_holds_back_the_next_start() {
+        let mut e = setup();
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(e.key(), "idle");
+        assert_eq!(e.channel.state().status, ChannelStatus::Idle);
+        let a = e.add_item("a");
+        // A film is waiting now: the pause slate tells viewers why nothing starts.
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert!(e.factory.calls().is_empty());
+        assert_eq!(e.get(a.id).status, ItemStatus::Queued);
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls(),
+            [Call {
+                item_id: a.id,
+                start_at_s: 0.0,
+                attempt: 0
+            }]
+        );
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn skip_while_paused_plays_out_the_paused_film_and_stays_paused() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 2).await;
+        e.channel.pause(PauseReason::Tunnel);
+        e.channel.skip().unwrap();
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Played);
+        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+        assert_eq!(e.factory.calls().len(), 1);
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: b.id,
+                start_at_s: 0.0,
+                attempt: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pausing_disposes_the_prefetched_clip_and_resume_prefetches_again() {
+        let mut e = setup();
+        let a = e.add("a", Some(40.0), false);
+        let b = e.add_item("b");
+        e.air(&a, 1).await;
+        e.factory.handle(0).produce(1);
+        e.next();
+        e.flush().await;
+        let prefetched = e.factory.handle(1);
+        assert_eq!(prefetched.item_id(), b.id);
+        e.channel.pause(PauseReason::Tunnel);
+        assert!(prefetched.disposed());
+        assert_eq!(e.channel.prefetched_item_id(), None);
+        e.channel.resume(PauseReason::Tunnel);
+        e.next();
+        e.flush().await;
+        e.factory.handle(2).produce(1);
+        e.next();
+        e.flush().await;
+        // Resumed `a` is within 60 s of its end again: `b` is prefetched anew.
+        let ids: Vec<i64> = e.factory.calls().iter().map(|c| c.item_id).collect();
+        assert_eq!(ids, [a.id, b.id, a.id, b.id]);
+        assert_eq!(e.channel.prefetched_item_id(), Some(b.id));
+    }
+
+    #[tokio::test]
+    async fn removing_the_paused_film_drops_it_and_the_next_one_starts_on_resume() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 2).await;
+        e.channel.pause(PauseReason::Tunnel);
+        e.set_status(a.id, ItemStatus::Removed);
+        e.channel.on_queue_changed().unwrap();
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        assert_eq!(e.factory.calls().len(), 2);
+        assert_eq!(e.get(a.id).status, ItemStatus::Removed);
+    }
+
+    #[tokio::test]
+    async fn pausing_a_film_that_is_still_starting_resumes_it_from_its_start_position() {
+        let mut e = setup();
+        e.factory.lock().manual = true;
+        let a = e.add_item("a");
+        assert_eq!(e.key(), "buffering");
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(e.key(), "pause");
+        // The start that was in flight finishes after the pause: its clip is disposed.
+        let gate = e.factory.lock().gates.remove(0);
+        gate.send(()).unwrap();
+        e.flush().await;
+        assert!(e.factory.handle(0).disposed());
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering");
+        assert_eq!(e.factory.calls().len(), 2);
+        assert_eq!(e.factory.calls()[1].item_id, a.id);
+        assert_eq!(e.factory.calls()[1].start_at_s, 0.0);
+    }
+
+    #[tokio::test]
+    async fn stop_while_paused_leaves_nothing_running() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h = e.air(&a, 2).await;
+        e.channel.pause(PauseReason::Tunnel);
+        e.channel.stop();
+        assert!(h.disposed());
+        assert_eq!(e.factory.calls().len(), 1);
     }
 }

@@ -14,6 +14,8 @@ const SLATE_SECONDS: u32 = 8;
 pub enum SlateKind {
     Idle,
     Buffering,
+    /// Shown while the channel is paused (tunnel being set up, no viewers, ...).
+    Pause,
 }
 
 impl SlateKind {
@@ -21,6 +23,7 @@ impl SlateKind {
         match self {
             SlateKind::Idle => "idle",
             SlateKind::Buffering => "buffering",
+            SlateKind::Pause => "pause",
         }
     }
 }
@@ -29,6 +32,7 @@ impl SlateKind {
 pub struct Slates {
     pub idle: Vec<SegmentInfo>,
     pub buffering: Vec<SegmentInfo>,
+    pub pause: Vec<SegmentInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +69,7 @@ fn texts(kind: SlateKind, request_url: &str) -> (String, String) {
             "Buforowanie…".to_string(),
             "Film zaraz się zacznie".to_string(),
         ),
+        SlateKind::Pause => ("Pauza — wracamy za chwilę".to_string(), String::new()),
     }
 }
 
@@ -143,13 +148,15 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
 }
 
 pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
-    let (idle, buffering) = tokio::join!(
+    let (idle, buffering, pause) = tokio::join!(
         generate_one(SlateKind::Idle, o),
-        generate_one(SlateKind::Buffering, o)
+        generate_one(SlateKind::Buffering, o),
+        generate_one(SlateKind::Pause, o)
     );
     Ok(Slates {
         idle: idle?,
         buffering: buffering?,
+        pause: pause?,
     })
 }
 
@@ -213,6 +220,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pause_slate_text_is_polish_with_an_empty_subtitle() {
+        assert_eq!(
+            texts(SlateKind::Pause, "https://tv.example.com/"),
+            ("Pauza — wracamy za chwilę".to_string(), String::new())
+        );
+        assert_eq!(SlateKind::Pause.as_str(), "pause");
+    }
+
     #[tokio::test]
     async fn broken_ffmpeg_reports_the_polish_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -249,7 +265,7 @@ mod tests {
         })
         .await
         .unwrap();
-        for segments in [&slates.idle, &slates.buffering] {
+        for segments in [&slates.idle, &slates.buffering, &slates.pause] {
             assert!(!segments.is_empty());
             let total: f64 = segments.iter().map(|s| s.duration).sum();
             assert!(total > 7.5, "{total}");
@@ -262,6 +278,9 @@ mod tests {
             let sub =
                 std::fs::read_to_string(dir.path().join("idle").join("subtitle.txt")).unwrap();
             assert_eq!(sub, "Dodaj film: https://tv.example.com/");
+            let pause =
+                std::fs::read_to_string(dir.path().join("pause").join("title.txt")).unwrap();
+            assert_eq!(pause, "Pauza — wracamy za chwilę");
         }
     }
 
@@ -281,7 +300,9 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(!slates.idle.is_empty() && !slates.buffering.is_empty());
+        assert!(
+            !slates.idle.is_empty() && !slates.buffering.is_empty() && !slates.pause.is_empty()
+        );
         assert!(!dir.path().join("idle").join("title.txt").exists());
     }
 }

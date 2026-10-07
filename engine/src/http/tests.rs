@@ -30,7 +30,7 @@ use crate::db::{
 };
 use crate::engine::{Command, EngineHandle, Snapshot};
 use crate::library::MediaLibrary;
-use crate::pipeline::channel::{ChannelState, ChannelStatus, NowPlaying};
+use crate::pipeline::channel::{ChannelState, ChannelStatus, NowPlaying, PauseReason};
 use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream};
 
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;
@@ -86,6 +86,8 @@ fn idle_state() -> ChannelState {
     ChannelState {
         status: ChannelStatus::Idle,
         current: None,
+        paused: false,
+        pause_reasons: Vec::new(),
     }
 }
 
@@ -665,6 +667,8 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
         [
             "status",
             "current",
+            "paused",
+            "pauseReasons",
             "queue",
             "channelUrl",
             "requestUrl",
@@ -689,10 +693,14 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
                 requester_name: Some("Ola".into()),
                 is_live: false,
             }),
+            paused: false,
+            pause_reasons: Vec::new(),
         },
     ));
     let body = h.send(get("/api/channels/main/state")).await.json();
     assert_eq!(body["status"], "playing");
+    assert_eq!(body["paused"], false);
+    assert_eq!(body["pauseReasons"], json!([]));
     assert_eq!(
         body["current"],
         json!({
@@ -700,6 +708,33 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
             "requesterName": "Ola", "isLive": false
         })
     );
+}
+
+#[tokio::test]
+async fn a_paused_channel_reports_status_paused_reasons_and_the_paused_film() {
+    let h = Harness::new();
+    h.snapshots.send_replace(snapshot(
+        h.live_dir.path(),
+        &["5.ts"],
+        ChannelState {
+            status: ChannelStatus::Paused,
+            current: Some(NowPlaying {
+                item_id: 7,
+                title: "Film".into(),
+                duration_s: Some(100.0),
+                position_s: 12,
+                requester_name: None,
+                is_live: false,
+            }),
+            paused: true,
+            pause_reasons: vec![PauseReason::Tunnel, PauseReason::NoViewers],
+        },
+    ));
+    let body = h.send(get("/api/channels/main/state")).await.json();
+    assert_eq!(body["status"], "paused");
+    assert_eq!(body["paused"], true);
+    assert_eq!(body["pauseReasons"], json!(["tunnel", "no_viewers"]));
+    assert_eq!(body["current"]["positionS"], 12);
 }
 
 #[tokio::test]

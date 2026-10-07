@@ -106,6 +106,8 @@ function stripTiming(v, topLevelChannel) {
     for (const [k, val] of Object.entries(v)) {
       if (TIMING_FIELDS.has(k)) continue;
       if (topLevelChannel && (k === 'status' || k === 'current')) continue;
+      // Etap 3: pola dodane przez pauzę, których serwer TS nie ma (zgodność wsteczna: tylko nowe klucze).
+      if (topLevelChannel && (k === 'paused' || k === 'pauseReasons')) continue;
       out[k] = stripTiming(val, false);
     }
     return out;

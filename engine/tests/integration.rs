@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use vrcinema::config::{VideoEncoder, load_config};
 use vrcinema::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
 use vrcinema::pipeline::broadcaster::{Broadcaster, BroadcasterOptions};
-use vrcinema::pipeline::channel::{Channel, ChannelOptions};
+use vrcinema::pipeline::channel::{Channel, ChannelOptions, ChannelStatus, PauseReason};
 use vrcinema::pipeline::clip_factory::{ClipFactoryDeps, create_clip_factory};
 use vrcinema::pipeline::slates::{SlateOptions, generate_slates};
 use vrcinema::resolver::{MediaMeta, MediaResolver, ResolveError, ResolvedStream, StreamInput};
@@ -262,6 +262,239 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
     }
 
     // Disposal is asynchronous: wait until ffmpeg exited and the clip directories are gone.
+    let cleanup_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let leftover = std::fs::read_dir(&clips_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        if leftover == 0 || Instant::now() > cleanup_deadline {
+            assert_eq!(leftover, 0, "katalogi klipów nie zostały usunięte");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn assert_no_dts_backwards(ffprobe: &Path, joined: &Path) {
+    for stream in ["v", "a"] {
+        let dts = packet_dts(ffprobe, joined, stream);
+        assert!(dts.len() > 100, "strumień {stream}: {} pakietów", dts.len());
+        let backwards: Vec<f64> = dts
+            .windows(2)
+            .filter(|w| w[1] <= w[0])
+            .map(|w| w[1])
+            .collect();
+        assert!(
+            backwards.is_empty(),
+            "cofnięcia DTS w strumieniu {stream}: {backwards:?}"
+        );
+        let max_gap = dts.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
+        assert!(
+            max_gap < 0.5 * 90_000.0,
+            "największa luka w strumieniu {stream}: {max_gap}"
+        );
+    }
+}
+
+/// Review Focus 2 (pause): a film paused midway and resumed continues from the remembered
+/// position (the same title, positions never jump back), and the stream across the pause slates
+/// and the relaunched clip has no DTS going backwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let env: HashMap<String, String> = HashMap::from([(
+        "ADMIN_PASSWORD".to_string(),
+        "haslo-testowe-123".to_string(),
+    )]);
+    let cfg = load_config(&env, &root, cfg!(windows)).unwrap();
+    if !cfg.ffmpeg_path.exists() || !cfg.ffprobe_path.exists() {
+        eprintln!("pomijam: brak bin/ffmpeg lub bin/ffprobe");
+        return;
+    }
+
+    let work = tempfile::tempdir().unwrap();
+    let work_dir = work.path();
+    make_clip(
+        &cfg.ffmpeg_path,
+        &work_dir.join("p.mp4"),
+        "1280x720",
+        25,
+        true,
+        32,
+    );
+    let db = Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap()));
+    let film = {
+        let conn = db.lock().unwrap();
+        QueueRepo::new(&conn)
+            .add(&NewItem {
+                channel_id: MAIN_CHANNEL_ID,
+                source_url: work_dir.join("p.mp4").to_string_lossy().into_owned(),
+                title: "p.mp4".to_string(),
+                duration_s: Some(32.0),
+                is_live: false,
+                status: ItemStatus::Queued,
+                added_by: AddedBy::Admin,
+                requester_name: None,
+                requester_ip: None,
+            })
+            .unwrap()
+    };
+    let slates = generate_slates(&SlateOptions {
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        font_file: cfg.font_file.clone(),
+        dir: work_dir.join("slates"),
+        request_url: String::new(),
+        segment_seconds: 4,
+    })
+    .await
+    .unwrap();
+    let clips_dir = work_dir.join("clips");
+    let factory = create_clip_factory(ClipFactoryDeps {
+        resolver: Arc::new(PathResolver),
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        ffprobe_path: cfg.ffprobe_path.clone(),
+        encoder: vrcinema::live::LiveValue::new(VideoEncoder::Libx264),
+        segment_seconds: 4,
+        clips_dir: clips_dir.clone(),
+        db: Arc::clone(&db),
+        channel_id: MAIN_CHANNEL_ID,
+        log: None,
+    });
+    let mut channel = Channel::new(ChannelOptions::new(
+        MAIN_CHANNEL_ID,
+        Arc::clone(&db),
+        Arc::new(factory),
+        slates,
+    ));
+    channel.start().unwrap();
+
+    let clock = Arc::new(AtomicU64::new(0));
+    let live_dir = work_dir.join("live");
+    let clock_for_broadcaster = Arc::clone(&clock);
+    let mut broadcaster = Broadcaster::new(
+        BroadcasterOptions {
+            dir: live_dir.clone(),
+            window_size: 10,
+            segment_seconds: 4.0,
+            path_prefix: String::new(),
+            discontinuity_tags: Box::new(|| true),
+            retain_s: Some(100_000),
+            log: None,
+        },
+        Box::new(move || clock_for_broadcaster.load(Ordering::SeqCst)),
+    );
+    broadcaster.start_initial(&mut channel);
+
+    // What viewers saw, one entry per observed change: (status, film position in seconds).
+    let mut seen: Vec<(ChannelStatus, i64)> = Vec::new();
+    let mut paused_at: Option<i64> = None;
+    let mut pause_slates = 0;
+    let mut resumed = false;
+    let mut finished = false;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        clock.fetch_add(1000, Ordering::SeqCst);
+        broadcaster.tick(&mut channel);
+        let state = channel.state();
+        if let Some(cur) = &state.current {
+            assert_eq!(cur.title, "p.mp4");
+            if seen.last() != Some(&(state.status, cur.position_s)) {
+                seen.push((state.status, cur.position_s));
+            }
+        }
+        match (paused_at, resumed) {
+            (None, _) => {
+                if state.status == ChannelStatus::Playing
+                    && state.current.as_ref().is_some_and(|c| c.position_s >= 12)
+                {
+                    channel.pause(PauseReason::Tunnel);
+                    paused_at = state.current.map(|c| c.position_s);
+                }
+            }
+            (Some(_), false) => {
+                if state.status == ChannelStatus::Paused {
+                    pause_slates += 1;
+                }
+                if pause_slates >= 8 {
+                    channel.resume(PauseReason::Tunnel);
+                    resumed = true;
+                }
+            }
+            (Some(_), true) => {}
+        }
+        if resumed {
+            let done = {
+                let conn = db.lock().unwrap();
+                QueueRepo::new(&conn).get(film.id).unwrap().unwrap().status == ItemStatus::Played
+            };
+            if done && channel.state().status == ChannelStatus::Idle {
+                finished = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let published = broadcaster.known_segments();
+    channel.stop();
+    assert!(finished, "film nie dokończył się po wznowieniu: {seen:?}");
+    let paused_at = paused_at.expect("film nie doszedł do pozycji pauzy");
+
+    // The pause shows the paused film at the position it will resume from, and playing
+    // positions never go back, not even across the pause.
+    let paused_pos = seen
+        .iter()
+        .find(|(s, _)| *s == ChannelStatus::Paused)
+        .map(|(_, p)| *p)
+        .expect("brak stanu pauzy");
+    assert!(paused_pos >= paused_at, "{seen:?}");
+    let playing: Vec<i64> = seen
+        .iter()
+        .filter(|(s, _)| *s == ChannelStatus::Playing)
+        .map(|(_, p)| *p)
+        .collect();
+    assert!(
+        playing.windows(2).all(|w| w[1] >= w[0]),
+        "pozycje cofnęły się: {seen:?}"
+    );
+    let after_pause: Vec<i64> = seen
+        .iter()
+        .skip_while(|(s, _)| *s != ChannelStatus::Paused)
+        .filter(|(s, _)| *s == ChannelStatus::Playing)
+        .map(|(_, p)| *p)
+        .collect();
+    let first_after = *after_pause.first().expect("brak odtwarzania po wznowieniu");
+    assert!(
+        first_after >= paused_pos && first_after <= paused_pos + 8,
+        "wznowiono od {first_after} s zamiast od ok. {paused_pos} s: {seen:?}"
+    );
+    assert!(
+        after_pause.last().copied().unwrap_or(0) >= 24,
+        "film nie doszedł do końca: {seen:?}"
+    );
+    assert_eq!(
+        {
+            let conn = db.lock().unwrap();
+            QueueRepo::new(&conn)
+                .history(MAIN_CHANNEL_ID, 10)
+                .unwrap()
+                .into_iter()
+                .map(|i| (i.title, i.status, i.error))
+                .collect::<Vec<_>>()
+        },
+        vec![("p.mp4".to_string(), ItemStatus::Played, None)]
+    );
+
+    let joined = work_dir.join("joined.ts");
+    let mut bytes = Vec::new();
+    for name in &published {
+        bytes.extend(std::fs::read(live_dir.join(name)).unwrap());
+    }
+    std::fs::write(&joined, bytes).unwrap();
+    assert_no_dts_backwards(&cfg.ffprobe_path, &joined);
+
     let cleanup_deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let leftover = std::fs::read_dir(&clips_dir)

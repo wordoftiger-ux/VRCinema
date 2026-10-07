@@ -564,7 +564,8 @@ pub(crate) fn admin_item(i: &QueueItem) -> Value {
     item
 }
 
-/// `{ status, current }` exactly like the TS channel state; the caller adds more keys.
+/// `{ status, current }` like the TS channel state plus `paused` / `pauseReasons` (fields only
+/// added); the caller adds more keys.
 pub(crate) fn state_map(state: &ChannelState) -> Map<String, Value> {
     let current = state.current.as_ref().map_or(Value::Null, |c| {
         json!({
@@ -579,6 +580,17 @@ pub(crate) fn state_map(state: &ChannelState) -> Map<String, Value> {
     let mut map = Map::new();
     map.insert("status".into(), json!(state.status.as_str()));
     map.insert("current".into(), current);
+    map.insert("paused".into(), json!(state.paused));
+    map.insert(
+        "pauseReasons".into(),
+        json!(
+            state
+                .pause_reasons
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+        ),
+    );
     map
 }
 

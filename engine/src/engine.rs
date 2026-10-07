@@ -18,13 +18,17 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
-use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus};
+use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
 
 /// Requests from HTTP, applied by the loop between ticks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Skip,
     QueueChanged,
+    /// Adds a pause reason; the channel pauses while any reason is active.
+    Pause(PauseReason),
+    /// Clears a pause reason; the channel resumes once none is left.
+    Resume(PauseReason),
 }
 
 /// What HTTP reads: the state right after the latest tick.
@@ -51,6 +55,8 @@ pub trait ChannelControl: SegmentSource + Send {
     fn stop(&mut self);
     fn skip(&mut self) -> anyhow::Result<()>;
     fn on_queue_changed(&mut self) -> anyhow::Result<()>;
+    fn pause(&mut self, reason: PauseReason);
+    fn resume(&mut self, reason: PauseReason);
     fn state(&self) -> ChannelState;
     fn prefetched_item_id(&self) -> Option<i64>;
     /// The queue item being aired right now (not the one viewers see, which lags behind).
@@ -71,6 +77,12 @@ impl ChannelControl for Channel {
     }
     fn on_queue_changed(&mut self) -> anyhow::Result<()> {
         Channel::on_queue_changed(self)
+    }
+    fn pause(&mut self, reason: PauseReason) {
+        Channel::pause(self, reason)
+    }
+    fn resume(&mut self, reason: PauseReason) {
+        Channel::resume(self, reason)
     }
     fn state(&self) -> ChannelState {
         Channel::state(self)
@@ -183,6 +195,8 @@ impl Snapshot {
             state: ChannelState {
                 status: ChannelStatus::Idle,
                 current: None,
+                paused: false,
+                pause_reasons: Vec::new(),
             },
             prefetched_item_id: None,
         }
@@ -375,6 +389,14 @@ impl<C: ChannelControl> Core<C> {
         match command {
             Command::Skip => self.channel.skip(),
             Command::QueueChanged => self.channel.on_queue_changed(),
+            Command::Pause(reason) => {
+                self.channel.pause(reason);
+                Ok(())
+            }
+            Command::Resume(reason) => {
+                self.channel.resume(reason);
+                Ok(())
+            }
         }
     }
 
@@ -578,10 +600,18 @@ mod tests {
             self.probe.queue_changes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+        fn pause(&mut self, reason: PauseReason) {
+            self.probe.event(format!("pause {}", reason.as_str()));
+        }
+        fn resume(&mut self, reason: PauseReason) {
+            self.probe.event(format!("resume {}", reason.as_str()));
+        }
         fn state(&self) -> ChannelState {
             ChannelState {
                 status: ChannelStatus::Buffering,
                 current: None,
+                paused: false,
+                pause_reasons: Vec::new(),
             }
         }
         fn prefetched_item_id(&self) -> Option<i64> {
@@ -732,6 +762,34 @@ mod tests {
         );
         wait_until(&mut handle.snapshot, |s| names(s).contains(&"3.ts".into())).await;
         assert_eq!(env.count(|p| &p.builds), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_and_resume_commands_carry_their_reason_to_the_channel() {
+        let env = Env::new();
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        handle
+            .commands
+            .send(Command::Pause(PauseReason::Tunnel))
+            .await
+            .unwrap();
+        handle
+            .commands
+            .send(Command::Pause(PauseReason::NoViewers))
+            .await
+            .unwrap();
+        handle
+            .commands
+            .send(Command::Resume(PauseReason::Tunnel))
+            .await
+            .unwrap();
+        next_snapshot(&mut handle.snapshot).await;
+        let events = env.probe.events.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            ["start", "pause tunnel", "pause no_viewers", "resume tunnel"]
+        );
     }
 
     /// Review Focus 2: a snapshot never lists a segment HTTP cannot serve.
@@ -989,6 +1047,7 @@ mod tests {
         Slates {
             idle: slate_in(dir, "idle.ts"),
             buffering: slate_in(dir, "buffering.ts"),
+            pause: slate_in(dir, "pause.ts"),
         }
     }
 
@@ -1117,6 +1176,7 @@ mod tests {
             let slates = Slates {
                 idle: slate_in(&slates_dir, "idle.ts"),
                 buffering: slate_in(&slates_dir, "buffering.ts"),
+                pause: slate_in(&slates_dir, "pause.ts"),
             };
             let channel = Channel::new(ChannelOptions::new(
                 MAIN_CHANNEL_ID,
