@@ -457,13 +457,13 @@ async fn the_restart_route_starts_a_new_cloudflared_and_needs_the_tunnel_on() {
 
 /// Fix round 1: a short loss of the connection (cloudflared alive, `Reconnecting`, back
 /// `Online` with the same address) changes neither the public address nor the slates.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_short_reconnect_keeps_the_address_and_the_slates() {
     let Some(app) = start(Setup {
         tools: true,
         runs: Some(json!([{
             "hostname": QUICK_HOST,
-            "ready_down": [[7000, 8000]],
+            "ready_down": [[7000, 9000]],
         }])),
         ..Setup::default()
     })
@@ -482,7 +482,7 @@ async fn a_short_reconnect_keeps_the_address_and_the_slates() {
     let started_ms = fake_starts(&app.home)[0]["ms"].as_u64().unwrap();
     let core = Arc::clone(&app.engine().core);
     let mut reconnecting = false;
-    while now_ms() < started_ms + 9_500 {
+    while now_ms() < started_ms + 11_000 {
         reconnecting |= core.tunnel_state() == TunnelState::Reconnecting;
         assert_eq!(core.live_settings.public_url.get(), url);
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -609,6 +609,118 @@ async fn updating_cloudflared_restarts_the_tunnel_on_the_new_program() {
     app.stop().await;
 }
 
+/// Fix round 2: a quick tunnel's address dies with its cloudflared: after the process exits
+/// the public address is none (not the dead URL) until the new process is online.
+#[tokio::test]
+async fn a_quick_tunnel_that_exits_drops_its_dead_address() {
+    let first = "pierwszy.trycloudflare.com";
+    let second = "drugi.trycloudflare.com";
+    let app = start(Setup {
+        runs: Some(json!([
+            { "hostname": first, "exit_after_ms": 2500, "exit_code": 1 },
+            { "hostname": second, "delay_ms": 3000 }
+        ])),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    let tunnel = wait_online(&app, &cookie).await;
+    assert_eq!(tunnel["url"], format!("https://{first}"));
+    let log = app.home.join("tools").join("fake_cloudflared.log");
+    eventually(10, "the first cloudflared to exit", || async {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("\"event\":\"exit\"")
+    })
+    .await;
+    let core = &app.engine().core;
+    // The exit is noticed within moments (the new process waits 3 s before it has an address).
+    eventually(2, "the exit noticed", || async {
+        core.tunnel_state().url().is_none()
+    })
+    .await;
+    assert_eq!(
+        core.live_settings.public_url.get(),
+        "",
+        "the dead quick address is still in effect"
+    );
+    let tunnel = wait_online(&app, &cookie).await;
+    assert_eq!(tunnel["url"], format!("https://{second}"));
+    assert_eq!(
+        core.live_settings.public_url.get(),
+        format!("https://{second}")
+    );
+    app.stop().await;
+}
+
+/// Fix round 2: a reason active when a restarted server was built, cleared before that server
+/// was published (a viewer fetched a segment from it), does not leave its channel paused.
+#[tokio::test]
+async fn a_reason_cleared_during_a_server_restart_is_resumed_on_the_new_channel() {
+    let Some(app) = start(Setup {
+        tools: true,
+        runs: None,
+        settings: json!({"tunnelEnabled": false, "pauseWhenNoViewers": true}),
+        auto_pause: AutoPauseTimings {
+            no_viewers: Duration::from_secs(6),
+            recheck: Duration::from_secs(10),
+            ..AutoPauseTimings::default()
+        },
+        ..Setup::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let core = Arc::clone(&app.engine().core);
+    eventually(30, "the no-viewers pause", || async {
+        pause_reasons(&core) == ["no_viewers"]
+    })
+    .await;
+    let (reached, release) = core.pause_next_start();
+    let restart = tokio::spawn({
+        let core = Arc::clone(&core);
+        async move { core.restart_server().await }
+    });
+    // The new server serves (its channel started paused) but is not published yet.
+    reached.await.unwrap();
+    let playlist = app
+        .http
+        .get(app.url("/live/main.m3u8"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let segment = playlist
+        .lines()
+        .rfind(|l| l.ends_with(".ts"))
+        .unwrap()
+        .to_string();
+    let res = app
+        .http
+        .get(app.url(&format!("/live/{segment}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let fetched = Instant::now();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release.send(()).unwrap();
+    restart.await.unwrap().unwrap();
+    eventually(3, "the new channel resumed", || async {
+        pause_reasons(&core).is_empty()
+    })
+    .await;
+    assert!(
+        fetched.elapsed() < Duration::from_secs(6),
+        "checked after the next no-viewers pause could come"
+    );
+    app.stop().await;
+}
+
 // ---------- Named tunnel ----------
 
 #[tokio::test]
@@ -686,17 +798,17 @@ async fn the_named_mode_runs_the_named_tunnel_and_never_shows_its_credentials() 
 
 /// Review Focus 4 with the real channel and the fake cloudflared losing its connection twice:
 /// a loss shorter than the limit does not pause; a longer one pauses; the return resumes.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resumes() {
     let Some(app) = start(Setup {
         tools: true,
-        // `/ready` fails 4.0–4.6 s (≈ 0.4 s "Reconnecting" after the 0.2 s grace) and 8–12 s.
+        // `/ready` fails 4.0–5.5 s (a loss of about 1.5 s) and 9–16 s (7 s); limit 4 s.
         runs: Some(json!([{
             "hostname": QUICK_HOST,
-            "ready_down": [[4000, 4600], [8000, 12000]],
+            "ready_down": [[4000, 5500], [9000, 16000]],
         }])),
         auto_pause: AutoPauseTimings {
-            tunnel_loss: Duration::from_millis(1500),
+            tunnel_loss: Duration::from_millis(4000),
             ..AutoPauseTimings::default()
         },
         ..Setup::default()
@@ -711,7 +823,7 @@ async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resum
     let core = Arc::clone(&app.engine().core);
     // (ms after the fake's start, tunnel state, pause reasons), every 25 ms.
     let mut samples: Vec<(u64, String, Vec<&str>)> = Vec::new();
-    while now_ms() < started_ms + 14_000 {
+    while now_ms() < started_ms + 18_000 {
         let state = core.tunnel_state();
         let name = format!("{state:?}");
         samples.push((now_ms() - started_ms, name, pause_reasons(&core)));
@@ -723,21 +835,23 @@ async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resum
             .any(|(t, s, _)| (from..to).contains(t) && s.starts_with("Reconnecting"))
     };
     assert!(
-        lost(4000, 5000),
+        lost(4000, 5700),
         "the short loss did not happen: {samples:?}"
     );
     assert!(
-        lost(8000, 12_000),
+        lost(9000, 16_000),
         "the long loss did not happen: {samples:?}"
     );
+    // From 3 s on (steadily online since the start): with a limit of a few seconds, a slow
+    // first start of cloudflared alone can already pause the channel for a moment.
     let first_pause = samples
         .iter()
-        .find(|(_, _, r)| r.contains(&"tunnel"))
+        .find(|(t, _, r)| *t >= 3000 && r.contains(&"tunnel"))
         .map(|(t, _, _)| *t)
         .unwrap_or_else(|| panic!("never paused: {samples:?}"));
-    // ≈ 8.0 s + 0.2 s grace + 1.5 s limit; the short loss would have paused near 5.7 s.
+    // ≈ 9.0 s (first failed check) + 4 s limit; the short loss would have paused near 8 s.
     assert!(
-        (9_000..12_000).contains(&first_pause),
+        (12_500..16_000).contains(&first_pause),
         "paused at {first_pause} ms: {samples:?}"
     );
     eventually(10, "the resume after the tunnel returned", || async {

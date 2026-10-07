@@ -22,6 +22,15 @@ const MISSING: &str =
 const UPDATING: &str = "Trwa aktualizacja programu cloudflared — tunel wróci za chwilę.";
 const NAMED_FALLBACK: &str = "Brak plików stałego linku — działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Ustaw stały link ponownie.";
 
+/// The tunnel's public address in effect and the cloudflared run that learnt it.
+#[derive(Debug, Clone)]
+pub(crate) struct KeptAddress {
+    pub url: String,
+    /// [`crate::tunnel::TunnelManager::runs_ended`] when it was learnt: a quick tunnel's
+    /// address is dead once that count has grown.
+    pub runs_ended: u64,
+}
+
 /// What the tunnel does besides its state, for the window.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TunnelNotes {
@@ -210,9 +219,21 @@ impl AppCore {
             } else {
                 self.tunnel.state().borrow().clone()
             };
-            // The address in effect follows the state (a short loss keeps it).
-            let mut address = lock(&self.tunnel_address);
-            *address = tunnel_address(address.as_deref(), &fresh);
+            // The address in effect follows the state: a short loss keeps it while it still
+            // leads to the channel (the same cloudflared, or a named tunnel's fixed host).
+            let ended = self.tunnel.runs_ended();
+            let named = lock(&self.tunnel_notes).mode == Some(TunnelModeSetting::Named);
+            let mut kept = lock(&self.tunnel_address);
+            let still_leads = named || kept.as_ref().is_some_and(|k| k.runs_ended == ended);
+            let url = tunnel_address(kept.as_ref().map(|k| k.url.as_str()), &fresh, still_leads);
+            let since = match &fresh {
+                TunnelState::Online { .. } => ended,
+                _ => kept.as_ref().map_or(ended, |k| k.runs_ended),
+            };
+            *kept = url.map(|url| KeptAddress {
+                url,
+                runs_ended: since,
+            });
             let changed = *view != fresh;
             *view = fresh;
             changed
@@ -242,7 +263,7 @@ impl AppCore {
     /// whether the tunnel is enabled but has no address yet.
     pub(crate) fn effective_config(&self, settings: &AppSettings) -> (AppConfig, bool) {
         let mut config = app_config(settings, &self.home);
-        let address = lock(&self.tunnel_address).clone();
+        let address = lock(&self.tunnel_address).clone().map(|kept| kept.url);
         let access = if settings.tunnel_enabled {
             PublicAccess::Tunnel {
                 address: address.as_deref(),

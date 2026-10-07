@@ -10,6 +10,7 @@ mod state;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, oneshot, watch};
@@ -104,6 +105,8 @@ pub struct TunnelManager {
     state: Arc<watch::Sender<TunnelState>>,
     /// See [`TunnelManager::lost_since`].
     lost: LostSince,
+    /// See [`TunnelManager::runs_ended`].
+    runs_ended: Arc<AtomicU64>,
     slot: Arc<Mutex<Slot>>,
     /// Set (or dropped) when the manager goes away: every supervisor stops, including one
     /// launched by an operation still in flight at that moment.
@@ -157,6 +160,7 @@ impl TunnelManager {
             log: Arc::new(|m: &str| eprintln!("{m}")),
             state: Arc::new(watch::channel(TunnelState::Off).0),
             lost: LostSince::default(),
+            runs_ended: Arc::default(),
             slot: Arc::new(Mutex::new(Slot::default())),
             shutdown: watch::channel(false).0,
         }
@@ -183,6 +187,13 @@ impl TunnelManager {
     /// online before; kept through restarts. `None` while online and while stopped.
     pub fn lost_since(&self) -> Option<Instant> {
         *lock_lost(&self.lost)
+    }
+
+    /// How many cloudflared processes have ended without being asked to (exited, or killed
+    /// after a failure). A quick tunnel's address dies with its process: one learnt before
+    /// the count last grew no longer leads anywhere.
+    pub fn runs_ended(&self) -> u64 {
+        self.runs_ended.load(AtomicOrdering::SeqCst)
     }
 
     /// Runs the tunnel for `config`, replacing a running one (which has exited before the new
@@ -214,6 +225,7 @@ impl TunnelManager {
             log: self.log.clone(),
             state: self.state.clone(),
             lost: self.lost.clone(),
+            runs_ended: self.runs_ended.clone(),
         };
         let slot = self.slot.clone();
         let shutdown = self.shutdown.subscribe();
@@ -370,6 +382,7 @@ struct Supervisor {
     log: SharedLogFn,
     state: Arc<watch::Sender<TunnelState>>,
     lost: LostSince,
+    runs_ended: Arc<AtomicU64>,
 }
 
 impl Supervisor {
@@ -395,6 +408,8 @@ impl Supervisor {
             let outcome = self.attempt(&config, &client, &mut stop).await;
             if matches!(outcome, Outcome::Failed(_)) {
                 lock_lost(&self.lost).get_or_insert_with(Instant::now);
+                // Before the state says so: whoever sees the new state sees the count.
+                self.runs_ended.fetch_add(1, AtomicOrdering::SeqCst);
             }
             let failure = match outcome {
                 Outcome::Stopped => return,

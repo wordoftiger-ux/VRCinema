@@ -102,15 +102,19 @@ pub fn apply_tunnel(config: &mut AppConfig, access: PublicAccess<'_>) -> bool {
 }
 
 /// The tunnel's public address in effect after a change of its state, given the one in effect
-/// before: online → its URL; `Reconnecting` (the same cloudflared lost its connection for a
-/// moment, or is being started again after a failure) → the previous address stays, so a short
-/// loss changes neither the links nor the slates (a quick tunnel that comes back with a new URL
-/// replaces it then); a fresh start (`Connecting`: switched on, new port or mode), an error or
-/// off → none.
-pub fn tunnel_address(previous: Option<&str>, state: &TunnelState) -> Option<String> {
+/// before: online → its URL; `Reconnecting` → the previous address stays when it `still_leads`
+/// to the channel (the same cloudflared lost its connection for a moment, or a named tunnel's
+/// fixed host name), so a short loss changes neither the links nor the slates; a quick tunnel
+/// whose cloudflared exited has a dead address, none until the new one is online. A fresh
+/// start (`Connecting`: switched on, new port or mode), an error or off → none.
+pub fn tunnel_address(
+    previous: Option<&str>,
+    state: &TunnelState,
+    still_leads: bool,
+) -> Option<String> {
     match state {
         TunnelState::Online { url } => Some(url.clone()),
-        TunnelState::Reconnecting => previous.map(str::to_string),
+        TunnelState::Reconnecting => previous.filter(|_| still_leads).map(str::to_string),
         TunnelState::Connecting | TunnelState::Off | TunnelState::Error { .. } => None,
     }
 }
@@ -165,16 +169,21 @@ mod tests {
     #[test]
     fn the_address_survives_reconnecting_only() {
         let online = TunnelState::Online { url: URL.into() };
-        assert_eq!(tunnel_address(None, &online).as_deref(), Some(URL));
+        assert_eq!(tunnel_address(None, &online, true).as_deref(), Some(URL));
         assert_eq!(
-            tunnel_address(Some("https://old.example.com"), &online).as_deref(),
+            tunnel_address(Some("https://old.example.com"), &online, false).as_deref(),
             Some(URL)
         );
         assert_eq!(
-            tunnel_address(Some(URL), &TunnelState::Reconnecting).as_deref(),
+            tunnel_address(Some(URL), &TunnelState::Reconnecting, true).as_deref(),
             Some(URL)
         );
-        assert_eq!(tunnel_address(None, &TunnelState::Reconnecting), None);
+        assert_eq!(tunnel_address(None, &TunnelState::Reconnecting, true), None);
+        // Fix round 2: a quick tunnel whose cloudflared exited has a dead address.
+        assert_eq!(
+            tunnel_address(Some(URL), &TunnelState::Reconnecting, false),
+            None
+        );
         for state in [
             TunnelState::Connecting,
             TunnelState::Off,
@@ -182,7 +191,7 @@ mod tests {
                 message: "x".into(),
             },
         ] {
-            assert_eq!(tunnel_address(Some(URL), &state), None, "{state:?}");
+            assert_eq!(tunnel_address(Some(URL), &state, true), None, "{state:?}");
         }
     }
 

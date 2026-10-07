@@ -622,6 +622,8 @@ async fn the_loss_is_dated_from_the_first_failed_ready_check() {
     })
     .await;
     let lost = tunnel.lost_since().expect("the loss is dated");
+    // Fix round 2: the same process lives on (its address still leads to the channel).
+    assert_eq!(tunnel.runs_ended(), 0);
     // Reconnecting comes `health_grace` (500 ms) after the first failed check.
     assert!(
         lost.elapsed() >= Duration::from_millis(400),
@@ -652,6 +654,8 @@ async fn an_exit_while_online_is_dated_from_the_exit_and_kept_until_online() {
     })
     .await;
     let lost = tunnel.lost_since().expect("the loss is dated");
+    // Fix round 2: the process that learnt the address has ended (its address is dead).
+    assert!(tunnel.runs_ended() >= 1);
     fake.wait_starts(2, Duration::from_secs(10)).await;
     assert_eq!(
         tunnel.lost_since(),

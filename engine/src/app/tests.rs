@@ -911,11 +911,21 @@ async fn installing_tools_from_the_local_server_updates_status_and_settings() {
         .call("POST", "/api/desktop/tools/install", Some(&cookie), None)
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
+    // The job ends with a server restart: a poll may meet the closed port (no answer, retry).
     eventually(30, "the tools job to finish", || async {
-        app.call("GET", "/api/desktop/tools", Some(&cookie), None)
-            .await
-            .1["running"]
-            == false
+        let res = app
+            .http
+            .get(app.url("/api/desktop/tools"))
+            .header("cookie", &cookie)
+            .send()
+            .await;
+        match res {
+            Ok(res) => res
+                .json::<Value>()
+                .await
+                .is_ok_and(|v| v["running"] == false),
+            Err(_) => false,
+        }
     })
     .await;
     let progress = app.get("/api/desktop/tools/progress", &cookie).await;

@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::app_settings::{AppSettings, CONFIG_FILE, TunnelModeSetting, app_config};
 use crate::auto_pause::{
-    AutoPause, AutoPauseSettings, AutoPauseTimings, CommandTarget, ViewerActivity,
+    AutoPause, AutoPauseSettings, AutoPauseTimings, ChannelTarget, CommandTarget, ViewerActivity,
 };
 use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
@@ -254,6 +254,8 @@ struct Live {
     channel: bool,
     /// Replaces the slate set when the public address changes (`None` without a channel).
     slates: Option<Arc<SlateSwapper>>,
+    /// The pause reasons its channel loop was started with.
+    started_paused: BTreeSet<PauseReason>,
 }
 
 pub(crate) struct AppCore {
@@ -305,7 +307,7 @@ pub(crate) struct AppCore {
     pause_active: Arc<Mutex<BTreeSet<PauseReason>>>,
     /// The tunnel's public address in effect (kept through a short `Reconnecting`, see
     /// [`crate::live::tunnel_address`]); updated with `tunnel_view`.
-    tunnel_address: Mutex<Option<String>>,
+    tunnel_address: Mutex<Option<tunnel::KeptAddress>>,
     /// A tools job replaces cloudflared: the tunnel stays stopped until it is done.
     tunnel_held: AtomicBool,
     #[cfg(test)]
@@ -454,7 +456,8 @@ impl AppCore {
         self.apply_live();
         *slot = Some(running);
         self.server_starts.fetch_add(1, Ordering::SeqCst);
-        // The new channel starts without pause reasons and with the start-up slates.
+        // The new channel starts with the pause reasons active when it was built (the
+        // automatic pause brings them up to date now) and with the start-up slates.
         self.pause_kick.notify_one();
         self.refresh_slates();
         Ok(())
@@ -488,6 +491,7 @@ impl AppCore {
             })
         };
         self.live_settings.apply(config);
+        let started_paused = lock(&self.pause_active).clone();
         let opts = RunOptions {
             fake_resolver: self.options.fake_resolver.clone(),
             update_ytdlp: channel
@@ -501,7 +505,7 @@ impl AppCore {
             channel_loops: Some(Arc::clone(&self.channel_loops)),
             live: Some(self.live_settings.clone()),
             slates_connecting: connecting,
-            pause_reasons: lock(&self.pause_active).iter().copied().collect(),
+            pause_reasons: started_paused.iter().copied().collect(),
             ..RunOptions::new(self.home.clone())
         };
         let mut join = tokio::spawn(run(config.clone(), opts, async move {
@@ -525,6 +529,7 @@ impl AppCore {
                         port: addr.port(),
                         state,
                         channel,
+                        started_paused,
                         slates: channel
                             .then(|| Arc::new(SlateSwapper::for_config(config, connecting))),
                     },
@@ -1170,7 +1175,10 @@ fn auto_pause(core: &Arc<AppCore>) -> AutoPause {
     let weak = Arc::downgrade(core);
     let target: CommandTarget = Arc::new(move || {
         let live = weak.upgrade()?.live()?;
-        live.channel.then(|| live.state.engine.commands.clone())
+        live.channel.then(|| ChannelTarget {
+            commands: live.state.engine.commands.clone(),
+            started_with: live.started_paused.clone(),
+        })
     });
     AutoPause {
         timings: core.options.auto_pause_timings.clone(),

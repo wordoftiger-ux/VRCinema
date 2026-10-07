@@ -9,7 +9,8 @@
 //!   `pauseWhenNoViewers`.
 //!
 //! The controller sends its reasons to whichever channel loop runs: a new loop (server restarted)
-//! starts with the active reasons ([`AutoPause::active`]) and gets them again by command. A loop
+//! starts with the active reasons ([`AutoPause::active`]); the controller then brings it up to date
+//! (pauses reasons that came, resumes ones that went while the server restarted). A loop
 //! that rebuilds its channel after a crash re-applies the reasons itself (`engine.rs`).
 
 use std::collections::BTreeSet;
@@ -97,9 +98,17 @@ impl ViewerActivity {
     }
 }
 
-/// The command queue of the channel loop running right now (`None`: no channel, e.g. while the
-/// server restarts or runs without tools).
-pub type CommandTarget = Arc<dyn Fn() -> Option<mpsc::Sender<Command>> + Send + Sync>;
+/// The channel loop running right now: its command queue and the pause reasons it was started
+/// with (a restarted server's loop starts with the reasons active when it was built).
+#[derive(Debug, Clone)]
+pub struct ChannelTarget {
+    pub commands: mpsc::Sender<Command>,
+    pub started_with: BTreeSet<PauseReason>,
+}
+
+/// The channel loop running right now (`None`: no channel, e.g. while the server restarts or
+/// runs without tools).
+pub type CommandTarget = Arc<dyn Fn() -> Option<ChannelTarget> + Send + Sync>;
 
 /// When the tunnel lost its connection, see [`AutoPause::lost_since`].
 pub type LossClock = Arc<dyn Fn() -> Option<Instant> + Send + Sync>;
@@ -123,7 +132,7 @@ pub struct AutoPause {
     pub log: SharedLogFn,
 }
 
-/// What has been sent to which channel loop.
+/// The reasons the channel loop `to` has right now (started with or commanded).
 #[derive(Default)]
 struct Delivered {
     to: Option<mpsc::Sender<Command>>,
@@ -219,19 +228,25 @@ impl AutoPause {
         }
     }
 
-    /// Brings the running channel loop to `wanted`: a new loop starts from no reasons; a command
-    /// the loop cannot take now (full queue) is sent again on a later check.
+    /// Brings the running channel loop to `wanted`: a new loop starts from the reasons it was
+    /// started with; a command the loop cannot take now (full queue) is sent again on a later
+    /// check.
     fn deliver(&self, wanted: &BTreeSet<PauseReason>, delivered: &mut Delivered) {
         let target = (self.target)();
         let same = match (&target, &delivered.to) {
-            (Some(new), Some(old)) => new.same_channel(old),
+            (Some(new), Some(old)) => new.commands.same_channel(old),
             _ => false,
         };
         if !same {
-            delivered.reasons.clear();
-            delivered.to = target.clone();
+            // A new loop has exactly the reasons it was started with: the ones no longer
+            // wanted are resumed, the missing ones paused.
+            delivered.reasons = target
+                .as_ref()
+                .map(|t| t.started_with.clone())
+                .unwrap_or_default();
+            delivered.to = target.as_ref().map(|t| t.commands.clone());
         }
-        let Some(tx) = target else {
+        let Some(tx) = target.map(|t| t.commands) else {
             return;
         };
         let pauses = wanted.difference(&delivered.reasons).copied();
@@ -269,7 +284,7 @@ mod tests {
         settings: watch::Sender<AutoPauseSettings>,
         tunnel: watch::Sender<TunnelState>,
         viewers: Arc<ViewerActivity>,
-        target: Arc<Mutex<Option<mpsc::Sender<Command>>>>,
+        target: Arc<Mutex<Option<ChannelTarget>>>,
         rx: mpsc::Receiver<Command>,
         kick: Arc<Notify>,
         logs: Arc<Mutex<Vec<String>>>,
@@ -295,11 +310,19 @@ mod tests {
         }
     }
 
+    /// A channel loop behind `tx`, started with `reasons`.
+    fn channel(tx: mpsc::Sender<Command>, reasons: &[PauseReason]) -> ChannelTarget {
+        ChannelTarget {
+            commands: tx,
+            started_with: reasons.iter().copied().collect(),
+        }
+    }
+
     fn start(settings: AutoPauseSettings, tunnel: TunnelState) -> Env {
         let (settings_tx, settings_rx) = watch::channel(settings);
         let (tunnel_tx, tunnel_rx) = watch::channel(tunnel);
         let (tx, rx) = mpsc::channel(64);
-        let target = Arc::new(Mutex::new(Some(tx)));
+        let target = Arc::new(Mutex::new(Some(channel(tx, &[]))));
         let viewers = Arc::new(ViewerActivity::new());
         let kick = Arc::new(Notify::new());
         let lost: Arc<Mutex<Option<Instant>>> = Arc::default();
@@ -560,7 +583,7 @@ mod tests {
         *env.target.lock().unwrap() = None;
         after_ms(5_000).await;
         let (tx, mut rx) = mpsc::channel(64);
-        *env.target.lock().unwrap() = Some(tx);
+        *env.target.lock().unwrap() = Some(channel(tx, &[]));
         env.kick.notify_one();
         after_ms(1).await;
         assert_eq!(
@@ -573,6 +596,53 @@ mod tests {
         assert!(env.sent().is_empty(), "the old loop got nothing more");
     }
 
+    /// Fix round 2: the new loop started with a reason (the copy taken when its server was
+    /// built) that went away while no channel ran: it is resumed, not left paused forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_reason_cleared_while_no_channel_runs_is_resumed_on_the_new_one() {
+        let mut env = start(ON_LOSS, TunnelState::Reconnecting);
+        after_ms(10_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        *env.target.lock().unwrap() = None;
+        // The tunnel comes back during the server restart.
+        env.tunnel.send_replace(online());
+        after_ms(1_000).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        *env.target.lock().unwrap() = Some(channel(tx, &[PauseReason::Tunnel]));
+        env.kick.notify_one();
+        after_ms(1).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Command::Resume(PauseReason::Tunnel))
+        );
+        after_ms(5_000).await;
+        assert!(rx.try_recv().is_err(), "sent once");
+    }
+
+    /// Fix round 2: a reason that came while no channel ran pauses the new loop; one it was
+    /// already started with is not sent again.
+    #[tokio::test(start_paused = true)]
+    async fn a_reason_that_appears_while_no_channel_runs_pauses_the_new_one() {
+        let mut env = start(ON_LOSS, online());
+        *env.target.lock().unwrap() = None;
+        env.tunnel.send_replace(TunnelState::Reconnecting);
+        after_ms(10_100).await;
+        let (tx, mut rx) = mpsc::channel(64);
+        *env.target.lock().unwrap() = Some(channel(tx, &[]));
+        env.kick.notify_one();
+        after_ms(1).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Command::Pause(PauseReason::Tunnel))
+        );
+        let (tx, mut rx) = mpsc::channel(64);
+        *env.target.lock().unwrap() = Some(channel(tx, &[PauseReason::Tunnel]));
+        env.kick.notify_one();
+        after_ms(5_000).await;
+        assert!(rx.try_recv().is_err(), "already started paused");
+        assert!(env.sent().is_empty());
+    }
+
     /// Without a kick the next periodic check finds the new loop.
     #[tokio::test(start_paused = true)]
     async fn a_new_channel_is_found_by_the_periodic_check() {
@@ -580,7 +650,7 @@ mod tests {
         after_ms(10_100).await;
         assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
         let (tx, mut rx) = mpsc::channel(64);
-        *env.target.lock().unwrap() = Some(tx);
+        *env.target.lock().unwrap() = Some(channel(tx, &[]));
         after_ms(1_100).await;
         assert_eq!(
             rx.try_recv().ok(),
@@ -594,7 +664,7 @@ mod tests {
         let mut env = start(ON_LOSS, TunnelState::Reconnecting);
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(Command::Skip).unwrap();
-        *env.target.lock().unwrap() = Some(tx);
+        *env.target.lock().unwrap() = Some(channel(tx, &[]));
         after_ms(10_100).await;
         assert_eq!(rx.try_recv().ok(), Some(Command::Skip));
         after_ms(1_100).await;
