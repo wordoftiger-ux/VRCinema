@@ -1,5 +1,5 @@
-//! Tools manager: downloads, installs, updates and repairs yt-dlp, the ffmpeg shared build and
-//! Deno in the app's `tools` folder (spec section 5). See [`encoder`] for the video-encoder test.
+//! Tools manager: downloads, installs, updates and repairs yt-dlp, the ffmpeg shared build,
+//! Deno and cloudflared in the app's `tools` folder (spec section 5). See [`encoder`] for the video-encoder test.
 
 pub mod download;
 pub mod encoder;
@@ -31,10 +31,11 @@ pub enum Tool {
     YtDlp,
     Ffmpeg,
     Deno,
+    Cloudflared,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 3] = [Tool::YtDlp, Tool::Ffmpeg, Tool::Deno];
+    pub const ALL: [Tool; 4] = [Tool::YtDlp, Tool::Ffmpeg, Tool::Deno, Tool::Cloudflared];
 
     /// Stable identifier (also the key in `versions.json`).
     pub fn name(self) -> &'static str {
@@ -42,6 +43,7 @@ impl Tool {
             Tool::YtDlp => "yt-dlp",
             Tool::Ffmpeg => "ffmpeg",
             Tool::Deno => "deno",
+            Tool::Cloudflared => "cloudflared",
         }
     }
 
@@ -51,6 +53,7 @@ impl Tool {
             Tool::YtDlp => "yt-dlp.exe",
             Tool::Ffmpeg => "ffmpeg.exe",
             Tool::Deno => "deno.exe",
+            Tool::Cloudflared => "cloudflared.exe",
         }
     }
 
@@ -60,6 +63,7 @@ impl Tool {
             Tool::YtDlp => &["--version"],
             Tool::Ffmpeg => &["-hide_banner", "-version"],
             Tool::Deno => &["--version"],
+            Tool::Cloudflared => &["--version"],
         }
     }
 }
@@ -71,6 +75,9 @@ pub struct ToolSources {
     pub ytdlp_base: String,
     pub ffmpeg_base: String,
     pub deno_base: String,
+    pub cloudflared_base: String,
+    /// "Latest release" API of cloudflared: its description is the only place with checksums.
+    pub cloudflared_release_api: String,
 }
 
 impl Default for ToolSources {
@@ -79,21 +86,42 @@ impl Default for ToolSources {
             ytdlp_base: "https://github.com/yt-dlp/yt-dlp/releases/latest/download".into(),
             ffmpeg_base: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest".into(),
             deno_base: "https://github.com/denoland/deno/releases/latest/download".into(),
+            cloudflared_base: "https://github.com/cloudflare/cloudflared/releases/latest/download"
+                .into(),
+            cloudflared_release_api:
+                "https://api.github.com/repos/cloudflare/cloudflared/releases/latest".into(),
         }
     }
 }
 
+/// Where the checksum of a download is published.
+enum Sums {
+    /// A sums file next to the download (missing file: install unverified; a file without an
+    /// entry for the download: failure).
+    File(String),
+    /// The description of a GitHub release (no entry: install unverified).
+    ReleaseNotes(String),
+}
+
 /// What to download for one tool.
 struct Download {
-    /// Name of the published file (also the lookup name in the sums file).
+    /// Name of the published file (also the lookup name for its checksum).
     file: &'static str,
     url: String,
-    sums_url: String,
+    sums: Sums,
 }
 
 impl ToolSources {
     fn download(&self, tool: Tool) -> Download {
         let (base, file, sums) = match tool {
+            Tool::Cloudflared => {
+                let file = "cloudflared-windows-amd64.exe";
+                return Download {
+                    file,
+                    url: format!("{}/{file}", self.cloudflared_base.trim_end_matches('/')),
+                    sums: Sums::ReleaseNotes(self.cloudflared_release_api.clone()),
+                };
+            }
             Tool::YtDlp => (&self.ytdlp_base, "yt-dlp.exe", "SHA2-256SUMS"),
             Tool::Ffmpeg => (
                 &self.ffmpeg_base,
@@ -110,7 +138,7 @@ impl ToolSources {
         Download {
             file,
             url: format!("{base}/{file}"),
-            sums_url: format!("{base}/{sums}"),
+            sums: Sums::File(format!("{base}/{sums}")),
         }
     }
 }
@@ -291,25 +319,34 @@ impl ToolsManager {
         fs::create_dir_all(&download_dir)
             .with_context(|| format!("Nie można utworzyć folderu {}", download_dir.display()))?;
 
-        let expected = match download::fetch_text(&self.http, &source.sums_url).await {
-            Ok(Some(text)) => {
-                let sum = download::parse_sums(&text, source.file);
-                if sum.is_none() {
-                    anyhow::bail!(
-                        "Plik sum kontrolnych nie zawiera wpisu dla {}.",
-                        source.file
-                    );
+        let unverified = || {
+            (self.log)(&format!(
+                "Narzędzia: wydawca nie udostępnia sum kontrolnych dla {}; instalacja bez weryfikacji.",
+                tool.name()
+            ));
+            None
+        };
+        let expected = match &source.sums {
+            Sums::File(url) => match download::fetch_text(&self.http, url).await {
+                Ok(Some(text)) => {
+                    let sum = download::parse_sums(&text, source.file);
+                    if sum.is_none() {
+                        anyhow::bail!(
+                            "Plik sum kontrolnych nie zawiera wpisu dla {}.",
+                            source.file
+                        );
+                    }
+                    sum
                 }
-                sum
+                Ok(None) => unverified(),
+                Err(e) => return Err(e),
+            },
+            Sums::ReleaseNotes(api_url) => {
+                match download::fetch_release_notes_sum(&self.http, api_url, source.file).await {
+                    Some(sum) => Some(sum),
+                    None => unverified(),
+                }
             }
-            Ok(None) => {
-                (self.log)(&format!(
-                    "Narzędzia: wydawca nie udostępnia sum kontrolnych dla {}; instalacja bez weryfikacji.",
-                    tool.name()
-                ));
-                None
-            }
-            Err(e) => return Err(e),
         };
 
         let part = download_dir.join(format!("{}.part", source.file));
@@ -429,6 +466,12 @@ mod tests {
         _tmp: tempfile::TempDir,
         ytdlp: Vec<u8>,
         deno_zip: Vec<u8>,
+        cloudflared: Vec<u8>,
+    }
+
+    /// The JSON the "latest release" API answers with.
+    fn release_json(body: &str) -> String {
+        serde_json::json!({ "tag_name": "2099.1.0", "body": body }).to_string()
     }
 
     impl Fixture {
@@ -479,25 +522,50 @@ mod tests {
                 "dn/deno-x86_64-pc-windows-msvc.zip.sha256sum",
                 format!("{}\n", hex(&deno_zip)),
             );
+            let cloudflared: Vec<u8> = (0..120_000).map(|i| (i % 239) as u8).collect();
+            server.put("cf/cloudflared-windows-amd64.exe", cloudflared.clone());
+            server.put(
+                "cf-api",
+                release_json(&format!(
+                    "## Release\n| File | SHA256 |\n|---|---|\n| cloudflared-windows-386.exe | {} |\n| cloudflared-windows-amd64.exe | {} |\n",
+                    hex(b"other"),
+                    hex(&cloudflared)
+                )),
+            );
             Fixture {
                 server,
                 tools,
                 _tmp: tmp,
                 ytdlp,
                 deno_zip,
+                cloudflared,
+            }
+        }
+
+        fn sources(&self) -> ToolSources {
+            ToolSources {
+                ytdlp_base: format!("{}/yt", self.server.base),
+                ffmpeg_base: format!("{}/ff/", self.server.base),
+                deno_base: format!("{}/dn", self.server.base),
+                cloudflared_base: format!("{}/cf", self.server.base),
+                cloudflared_release_api: format!("{}/cf-api", self.server.base),
             }
         }
 
         fn manager(&self) -> ToolsManager {
-            ToolsManager::with_sources(
-                self.tools.clone(),
-                reqwest::Client::new(),
-                ToolSources {
-                    ytdlp_base: format!("{}/yt", self.server.base),
-                    ffmpeg_base: format!("{}/ff/", self.server.base),
-                    deno_base: format!("{}/dn", self.server.base),
-                },
-            )
+            ToolsManager::with_sources(self.tools.clone(), reqwest::Client::new(), self.sources())
+        }
+
+        /// A manager whose notes are collected in the returned list.
+        fn manager_with_log(
+            &self,
+        ) -> (ToolsManager, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = lines.clone();
+            let m = self.manager().with_log(std::sync::Arc::new(move |m: &str| {
+                sink.lock().unwrap().push(m.to_string());
+            }));
+            (m, lines)
         }
     }
 
@@ -509,25 +577,35 @@ mod tests {
             yt.url,
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
         );
-        assert_eq!(
-            yt.sums_url,
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
-        );
+        assert!(matches!(
+            &yt.sums,
+            Sums::File(u) if u == "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
+        ));
         let ff = s.download(Tool::Ffmpeg);
         assert_eq!(
             ff.url,
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
         );
-        assert!(ff.sums_url.ends_with("/latest/checksums.sha256"));
+        assert!(matches!(&ff.sums, Sums::File(u) if u.ends_with("/latest/checksums.sha256")));
         let dn = s.download(Tool::Deno);
         assert_eq!(
             dn.url,
             "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
         );
-        assert!(
-            dn.sums_url
-                .ends_with("deno-x86_64-pc-windows-msvc.zip.sha256sum")
+        assert!(matches!(
+            &dn.sums,
+            Sums::File(u) if u.ends_with("deno-x86_64-pc-windows-msvc.zip.sha256sum")
+        ));
+        let cf = s.download(Tool::Cloudflared);
+        assert_eq!(
+            cf.url,
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
         );
+        assert!(matches!(
+            &cf.sums,
+            Sums::ReleaseNotes(u)
+                if u == "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"
+        ));
     }
 
     #[tokio::test]
@@ -544,7 +622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_missing_installs_all_three_with_versions_and_progress() {
+    async fn install_missing_installs_all_four_with_versions_and_progress() {
         let f = Fixture::new().await;
         let m = f.manager();
         let mut rx = m.progress();
@@ -574,6 +652,10 @@ mod tests {
         assert_eq!(fs::read(f.tools.join("ffprobe.exe")).unwrap(), b"FFPROBE");
         assert_eq!(fs::read(f.tools.join("avcodec-62.dll")).unwrap(), b"DLL");
         assert_eq!(fs::read(f.tools.join("deno.exe")).unwrap(), b"DENO");
+        assert_eq!(
+            fs::read(f.tools.join("cloudflared.exe")).unwrap(),
+            f.cloudflared
+        );
         assert!(!f.tools.join("LICENSE.txt").exists());
 
         let status = m.status();
@@ -581,7 +663,7 @@ mod tests {
         let versions: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(f.tools.join("versions.json")).unwrap())
                 .unwrap();
-        for name in ["yt-dlp", "ffmpeg", "deno"] {
+        for name in ["yt-dlp", "ffmpeg", "deno", "cloudflared"] {
             // The fixtures are not runnable programs, so the label is "unknown".
             assert_eq!(versions[name]["version"], "unknown", "{name}");
             let at = versions[name]["installedAt"].as_str().unwrap();
@@ -609,9 +691,11 @@ mod tests {
         let f = Fixture::new().await;
         fs::write(f.tools.join("yt-dlp.exe"), b"KEEP").unwrap();
         fs::write(f.tools.join("deno.exe"), b"KEEP").unwrap();
+        fs::write(f.tools.join("cloudflared.exe"), b"KEEP").unwrap();
         f.manager().install_missing().await.unwrap();
         assert_eq!(fs::read(f.tools.join("yt-dlp.exe")).unwrap(), b"KEEP");
         assert_eq!(fs::read(f.tools.join("deno.exe")).unwrap(), b"KEEP");
+        assert_eq!(fs::read(f.tools.join("cloudflared.exe")).unwrap(), b"KEEP");
         assert!(f.tools.join("avcodec-62.dll").exists());
         assert!(
             f.server
@@ -708,9 +792,8 @@ mod tests {
             f.tools.clone(),
             reqwest::Client::new(),
             ToolSources {
-                ytdlp_base: format!("{}/yt", server.base),
-                ffmpeg_base: format!("{}/ff", server.base),
                 deno_base: format!("{}/dn-nosums", server.base),
+                ..f.sources()
             },
         );
         server.put(
@@ -806,6 +889,123 @@ mod tests {
         fs::write(f.tools.join("ffprobe.exe"), b"x").unwrap();
         assert_eq!(f.manager().status().missing, Tool::ALL);
         fs::write(f.tools.join("avcodec-62.dll"), b"x").unwrap();
-        assert_eq!(f.manager().status().missing, [Tool::YtDlp, Tool::Deno]);
+        assert_eq!(
+            f.manager().status().missing,
+            [Tool::YtDlp, Tool::Deno, Tool::Cloudflared]
+        );
+    }
+
+    // ---------- cloudflared ----------
+
+    #[tokio::test]
+    async fn cloudflared_with_a_checksum_in_the_release_notes_is_verified() {
+        let f = Fixture::new().await;
+        let (m, log) = f.manager_with_log();
+        m.update(Tool::Cloudflared).await.unwrap();
+        assert_eq!(
+            fs::read(f.tools.join("cloudflared.exe")).unwrap(),
+            f.cloudflared
+        );
+        assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+        assert_eq!(fs::read_dir(f.tools.join(".download")).unwrap().count(), 0);
+        let paths = f.server.requested_paths();
+        assert!(paths.contains(&"cf-api".to_string()), "{paths:?}");
+        let versions: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(f.tools.join("versions.json")).unwrap())
+                .unwrap();
+        assert_eq!(versions["cloudflared"]["version"], "unknown");
+        assert!(m.status().tools.iter().any(|t| t.tool == Tool::Cloudflared
+            && t.installed
+            && t.version.as_deref() == Some("unknown")));
+    }
+
+    #[tokio::test]
+    async fn cloudflared_checksum_mismatch_is_rejected_and_the_old_file_stays() {
+        let f = Fixture::new().await;
+        fs::write(f.tools.join("cloudflared.exe"), b"OLD-WORKING").unwrap();
+        f.server.put(
+            "cf-api",
+            release_json(&format!(
+                "cloudflared-windows-amd64.exe: {}",
+                hex(b"something else")
+            )),
+        );
+        let m = f.manager();
+        let err = m.update(Tool::Cloudflared).await.unwrap_err();
+        assert!(err.to_string().contains("Suma kontrolna"), "{err}");
+        assert_eq!(
+            fs::read(f.tools.join("cloudflared.exe")).unwrap(),
+            b"OLD-WORKING"
+        );
+        assert!(m.progress().borrow().error.is_some());
+        assert_eq!(fs::read_dir(f.tools.join(".download")).unwrap().count(), 0);
+        assert!(!f.tools.join("versions.json").exists());
+    }
+
+    #[tokio::test]
+    async fn cloudflared_installs_unverified_when_no_checksum_is_published() {
+        // (api answer, description of the scenario)
+        let f = Fixture::new().await;
+        let cases = [
+            (
+                "notes without the file",
+                Some(release_json(&format!(
+                    "{}  cloudflared-linux-amd64\n",
+                    hex(b"x")
+                ))),
+                None,
+            ),
+            (
+                "line with two hashes",
+                Some(release_json(&format!(
+                    "cloudflared-windows-amd64.exe {} {}",
+                    hex(b"a"),
+                    hex(b"b")
+                ))),
+                None,
+            ),
+            ("API answers 404", None, Some(404)),
+            ("API answers 500", None, Some(500)),
+            ("API answers garbage", Some("not json".to_string()), None),
+        ];
+        for (what, body, fail) in cases {
+            let _ = fs::remove_file(f.tools.join("cloudflared.exe"));
+            match (&body, fail) {
+                (Some(b), _) => f.server.put("cf-api", b.clone()),
+                (None, Some(code)) => f.server.fail_with("cf-api", code),
+                _ => unreachable!(),
+            }
+            let (m, log) = f.manager_with_log();
+            m.update(Tool::Cloudflared)
+                .await
+                .unwrap_or_else(|e| panic!("{what}: {e:#}"));
+            assert_eq!(
+                fs::read(f.tools.join("cloudflared.exe")).unwrap(),
+                f.cloudflared,
+                "{what}"
+            );
+            let lines = log.lock().unwrap().clone();
+            assert_eq!(lines.len(), 1, "{what}: {lines:?}");
+            assert!(
+                lines[0].contains("cloudflared") && lines[0].contains("bez weryfikacji"),
+                "{what}: {lines:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cloudflared_unreachable_api_still_installs_unverified() {
+        let f = Fixture::new().await;
+        let m = ToolsManager::with_sources(
+            f.tools.clone(),
+            reqwest::Client::new(),
+            ToolSources {
+                cloudflared_release_api: "http://127.0.0.1:9/api".into(),
+                ..f.sources()
+            },
+        )
+        .with_log(std::sync::Arc::new(|_: &str| {}));
+        m.update(Tool::Cloudflared).await.unwrap();
+        assert!(f.tools.join("cloudflared.exe").is_file());
     }
 }

@@ -41,6 +41,45 @@ pub fn parse_sums(text: &str, name: &str) -> Option<String> {
     if bare.len() == 1 { bare.pop() } else { None }
 }
 
+/// Finds the SHA-256 of `name` in a GitHub release description: the first line that contains
+/// the file name and exactly one 64-digit hex token (`name: <hex>`, markdown table rows, ...).
+pub fn parse_release_notes(body: &str, name: &str) -> Option<String> {
+    body.lines()
+        .filter(|line| line.contains(name))
+        .find_map(|line| {
+            let mut hashes = line
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|t| t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()));
+            match (hashes.next(), hashes.next()) {
+                (Some(hash), None) => Some(hash.to_ascii_lowercase()),
+                _ => None,
+            }
+        })
+}
+
+/// Reads the checksum of `name` from the description of a GitHub release (`api_url` is the
+/// "latest release" API). `None` when the API is unreachable, answers with an error or the
+/// description holds no checksum for `name` — the publisher then simply has none to offer.
+pub async fn fetch_release_notes_sum(
+    http: &reqwest::Client,
+    api_url: &str,
+    name: &str,
+) -> Option<String> {
+    let res = http
+        .get(api_url)
+        .header(reqwest::header::USER_AGENT, "VRCinema")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = res.json().await.ok()?;
+    parse_release_notes(json.get("body")?.as_str()?, name)
+}
+
 /// Downloads a small text file. `Ok(None)` when the publisher has none (HTTP 404/410).
 pub async fn fetch_text(http: &reqwest::Client, url: &str) -> Result<Option<String>> {
     let res = http
@@ -237,6 +276,34 @@ mod tests {
         assert_eq!(parse_sums("", "x"), None);
         assert_eq!(parse_sums("<html>404</html>", "x"), None);
         assert_eq!(parse_sums(&format!("{H1}\n{H2}\n"), "x"), None);
+    }
+
+    #[test]
+    fn release_notes_checksum_formats() {
+        let name = "cloudflared-windows-amd64.exe";
+        for body in [
+            format!("{name}: {H2}"),
+            format!("- {name}  {H2}"),
+            format!("| {name} | {H2} |"),
+            format!("| Windows 64 | `{name}` | `{H2}` |"),
+            format!("{H2} *{name}"),
+            format!("intro\r\n{H1} cloudflared-windows-386.exe\r\n**{name}** (sha256: {H2})\r\n"),
+        ] {
+            assert_eq!(
+                parse_release_notes(&body, name).as_deref(),
+                Some(H2.to_lowercase().as_str()),
+                "{body}"
+            );
+        }
+        // No file name, no hash, two hashes, or a hash of the wrong length: not published.
+        assert_eq!(parse_release_notes(&format!("{H1} other.exe"), name), None);
+        assert_eq!(parse_release_notes(name, name), None);
+        assert_eq!(
+            parse_release_notes(&format!("{name} {H1} {H2}"), name),
+            None
+        );
+        assert_eq!(parse_release_notes(&format!("{name} {H1}{H1}"), name), None);
+        assert_eq!(parse_release_notes("", name), None);
     }
 
     #[tokio::test]

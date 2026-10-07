@@ -59,6 +59,8 @@ fn test_options(tmp: &Path) -> AppOptions {
             ytdlp_base: NOWHERE.into(),
             ffmpeg_base: NOWHERE.into(),
             deno_base: NOWHERE.into(),
+            cloudflared_base: NOWHERE.into(),
+            cloudflared_release_api: format!("{NOWHERE}/release-api"),
         },
         fake_resolver: Some(fake),
     }
@@ -717,6 +719,8 @@ async fn a_second_tools_job_is_409_while_one_runs() {
             ytdlp_base: base.clone(),
             ffmpeg_base: base.clone(),
             deno_base: base.clone(),
+            cloudflared_base: base.clone(),
+            cloudflared_release_api: format!("{base}/release-api"),
         };
     })
     .await;
@@ -794,12 +798,15 @@ async fn installing_tools_from_the_local_server_updates_status_and_settings() {
         "dn/deno-x86_64-pc-windows-msvc.zip.sha256sum",
         format!("{}\n", hex(&deno_zip)),
     );
+    server.put("cf/cloudflared-windows-amd64.exe", b"CLOUDFLARED".to_vec());
     let base = server.base.clone();
     let app = App::start_with(|_, o| {
         o.tool_sources = ToolSources {
             ytdlp_base: format!("{base}/yt"),
             ffmpeg_base: format!("{base}/ff"),
             deno_base: format!("{base}/dn"),
+            cloudflared_base: format!("{base}/cf"),
+            cloudflared_release_api: format!("{base}/cf-api"),
         };
     })
     .await;
@@ -827,7 +834,7 @@ async fn installing_tools_from_the_local_server_updates_status_and_settings() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["yt-dlp", "ffmpeg", "deno"]);
+    assert_eq!(names, ["yt-dlp", "ffmpeg", "deno", "cloudflared"]);
     assert!(tools["tools"][0]["installedAt"].is_string());
     assert_eq!(app.saved()["toolsInstalled"], true);
     // The fake ffmpeg cannot make slates: the server came back without the channel.

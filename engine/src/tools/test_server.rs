@@ -26,6 +26,8 @@ struct Shared {
     /// Answer a `Range` request with 206 for one byte later than asked.
     wrong_range_start: AtomicBool,
     requests: Mutex<Vec<(String, Option<String>)>>,
+    /// Paths that answer with this status instead of their file.
+    failing: Mutex<HashMap<String, StatusCode>>,
 }
 
 pub struct TestServer {
@@ -51,11 +53,20 @@ impl TestServer {
     }
 
     pub fn put(&self, path: &str, bytes: impl Into<Vec<u8>>) {
+        self.shared.failing.lock().unwrap().remove(path);
         self.shared
             .files
             .lock()
             .unwrap()
             .insert(path.to_string(), bytes.into());
+    }
+
+    /// Makes `path` answer with HTTP `status` (and an empty body) from now on.
+    pub fn fail_with(&self, path: &str, status: u16) {
+        self.shared.failing.lock().unwrap().insert(
+            path.to_string(),
+            StatusCode::from_u16(status).expect("valid status"),
+        );
     }
 
     pub fn drop_next_response_after(&self, bytes: usize) {
@@ -103,6 +114,13 @@ async fn serve(
         .lock()
         .unwrap()
         .push((path.clone(), range.clone()));
+    let failing = shared.failing.lock().unwrap().get(&path).copied();
+    if let Some(status) = failing {
+        return Response::builder()
+            .status(status)
+            .body(Body::empty())
+            .unwrap();
+    }
     let Some(data) = shared.files.lock().unwrap().get(&path).cloned() else {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)

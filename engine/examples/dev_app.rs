@@ -29,7 +29,9 @@ async fn main() -> anyhow::Result<()> {
         tool_sources: ToolSources {
             ytdlp_base: base.clone(),
             ffmpeg_base: base.clone(),
-            deno_base: base,
+            deno_base: base.clone(),
+            cloudflared_base: base.clone(),
+            cloudflared_release_api: format!("{base}/release-api"),
         },
         ..AppOptions::default()
     };

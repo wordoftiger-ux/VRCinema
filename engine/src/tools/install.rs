@@ -12,7 +12,7 @@ use crate::setup::{extract_zip, find_file};
 const STAGE_PREFIX: &str = ".install-";
 const BACKUP_DIR: &str = ".backup";
 
-/// Installs the downloaded `file` (the bare exe for yt-dlp, the zip for ffmpeg and Deno) into
+/// Installs the downloaded `file` (the bare exe for yt-dlp and cloudflared, the zip for ffmpeg and Deno) into
 /// `tools_dir`. Everything is first extracted into a temporary folder inside `tools_dir`;
 /// only a complete, valid result is moved into place (with rollback if a move fails).
 pub fn install_downloaded(tool: Tool, file: &Path, tools_dir: &Path) -> Result<()> {
@@ -35,10 +35,12 @@ fn stage_files(
     tools_dir: &Path,
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
     match tool {
-        Tool::YtDlp => {
-            let staged = stage.join("yt-dlp.exe");
+        // Single executables (no archive): the download is the program.
+        Tool::YtDlp | Tool::Cloudflared => {
+            let exe = tool.exe();
+            let staged = stage.join(exe);
             fs::rename(file, &staged).or_else(|_| fs::copy(file, &staged).map(|_| ()))?;
-            Ok(vec![(staged, tools_dir.join("yt-dlp.exe"))])
+            Ok(vec![(staged, tools_dir.join(exe))])
         }
         Tool::Deno => {
             extract_zip(file, stage).context("Rozpakowanie Deno nie powiodło się")?;

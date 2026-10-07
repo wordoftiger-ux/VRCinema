@@ -149,8 +149,9 @@ export const TOOL_TEXT = {
   'yt-dlp': 'yt-dlp (pobieranie z serwisów)',
   ffmpeg: 'ffmpeg (konwersja obrazu)',
   deno: 'Deno (wymagane przez yt-dlp)',
+  cloudflared: 'cloudflared (publiczny adres kanału)',
 };
-export const TOOL_ORDER = ['yt-dlp', 'ffmpeg', 'deno'];
+export const TOOL_ORDER = ['yt-dlp', 'ffmpeg', 'deno', 'cloudflared'];
 
 export function fmtMB(bytes) {
   return (bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1) + ' MB';
