@@ -39,6 +39,10 @@ impl<T: Clone> LiveValue<T> {
 pub struct LiveSettings {
     /// In the app: on while the tunnel is enabled, see [`apply_tunnel`].
     pub trust_cloudflare: LiveValue<bool>,
+    /// The Cloudflare trust comes from the built-in tunnel: `CF-Connecting-IP` counts only on
+    /// requests from a loopback peer (cloudflared connects from 127.0.0.1), so a LAN client
+    /// cannot forge it. False for the manual `trustCloudflare` (stage-2 behaviour).
+    pub cloudflare_from_loopback_only: LiveValue<bool>,
     /// Links in the API; in the app the tunnel's address while it is enabled (the slates get a
     /// new address through `SlateSwapper`).
     pub public_url: LiveValue<String>,
@@ -52,6 +56,7 @@ impl LiveSettings {
     pub fn from_config(config: &AppConfig) -> Self {
         Self {
             trust_cloudflare: LiveValue::new(config.trust_cloudflare),
+            cloudflare_from_loopback_only: LiveValue::new(false),
             public_url: LiveValue::new(config.public_url.clone()),
             encoder: LiveValue::new(config.video_encoder),
             ytdlp_cookies: LiveValue::new(config.ytdlp_cookies.clone()),
@@ -70,20 +75,44 @@ impl LiveSettings {
     }
 }
 
+/// Where the public address and the Cloudflare trust come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicAccess<'a> {
+    /// The tunnel is switched off: the manual `publicUrl` and `trustCloudflare` apply.
+    Manual,
+    /// The tunnel is enabled; `address`: its public address in effect (see
+    /// [`tunnel_address`]), `None` while it has none.
+    Tunnel { address: Option<&'a str> },
+}
+
 /// Puts the public address and the Cloudflare trust in effect into `config` (spec section 7).
-/// `tunnel` is the tunnel's state while it is enabled, `None` while it is switched off (then
-/// the manual `publicUrl` and `trustCloudflare` stay). While enabled the address is the
-/// tunnel's when it is online and none otherwise, and `CF-Connecting-IP` is trusted (every
-/// request through the tunnel carries it). Returns whether the tunnel is enabled but has no
-/// address (the idle slate then says "Łączenie z internetem…").
-pub fn apply_tunnel(config: &mut AppConfig, tunnel: Option<&TunnelState>) -> bool {
-    let Some(state) = tunnel else {
+/// While the tunnel is enabled the address is the tunnel's (none while it has none) and
+/// `CF-Connecting-IP` is trusted (every request through the tunnel carries it; the app trusts
+/// it only from loopback peers, see [`LiveSettings::cloudflare_from_loopback_only`]). Returns
+/// whether the tunnel is enabled but has no address (the idle slate then says "Łączenie z
+/// internetem…").
+pub fn apply_tunnel(config: &mut AppConfig, access: PublicAccess<'_>) -> bool {
+    let PublicAccess::Tunnel { address } = access else {
         return false;
     };
-    let url = state.url().unwrap_or_default().trim_end_matches('/');
+    let url = address.unwrap_or_default().trim_end_matches('/');
     config.public_url = url.to_string();
     config.trust_cloudflare = true;
     url.is_empty()
+}
+
+/// The tunnel's public address in effect after a change of its state, given the one in effect
+/// before: online → its URL; `Reconnecting` (the same cloudflared lost its connection for a
+/// moment, or is being started again after a failure) → the previous address stays, so a short
+/// loss changes neither the links nor the slates (a quick tunnel that comes back with a new URL
+/// replaces it then); a fresh start (`Connecting`: switched on, new port or mode), an error or
+/// off → none.
+pub fn tunnel_address(previous: Option<&str>, state: &TunnelState) -> Option<String> {
+    match state {
+        TunnelState::Online { url } => Some(url.clone()),
+        TunnelState::Reconnecting => previous.map(str::to_string),
+        TunnelState::Connecting | TunnelState::Off | TunnelState::Error { .. } => None,
+    }
 }
 
 #[cfg(test)]
@@ -100,40 +129,61 @@ mod tests {
         app_config(&settings, std::path::Path::new("H"))
     }
 
+    const URL: &str = "https://abc.trycloudflare.com";
+
     #[test]
-    fn a_tunnel_online_gives_its_address_and_trusts_cloudflare() {
+    fn a_tunnel_address_is_the_public_address_and_cloudflare_is_trusted() {
         let mut config = manual();
-        let online = TunnelState::Online {
-            url: "https://abc.trycloudflare.com".into(),
+        let access = PublicAccess::Tunnel {
+            address: Some("https://abc.trycloudflare.com/"),
         };
-        assert!(!apply_tunnel(&mut config, Some(&online)));
-        assert_eq!(config.public_url, "https://abc.trycloudflare.com");
+        assert!(!apply_tunnel(&mut config, access));
+        assert_eq!(config.public_url, URL);
         assert!(config.trust_cloudflare);
     }
 
     #[test]
     fn an_enabled_tunnel_without_address_gives_none_and_says_connecting() {
-        for state in [
-            TunnelState::Connecting,
-            TunnelState::Reconnecting,
-            TunnelState::Off,
-            TunnelState::Error {
-                message: "x".into(),
-            },
-        ] {
-            let mut config = manual();
-            assert!(apply_tunnel(&mut config, Some(&state)), "{state:?}");
-            assert_eq!(config.public_url, "", "{state:?}");
-            assert!(config.trust_cloudflare, "{state:?}");
-        }
+        let mut config = manual();
+        assert!(apply_tunnel(
+            &mut config,
+            PublicAccess::Tunnel { address: None }
+        ));
+        assert_eq!(config.public_url, "");
+        assert!(config.trust_cloudflare);
     }
 
     #[test]
     fn a_disabled_tunnel_leaves_the_manual_settings() {
         let mut config = manual();
-        assert!(!apply_tunnel(&mut config, None));
+        assert!(!apply_tunnel(&mut config, PublicAccess::Manual));
         assert_eq!(config.public_url, "https://reczny.example.com");
         assert!(!config.trust_cloudflare);
+    }
+
+    /// Fix round 1: a short loss keeps the address; a fresh start, an error or off clear it.
+    #[test]
+    fn the_address_survives_reconnecting_only() {
+        let online = TunnelState::Online { url: URL.into() };
+        assert_eq!(tunnel_address(None, &online).as_deref(), Some(URL));
+        assert_eq!(
+            tunnel_address(Some("https://old.example.com"), &online).as_deref(),
+            Some(URL)
+        );
+        assert_eq!(
+            tunnel_address(Some(URL), &TunnelState::Reconnecting).as_deref(),
+            Some(URL)
+        );
+        assert_eq!(tunnel_address(None, &TunnelState::Reconnecting), None);
+        for state in [
+            TunnelState::Connecting,
+            TunnelState::Off,
+            TunnelState::Error {
+                message: "x".into(),
+            },
+        ] {
+            assert_eq!(tunnel_address(Some(URL), &state), None, "{state:?}");
+        }
     }
 
     #[test]

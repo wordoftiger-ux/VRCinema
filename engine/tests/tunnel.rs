@@ -602,6 +602,68 @@ async fn quick_tunnel_without_connection_is_reconnecting_until_ready_again() {
     lost_connection_and_back(None, "https://lost-link.trycloudflare.com", 18181).await;
 }
 
+/// Fix round 1: the moment the connection was lost is known (the first failed `/ready`, not
+/// the end of the grace), for the automatic pause; none while online or stopped.
+#[tokio::test]
+async fn the_loss_is_dated_from_the_first_failed_ready_check() {
+    let fake = Fake::new(json!([{
+        "hostname": "dated.trycloudflare.com",
+        "ready_down": [[1000, 2800]],
+    }]));
+    let tunnel = manager(timings());
+    let mut rx = tunnel.state();
+    tunnel.start(fake.quick(18192)).await;
+    // Starting: lost (never connected) since the start.
+    assert!(tunnel.lost_since().is_some());
+    wait_online(&mut rx, "https://dated.trycloudflare.com").await;
+    assert_eq!(tunnel.lost_since(), None);
+    wait_for(&mut rx, "reconnecting", Duration::from_secs(5), |s| {
+        *s == TunnelState::Reconnecting
+    })
+    .await;
+    let lost = tunnel.lost_since().expect("the loss is dated");
+    // Reconnecting comes `health_grace` (500 ms) after the first failed check.
+    assert!(
+        lost.elapsed() >= Duration::from_millis(400),
+        "dated only {:?} ago",
+        lost.elapsed()
+    );
+    wait_online(&mut rx, "https://dated.trycloudflare.com").await;
+    assert_eq!(tunnel.lost_since(), None);
+    tunnel.stop().await;
+    assert_eq!(tunnel.lost_since(), None);
+    fake.assert_all_dead();
+}
+
+/// A process that exits while online is a loss from that moment, kept through the restarts.
+#[tokio::test]
+async fn an_exit_while_online_is_dated_from_the_exit_and_kept_until_online() {
+    let fake = Fake::new(json!([
+        { "hostname": "first.trycloudflare.com", "exit_after_ms": 600, "exit_code": 1 },
+        { "hostname": "", "serve_metrics": false, "exit_after_ms": 100, "exit_code": 1 },
+        { "hostname": "second.trycloudflare.com" }
+    ]));
+    let tunnel = manager(timings());
+    let mut rx = tunnel.state();
+    tunnel.start(fake.quick(18193)).await;
+    wait_online(&mut rx, "https://first.trycloudflare.com").await;
+    wait_for(&mut rx, "not online", Duration::from_secs(5), |s| {
+        s.url().is_none()
+    })
+    .await;
+    let lost = tunnel.lost_since().expect("the loss is dated");
+    fake.wait_starts(2, Duration::from_secs(10)).await;
+    assert_eq!(
+        tunnel.lost_since(),
+        Some(lost),
+        "a restart must not move it"
+    );
+    wait_online(&mut rx, "https://second.trycloudflare.com").await;
+    assert_eq!(tunnel.lost_since(), None);
+    tunnel.stop().await;
+    fake.assert_all_dead();
+}
+
 #[tokio::test]
 async fn a_short_ready_blip_below_the_grace_stays_online() {
     let fake = Fake::new(json!([{

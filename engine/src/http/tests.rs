@@ -473,6 +473,40 @@ async fn segment_must_be_in_the_snapshot_and_on_disk() {
     assert_eq!(h.send(get("/live/main/5.ts")).await.status, StatusCode::OK);
 }
 
+/// Fix round 1: the tunnel's Cloudflare trust counts only for loopback peers (cloudflared); a
+/// LAN client forging `CF-Connecting-IP` is still limited by its own address.
+#[tokio::test]
+async fn tunnel_trust_ignores_cf_connecting_ip_from_other_peers() {
+    let settings = crate::app_settings::AppSettings {
+        trust_cloudflare: true,
+        ..crate::app_settings::AppSettings::default()
+    };
+    let live = crate::live::LiveSettings::from_config(&crate::app_settings::app_config(
+        &settings,
+        Path::new("H"),
+    ));
+    live.cloudflare_from_loopback_only.set(true);
+    let h = Harness::with_state(config(), move |s| s.with_live(live));
+    let login = |peer: &str, n: usize| {
+        call("POST", "/api/admin/login")
+            .ip(peer)
+            .header("cf-connecting-ip", &format!("1.1.1.{n}"))
+            .json(json!({"password": "x"}))
+    };
+    // Through cloudflared: every viewer has its own address, none is blocked.
+    for n in 0..7 {
+        let res = h.send(login("127.0.0.1", n)).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "loopback attempt {n}");
+    }
+    // From the LAN: a new forged address per attempt does not help.
+    for n in 0..5 {
+        let res = h.send(login("192.168.1.5", 100 + n)).await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "LAN attempt {n}");
+    }
+    let res = h.send(login("192.168.1.5", 200)).await;
+    assert_eq!(res.status, StatusCode::TOO_MANY_REQUESTS);
+}
+
 /// Spec section 8: a served segment is a viewer; the playlist and a missing segment are not.
 #[tokio::test]
 async fn a_served_segment_counts_as_a_viewer() {

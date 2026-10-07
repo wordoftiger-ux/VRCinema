@@ -124,6 +124,7 @@ impl AppState {
             desktop: None,
             live: LiveSettings {
                 trust_cloudflare: LiveValue::new(config.trust_cloudflare),
+                cloudflare_from_loopback_only: LiveValue::new(false),
                 public_url: LiveValue::new(config.public_url.clone()),
                 encoder: LiveValue::new(crate::config::VideoEncoder::Libx264),
                 ytdlp_cookies: LiveValue::new(None),
@@ -238,8 +239,16 @@ impl AppState {
         }
     }
 
-    fn trusted(&self) -> bool {
-        self.live.trust_cloudflare.get() || self.config.trust_proxy
+    /// `CF-Connecting-IP` counts for a request from `peer`: trust switched on, and when it comes
+    /// from the app's tunnel only for loopback peers (cloudflared), so nobody on the LAN can
+    /// forge a viewer address.
+    fn trusts_cloudflare(&self, peer: &str) -> bool {
+        self.live.trust_cloudflare.get()
+            && (!self.live.cloudflare_from_loopback_only.get() || is_loopback(peer))
+    }
+
+    fn trusted(&self, peer: &str) -> bool {
+        self.trusts_cloudflare(peer) || self.config.trust_proxy
     }
 
     /// Key remote-session tokens are signed with: the session secret in `.env` mode; in the app
@@ -365,6 +374,14 @@ async fn log_internal_errors(
         (state.log)(&format!("Błąd serwera: {message}"));
     }
     res
+}
+
+/// The socket peer is this machine (`127.0.0.1`, `::1`, also IPv4-mapped).
+fn is_loopback(peer: &str) -> bool {
+    peer.strip_prefix("::ffff:")
+        .unwrap_or(peer)
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 pub(crate) fn json_response(status: StatusCode, value: &Value) -> Response {
@@ -494,15 +511,15 @@ impl FromRequestParts<AppState> for Ctx {
             .unwrap_or_default();
         let cfg = &state.config;
         let trust = Trust {
-            cloudflare: state.live.trust_cloudflare.get(),
+            cloudflare: state.trusts_cloudflare(&remote),
             proxy: cfg.trust_proxy,
         };
         let ip = get_client_ip(&parts.headers, &remote, trust);
-        let https = is_https(&parts.headers, false, state.trusted());
+        let https = is_https(&parts.headers, false, state.trusted(&remote));
         let public_url = state.live.public_url.get();
         let base_url = if public_url.is_empty() {
             let forwarded = state
-                .trusted()
+                .trusted(&remote)
                 .then(|| {
                     parts
                         .headers

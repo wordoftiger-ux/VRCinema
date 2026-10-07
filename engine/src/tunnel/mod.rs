@@ -102,10 +102,20 @@ pub struct TunnelManager {
     timings: TunnelTimings,
     log: SharedLogFn,
     state: Arc<watch::Sender<TunnelState>>,
+    /// See [`TunnelManager::lost_since`].
+    lost: LostSince,
     slot: Arc<Mutex<Slot>>,
     /// Set (or dropped) when the manager goes away: every supervisor stops, including one
     /// launched by an operation still in flight at that moment.
     shutdown: watch::Sender<bool>,
+}
+
+/// Since when the tunnel has had no working connection (see [`TunnelManager::lost_since`]).
+type LostSince = Arc<std::sync::Mutex<Option<Instant>>>;
+
+fn lock_lost(lost: &LostSince) -> std::sync::MutexGuard<'_, Option<Instant>> {
+    lost.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The configuration and the supervisor currently running it (at most one).
@@ -146,6 +156,7 @@ impl TunnelManager {
             timings: TunnelTimings::default(),
             log: Arc::new(|m: &str| eprintln!("{m}")),
             state: Arc::new(watch::channel(TunnelState::Off).0),
+            lost: LostSince::default(),
             slot: Arc::new(Mutex::new(Slot::default())),
             shutdown: watch::channel(false).0,
         }
@@ -165,6 +176,13 @@ impl TunnelManager {
     /// The current state and every change of it.
     pub fn state(&self) -> watch::Receiver<TunnelState> {
         self.state.subscribe()
+    }
+
+    /// Since when the tunnel has had no working connection: the first failed `/ready` check of
+    /// a running cloudflared, the exit of one that was online, or the (re)start when it was not
+    /// online before; kept through restarts. `None` while online and while stopped.
+    pub fn lost_since(&self) -> Option<Instant> {
+        *lock_lost(&self.lost)
     }
 
     /// Runs the tunnel for `config`, replacing a running one (which has exited before the new
@@ -195,6 +213,7 @@ impl TunnelManager {
             timings: self.timings.clone(),
             log: self.log.clone(),
             state: self.state.clone(),
+            lost: self.lost.clone(),
         };
         let slot = self.slot.clone();
         let shutdown = self.shutdown.subscribe();
@@ -212,6 +231,7 @@ impl TunnelManager {
                         (supervisor.log)("Tunel: zatrzymano cloudflared.");
                     }
                     stop_run(&mut slot).await;
+                    *lock_lost(&supervisor.lost) = None;
                     supervisor.state.send_replace(TunnelState::Off);
                 }
                 Op::Port(port) => {
@@ -274,6 +294,7 @@ fn launch(
     if stop.is_set() {
         return;
     }
+    lock_lost(&supervisor.lost).get_or_insert_with(Instant::now);
     supervisor.state.send_replace(TunnelState::Connecting);
     slot.run = Some(Run {
         stop: Some(stop_tx),
@@ -348,6 +369,7 @@ struct Supervisor {
     timings: TunnelTimings,
     log: SharedLogFn,
     state: Arc<watch::Sender<TunnelState>>,
+    lost: LostSince,
 }
 
 impl Supervisor {
@@ -370,7 +392,11 @@ impl Supervisor {
                 self.state.send_replace(TunnelState::Reconnecting);
             }
             first = false;
-            let failure = match self.attempt(&config, &client, &mut stop).await {
+            let outcome = self.attempt(&config, &client, &mut stop).await;
+            if matches!(outcome, Outcome::Failed(_)) {
+                lock_lost(&self.lost).get_or_insert_with(Instant::now);
+            }
+            let failure = match outcome {
                 Outcome::Stopped => return,
                 Outcome::Failed(failure) => failure,
             };
@@ -541,6 +567,7 @@ impl Supervisor {
                             {
                                 longest_online = longest_online.max(online.elapsed());
                                 online_since = None;
+                                lock_lost(&self.lost).get_or_insert(since);
                                 (self.log)(
                                     "Tunel: cloudflared stracił połączenie z Cloudflare; czekam, aż je odzyska.",
                                 );
@@ -573,6 +600,7 @@ impl Supervisor {
     }
 
     fn online(&self, url: &str) -> Instant {
+        *lock_lost(&self.lost) = None;
         (self.log)(&format!("Tunel: w sieci — {url}"));
         self.state
             .send_replace(TunnelState::Online { url: url.into() });

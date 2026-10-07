@@ -412,6 +412,14 @@ async fn put_config_rejects_bad_values_and_saves_nothing() {
             "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
         ),
         (
+            json!({"namedTunnelHostname": "192.168.0.1"}),
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ),
+        (
+            json!({"namedTunnelHostname": "kanal.example.123"}),
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ),
+        (
             json!({"namedTunnelHostname": 5}),
             "Pole namedTunnelHostname musi być tekstem.",
         ),
@@ -1274,7 +1282,9 @@ async fn a_new_public_address_replaces_the_slates_live() {
         slates.join("g1").join("idle").join("qr.png").is_file()
     })
     .await;
-    eventually(60, "the new set on air", || async {
+    // The code file is written before ffmpeg makes the set: under a full parallel test run
+    // (many ffmpeg processes) the set may take a while.
+    eventually(180, "the new set on air", || async {
         playlist().await.contains(TAG)
     })
     .await;

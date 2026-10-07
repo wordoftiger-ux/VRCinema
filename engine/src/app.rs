@@ -3,6 +3,7 @@
 //! built-in tunnel with the automatic pause (`app::tunnel`, `crate::auto_pause`) and the
 //! program updates. The `/api/desktop/*` routes (`http::routes_desktop`) call into [`AppCore`].
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
@@ -300,6 +301,13 @@ pub(crate) struct AppCore {
     viewers: Arc<ViewerActivity>,
     /// A new channel is on: the automatic pause hands it the active reasons now.
     pause_kick: Arc<Notify>,
+    /// The automatic pause's active reasons: a new server's channel loop starts with them.
+    pause_active: Arc<Mutex<BTreeSet<PauseReason>>>,
+    /// The tunnel's public address in effect (kept through a short `Reconnecting`, see
+    /// [`crate::live::tunnel_address`]); updated with `tunnel_view`.
+    tunnel_address: Mutex<Option<String>>,
+    /// A tools job replaces cloudflared: the tunnel stays stopped until it is done.
+    tunnel_held: AtomicBool,
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     start_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
@@ -336,6 +344,11 @@ impl AppCore {
     }
 
     /// The port the server listens on (the configured one while it is restarting).
+    /// The port of the published server (`None` while it restarts or is down).
+    fn live_port(&self) -> Option<u16> {
+        self.live().map(|l| l.port)
+    }
+
     pub(crate) fn port(&self) -> u16 {
         self.live().map_or_else(|| self.settings().port, |l| l.port)
     }
@@ -488,6 +501,7 @@ impl AppCore {
             channel_loops: Some(Arc::clone(&self.channel_loops)),
             live: Some(self.live_settings.clone()),
             slates_connecting: connecting,
+            pause_reasons: lock(&self.pause_active).iter().copied().collect(),
             ..RunOptions::new(self.home.clone())
         };
         let mut join = tokio::spawn(run(config.clone(), opts, async move {
@@ -667,6 +681,11 @@ impl AppCore {
         let settings = self.settings();
         let (config, _) = self.effective_config(&settings);
         self.live_settings.apply(&config);
+        // The tunnel's trust holds only for cloudflared's own (loopback) connections; the
+        // manual `trustCloudflare` keeps the stage-2 behaviour.
+        self.live_settings
+            .cloudflare_from_loopback_only
+            .set(settings.tunnel_enabled);
         if let Some(live) = self.live() {
             live.state.set_admin_auth(admin_auth(&settings));
         }
@@ -777,14 +796,23 @@ impl AppCore {
     }
 
     async fn run_tools_job(self: Arc<Self>, job: ToolsJob) {
+        // A running cloudflared.exe would be moved aside by the swap and keep running the old
+        // program (the configuration looks unchanged): stop it first, start it after.
+        let replaces_cloudflared =
+            matches!(job, ToolsJob::Update(Tool::Cloudflared) | ToolsJob::Repair);
+        if replaces_cloudflared {
+            self.tunnel_held.store(true, Ordering::SeqCst);
+            self.sync_tunnel().await;
+        }
         let (what, result) = match job {
             ToolsJob::Install => ("pobieranie", self.tools.install_missing().await),
             ToolsJob::Update(tool) => ("aktualizacja", self.tools.update(tool).await),
             ToolsJob::Repair => ("naprawa", self.tools.repair().await),
         };
+        self.tunnel_held.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             self.log(&format!("Narzędzia ({what}): błąd — {e:#}"));
-            // cloudflared may have come before the failure.
+            // cloudflared may have come before the failure, or was stopped for it.
             self.sync_tunnel().await;
             return;
         }
@@ -953,6 +981,9 @@ impl AppEngine {
             auto_pause: watch::channel(AutoPauseSettings::default()).0,
             viewers: Arc::new(ViewerActivity::new()),
             pause_kick: Arc::new(Notify::new()),
+            pause_active: Arc::default(),
+            tunnel_address: Mutex::new(None),
+            tunnel_held: AtomicBool::new(false),
             #[cfg(test)]
             start_pause: Mutex::new(None),
         });
@@ -1149,6 +1180,14 @@ fn auto_pause(core: &Arc<AppCore>) -> AutoPause {
         target,
         kick: Arc::clone(&core.pause_kick),
         log: core.log.log_fn(),
+        lost_since: {
+            let weak = Arc::downgrade(core);
+            Arc::new(move || {
+                let lost = weak.upgrade()?.tunnel.lost_since()?;
+                Some(tokio::time::Instant::from_std(lost))
+            })
+        },
+        active: Arc::clone(&core.pause_active),
     }
 }
 

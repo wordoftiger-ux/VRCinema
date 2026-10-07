@@ -455,6 +455,160 @@ async fn the_restart_route_starts_a_new_cloudflared_and_needs_the_tunnel_on() {
     app.stop().await;
 }
 
+/// Fix round 1: a short loss of the connection (cloudflared alive, `Reconnecting`, back
+/// `Online` with the same address) changes neither the public address nor the slates.
+#[tokio::test]
+async fn a_short_reconnect_keeps_the_address_and_the_slates() {
+    let Some(app) = start(Setup {
+        tools: true,
+        runs: Some(json!([{
+            "hostname": QUICK_HOST,
+            "ready_down": [[7000, 8000]],
+        }])),
+        ..Setup::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let cookie = app.window_cookie().await;
+    wait_online(&app, &cookie).await;
+    let url = format!("https://{QUICK_HOST}");
+    let slates = app.home.join("data").join("slates");
+    eventually(90, "the slates for the tunnel address", || async {
+        slates.join("g1").join("idle").join("qr.png").is_file()
+    })
+    .await;
+    let started_ms = fake_starts(&app.home)[0]["ms"].as_u64().unwrap();
+    let core = Arc::clone(&app.engine().core);
+    let mut reconnecting = false;
+    while now_ms() < started_ms + 9_500 {
+        reconnecting |= core.tunnel_state() == TunnelState::Reconnecting;
+        assert_eq!(core.live_settings.public_url.get(), url);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(reconnecting, "the loss did not happen");
+    assert_eq!(
+        core.tunnel_state(),
+        TunnelState::Online { url: url.clone() }
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !slates.join("g2").exists(),
+        "a slate set was made for the short loss"
+    );
+    assert_eq!(fake_starts(&app.home).len(), 1);
+    app.stop().await;
+}
+
+/// Fix round 1: a tunnel sync while the server restarts (no server published yet) does not
+/// move cloudflared to the new port early; the restart's own sync does, once.
+#[tokio::test]
+async fn a_sync_during_a_server_restart_leaves_cloudflared_for_the_restart() {
+    let app = start(Setup::default()).await.unwrap();
+    let cookie = app.window_cookie().await;
+    wait_online(&app, &cookie).await;
+    let core = Arc::clone(&app.engine().core);
+    let new = free_port();
+    core.update_settings(|s| s.port = new).unwrap();
+    let (reached, release) = core.pause_next_start();
+    let restart = tokio::spawn({
+        let core = Arc::clone(&core);
+        async move { core.restart_server().await }
+    });
+    reached.await.unwrap();
+    let old = core.tunnel_running.lock().await.as_ref().unwrap().port;
+    assert_ne!(old, new);
+    // E.g. a settings change or a finished tools job meanwhile.
+    core.sync_tunnel().await;
+    assert_eq!(
+        core.tunnel_running.lock().await.as_ref().unwrap().port,
+        old,
+        "cloudflared was moved before the new server was up"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        fake_starts(&app.home).len(),
+        1,
+        "cloudflared restarted while the server was restarting"
+    );
+    release.send(()).unwrap();
+    restart.await.unwrap().unwrap();
+    eventually(20, "a cloudflared for the new port", || async {
+        fake_starts(&app.home).len() >= 2
+    })
+    .await;
+    wait_online(&app, &cookie).await;
+    let starts = fake_starts(&app.home);
+    assert_eq!(starts.len(), 2);
+    assert!(args_of(&starts[1]).contains(&format!("http://127.0.0.1:{new}")));
+    assert_never_two(&app.home);
+    app.stop().await;
+}
+
+/// Fix round 1: updating cloudflared while the tunnel runs stops it first (the running exe
+/// would keep the old program alive) and starts the new one after the swap.
+#[tokio::test]
+async fn updating_cloudflared_restarts_the_tunnel_on_the_new_program() {
+    let server = TestServer::start().await;
+    server.put(
+        "cf/cloudflared-windows-amd64.exe",
+        std::fs::read(fake_program()).unwrap(),
+    );
+    let base = server.base.clone();
+    let app = App::start_with(|home, options| {
+        std::fs::write(
+            home.join("config.json"),
+            json!({"port": 0, "tunnelEnabled": true}).to_string(),
+        )
+        .unwrap();
+        // Start 1: the tunnel; start 2: `--version` after the install; start 3: the tunnel.
+        install_fake(
+            home,
+            &json!([
+                { "hostname": QUICK_HOST },
+                { "serve_metrics": false, "exit_after_ms": 0 },
+                { "hostname": QUICK_HOST }
+            ]),
+        );
+        options.tunnel_timings = fast_tunnel();
+        options.tool_sources.cloudflared_base = format!("{base}/cf");
+        options.tool_sources.cloudflared_release_api = format!("{base}/cf-api");
+    })
+    .await;
+    let cookie = app.window_cookie().await;
+    wait_online(&app, &cookie).await;
+    let (status, res) = app
+        .call(
+            "POST",
+            "/api/desktop/tools/update",
+            Some(&cookie),
+            Some(json!({"tool": "cloudflared"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{res}");
+    eventually(60, "the tools job to finish", || async {
+        app.call("GET", "/api/desktop/tools", Some(&cookie), None)
+            .await
+            .1["running"]
+            == false
+    })
+    .await;
+    let progress = app.get("/api/desktop/tools/progress", &cookie).await;
+    assert_eq!(progress["error"], Value::Null, "{progress}");
+    eventually(20, "the tunnel on the new program", || async {
+        fake_starts(&app.home).len() >= 3
+    })
+    .await;
+    wait_online(&app, &cookie).await;
+    let starts = fake_starts(&app.home);
+    assert_eq!(starts.len(), 3, "{starts:?}");
+    assert_eq!(args_of(&starts[1]), ["--version"]);
+    assert_eq!(args_of(&starts[2])[0], "tunnel");
+    assert_never_two(&app.home);
+    app.stop().await;
+}
+
 // ---------- Named tunnel ----------
 
 #[tokio::test]
@@ -628,10 +782,9 @@ async fn no_viewers_pause_survive_a_restart_and_a_segment_fetch_resumes_at_once(
 
     app.engine().restart().await.unwrap();
     assert_eq!(app.engine().server_starts(), 2);
-    eventually(5, "the reason on the new channel", || async {
-        pause_reasons(&core) == ["no_viewers"]
-    })
-    .await;
+    // Fix round 1: the new loop starts paused (its very first snapshot has the reason), not
+    // only after the controller's command reaches it.
+    assert_eq!(pause_reasons(&core), ["no_viewers"]);
 
     let playlist = app
         .http

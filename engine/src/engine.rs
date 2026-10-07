@@ -162,6 +162,22 @@ where
     F: Fn() -> (Broadcaster, C) + Send + 'static,
     L: Fn(&str) + Send + Sync + 'static,
 {
+    spawn_engine_paused(build, log, [])
+}
+
+/// Like [`spawn_engine_with`], with `pause_reasons` active from the start (as if commanded
+/// before it): the first channel is paused before it starts. The app passes the automatic
+/// pause's active reasons to the loop of a restarted server.
+pub fn spawn_engine_paused<C, F, L>(
+    build: F,
+    log: L,
+    pause_reasons: impl IntoIterator<Item = PauseReason>,
+) -> (EngineHandle, EngineTask)
+where
+    C: ChannelControl + 'static,
+    F: Fn() -> (Broadcaster, C) + Send + 'static,
+    L: Fn(&str) + Send + Sync + 'static,
+{
     let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
     let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(Snapshot::starting()));
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -172,7 +188,7 @@ where
         stop: stop_rx,
         log,
         slates: None,
-        pause_reasons: BTreeSet::new(),
+        pause_reasons: pause_reasons.into_iter().collect(),
     };
     let join = tokio::spawn(supervisor.run());
     let handle = EngineHandle {
@@ -693,6 +709,11 @@ mod tests {
 
         /// Window of 3 segments, retired files deleted on the next tick.
         fn spawn(&self) -> (EngineHandle, EngineTask) {
+            self.spawn_paused(&[])
+        }
+
+        /// Like `spawn`, with the loop started under `reasons`.
+        fn spawn_paused(&self, reasons: &[PauseReason]) -> (EngineHandle, EngineTask) {
             let probe = Arc::clone(&self.probe);
             let live_dir = self.live_dir();
             let src_dir = self.src.path().to_path_buf();
@@ -718,9 +739,11 @@ mod tests {
                 (Broadcaster::new(options, tokio_clock()), channel)
             };
             let logs = Arc::clone(&self.logs);
-            spawn_engine_with(build, move |m: &str| {
-                logs.lock().unwrap().push(m.to_string())
-            })
+            spawn_engine_paused(
+                build,
+                move |m: &str| logs.lock().unwrap().push(m.to_string()),
+                reasons.iter().copied(),
+            )
         }
     }
 
@@ -1286,6 +1309,30 @@ mod tests {
         assert_eq!(
             *env.probe.events.lock().unwrap(),
             ["start", "slates g7", "stop", "slates g7", "start"]
+        );
+    }
+
+    /// Fix round 1: a loop started for a restarted server gets the active reasons at once; its
+    /// first channel is paused before it starts (no film aired before the controller's command).
+    #[tokio::test(start_paused = true)]
+    async fn a_loop_started_with_pause_reasons_starts_its_channel_paused() {
+        let env = Env::new();
+        let (mut handle, _task) = env.spawn_paused(&[PauseReason::NoViewers]);
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            ["pause no_viewers", "start"]
+        );
+        // The loop keeps it like a commanded reason: a Resume clears it.
+        handle
+            .commands
+            .send(Command::Resume(PauseReason::NoViewers))
+            .await
+            .unwrap();
+        next_snapshot(&mut handle.snapshot).await;
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            ["pause no_viewers", "start", "resume no_viewers"]
         );
     }
 

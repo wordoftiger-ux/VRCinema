@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use super::{AppCore, lock};
 use crate::app_settings::{AppSettings, TunnelModeSetting, app_config};
 use crate::config::AppConfig;
-use crate::live::apply_tunnel;
+use crate::live::{PublicAccess, apply_tunnel, tunnel_address};
 use crate::pipeline::slates::SlateAddress;
 use crate::tools::Tool;
 use crate::tunnel::{NamedTunnel, TunnelConfig, TunnelMode, TunnelState};
@@ -19,6 +19,7 @@ pub(crate) const TUNNEL_DIR: &str = "tunnel";
 
 const MISSING: &str =
     "Brak programu cloudflared — pobierz brakujące narzędzia w ustawieniach (Narzędzia).";
+const UPDATING: &str = "Trwa aktualizacja programu cloudflared — tunel wróci za chwilę.";
 const NAMED_FALLBACK: &str = "Brak plików stałego linku — działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Ustaw stały link ponownie.";
 
 /// What the tunnel does besides its state, for the window.
@@ -96,9 +97,13 @@ fn mode_setting(mode: &TunnelMode) -> TunnelModeSetting {
 }
 
 impl AppCore {
-    fn tunnel_plan(&self, settings: &AppSettings) -> Plan {
+    /// `keep_port`: the port of the running tunnel, used while no server is published.
+    fn tunnel_plan(&self, settings: &AppSettings, keep_port: Option<u16>) -> Plan {
         if self.closing.load(Ordering::SeqCst) || !settings.tunnel_enabled {
             return Plan::Off;
+        }
+        if self.tunnel_held.load(Ordering::SeqCst) {
+            return Plan::Blocked(UPDATING.to_string());
         }
         let cloudflared = self.tools.tools_dir().join(Tool::Cloudflared.exe());
         if !cloudflared.is_file() {
@@ -116,7 +121,7 @@ impl AppCore {
         Plan::Run {
             config: TunnelConfig {
                 cloudflared,
-                port: self.port(),
+                port: self.live_port().or(keep_port).unwrap_or(settings.port),
                 mode,
             },
             warning,
@@ -142,7 +147,10 @@ impl AppCore {
 
     async fn run_tunnel_plan(self: &Arc<Self>, force: bool) {
         let mut running = self.tunnel_running.lock().await;
-        let (wanted, notes) = match self.tunnel_plan(&self.settings()) {
+        // While the server restarts (none published) a running tunnel keeps its port: the
+        // restart syncs again once the new server is up.
+        let keep_port = running.as_ref().map(|c| c.port);
+        let (wanted, notes) = match self.tunnel_plan(&self.settings(), keep_port) {
             Plan::Off => (None, TunnelNotes::default()),
             Plan::Blocked(why) => (
                 None,
@@ -202,6 +210,9 @@ impl AppCore {
             } else {
                 self.tunnel.state().borrow().clone()
             };
+            // The address in effect follows the state (a short loss keeps it).
+            let mut address = lock(&self.tunnel_address);
+            *address = tunnel_address(address.as_deref(), &fresh);
             let changed = *view != fresh;
             *view = fresh;
             changed
@@ -231,8 +242,15 @@ impl AppCore {
     /// whether the tunnel is enabled but has no address yet.
     pub(crate) fn effective_config(&self, settings: &AppSettings) -> (AppConfig, bool) {
         let mut config = app_config(settings, &self.home);
-        let view = self.tunnel_state();
-        let connecting = apply_tunnel(&mut config, settings.tunnel_enabled.then_some(&view));
+        let address = lock(&self.tunnel_address).clone();
+        let access = if settings.tunnel_enabled {
+            PublicAccess::Tunnel {
+                address: address.as_deref(),
+            }
+        } else {
+            PublicAccess::Manual
+        };
+        let connecting = apply_tunnel(&mut config, access);
         (config, connecting)
     }
 

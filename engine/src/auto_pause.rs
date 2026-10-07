@@ -1,18 +1,20 @@
 //! Automatic pause (spec section 8): the channel holds films back while nobody can watch them.
 //!
-//! - Tunnel loss: the tunnel is enabled but not online for at least 10 s → `Pause(Tunnel)`;
-//!   online again → `Resume(Tunnel)`. Only with `pauseOnTunnelLoss`.
+//! - Tunnel loss: the tunnel is enabled and has had no connection for at least 10 s →
+//!   `Pause(Tunnel)`, counted from the moment its manager lost the connection (it reports
+//!   `Reconnecting` only after a short grace), else from when a state other than `Online` was
+//!   first seen; online again → `Resume(Tunnel)`. Only with `pauseOnTunnelLoss`.
 //! - No viewers: no segment fetched (`/live/main/<n>.ts`) for at least 30 s →
 //!   `Pause(NoViewers)`; the first fetch → `Resume(NoViewers)` at once. Only with
 //!   `pauseWhenNoViewers`.
 //!
 //! The controller sends its reasons to whichever channel loop runs: a new loop (server restarted)
-//! gets every active reason again. A loop that rebuilds its channel after a crash re-applies the
-//! reasons itself (`engine.rs`).
+//! starts with the active reasons ([`AutoPause::active`]) and gets them again by command. A loop
+//! that rebuilds its channel after a crash re-applies the reasons itself (`engine.rs`).
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::mpsc::error::TrySendError;
@@ -99,6 +101,9 @@ impl ViewerActivity {
 /// server restarts or runs without tools).
 pub type CommandTarget = Arc<dyn Fn() -> Option<mpsc::Sender<Command>> + Send + Sync>;
 
+/// When the tunnel lost its connection, see [`AutoPause::lost_since`].
+pub type LossClock = Arc<dyn Fn() -> Option<Instant> + Send + Sync>;
+
 /// The controller; [`AutoPause::run`] drives it until the tunnel or settings sender is gone.
 pub struct AutoPause {
     pub timings: AutoPauseTimings,
@@ -109,6 +114,12 @@ pub struct AutoPause {
     pub target: CommandTarget,
     /// Asks for a check now (a new server published its channel).
     pub kick: Arc<Notify>,
+    /// Since when the tunnel has had no connection, as its manager knows it (the state turns
+    /// `Reconnecting` only after a grace period); `None`: unknown, the time the state was seen
+    /// counts.
+    pub lost_since: LossClock,
+    /// The reasons active right now, for the loop of a restarted server to start with.
+    pub active: Arc<Mutex<BTreeSet<PauseReason>>>,
     pub log: SharedLogFn,
 }
 
@@ -137,7 +148,11 @@ impl AutoPause {
             settings = fresh;
             let online = matches!(*self.tunnel.borrow_and_update(), TunnelState::Online { .. });
             if settings.tunnel_enabled && !online {
-                down_since.get_or_insert(now);
+                // From the manager's date of the loss when it has one (it reports the loss
+                // only after its grace), else from when the state was first seen.
+                let seen = *down_since.get_or_insert(now);
+                let lost = (self.lost_since)().map_or(seen, |lost| lost.min(seen));
+                down_since = Some(lost);
             } else {
                 down_since = None;
             }
@@ -169,6 +184,7 @@ impl AutoPause {
             }
             self.log_changes(&active, &wanted);
             active = wanted;
+            *self.active.lock().unwrap_or_else(PoisonError::into_inner) = active.clone();
             self.deliver(&active, &mut delivered);
 
             tokio::select! {
@@ -257,6 +273,8 @@ mod tests {
         rx: mpsc::Receiver<Command>,
         kick: Arc<Notify>,
         logs: Arc<Mutex<Vec<String>>>,
+        /// What the tunnel manager says about the loss.
+        lost: Arc<Mutex<Option<Instant>>>,
     }
 
     const ON_LOSS: AutoPauseSettings = AutoPauseSettings {
@@ -284,6 +302,7 @@ mod tests {
         let target = Arc::new(Mutex::new(Some(tx)));
         let viewers = Arc::new(ViewerActivity::new());
         let kick = Arc::new(Notify::new());
+        let lost: Arc<Mutex<Option<Instant>>> = Arc::default();
         let logs = Arc::new(Mutex::new(Vec::new()));
         let controller = AutoPause {
             timings: AutoPauseTimings::default(),
@@ -295,6 +314,11 @@ mod tests {
                 Arc::new(move || target.lock().unwrap().clone())
             },
             kick: Arc::clone(&kick),
+            lost_since: {
+                let lost = Arc::clone(&lost);
+                Arc::new(move || *lost.lock().unwrap())
+            },
+            active: Arc::default(),
             log: {
                 let logs = Arc::clone(&logs);
                 Arc::new(move |m: &str| logs.lock().unwrap().push(m.to_string()))
@@ -309,6 +333,7 @@ mod tests {
             rx,
             kick,
             logs,
+            lost,
         }
     }
 
@@ -366,6 +391,32 @@ mod tests {
             "{:?}",
             env.logs.lock().unwrap()
         );
+    }
+
+    /// Fix round 1: the 10 s count from the moment the connection was lost (the manager reports
+    /// `Reconnecting` only after its grace), so a loss longer than 10 s pauses at 10 s.
+    #[tokio::test(start_paused = true)]
+    async fn the_loss_counts_from_when_the_manager_lost_the_connection() {
+        let mut env = start(ON_LOSS, online());
+        after_ms(1_000).await;
+        *env.lost.lock().unwrap() = Some(Instant::now());
+        // The state follows after the manager's grace.
+        after_ms(3_000).await;
+        env.tunnel.send_replace(TunnelState::Reconnecting);
+        after_ms(6_900).await;
+        assert!(env.sent().is_empty(), "paused before 10 s");
+        after_ms(200).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
+        // A date later than the state change does not delay the count.
+        *env.lost.lock().unwrap() = None;
+        env.tunnel.send_replace(online());
+        after_ms(10).await;
+        assert_eq!(env.sent(), [Command::Resume(PauseReason::Tunnel)]);
+        env.tunnel.send_replace(TunnelState::Reconnecting);
+        after_ms(5_000).await;
+        *env.lost.lock().unwrap() = Some(Instant::now());
+        after_ms(5_100).await;
+        assert_eq!(env.sent(), [Command::Pause(PauseReason::Tunnel)]);
     }
 
     /// A tunnel that never came up counts from the start.

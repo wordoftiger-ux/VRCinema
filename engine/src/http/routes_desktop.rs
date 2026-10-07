@@ -263,7 +263,8 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
 }
 
 /// A DNS host name with at least two labels (`kanal.example.com`): letters, digits and inner
-/// hyphens, labels of 1–63 characters, 253 in total. No scheme, port or path.
+/// hyphens, labels of 1–63 characters, 253 in total, a top-level domain with a letter. No
+/// scheme, port, path or IP address.
 fn is_hostname(host: &str) -> bool {
     let labels: Vec<&str> = host.split('.').collect();
     host.len() <= 253
@@ -275,6 +276,10 @@ fn is_hostname(host: &str) -> bool {
                 && l.bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         })
+        // The top-level domain has a letter: no IP literal, no all-numeric name.
+        && labels
+            .last()
+            .is_some_and(|tld| tld.bytes().any(|b| b.is_ascii_lowercase()))
 }
 
 /// Partial update: only the fields present change. Only a new port or network access restarts

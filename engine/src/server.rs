@@ -12,12 +12,12 @@ use tokio::sync::oneshot;
 
 use crate::config::AppConfig;
 use crate::db::{MAIN_CHANNEL_ID, SettingsRepo, open_database};
-use crate::engine::{EngineHandle, EngineTask, idle_engine_handle, spawn_engine_with};
+use crate::engine::{EngineHandle, EngineTask, idle_engine_handle, spawn_engine_paused};
 use crate::http::{AppState, HttpConfig, build_router};
 use crate::library::MediaLibrary;
 use crate::live::LiveSettings;
 use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
-use crate::pipeline::channel::{Channel, ChannelOptions};
+use crate::pipeline::channel::{Channel, ChannelOptions, PauseReason};
 use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_factory};
 use crate::pipeline::probe::probe_duration;
 use crate::pipeline::slates::{RETAIN_S, SlateOptions, generate_slates, request_url};
@@ -56,6 +56,9 @@ pub struct RunOptions {
     /// Desktop app: the tunnel is enabled but has no address yet, so the start-up idle slate
     /// says "Łączenie z internetem…" (with `config.public_url` empty).
     pub slates_connecting: bool,
+    /// Desktop app: pause reasons active right now (automatic pause); the channel loop starts
+    /// with them, so a restarted server does not air a film before they reach it.
+    pub pause_reasons: Vec<PauseReason>,
 }
 
 impl RunOptions {
@@ -73,6 +76,7 @@ impl RunOptions {
             channel_loops: None,
             live: None,
             slates_connecting: false,
+            pause_reasons: Vec::new(),
         }
     }
 }
@@ -274,6 +278,7 @@ async fn start_channel_loop(
     live: &LiveSettings,
     shared_log: &SharedLogFn,
     connecting: bool,
+    pause_reasons: Vec<PauseReason>,
 ) -> anyhow::Result<(EngineHandle, EngineTask)> {
     shared_log("Generowanie plansz...");
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -339,7 +344,11 @@ async fn start_channel_loop(
         }
     };
     let engine_log = Arc::clone(shared_log);
-    Ok(spawn_engine_with(build, move |m: &str| engine_log(m)))
+    Ok(spawn_engine_paused(
+        build,
+        move |m: &str| engine_log(m),
+        pause_reasons,
+    ))
 }
 
 /// Starts everything and serves until `shutdown` completes, then stops cleanly.
@@ -360,6 +369,7 @@ pub async fn run(
         channel_loops,
         live,
         slates_connecting,
+        pause_reasons,
     } = opts;
     let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
     let print_banner = custom_log.is_none();
@@ -406,6 +416,7 @@ pub async fn run(
             &live,
             &shared_log,
             slates_connecting,
+            pause_reasons,
         )
         .await?;
         (handle, LoopGuard::new(Some(task), channel_loops))
