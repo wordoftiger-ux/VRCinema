@@ -5,6 +5,7 @@
 //! At most one cloudflared process runs at any time: every operation that replaces or stops the
 //! process kills the old one and waits for its exit before anything new is started.
 
+pub mod named;
 mod process;
 mod state;
 

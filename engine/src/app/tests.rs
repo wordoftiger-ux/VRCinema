@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 17] = [
+const ROUTES: [(&str, &str); 22] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -34,6 +34,11 @@ const ROUTES: [(&str, &str); 17] = [
     ("POST", "/api/desktop/restart"),
     ("GET", "/api/desktop/tunnel"),
     ("POST", "/api/desktop/tunnel/restart"),
+    ("POST", "/api/desktop/tunnel/named/login"),
+    ("GET", "/api/desktop/tunnel/named/progress"),
+    ("POST", "/api/desktop/tunnel/named/create"),
+    ("POST", "/api/desktop/tunnel/named/quick"),
+    ("POST", "/api/desktop/tunnel/named/delete"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -65,6 +70,11 @@ fn test_options(tmp: &Path) -> AppOptions {
             cloudflared_release_api: format!("{NOWHERE}/release-api"),
         },
         fake_resolver: Some(fake),
+        // Never the owner's real `%USERPROFILE%\.cloudflared`.
+        named_tunnel: NamedOptions {
+            user_dir: Some(tmp.join("user").join(".cloudflared")),
+            ..NamedOptions::default()
+        },
         ..AppOptions::default()
     }
 }
@@ -1403,4 +1413,5 @@ async fn a_remote_switch_during_a_restart_reaches_the_new_server() {
     app.stop().await;
 }
 
+mod named;
 mod tunnel;

@@ -36,6 +36,8 @@ pub struct AppSettings {
     pub tunnel_mode: TunnelModeSetting,
     /// Host name of the named tunnel (`kanal.example.com`), set by the permanent-link wizard.
     pub named_tunnel_hostname: Option<String>,
+    /// UUID of the named tunnel the wizard set up (its credentials are `tunnel\<id>.json`).
+    pub named_tunnel_id: Option<String>,
     /// Pause the channel when the tunnel is lost for 10 s (spec section 8).
     pub pause_on_tunnel_loss: bool,
     /// Pause the channel when nobody fetched a segment for 30 s.
@@ -99,6 +101,7 @@ impl Default for AppSettings {
             tunnel_enabled: true,
             tunnel_mode: TunnelModeSetting::Quick,
             named_tunnel_hostname: None,
+            named_tunnel_id: None,
             pause_on_tunnel_loss: true,
             pause_when_no_viewers: false,
         }
@@ -236,7 +239,7 @@ mod tests {
         // Spec section 7: the tunnel is on by default, quick, pausing when it is lost.
         assert!(d.tunnel_enabled);
         assert_eq!(d.tunnel_mode, TunnelModeSetting::Quick);
-        assert!(d.named_tunnel_hostname.is_none());
+        assert!(d.named_tunnel_hostname.is_none() && d.named_tunnel_id.is_none());
         assert!(d.pause_on_tunnel_loss);
         assert!(!d.pause_when_no_viewers);
     }
@@ -252,6 +255,7 @@ mod tests {
         s.tunnel_enabled = false;
         s.tunnel_mode = TunnelModeSetting::Named;
         s.named_tunnel_hostname = Some("kanal.example.com".into());
+        s.named_tunnel_id = Some("6ff42ae2-765d-4adf-8112-31c55c1551ef".into());
         s.pause_on_tunnel_loss = false;
         s.pause_when_no_viewers = true;
         s.save(tmp.path()).unwrap();
@@ -260,6 +264,7 @@ mod tests {
             "\"tunnelEnabled\": false",
             "\"tunnelMode\": \"named\"",
             "\"namedTunnelHostname\": \"kanal.example.com\"",
+            "\"namedTunnelId\": \"6ff42ae2-765d-4adf-8112-31c55c1551ef\"",
             "\"pauseOnTunnelLoss\": false",
             "\"pauseWhenNoViewers\": true",
         ] {

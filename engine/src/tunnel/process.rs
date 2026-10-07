@@ -69,7 +69,8 @@ impl Cloudflared {
     }
 }
 
-async fn forward_lines<R: AsyncRead + Unpin>(pipe: R, tx: mpsc::Sender<String>) {
+/// Sends every line `pipe` delivers to `tx` (at most [`MAX_LINE`] bytes of each).
+pub(super) async fn forward_lines<R: AsyncRead + Unpin>(pipe: R, tx: mpsc::Sender<String>) {
     let mut reader = BufReader::new(pipe);
     let mut line = Vec::new();
     loop {

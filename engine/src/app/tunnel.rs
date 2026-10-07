@@ -2,9 +2,12 @@
 //! settings and the server's port, the state the window sees, and the public address in effect
 //! (the tunnel's while it is enabled, see [`crate::live::apply_tunnel`]).
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+use tokio::sync::oneshot;
 
 use super::{AppCore, lock};
 use crate::app_settings::{AppSettings, TunnelModeSetting, app_config};
@@ -12,13 +15,18 @@ use crate::config::AppConfig;
 use crate::live::{PublicAccess, apply_tunnel, tunnel_address};
 use crate::pipeline::slates::SlateAddress;
 use crate::tools::Tool;
+use crate::tunnel::named::{
+    self, CERT_FILE, ErrorCode, NO_CLOUDFLARED, NamedError, NamedPaths, Operation, Progress, Step,
+    default_user_dir, is_tunnel_id,
+};
 use crate::tunnel::{NamedTunnel, TunnelConfig, TunnelMode, TunnelState};
 
 /// Folder of the named tunnel's files (`cert.pem`, `<id>.json`) in the app's home.
 pub(crate) const TUNNEL_DIR: &str = "tunnel";
 
-const MISSING: &str =
-    "Brak programu cloudflared — pobierz brakujące narzędzia w ustawieniach (Narzędzia).";
+const MISSING: &str = NO_CLOUDFLARED;
+const LOGGED_IN: &str = "Połączono z Cloudflare. Teraz wpisz adres stałego linku.";
+const BACK_TO_QUICK: &str = "Działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Pliki stałego linku zostały — możesz do niego wrócić.";
 const UPDATING: &str = "Trwa aktualizacja programu cloudflared — tunel wróci za chwilę.";
 const NAMED_FALLBACK: &str = "Brak plików stałego linku — działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Ustaw stały link ponownie.";
 
@@ -63,39 +71,27 @@ enum Plan {
     },
 }
 
-/// The named tunnel set up by the wizard: credentials `<home>/tunnel/<id>.json` for `hostname`.
-/// `None` without a host name or without the file (the quick tunnel runs instead).
-pub(crate) fn find_named_tunnel(home: &Path, hostname: Option<&str>) -> Option<NamedTunnel> {
+/// The named tunnel the wizard set up: the tunnel `id` it stored, with its credentials
+/// `<home>/tunnel/<id>.json`, for `hostname`. `None` without a host name, without an id or
+/// without the file (the quick tunnel runs instead).
+pub(crate) fn find_named_tunnel(
+    home: &Path,
+    hostname: Option<&str>,
+    id: Option<&str>,
+) -> Option<NamedTunnel> {
     let hostname = hostname.map(str::trim).filter(|h| !h.is_empty())?;
+    let tunnel_id = id.filter(|id| is_tunnel_id(id))?.to_string();
     let dir = home.join(TUNNEL_DIR);
-    let mut ids: Vec<String> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .filter(|e| e.path().is_file())
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
-            let id = name.strip_suffix(".json")?;
-            is_tunnel_id(id).then(|| id.to_string())
-        })
-        .collect();
-    ids.sort();
-    let tunnel_id = ids.into_iter().next()?;
+    let credentials_file = dir.join(format!("{tunnel_id}.json"));
+    if !credentials_file.is_file() {
+        return None;
+    }
     Some(NamedTunnel {
         hostname: hostname.to_string(),
-        credentials_file: dir.join(format!("{tunnel_id}.json")),
-        origin_cert: dir.join("cert.pem"),
+        credentials_file,
+        origin_cert: dir.join(CERT_FILE),
         tunnel_id,
     })
-}
-
-/// A tunnel UUID as cloudflared names its credentials file (`8-4-4-4-12` hex digits).
-fn is_tunnel_id(s: &str) -> bool {
-    let groups: Vec<&str> = s.split('-').collect();
-    groups.len() == 5
-        && groups
-            .iter()
-            .zip([8, 4, 4, 4, 12])
-            .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 fn mode_setting(mode: &TunnelMode) -> TunnelModeSetting {
@@ -121,7 +117,11 @@ impl AppCore {
         let (mode, warning) = match settings.tunnel_mode {
             TunnelModeSetting::Quick => (TunnelMode::Quick, None),
             TunnelModeSetting::Named => {
-                match find_named_tunnel(&self.home, settings.named_tunnel_hostname.as_deref()) {
+                match find_named_tunnel(
+                    &self.home,
+                    settings.named_tunnel_hostname.as_deref(),
+                    settings.named_tunnel_id.as_deref(),
+                ) {
                     Some(named) => (TunnelMode::Named(named), None),
                     None => (TunnelMode::Quick, Some(NAMED_FALLBACK.to_string())),
                 }
@@ -294,36 +294,228 @@ impl AppCore {
     }
 }
 
+/// The permanent-link wizard (spec section 9): the management commands of
+/// [`crate::tunnel::named`] and what they change in the settings. A failure never changes the
+/// mode in use (spec section 11).
+impl AppCore {
+    pub(crate) fn named_paths(&self) -> NamedPaths {
+        NamedPaths {
+            cloudflared: self.tools.tools_dir().join(Tool::Cloudflared.exe()),
+            dir: self.home.join(TUNNEL_DIR),
+            user_dir: self
+                .options
+                .named_tunnel
+                .user_dir
+                .clone()
+                .or_else(default_user_dir)
+                .unwrap_or_else(|| self.home.join(".cloudflared")),
+        }
+    }
+
+    /// The wizard's last (or running) operation, and whether the certificate is there.
+    pub(crate) fn named_progress(&self) -> (Progress, bool) {
+        (self.named.progress(), self.named_paths().logged_in())
+    }
+
+    /// Starts `tunnel login` in the background (its progress: [`Self::named_progress`]).
+    pub(crate) fn start_named_login(self: &Arc<Self>) -> Result<(), NamedError> {
+        let busy = self.named.begin(Operation::Login)?;
+        let paths = self.named_paths();
+        if !paths.cloudflared.is_file() {
+            let error = NamedError::new(ErrorCode::NoCloudflared, NO_CLOUDFLARED);
+            self.named.finish(&Err(error.clone()));
+            return Err(error);
+        }
+        let (cancel, cancelled) = oneshot::channel();
+        self.named.set_cancel(cancel);
+        self.named.step(Step::Starting, Step::Starting.message(""));
+        let core = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            let log = core.log.log_fn();
+            let named = &core.named;
+            let on_url = |url: String| {
+                named.set_login_url(url);
+                named.step(Step::WaitingForBrowser, Step::WaitingForBrowser.message(""));
+            };
+            let timeout = core.options.named_tunnel.login_timeout;
+            let result = named::login(&paths, timeout, cancelled, on_url, &log)
+                .await
+                .map(|_| LOGGED_IN.to_string());
+            named.finish(&result);
+            drop(busy);
+        });
+        // Aborted when the app quits (the login's cloudflared dies with its handle).
+        let mut background = lock(&self.background);
+        background.retain(|t| !t.is_finished());
+        background.push(task);
+        Ok(())
+    }
+
+    /// Cancels a running login; false when none runs.
+    pub(crate) fn cancel_named_login(&self) -> bool {
+        self.named.cancel_login()
+    }
+
+    /// Creates (or reuses) the tunnel, routes `hostname` to it and switches to it.
+    pub(crate) async fn create_named(
+        self: &Arc<Self>,
+        hostname: String,
+        overwrite: bool,
+    ) -> Result<String, NamedError> {
+        self.named_operation(Operation::Create, move |core| async move {
+            let paths = core.named_paths();
+            let log = core.log.log_fn();
+            let timeout = core.options.named_tunnel.command_timeout;
+            let on_step = |step: Step| core.named.step(step, step.message(&hostname));
+            let id = named::create(&paths, &hostname, overwrite, timeout, on_step, &log).await?;
+            let url = format!("https://{hostname}");
+            core.switch_tunnel_mode(move |s| {
+                s.tunnel_mode = TunnelModeSetting::Named;
+                s.named_tunnel_hostname = Some(hostname);
+                s.named_tunnel_id = Some(id);
+            })
+            .await?;
+            Ok(format!(
+                "Stały link {url} jest gotowy — tunel łączy się z Cloudflare."
+            ))
+        })
+        .await
+    }
+
+    /// Back to the quick tunnel; the permanent link's files stay.
+    pub(crate) async fn named_to_quick(self: &Arc<Self>) -> Result<String, NamedError> {
+        self.named_operation(Operation::Quick, |core| async move {
+            core.switch_tunnel_mode(|s| s.tunnel_mode = TunnelModeSetting::Quick)
+                .await?;
+            Ok(BACK_TO_QUICK.to_string())
+        })
+        .await
+    }
+
+    /// Deletes the tunnel in Cloudflare, then (the quick tunnel running) its files here.
+    pub(crate) async fn delete_named(self: &Arc<Self>) -> Result<String, NamedError> {
+        self.named_operation(Operation::Delete, |core| async move {
+            let paths = core.named_paths();
+            let log = core.log.log_fn();
+            let host = core.settings().named_tunnel_hostname;
+            core.named
+                .step(Step::Deleting, Step::Deleting.message(""));
+            named::delete(&paths, core.options.named_tunnel.command_timeout, &log).await?;
+            // The tunnel is gone in Cloudflare: from here on the quick tunnel is the only
+            // way out, whatever else fails.
+            core.switch_tunnel_mode(|s| {
+                s.tunnel_mode = TunnelModeSetting::Quick;
+                s.named_tunnel_hostname = None;
+                s.named_tunnel_id = None;
+            })
+            .await?;
+            // The named cloudflared has exited by now: its files can go.
+            if let Err(e) = named::remove_files(&paths.dir) {
+                core.log(&format!(
+                    "Stały link: nie udało się usunąć plików z {}: {e}",
+                    paths.dir.display()
+                ));
+                return Err(NamedError::new(
+                    ErrorCode::Failed,
+                    format!(
+                        "Tunel usunięto w Cloudflare i działa szybki tunel, ale nie udało się usunąć plików stałego linku: {e}"
+                    ),
+                ));
+            }
+            core.log(&format!(
+                "Stały link: usunięto certyfikat i poświadczenia z {}.",
+                paths.dir.display()
+            ));
+            let record = host.map_or_else(
+                || "stałego linku".to_string(),
+                |host| host.to_string(),
+            );
+            Ok(format!(
+                "Stały link usunięty — działa szybki tunel. Rekord DNS {record} mógł zostać w Cloudflare: usuń go w panelu Cloudflare (DNS), jeśli nie jest już potrzebny."
+            ))
+        })
+        .await
+    }
+
+    /// Runs one operation of the wizard (others are refused meanwhile) as its own task, so a
+    /// request that gives up waiting never leaves the settings half changed; its outcome goes
+    /// to the progress.
+    async fn named_operation<F, Fut>(
+        self: &Arc<Self>,
+        operation: Operation,
+        work: F,
+    ) -> Result<String, NamedError>
+    where
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<String, NamedError>> + Send + 'static,
+    {
+        let busy = self.named.begin(operation)?;
+        let core = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = work(Arc::clone(&core)).await;
+            core.named.finish(&result);
+            drop(busy);
+            result
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(NamedError::new(
+                ErrorCode::Failed,
+                format!("Operacja stałego linku została przerwana: {e}"),
+            ))
+        })
+    }
+
+    /// Saves the tunnel mode and switches the running tunnel to it (only after a successful
+    /// command: a failure never changes the mode, spec section 11).
+    async fn switch_tunnel_mode(
+        self: &Arc<Self>,
+        change: impl FnOnce(&mut AppSettings),
+    ) -> Result<(), NamedError> {
+        self.named
+            .step(Step::Switching, Step::Switching.message(""));
+        let _guard = self.settings_change.lock().await;
+        self.update_settings(change)
+            .map_err(|e| NamedError::new(ErrorCode::Failed, format!("{e:#}")))?;
+        self.apply_live();
+        self.sync_tunnel().await;
+        self.refresh_slates();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
+    /// Sorts before [`ID`]: never chosen in its place.
+    const OTHER: &str = "0aa42ae2-765d-4adf-8112-31c55c1551ef";
+    const HOST: Option<&str> = Some("kanal.example.com");
 
     #[test]
-    fn tunnel_ids_are_uuids() {
-        assert!(is_tunnel_id(ID));
-        assert!(!is_tunnel_id("cert"));
-        assert!(!is_tunnel_id("6ff42ae2-765d-4adf-8112-31c55c1551eZ"));
-        assert!(!is_tunnel_id("6ff42ae2765d-4adf-8112-31c55c1551ef0"));
-    }
-
-    #[test]
-    fn the_named_tunnel_needs_a_host_name_and_its_credentials_file() {
+    fn the_named_tunnel_needs_a_host_name_its_stored_id_and_its_credentials_file() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join(TUNNEL_DIR);
-        assert!(find_named_tunnel(home.path(), Some("kanal.example.com")).is_none());
+        assert!(find_named_tunnel(home.path(), HOST, Some(ID)).is_none());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cert.pem"), "x").unwrap();
-        std::fs::write(dir.join("inny.json"), "{}").unwrap();
-        assert!(find_named_tunnel(home.path(), Some("kanal.example.com")).is_none());
+        std::fs::write(dir.join(format!("{OTHER}.json")), "{}").unwrap();
+        assert!(
+            find_named_tunnel(home.path(), HOST, Some(ID)).is_none(),
+            "another tunnel's credentials are not the stored one's"
+        );
         std::fs::write(dir.join(format!("{ID}.json")), "{}").unwrap();
-        assert!(find_named_tunnel(home.path(), None).is_none());
-        assert!(find_named_tunnel(home.path(), Some(" ")).is_none());
-        let named = find_named_tunnel(home.path(), Some("kanal.example.com")).unwrap();
+        assert!(find_named_tunnel(home.path(), None, Some(ID)).is_none());
+        assert!(find_named_tunnel(home.path(), Some(" "), Some(ID)).is_none());
+        assert!(find_named_tunnel(home.path(), HOST, None).is_none());
+        assert!(find_named_tunnel(home.path(), HOST, Some("..\\cert")).is_none());
+        let named = find_named_tunnel(home.path(), HOST, Some(ID)).unwrap();
         assert_eq!(named.hostname, "kanal.example.com");
         assert_eq!(named.tunnel_id, ID);
         assert_eq!(named.credentials_file, dir.join(format!("{ID}.json")));
         assert_eq!(named.origin_cert, dir.join("cert.pem"));
+        let other = find_named_tunnel(home.path(), HOST, Some(OTHER)).unwrap();
+        assert_eq!(other.tunnel_id, OTHER);
     }
 }

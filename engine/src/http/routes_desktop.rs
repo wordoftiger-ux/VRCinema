@@ -1,6 +1,7 @@
 //! Routes only the app window may use (`/api/desktop/*`, spec 9): settings, tools, encoder
-//! test, cookies picker, log, program updates, the first-run wizard, the tunnel. Every handler takes
-//! [`DesktopSession`] first: no session is 401, a remote session 403.
+//! test, cookies picker, log, program updates, the first-run wizard, the tunnel and its
+//! permanent-link wizard. Every handler takes [`DesktopSession`] first: no session is 401, a
+//! remote session 403.
 
 use axum::Router;
 use axum::extract::State;
@@ -16,6 +17,7 @@ use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
 use crate::app_settings::TunnelModeSetting;
 use crate::tools::Tool;
 use crate::tunnel::TunnelState;
+use crate::tunnel::named::{ADD_DOMAIN_HELP, ErrorCode, NamedError, Phase};
 
 const ENCODERS: [&str; 5] = ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf"];
 const MIN_PASSWORD_CHARS: usize = 8;
@@ -39,6 +41,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/desktop/restart", post(restart))
         .route("/api/desktop/tunnel", get(tunnel))
         .route("/api/desktop/tunnel/restart", post(tunnel_restart))
+        .route("/api/desktop/tunnel/named/login", post(named_login))
+        .route("/api/desktop/tunnel/named/progress", get(named_progress))
+        .route("/api/desktop/tunnel/named/create", post(named_create))
+        .route("/api/desktop/tunnel/named/quick", post(named_quick))
+        .route("/api/desktop/tunnel/named/delete", post(named_delete))
 }
 
 impl From<OpError> for ApiError {
@@ -456,6 +463,160 @@ async fn tunnel_restart(_: DesktopSession, State(state): State<AppState>) -> Api
         ));
     }
     Ok(json_ok(&tunnel_view(&core)))
+}
+
+// ---------- The permanent link (spec section 9) ----------
+//
+// Answers of the wizard's routes: a failure is `{"error": <Polish text>, "code": <ErrorCode>}`
+// (plus `helpUrl` for `no_domain`); the progress is `named_progress_view`. Neither ever holds
+// the certificate or the credentials, nor their paths.
+
+fn named_error(e: &NamedError) -> Response {
+    let status = match e.code {
+        ErrorCode::Busy
+        | ErrorCode::NoCloudflared
+        | ErrorCode::NotLoggedIn
+        | ErrorCode::DnsTaken
+        | ErrorCode::Cancelled => StatusCode::CONFLICT,
+        ErrorCode::NoDomain => StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        ErrorCode::Failed => StatusCode::BAD_GATEWAY,
+    };
+    json_response(
+        status,
+        &json!({
+            "error": e.message,
+            "code": e.code.as_str(),
+            "helpUrl": help_url(Some(e.code)),
+        }),
+    )
+}
+
+fn help_url(code: Option<ErrorCode>) -> Option<&'static str> {
+    (code == Some(ErrorCode::NoDomain)).then_some(ADD_DOMAIN_HELP)
+}
+
+fn invalid(message: &str) -> Response {
+    json_response(
+        StatusCode::BAD_REQUEST,
+        &json!({ "error": message, "code": "invalid" }),
+    )
+}
+
+/// `state`: idle | running | done | failed | cancelled; `step` while running; `code` after a
+/// failure (see [`ErrorCode`]); `loginUrl` while the login waits for the owner; `loggedIn`: the
+/// certificate is there (the next step can start).
+fn named_progress_view(core: &AppCore) -> Value {
+    let (p, logged_in) = core.named_progress();
+    json!({
+        "operation": p.operation.map(|o| o.as_str()),
+        "state": p.phase.as_str(),
+        "running": p.phase == Phase::Running,
+        "step": p.step.map(|s| s.as_str()),
+        "message": p.message,
+        "code": p.code.map(|c| c.as_str()),
+        "helpUrl": help_url(p.code),
+        "loginUrl": p.login_url,
+        "loggedIn": logged_in,
+    })
+}
+
+/// Step 1, "Połącz z Cloudflare": starts `cloudflared tunnel login` (202 with the progress; the
+/// window then polls `progress` for the login page to open). `{"cancel": true}` cancels a
+/// running login instead (200 with the progress, `state` "cancelled"); "Spróbuj ponownie" is
+/// another plain POST once it ended.
+async fn named_login(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody,
+) -> ApiResult {
+    let core = state.desktop()?;
+    let cancel = match &body {
+        Value::Null => false,
+        Value::Object(map) => match flag(map, "cancel") {
+            Ok(cancel) => cancel.unwrap_or(false),
+            Err(_) => return Ok(invalid("Pole cancel musi mieć wartość true albo false.")),
+        },
+        _ => return Ok(invalid("Niepoprawne żądanie.")),
+    };
+    if cancel {
+        core.cancel_named_login();
+        return Ok(json_ok(&named_progress_view(&core)));
+    }
+    match core.start_named_login() {
+        Ok(()) => Ok(json_response(
+            StatusCode::ACCEPTED,
+            &named_progress_view(&core),
+        )),
+        Err(e) => Ok(named_error(&e)),
+    }
+}
+
+async fn named_progress(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    Ok(json_ok(&named_progress_view(&core)))
+}
+
+/// What a finished operation answers: its message and the tunnel as `GET tunnel` shows it.
+fn named_done(core: &AppCore, result: Result<String, NamedError>) -> ApiResult {
+    Ok(match result {
+        Ok(message) => json_ok(&json!({
+            "ok": true,
+            "message": message,
+            "tunnel": tunnel_view(core),
+        })),
+        Err(e) => named_error(&e),
+    })
+}
+
+/// Step 2, "Wybierz adres": `{"hostname": "kanal.example.com", "overwrite": false}`. Creates (or
+/// reuses) the tunnel `vrcinema`, routes the host name to it (`overwrite`: replace another DNS
+/// record of that name, after a `dns_taken`) and switches to the permanent link.
+async fn named_create(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody,
+) -> ApiResult {
+    let core = state.desktop()?;
+    let Value::Object(map) = &body else {
+        return Ok(invalid(
+            "Podaj adres stałego linku (np. kanal.example.com).",
+        ));
+    };
+    let hostname = match map.get("hostname") {
+        Some(Value::String(h)) => h.trim().to_ascii_lowercase(),
+        _ => {
+            return Ok(invalid(
+                "Podaj adres stałego linku (np. kanal.example.com).",
+            ));
+        }
+    };
+    if !is_hostname(&hostname) {
+        return Ok(invalid(
+            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
+        ));
+    }
+    let Ok(overwrite) = flag(map, "overwrite") else {
+        return Ok(invalid("Pole overwrite musi mieć wartość true albo false."));
+    };
+    let result = core
+        .create_named(hostname, overwrite.unwrap_or(false))
+        .await;
+    named_done(&core, result)
+}
+
+/// "Wróć do szybkiego tunelu": the permanent link's files stay.
+async fn named_quick(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    let result = core.named_to_quick().await;
+    named_done(&core, result)
+}
+
+/// "Usuń stały link": the tunnel in Cloudflare, then its files here; the quick tunnel runs.
+async fn named_delete(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    let result = core.delete_named().await;
+    named_done(&core, result)
 }
 
 /// The first-run wizard page (`public/wizard.html`); like the API it needs the window session.

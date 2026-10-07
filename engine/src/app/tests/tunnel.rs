@@ -13,9 +13,9 @@ use super::*;
 use crate::auto_pause::AutoPauseTimings;
 use crate::tunnel::TunnelTimings;
 
-const QUICK_HOST: &str = "proba-kanalu.trycloudflare.com";
-const NAMED_HOST: &str = "kanal.example.com";
-const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
+pub(super) const QUICK_HOST: &str = "proba-kanalu.trycloudflare.com";
+pub(super) const NAMED_HOST: &str = "kanal.example.com";
+pub(super) const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
 
 fn fake_program() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
@@ -42,7 +42,7 @@ fn install_fake(home: &Path, runs: &Value) {
     std::fs::write(tools.join("fake_cloudflared.json"), runs.to_string()).unwrap();
 }
 
-fn fake_starts(home: &Path) -> Vec<Value> {
+pub(super) fn fake_starts(home: &Path) -> Vec<Value> {
     std::fs::read_to_string(home.join("tools").join("fake_cloudflared.log"))
         .unwrap_or_default()
         .lines()
@@ -51,7 +51,7 @@ fn fake_starts(home: &Path) -> Vec<Value> {
         .collect()
 }
 
-fn args_of(start: &Value) -> Vec<String> {
+pub(super) fn args_of(start: &Value) -> Vec<String> {
     start["args"]
         .as_array()
         .unwrap()
@@ -61,7 +61,7 @@ fn args_of(start: &Value) -> Vec<String> {
 }
 
 /// A fake instance holds `instance.lock` exclusively for its whole life.
-fn fake_running(home: &Path) -> bool {
+pub(super) fn fake_running(home: &Path) -> bool {
     use std::os::windows::fs::OpenOptionsExt;
     let lock = home.join("tools").join("instance.lock");
     lock.exists()
@@ -72,7 +72,7 @@ fn fake_running(home: &Path) -> bool {
             .is_err()
 }
 
-fn assert_never_two(home: &Path) {
+pub(super) fn assert_never_two(home: &Path) {
     let overlapping: Vec<Value> = fake_starts(home)
         .into_iter()
         .filter(|s| s["overlap"] != false)
@@ -103,17 +103,21 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-struct Setup {
+pub(super) struct Setup {
     /// The fake's script; `None`: no cloudflared in the tools.
-    runs: Option<Value>,
+    pub(super) runs: Option<Value>,
     /// Settings on top of `{"port": 0, "tunnelEnabled": true}`.
-    settings: Value,
+    pub(super) settings: Value,
     /// Link the repo's ffmpeg (the channel runs); the test is skipped without it.
-    tools: bool,
-    auto_pause: AutoPauseTimings,
+    pub(super) tools: bool,
+    pub(super) auto_pause: AutoPauseTimings,
     /// The named tunnel's files in `<home>/tunnel` (as the wizard leaves them).
-    named_files: bool,
-    tunnel: TunnelTimings,
+    pub(super) named_files: bool,
+    pub(super) tunnel: TunnelTimings,
+    /// The fake's management commands (`fake_cloudflared_commands.json`); the login writes its
+    /// certificate into the test's own cloudflared folder.
+    pub(super) commands: Value,
+    pub(super) login_timeout: Duration,
 }
 
 impl Default for Setup {
@@ -125,12 +129,14 @@ impl Default for Setup {
             auto_pause: AutoPauseTimings::default(),
             named_files: false,
             tunnel: fast_tunnel(),
+            commands: json!({}),
+            login_timeout: Duration::from_secs(30),
         }
     }
 }
 
 /// The app with the tunnel on; `None` when the test needs ffmpeg and it is not there.
-async fn start(setup: Setup) -> Option<App> {
+pub(super) async fn start(setup: Setup) -> Option<App> {
     let mut linked = true;
     let app = App::start_with(|home, options| {
         let mut config = json!({"port": 0, "tunnelEnabled": true});
@@ -140,7 +146,16 @@ async fn start(setup: Setup) -> Option<App> {
         std::fs::write(home.join("config.json"), config.to_string()).unwrap();
         if let Some(runs) = &setup.runs {
             install_fake(home, runs);
+            let user_dir = options.named_tunnel.user_dir.clone().unwrap();
+            let mut commands = setup.commands.clone();
+            commands["login"]["cert_dir"] = json!(user_dir);
+            std::fs::write(
+                home.join("tools").join("fake_cloudflared_commands.json"),
+                commands.to_string(),
+            )
+            .unwrap();
         }
+        options.named_tunnel.login_timeout = setup.login_timeout;
         if setup.named_files {
             let dir = home.join("tunnel");
             std::fs::create_dir_all(&dir).unwrap();
@@ -166,7 +181,7 @@ async fn start(setup: Setup) -> Option<App> {
     Some(app)
 }
 
-async fn wait_online(app: &App, cookie: &str) -> Value {
+pub(super) async fn wait_online(app: &App, cookie: &str) -> Value {
     let mut last = Value::Null;
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -786,7 +801,11 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
 #[tokio::test]
 async fn the_named_mode_without_its_files_runs_the_quick_tunnel_with_a_warning() {
     let app = start(Setup {
-        settings: json!({"tunnelMode": "named", "namedTunnelHostname": NAMED_HOST}),
+        settings: json!({
+            "tunnelMode": "named",
+            "namedTunnelHostname": NAMED_HOST,
+            "namedTunnelId": TUNNEL_ID,
+        }),
         ..Setup::default()
     })
     .await
@@ -808,7 +827,11 @@ async fn the_named_mode_without_its_files_runs_the_quick_tunnel_with_a_warning()
 #[tokio::test]
 async fn the_named_mode_runs_the_named_tunnel_and_never_shows_its_credentials() {
     let app = start(Setup {
-        settings: json!({"tunnelMode": "named", "namedTunnelHostname": NAMED_HOST}),
+        settings: json!({
+            "tunnelMode": "named",
+            "namedTunnelHostname": NAMED_HOST,
+            "namedTunnelId": TUNNEL_ID,
+        }),
         // `/ready` answers 200: the named tunnel is connected.
         runs: Some(json!([{}])),
         named_files: true,
@@ -938,8 +961,7 @@ async fn no_viewers_pause_survive_a_restart_and_a_segment_fetch_resumes_at_once(
             recheck: Duration::from_secs(10),
             ..AutoPauseTimings::default()
         },
-        named_files: false,
-        tunnel: fast_tunnel(),
+        ..Setup::default()
     })
     .await
     else {

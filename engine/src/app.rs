@@ -30,6 +30,7 @@ use crate::pipeline::slates::{SlateSwapper, SwapOutcome};
 use crate::self_update::{self, DEFAULT_API_URL, UpdateInfo};
 use crate::server::{RunOptions, run};
 use crate::tools::{Tool, ToolSources, ToolsManager};
+use crate::tunnel::named::{NamedOptions, NamedSetup};
 use crate::tunnel::{TunnelConfig, TunnelManager, TunnelState, TunnelTimings};
 
 mod tunnel;
@@ -108,6 +109,8 @@ pub struct AppOptions {
     pub tunnel_timings: TunnelTimings,
     /// Timings of the automatic pause (tests shorten them).
     pub auto_pause_timings: AutoPauseTimings,
+    /// The permanent-link wizard's timeouts and cloudflared's own folder (tests: a temporary one).
+    pub named_tunnel: NamedOptions,
 }
 
 impl Default for AppOptions {
@@ -120,6 +123,7 @@ impl Default for AppOptions {
             fake_resolver: None,
             tunnel_timings: TunnelTimings::default(),
             auto_pause_timings: AutoPauseTimings::default(),
+            named_tunnel: NamedOptions::default(),
         }
     }
 }
@@ -310,6 +314,8 @@ pub(crate) struct AppCore {
     tunnel_address: Mutex<Option<tunnel::KeptAddress>>,
     /// A tools job replaces cloudflared: the tunnel stays stopped until it is done.
     tunnel_held: AtomicBool,
+    /// The permanent-link wizard: one operation at a time and its progress.
+    named: NamedSetup,
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     start_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
@@ -989,6 +995,7 @@ impl AppEngine {
             pause_active: Arc::default(),
             tunnel_address: Mutex::new(None),
             tunnel_held: AtomicBool::new(false),
+            named: NamedSetup::default(),
             #[cfg(test)]
             start_pause: Mutex::new(None),
         });
