@@ -1,5 +1,9 @@
-//! Tunnel manager against a fake cloudflared (`examples/fake_cloudflared.rs`; a plain
-//! `cargo test` builds it). Never the real cloudflared or the internet.
+//! Tunnel manager against a fake cloudflared (`examples/fake_cloudflared.rs`). Never the real
+//! cloudflared or the internet.
+//!
+//! The fake is an example target: a plain `cargo test` builds it, but a filtered run such as
+//! `cargo test --test tunnel` does not — run `cargo build --example fake_cloudflared` first
+//! (after a clean checkout or a change to the fake).
 //!
 //! Review Focus 1: two cloudflared processes never run at once. Every fake instance holds an
 //! exclusive lock for its whole life and records `overlap` when it finds the lock taken; tests
@@ -171,7 +175,42 @@ fn timings() -> TunnelTimings {
         backoff_max: Duration::from_secs(5),
         stable_after: Duration::from_secs(60),
         rate_limit_wait: Duration::from_secs(60),
+        health_grace: Duration::from_millis(500),
     }
+}
+
+/// Without a metrics server there is nothing to watch: an address found on stderr stays
+/// online (well past the health grace).
+async fn assert_stays_online(rx: &watch::Receiver<TunnelState>, url: &str) {
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(*rx.borrow(), TunnelState::Online { url: url.into() });
+}
+
+impl Fake {
+    /// Paths the manager requested from the fake's metrics server.
+    fn requests(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("requests.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// The states in `seen` include `expected` in this order (other states may come between).
+fn assert_sequence(seen: &Mutex<Vec<TunnelState>>, expected: &[TunnelState]) {
+    let seen = seen.lock().unwrap();
+    let mut wanted = expected.iter();
+    let mut next = wanted.next();
+    for state in seen.iter() {
+        if Some(state) == next {
+            next = wanted.next();
+        }
+    }
+    assert!(
+        next.is_none(),
+        "expected {expected:?} in order, saw {seen:?}"
+    );
 }
 
 fn manager(timings: TunnelTimings) -> TunnelManager {
@@ -292,6 +331,7 @@ async fn quick_tunnel_address_falls_back_to_stderr() {
     let mut rx = tunnel.state();
     tunnel.start(fake.quick(18102)).await;
     wait_online(&mut rx, "https://quiet-river.trycloudflare.com").await;
+    assert_stays_online(&rx, "https://quiet-river.trycloudflare.com").await;
     tunnel.stop().await;
     fake.assert_all_dead();
 }
@@ -347,6 +387,135 @@ async fn named_tunnel_falls_back_to_a_registered_connection_in_stderr() {
     config.mode = fake.named_mode();
     tunnel.start(config).await;
     wait_online(&mut rx, "https://kanal.example.com").await;
+    assert_stays_online(&rx, "https://kanal.example.com").await;
+    tunnel.stop().await;
+    fake.assert_all_dead();
+}
+
+/// Connection to Cloudflare lost while cloudflared keeps running (`/ready` 503 longer than the
+/// grace): `Reconnecting`, then `Online` with the same address once `/ready` is 200 again —
+/// the same process, no restart.
+async fn lost_connection_and_back(mode: Option<TunnelMode>, url: &str, port: u16) {
+    let fake = Fake::new(json!([{
+        "hostname": url.trim_start_matches("https://"),
+        "ready_down": [[1000, 2800]],
+    }]));
+    let tunnel = manager(timings());
+    let seen = record(tunnel.state());
+    let mut rx = tunnel.state();
+    let mut config = fake.quick(port);
+    if let Some(mode) = mode {
+        config.mode = mode;
+    }
+    tunnel.start(config).await;
+    wait_online(&mut rx, url).await;
+    wait_for(&mut rx, "reconnecting", Duration::from_secs(5), |s| {
+        *s == TunnelState::Reconnecting
+    })
+    .await;
+    let pid = fake.pids()[0];
+    assert!(is_alive(pid), "the process must keep running");
+    wait_online(&mut rx, url).await;
+
+    assert_eq!(fake.starts().len(), 1, "no restart");
+    assert!(is_alive(pid));
+    let online = TunnelState::Online { url: url.into() };
+    assert_sequence(
+        &seen,
+        &[online.clone(), TunnelState::Reconnecting, online.clone()],
+    );
+    let polls = fake.requests().iter().filter(|p| *p == "/ready").count();
+    assert!(polls > 10, "/ready polled {polls} times");
+    tunnel.stop().await;
+    fake.assert_all_dead();
+}
+
+#[tokio::test]
+async fn named_tunnel_without_connection_is_reconnecting_until_ready_again() {
+    let fake_mode = TunnelMode::Named(NamedTunnel {
+        hostname: HOSTNAME.into(),
+        tunnel_id: TUNNEL_ID.into(),
+        credentials_file: PathBuf::from("unused.json"),
+        origin_cert: PathBuf::from("cert.pem"),
+    });
+    lost_connection_and_back(Some(fake_mode), "https://kanal.example.com", 18180).await;
+}
+
+#[tokio::test]
+async fn quick_tunnel_without_connection_is_reconnecting_until_ready_again() {
+    lost_connection_and_back(None, "https://lost-link.trycloudflare.com", 18181).await;
+}
+
+#[tokio::test]
+async fn a_short_ready_blip_below_the_grace_stays_online() {
+    let fake = Fake::new(json!([{
+        "hostname": "steady.trycloudflare.com",
+        "ready_down": [[800, 1000]],
+    }]));
+    let tunnel = manager(TunnelTimings {
+        health_grace: Duration::from_millis(900),
+        ..timings()
+    });
+    let seen = record(tunnel.state());
+    let mut rx = tunnel.state();
+    tunnel.start(fake.quick(18182)).await;
+    wait_online(&mut rx, "https://steady.trycloudflare.com").await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+
+    assert_eq!(
+        *rx.borrow(),
+        TunnelState::Online {
+            url: "https://steady.trycloudflare.com".into()
+        }
+    );
+    assert!(
+        !seen.lock().unwrap().contains(&TunnelState::Reconnecting),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+    let polls = fake.requests().iter().filter(|p| *p == "/ready").count();
+    assert!(polls > 10, "/ready polled {polls} times");
+    tunnel.stop().await;
+    fake.assert_all_dead();
+}
+
+/// Rule: the backoff starts over only after `stable_after` of continuous `Online`. Time spent
+/// `Reconnecting` while the process is alive does not count.
+#[tokio::test]
+async fn time_without_connection_does_not_count_as_stable() {
+    let fail = json!({ "exit_after_ms": 0, "exit_code": 1 });
+    let fake = Fake::new(json!([
+        fail,
+        fail,
+        // Online at once, connection lost at 300 ms (Reconnecting about 300 ms later), alive
+        // for 2.5 s in total: longer than `stable_after`, but only ~0.6 s of it online.
+        {
+            "hostname": "flaky.trycloudflare.com",
+            "ready_down": [[300, 60000]],
+            "exit_after_ms": 2500,
+            "exit_code": 1
+        },
+        fail,
+        { "hostname": "final-flaky.trycloudflare.com" }
+    ]));
+    let tunnel = manager(TunnelTimings {
+        backoff_initial: Duration::from_millis(300),
+        stable_after: Duration::from_millis(1000),
+        health_grace: Duration::from_millis(300),
+        ..timings()
+    });
+    let mut rx = tunnel.state();
+    tunnel.start(fake.quick(18183)).await;
+    wait_online(&mut rx, "https://final-flaky.trycloudflare.com").await;
+
+    let starts = fake.starts();
+    assert_eq!(starts.len(), 5);
+    // Waits 300, 600, then 1200 (no reset); a reset would make it 300.
+    let after_flaky = start_ms(&starts[3]) - exit_ms(&fake, &starts[2]);
+    assert!(
+        after_flaky >= 1200,
+        "wait after a run that was mostly disconnected: {after_flaky} ms, expected about 1200"
+    );
     tunnel.stop().await;
     fake.assert_all_dead();
 }
@@ -366,8 +535,10 @@ async fn no_address_in_time_is_a_failed_start() {
     let starts = fake.starts();
     assert_eq!(starts.len(), 2);
     let gap = start_ms(&starts[1]) - start_ms(&starts[0]);
+    // Timeout 1500 + wait 100, minus slack: the fakes stamp their own start, and Windows
+    // timers are coarse.
     assert!(
-        gap >= 1600,
+        gap >= 1500,
         "restarted after {gap} ms (timeout 1500 + wait 100)"
     );
     assert!(

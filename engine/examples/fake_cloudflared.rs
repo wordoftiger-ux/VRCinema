@@ -7,19 +7,22 @@
 //! - `delay_ms`: wait before anything else (a start still in progress);
 //! - `serve_metrics` (default true): serve `/quicktunnel` and `/ready` on the `--metrics` address;
 //! - `hostname`: what `/quicktunnel` reports (`""` when absent);
-//! - `ready_after_ms`: `/ready` answers 200 this long after the start (503 before; always 503 when absent);
+//! - `ready_after_ms` (default 0): `/ready` answers 200 this long after the start, 503 before;
+//! - `ready_down`: `[[from_ms, to_ms], …]` after the start during which `/ready` answers 503
+//!   again (connection to Cloudflare lost while the process keeps running);
 //! - `stderr`: lines printed to stderr;
 //! - `exit_after_ms` + `exit_code`: exit on its own (runs until killed when absent).
 //!
 //! Every start appends `{"event":"start","pid","args","ms","overlap"}` to `fake_cloudflared.log`
 //! in the same folder (and `{"event":"exit",…}` before exiting on its own). `overlap` is true
 //! when another instance from that folder was still running: each instance holds an exclusive
-//! lock on `instance.lock` for its whole life (Windows).
+//! lock on `instance.lock` for its whole life (Windows). The path of every request to the
+//! metrics server is appended to `requests.log`.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -30,7 +33,8 @@ struct Run {
     delay_ms: u64,
     serve_metrics: bool,
     hostname: Option<String>,
-    ready_after_ms: Option<u64>,
+    ready_after_ms: u64,
+    ready_down: Vec<[u64; 2]>,
     stderr: Vec<String>,
     exit_after_ms: Option<u64>,
     exit_code: i32,
@@ -42,7 +46,8 @@ impl Default for Run {
             delay_ms: 0,
             serve_metrics: true,
             hostname: None,
-            ready_after_ms: None,
+            ready_after_ms: 0,
+            ready_down: Vec::new(),
             stderr: Vec::new(),
             exit_after_ms: None,
             exit_code: 0,
@@ -92,28 +97,38 @@ fn lock(dir: &Path) -> Option<File> {
         .ok()
 }
 
-fn serve(listener: TcpListener, run: Run, started: Instant) {
+fn serve(listener: TcpListener, run: Run, started: Instant, requests: PathBuf) {
     for stream in listener.incoming().flatten() {
         let run = run.clone();
-        std::thread::spawn(move || answer(stream, &run, started));
+        let requests = requests.clone();
+        std::thread::spawn(move || answer(stream, &run, started, &requests));
     }
 }
 
-fn answer(mut stream: TcpStream, run: &Run, started: Instant) {
+fn is_ready(run: &Run, started: Instant) -> bool {
+    let ms = started.elapsed().as_millis() as u64;
+    ms >= run.ready_after_ms
+        && !run
+            .ready_down
+            .iter()
+            .any(|[from, to]| (*from..*to).contains(&ms))
+}
+
+fn answer(mut stream: TcpStream, run: &Run, started: Instant, requests: &Path) {
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).unwrap_or(0);
     let request = String::from_utf8_lossy(&buf[..n]);
     let path = request.split_whitespace().nth(1).unwrap_or("");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(requests) {
+        let _ = file.write_all(format!("{path}\n").as_bytes());
+    }
     let (status, body) = match path {
         "/quicktunnel" => (
             "200 OK",
             serde_json::json!({ "hostname": run.hostname.clone().unwrap_or_default() }).to_string(),
         ),
         "/ready" => {
-            let ready = run
-                .ready_after_ms
-                .is_some_and(|ms| started.elapsed() >= Duration::from_millis(ms));
-            if ready {
+            if is_ready(run, started) {
                 (
                     "200 OK",
                     r#"{"status":200,"readyConnections":1}"#.to_string(),
@@ -178,7 +193,8 @@ fn main() {
             .expect("--metrics <address>");
         let listener = TcpListener::bind(metrics).expect("bind the metrics address");
         let served = run.clone();
-        std::thread::spawn(move || serve(listener, served, started));
+        let requests = dir.join("requests.log");
+        std::thread::spawn(move || serve(listener, served, started, requests));
     }
 
     for line in &run.stderr {

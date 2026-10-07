@@ -11,7 +11,9 @@ pub enum TunnelState {
     Connecting,
     /// The channel is reachable at `url` (`https://…`, no trailing slash).
     Online { url: String },
-    /// cloudflared failed (exited, or gave no address in time) and is being started again.
+    /// cloudflared failed (exited, or gave no address in time) and is being started again, or
+    /// it is running but has had no connection to Cloudflare for longer than the grace period
+    /// (`/ready` not 200); it then reconnects on its own and the state returns to `Online`.
     Reconnecting,
     /// A failure worth a readable (Polish) explanation; a new start follows after a wait.
     Error { message: String },

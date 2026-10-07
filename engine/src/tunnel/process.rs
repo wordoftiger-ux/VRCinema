@@ -119,36 +119,48 @@ pub fn args(config: &TunnelConfig, metrics_port: u16) -> Vec<OsString> {
     args
 }
 
-/// The public address once the metrics server reports it: the quick tunnel's host name from
-/// `/quicktunnel`, or the named tunnel's address once `/ready` answers 200.
-pub async fn address_from_metrics(
-    client: &reqwest::Client,
-    metrics_port: u16,
-    mode: &TunnelMode,
-) -> Option<String> {
-    let base = format!("http://127.0.0.1:{metrics_port}");
-    match mode {
-        TunnelMode::Quick => {
-            let response = client
-                .get(format!("{base}/quicktunnel"))
-                .send()
-                .await
-                .ok()?;
-            if !response.status().is_success() {
-                return None;
-            }
-            let body: serde_json::Value = response.json().await.ok()?;
-            let host = body.get("hostname")?.as_str()?.trim();
-            let valid = !host.is_empty()
-                && host
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
-            valid.then(|| format!("https://{host}"))
-        }
-        TunnelMode::Named(named) => {
-            let response = client.get(format!("{base}/ready")).send().await.ok()?;
-            (response.status() == reqwest::StatusCode::OK).then(|| named_url(&named.hostname))
-        }
+/// What cloudflared's metrics server said, or that it could not be reached at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Metrics<T> {
+    Answered(T),
+    Unreachable,
+}
+
+async fn get(client: &reqwest::Client, metrics_port: u16, path: &str) -> Option<reqwest::Response> {
+    client
+        .get(format!("http://127.0.0.1:{metrics_port}{path}"))
+        .send()
+        .await
+        .ok()
+}
+
+/// `/quicktunnel`: the quick tunnel's address (`None` while it has none yet).
+pub async fn quick_address(client: &reqwest::Client, metrics_port: u16) -> Metrics<Option<String>> {
+    let Some(response) = get(client, metrics_port, "/quicktunnel").await else {
+        return Metrics::Unreachable;
+    };
+    if !response.status().is_success() {
+        return Metrics::Answered(None);
+    }
+    let body: Option<serde_json::Value> = response.json().await.ok();
+    let host = body
+        .as_ref()
+        .and_then(|b| b.get("hostname"))
+        .and_then(|h| h.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let valid = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+    Metrics::Answered(valid.then(|| format!("https://{host}")))
+}
+
+/// `/ready`: 200 while cloudflared has at least one connection to Cloudflare, 503 without.
+pub async fn ready(client: &reqwest::Client, metrics_port: u16) -> Metrics<bool> {
+    match get(client, metrics_port, "/ready").await {
+        Some(response) => Metrics::Answered(response.status() == reqwest::StatusCode::OK),
+        None => Metrics::Unreachable,
     }
 }
 
@@ -162,7 +174,8 @@ pub fn address_in_line(line: &str, mode: &TunnelMode) -> Option<String> {
     }
 }
 
-fn named_url(hostname: &str) -> String {
+/// Public address of a named tunnel.
+pub fn named_url(hostname: &str) -> String {
     format!("https://{hostname}")
 }
 

@@ -1,5 +1,6 @@
 //! Built-in Cloudflare tunnel (spec section 7): runs `cloudflared` for the local server, learns
-//! the public address and keeps the process alive (restarts with growing waits).
+//! the public address and keeps the process alive (restarts with growing waits). While online
+//! it keeps asking cloudflared's `/ready` whether the connection to Cloudflare still stands.
 //!
 //! At most one cloudflared process runs at any time: every operation that replaces or stops the
 //! process kills the old one and waits for its exit before anything new is started.
@@ -15,7 +16,7 @@ use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::pipeline::clip_factory::SharedLogFn;
-use process::Cloudflared;
+use process::{Cloudflared, Metrics};
 use state::Backoff;
 
 pub use state::TunnelState;
@@ -68,6 +69,9 @@ pub struct TunnelTimings {
     pub stable_after: Duration,
     /// Shortest wait after Cloudflare refused a quick tunnel (429, 60 s).
     pub rate_limit_wait: Duration,
+    /// While online, `/ready` must fail this long without a break before the state turns
+    /// `Reconnecting` (3 s); a single failed poll is not a lost connection.
+    pub health_grace: Duration,
 }
 
 impl Default for TunnelTimings {
@@ -79,6 +83,7 @@ impl Default for TunnelTimings {
             backoff_max: Duration::from_secs(30),
             stable_after: Duration::from_secs(60),
             rate_limit_wait: Duration::from_secs(60),
+            health_grace: Duration::from_secs(3),
         }
     }
 }
@@ -311,7 +316,8 @@ struct Failure {
     /// Shown as `TunnelState::Error` during the wait.
     error: Option<String>,
     rate_limited: bool,
-    /// How long the tunnel was online before it failed.
+    /// The longest stretch of continuous `Online` in this run; time `Reconnecting` while the
+    /// process was alive does not count. At least `stable_after` resets the backoff.
     online_for: Duration,
 }
 
@@ -417,10 +423,21 @@ impl Supervisor {
         ));
 
         let metrics_port = cloudflared.metrics_port;
+        let poll = self.timings.poll_interval;
         let deadline = tokio::time::sleep(self.timings.address_timeout);
         tokio::pin!(deadline);
-        let mut probe = Box::pin(probe_after(Duration::ZERO, client, metrics_port, config));
+        let mut probe = Box::pin(address_probe(Duration::ZERO, client, metrics_port, config));
+        let mut health = Box::pin(health_probe(poll, client, metrics_port));
+        // The public address, once known (it stays the same for the life of the process).
+        let mut address: Option<String> = None;
+        // Since when the state is `Online` (`None` while `Reconnecting` with a live process).
         let mut online_since: Option<Instant> = None;
+        let mut longest_online = Duration::ZERO;
+        // Since when `/ready` has been failing without a break.
+        let mut down_since: Option<Instant> = None;
+        // The metrics server answered at least once: only then can `/ready` be watched (an
+        // address found on stderr without a metrics server stays online).
+        let mut metrics_seen = false;
         let mut last_line = String::new();
         let mut stderr_open = true;
 
@@ -436,7 +453,7 @@ impl Supervisor {
                         stderr_open = false;
                         continue;
                     };
-                    if online_since.is_none() {
+                    if address.is_none() {
                         if process::is_rate_limited(&line) {
                             cloudflared.kill().await;
                             let mut failure = Failure::new(
@@ -446,7 +463,8 @@ impl Supervisor {
                             return Outcome::Failed(failure);
                         }
                         if let Some(url) = process::address_in_line(&line, &config.mode) {
-                            online_since = Some(self.online(url));
+                            online_since = Some(self.online(&url));
+                            address = Some(url);
                         }
                     }
                     if !line.trim().is_empty() {
@@ -458,7 +476,7 @@ impl Supervisor {
                     // the end of the pipe itself can come late on Windows, when a process
                     // started at the same moment inherited its handle.
                     let late = cloudflared.remaining_lines(Duration::from_millis(200)).await;
-                    let rate_limited = online_since.is_none()
+                    let rate_limited = address.is_none()
                         && late.iter().any(|l| process::is_rate_limited(l));
                     if let Some(line) = late.into_iter().rev().find(|l| !l.trim().is_empty()) {
                         last_line = line;
@@ -475,21 +493,57 @@ impl Supervisor {
                     }
                     let mut failure = Failure::new(reason);
                     failure.rate_limited = rate_limited;
-                    failure.online_for = online_since.map_or(Duration::ZERO, |t| t.elapsed());
+                    failure.online_for = online_since
+                        .map_or(longest_online, |t| longest_online.max(t.elapsed()));
                     return Outcome::Failed(failure);
                 }
-                url = &mut probe, if online_since.is_none() => match url {
-                    Some(url) => online_since = Some(self.online(url)),
-                    None => {
-                        probe = Box::pin(probe_after(
-                            self.timings.poll_interval,
-                            client,
-                            metrics_port,
-                            config,
-                        ));
+                answer = &mut probe, if address.is_none() => {
+                    if let Metrics::Answered(found) = answer {
+                        metrics_seen = true;
+                        if let Some(url) = found {
+                            online_since = Some(self.online(&url));
+                            address = Some(url);
+                            health = Box::pin(health_probe(poll, client, metrics_port));
+                            continue;
+                        }
                     }
-                },
-                _ = &mut deadline, if online_since.is_none() => {
+                    probe = Box::pin(address_probe(poll, client, metrics_port, config));
+                }
+                answer = &mut health, if address.is_some() => {
+                    let connected = match answer {
+                        Metrics::Answered(ready) => {
+                            metrics_seen = true;
+                            Some(ready)
+                        }
+                        Metrics::Unreachable => metrics_seen.then_some(false),
+                    };
+                    match connected {
+                        Some(true) => {
+                            down_since = None;
+                            if online_since.is_none()
+                                && let Some(url) = &address
+                            {
+                                online_since = Some(self.online(url));
+                            }
+                        }
+                        Some(false) => {
+                            let since = *down_since.get_or_insert_with(Instant::now);
+                            if let Some(online) = online_since
+                                && since.elapsed() >= self.timings.health_grace
+                            {
+                                longest_online = longest_online.max(online.elapsed());
+                                online_since = None;
+                                (self.log)(
+                                    "Tunel: cloudflared stracił połączenie z Cloudflare; czekam, aż je odzyska.",
+                                );
+                                self.state.send_replace(TunnelState::Reconnecting);
+                            }
+                        }
+                        None => {}
+                    }
+                    health = Box::pin(health_probe(poll, client, metrics_port));
+                }
+                _ = &mut deadline, if address.is_none() => {
                     cloudflared.kill().await;
                     return Outcome::Failed(Failure::new(format!(
                         "brak adresu tunelu po {} s",
@@ -500,21 +554,42 @@ impl Supervisor {
         }
     }
 
-    fn online(&self, url: String) -> Instant {
+    fn online(&self, url: &str) -> Instant {
         (self.log)(&format!("Tunel: w sieci — {url}"));
-        self.state.send_replace(TunnelState::Online { url });
+        self.state
+            .send_replace(TunnelState::Online { url: url.into() });
         Instant::now()
     }
 }
 
-async fn probe_after(
+/// After `delay`, asks the metrics server for the public address: the quick tunnel's host name
+/// from `/quicktunnel`, or the named tunnel's address once `/ready` answers 200.
+async fn address_probe(
     delay: Duration,
     client: &reqwest::Client,
     metrics_port: u16,
     config: &TunnelConfig,
-) -> Option<String> {
+) -> Metrics<Option<String>> {
     tokio::time::sleep(delay).await;
-    process::address_from_metrics(client, metrics_port, &config.mode).await
+    match &config.mode {
+        TunnelMode::Quick => process::quick_address(client, metrics_port).await,
+        TunnelMode::Named(named) => match process::ready(client, metrics_port).await {
+            Metrics::Answered(ready) => {
+                Metrics::Answered(ready.then(|| process::named_url(&named.hostname)))
+            }
+            Metrics::Unreachable => Metrics::Unreachable,
+        },
+    }
+}
+
+/// After `delay`, asks `/ready` whether cloudflared is connected to Cloudflare (both modes).
+async fn health_probe(
+    delay: Duration,
+    client: &reqwest::Client,
+    metrics_port: u16,
+) -> Metrics<bool> {
+    tokio::time::sleep(delay).await;
+    process::ready(client, metrics_port).await
 }
 
 /// The configuration for the log: paths only, never file contents.
