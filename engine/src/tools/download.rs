@@ -44,8 +44,14 @@ pub fn parse_sums(text: &str, name: &str) -> Option<String> {
 /// Finds the SHA-256 of `name` in a GitHub release description: the first line that contains
 /// the file name and exactly one 64-digit hex token (`name: <hex>`, markdown table rows, ...).
 pub fn parse_release_notes(body: &str, name: &str) -> Option<String> {
+    // Markup (`*`, backticks, `|`, `:`, brackets, spaces) separates tokens; a file name is a
+    // run of letters, digits, `-`, `_` and `.`, so `name.sha256` or `xname` are other files.
+    let is_name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
     body.lines()
-        .filter(|line| line.contains(name))
+        .filter(|line| {
+            line.split(|c: char| !is_name_char(c))
+                .any(|t| t.trim_end_matches('.') == name)
+        })
         .find_map(|line| {
             let mut hashes = line
                 .split(|c: char| !c.is_ascii_alphanumeric())
@@ -304,6 +310,32 @@ mod tests {
         );
         assert_eq!(parse_release_notes(&format!("{name} {H1}{H1}"), name), None);
         assert_eq!(parse_release_notes("", name), None);
+    }
+
+    #[test]
+    fn release_notes_match_the_file_name_exactly() {
+        let name = "cloudflared-windows-amd64.exe";
+        // Lines about other files that merely contain the name never count.
+        for other in [
+            format!("{name}.sha256: {H1}"),
+            format!("{name}.sig {H1}"),
+            format!("x{name} {H1}"),
+            format!("| cloudflared-windows-amd64.msi | {H1} |"),
+            format!("{name}-old: {H1}"),
+        ] {
+            assert_eq!(parse_release_notes(&other, name), None, "{other}");
+            // ...and do not shadow the real line that follows.
+            let both = format!("{other}\n{name}: {H2}\n");
+            assert_eq!(
+                parse_release_notes(&both, name).as_deref(),
+                Some(H2.to_lowercase().as_str()),
+                "{both}"
+            );
+        }
+        assert_eq!(
+            parse_release_notes(&format!("|{name}|{H2}|"), name).as_deref(),
+            Some(H2.to_lowercase().as_str())
+        );
     }
 
     #[tokio::test]
