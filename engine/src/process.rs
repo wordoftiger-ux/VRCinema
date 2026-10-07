@@ -81,6 +81,15 @@ pub fn contain_this_process() -> io::Result<()> {
 pub struct OwnJob {
     #[cfg(windows)]
     handle: usize,
+    warning: Option<String>,
+}
+
+impl OwnJob {
+    /// What did not go as planned (Polish, for the app's log): the process could not leave
+    /// the program-wide job, or got no job of its own (it still dies with its handle).
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
 }
 
 impl Drop for OwnJob {
@@ -101,12 +110,13 @@ pub fn spawn_in_own_job(cmd: &mut Command) -> io::Result<(Child, OwnJob)> {
     #[cfg(windows)]
     return job::spawn_own(cmd);
     #[cfg(not(windows))]
-    Ok((cmd.spawn()?, OwnJob {}))
+    Ok((cmd.spawn()?, OwnJob { warning: None }))
 }
 
-/// Tests: whether process `pid` is in the program-wide job (`None`: cannot tell).
-#[cfg(all(test, windows))]
-pub(crate) fn in_program_job(pid: u32) -> Option<bool> {
+/// Diagnostics and tests: whether process `pid` is in the program-wide job (`None`: cannot
+/// tell). Windows only.
+#[cfg(windows)]
+pub fn in_program_job(pid: u32) -> Option<bool> {
     job::contains(pid)
 }
 
@@ -170,20 +180,18 @@ mod job {
         // Members die with the job; only a process started with CREATE_BREAKAWAY_FROM_JOB
         // (the updated desktop app, the login's cloudflared) may leave it.
         create_with(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+            .inspect_err(|e| eprintln!("job object: {e}"))
+            .ok()
     }
 
-    /// A new job with these limit flags.
-    fn create_with(flags: u32) -> Option<usize> {
+    /// A new job with these limit flags, or which call failed and why.
+    fn create_with(flags: u32) -> Result<usize, String> {
         // SAFETY: plain Win32 calls with valid arguments; `info` outlives the call; a handle
         // that cannot be set up is closed once.
         unsafe {
             let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if handle.is_null() {
-                eprintln!(
-                    "job object: CreateJobObjectW failed: {}",
-                    Error::last_os_error()
-                );
-                return None;
+                return Err(format!("CreateJobObjectW: {}", Error::last_os_error()));
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = flags;
@@ -194,22 +202,21 @@ mod job {
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             );
             if ok == 0 {
-                eprintln!(
-                    "job object: SetInformationJobObject failed: {}",
-                    Error::last_os_error()
-                );
+                let e = Error::last_os_error();
                 CloseHandle(handle);
-                return None;
+                return Err(format!("SetInformationJobObject: {e}"));
             }
-            Some(handle as usize)
+            Ok(handle as usize)
         }
     }
 
-    /// See [`super::spawn_in_own_job`].
+    /// See [`super::spawn_in_own_job`]. What did not go as planned is in
+    /// [`super::OwnJob::warning`] (Polish, for the app's log).
     pub fn spawn_own(cmd: &mut Command) -> std::io::Result<(Child, super::OwnJob)> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         const ERROR_ACCESS_DENIED: i32 = 5;
+        let mut warnings = Vec::new();
         // Out of the program-wide job (which allows that), so its own children are born
         // outside every job of ours.
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
@@ -217,28 +224,41 @@ mod job {
             Ok(child) => child,
             // This process sits in a job (not ours) that allows no breakaway: start it inside.
             Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+                warnings.push(
+                    "program działa w obiekcie zadania Windows, który nie pozwala wydzielić procesu — przeglądarka otwarta przez cloudflared może zostać zamknięta razem z programem"
+                        .to_string(),
+                );
                 cmd.creation_flags(CREATE_NO_WINDOW);
                 cmd.spawn()?
             }
             Err(e) => return Err(e),
         };
         // Killed when the job closes; whatever it starts is silently left out of the job.
-        let handle =
-            create_with(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK)
-                .unwrap_or(0);
+        let handle = match create_with(
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        ) {
+            Ok(handle) => handle,
+            Err(e) => {
+                warnings.push(format!(
+                    "nie można utworzyć osobnego obiektu zadania Windows dla cloudflared ({e}) — zatrzyma się przy anulowaniu, ale może przetrwać nagłe zamknięcie programu"
+                ));
+                0
+            }
+        };
         if handle != 0
             && let Some(process) = child.raw_handle()
         {
             // SAFETY: both handles are valid for the duration of the call.
             if unsafe { AssignProcessToJobObject(handle as HANDLE, process as HANDLE) } == 0 {
-                eprintln!(
-                    "job object: AssignProcessToJobObject failed: {}",
+                warnings.push(format!(
+                    "nie można przypisać cloudflared do jego obiektu zadania Windows ({}) — zatrzyma się przy anulowaniu, ale może przetrwać nagłe zamknięcie programu",
                     Error::last_os_error()
-                );
+                ));
             }
         }
         // Without its own job it still dies with its handle (`kill_on_drop`).
-        Ok((child, super::OwnJob { handle }))
+        let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+        Ok((child, super::OwnJob { handle, warning }))
     }
 
     /// Closes a job made by [`spawn_own`] (its process dies with it).
@@ -272,9 +292,7 @@ mod job {
     }
 
     /// Whether process `pid` is in the program-wide job (`None`: cannot tell).
-    #[cfg(test)]
     pub fn contains(pid: u32) -> Option<bool> {
-        use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::IsProcessInJob;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,

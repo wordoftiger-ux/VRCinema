@@ -413,7 +413,10 @@ pub async fn login(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Dropped on every way out of here: cloudflared dies with it.
-    let (mut child, _job) = crate::process::spawn_in_own_job(&mut command).map_err(cannot_start)?;
+    let (mut child, job) = crate::process::spawn_in_own_job(&mut command).map_err(cannot_start)?;
+    if let Some(warning) = job.warning() {
+        log(&format!("Stały link: {warning}."));
+    }
     log(&format!(
         "Stały link: logowanie do Cloudflare (cloudflared, pid {}) — czekam na potwierdzenie w przeglądarce.",
         child.id().unwrap_or(0)
@@ -992,23 +995,38 @@ fn routed_record(output: &str) -> Option<String> {
 
 /// Moves `from` over `to`, also when `to` is read-only (cloudflared writes credentials
 /// read-only, so a second attempt meets the first one's file).
+///
+/// The rename replaces `to` in one step; if it fails, `to` stays as it was (read-only again), so
+/// a running named tunnel never loses its credentials to a failed attempt.
 fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
-    remove_file(to)?;
-    std::fs::rename(from, to)
+    let was_read_only = set_read_only(to, false)?;
+    std::fs::rename(from, to).inspect_err(|_| {
+        if was_read_only {
+            let _ = set_read_only(to, true);
+        }
+    })
+}
+
+/// Sets or clears the read-only attribute of `path` if it exists; returns whether it was
+/// read-only before (false for a missing file).
+fn set_read_only(path: &Path, read_only: bool) -> std::io::Result<bool> {
+    let metadata = match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        metadata => metadata?,
+    };
+    let mut permissions = metadata.permissions();
+    let was = permissions.readonly();
+    if was != read_only {
+        #[allow(clippy::permissions_set_readonly_false)] // Windows: the attribute only
+        permissions.set_readonly(read_only);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(was)
 }
 
 /// Removes `path`, also when it is read-only; a missing file is fine.
 fn remove_file(path: &Path) -> std::io::Result<()> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        metadata => metadata?,
-    };
-    let mut permissions = metadata.permissions();
-    if permissions.readonly() {
-        #[allow(clippy::permissions_set_readonly_false)] // Windows: clears the attribute only
-        permissions.set_readonly(false);
-        std::fs::set_permissions(path, permissions)?;
-    }
+    set_read_only(path, false)?;
     match std::fs::remove_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other,
@@ -1178,6 +1196,36 @@ mod tests {
         remove_file(&new).unwrap();
         remove_file(&old).unwrap();
         assert!(!old.exists());
+    }
+
+    /// A rename that fails (here: the new file is held open exclusively, like an antivirus scan
+    /// can) keeps the old credentials — the running named tunnel needs them.
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_replace_keeps_the_old_credentials() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("6ff42ae2-765d-4adf-8112-31c55c1551ef.json");
+        let new = dir.path().join("vrcinema-new.json");
+        std::fs::write(&old, "stare").unwrap();
+        let mut permissions = std::fs::metadata(&old).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&old, permissions).unwrap();
+        std::fs::write(&new, "nowe").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&new)
+            .unwrap();
+        assert!(replace_file(&new, &old).is_err());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "stare");
+        assert!(
+            std::fs::metadata(&old).unwrap().permissions().readonly(),
+            "still read-only"
+        );
+        drop(held);
+        replace_file(&new, &old).unwrap();
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "nowe");
     }
 
     #[test]
