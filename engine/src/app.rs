@@ -1095,6 +1095,17 @@ impl AppEngine {
         self.core.settings()
     }
 
+    /// The public address in effect right now (no trailing slash, empty: none): the tunnel's
+    /// while it is enabled (empty while it has none), else the manual one. The tray's links.
+    pub fn public_url(&self) -> String {
+        self.core.live_settings.public_url.get()
+    }
+
+    /// The tunnel's state (tray tooltip).
+    pub fn tunnel_state(&self) -> crate::tunnel::TunnelState {
+        self.core.tunnel_state()
+    }
+
     /// The channel loop runs (false: tools missing or broken, the server runs without it).
     pub fn channel_running(&self) -> bool {
         self.core.channel_running()

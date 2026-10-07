@@ -16,7 +16,7 @@
 </main>
 
 <script type="module">
-  import { apiRetry, el, notice, encoderLabel, toolProgressList, TOOL_ORDER, watchToolsJob } from '/static/common.js';
+  import { api, apiRetry, el, notice, sleep, setupCopy, progressBar, setBar, encoderLabel, toolProgressList, TOOL_ORDER, watchToolsJob } from '/static/common.js';
 
   const stepRoot = document.getElementById('step');
   const dots = [...document.querySelectorAll('#steps li')];
@@ -50,7 +50,7 @@
     const status = el('p', { class: 'notice', role: 'status' });
     const next = el('button', { type: 'button', class: 'hidden', onclick: encoder }, 'Dalej');
     const retry = el('button', { type: 'button', class: 'hidden' }, 'Spróbuj ponownie');
-    const later = el('button', { type: 'button', class: 'quiet hidden', onclick: finish }, 'Pomiń i przejdź do panelu');
+    const later = el('button', { type: 'button', class: 'quiet hidden', onclick: () => finish() }, 'Pomiń i przejdź do panelu');
     show(2,
       heading('Pobieranie narzędzi'),
       el('p', {}, 'Pobieram programy, z których korzysta kanał. Nie zamykaj okna.'),
@@ -139,44 +139,106 @@
     run();
   }
 
-  // ---------- 4. VRChat ----------
+  // ---------- 4. Twój kanał w internecie ----------
   function watching() {
-    const port = info?.port ?? 8080;
-    const url = el('input', { type: 'url', name: 'publicUrl', placeholder: 'https://twoja-nazwa.trycloudflare.com', autocomplete: 'off', value: info?.publicUrl ?? '' });
-    const status = el('p', { class: 'notice', role: 'status' });
-    const finishButton = el('button', { type: 'submit' }, 'Zakończ i otwórz panel');
-    const form = el('form', { class: 'stack' },
-      el('label', {}, 'Adres publiczny (możesz go podać później w panelu)', url),
-      status, actions(finishButton));
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      finishButton.disabled = true;
-      try {
-        if (url.value.trim()) await apiRetry('PUT', '/api/desktop/config', { publicUrl: url.value });
-        await finish();
-      } catch (err) {
-        notice(status, err.message, 'err');
-        finishButton.disabled = false;
-      }
-    });
+    const body = el('div', { class: 'stack', 'aria-live': 'polite' });
+    const finishButton = el('button', { type: 'button', onclick: () => leave() }, 'Gotowe');
+    const permanent = el('button', { type: 'button', class: 'quiet', onclick: () => leave('#internet') }, 'Chcę stały link');
+    const retry = el('button', { type: 'button', onclick: tryAgain }, 'Spróbuj ponownie');
+    const skip = el('button', { type: 'button', class: 'quiet', onclick: () => leave() }, 'Pomiń');
+    const buttons = el('div', { class: 'actions' });
     show(4,
-      heading('Jak oglądać w VRChat'),
-      el('ol', { class: 'howto-list' },
-        el('li', {}, 'W VRChat włącz w ustawieniach opcję ', el('strong', {}, 'Allow Untrusted URLs'), ' (zezwalaj na niezaufane adresy). Bez niej odtwarzacz w świecie nie otworzy Twojego kanału.'),
-        el('li', {}, 'Kanał działa na tym komputerze pod adresem ', el('code', {}, `http://127.0.0.1:${port}`), '. Ten adres widzisz tylko Ty, więc VRChat potrzebuje adresu publicznego, dostępnego z internetu.'),
-        el('li', {}, 'Najprościej dostać go z darmowego programu cloudflared. ',
-          el('a', { href: 'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/', target: '_blank', rel: 'noopener' }, 'Pobierz cloudflared'),
-          ', otwórz wiersz poleceń w folderze z plikiem i uruchom: ',
-          el('code', {}, `cloudflared tunnel --url http://127.0.0.1:${port}`),
-          '. Program wypisze adres kończący się na ', el('code', {}, 'trycloudflare.com'), '.'),
-        el('li', {}, 'Wklej ten adres poniżej. Link do wklejenia w odtwarzaczu VRChat zobaczysz potem w panelu, w sekcji „Link kanału”.')),
-      form);
-    url.focus({ preventScroll: true });
+      heading('Twój kanał w internecie'),
+      el('p', {}, 'Program sam łączy kanał z internetem, żeby odtwarzacz w VRChat mógł go otworzyć. Nie musisz niczego instalować ani wpisywać.'),
+      body, buttons);
+
+    let alive = true;
+    let shown = '';
+    async function leave(hash) {
+      try {
+        await finish(hash);
+        alive = false;
+      } catch (err) {
+        body.append(el('p', { class: 'notice err', role: 'alert' }, err.message));
+      }
+    }
+    const wait = progressBar('Łączenie z internetem');
+    setBar(wait, null);
+
+    function linkRow(label, value) {
+      const input = el('input', { type: 'text', readonly: true, value, 'aria-label': label });
+      const copy = el('button', { type: 'button', class: 'quiet' }, 'Kopiuj');
+      setupCopy(input, copy);
+      return el('div', {}, el('div', { class: 'muted small', style: 'margin-bottom:4px' }, label), el('div', { class: 'linkbox' }, input, copy));
+    }
+
+    function render(t) {
+      const key = JSON.stringify([t.state, t.url, t.message]);
+      if (key === shown) return;
+      shown = key;
+      if (t.state === 'online') {
+        body.replaceChildren(
+          el('p', { class: 'notice ok', role: 'status' }, 'Kanał jest w internecie.'),
+          linkRow('Link kanału — wklej go w odtwarzaczu VRChat', `${t.url}/live/main.m3u8`),
+          linkRow('Strona zgłoszeń dla widzów', `${t.url}/`),
+          el('div', { class: 'qr-box' },
+            el('img', { class: 'qr', src: `/api/desktop/tunnel/qr?address=${encodeURIComponent(t.url)}`, alt: 'Kod QR strony zgłoszeń', width: 220, height: 220 }),
+            el('p', { class: 'muted small' }, 'Widzowie mogą zeskanować ten kod telefonem, żeby dodać film.')),
+          el('p', { class: 'muted small' }, 'Ten adres zmienia się przy każdym uruchomieniu programu. Jeśli chcesz mieć stały link, możesz go ustawić teraz albo później w Ustawieniach.'));
+        buttons.replaceChildren(finishButton, permanent);
+        finishButton.focus({ preventScroll: true });
+      } else if (t.state === 'error') {
+        body.replaceChildren(
+          el('p', { class: 'notice err', role: 'alert' }, t.message || 'Nie udało się połączyć z internetem.'),
+          el('p', { class: 'muted small' }, 'Możesz spróbować jeszcze raz albo pominąć ten krok: kanał będzie wtedy działał tylko na tym komputerze, a połączenie ponowisz w Ustawieniach, w sekcji Internet.'));
+        buttons.replaceChildren(retry, skip);
+        retry.disabled = false;
+      } else {
+        body.replaceChildren(el('p', { class: 'notice', role: 'status' }, 'Łączenie z internetem…'), wait);
+        buttons.replaceChildren();
+      }
+    }
+
+    async function poll() {
+      while (alive) {
+        try {
+          render(await api('GET', '/api/desktop/tunnel'));
+        } catch {
+          // serwer chwilowo nie odpowiada: następna próba
+        }
+        await sleep(1000);
+      }
+    }
+
+    async function tryAgain() {
+      retry.disabled = true;
+      shown = '';
+      render({ state: 'connecting' });
+      try {
+        await api('POST', '/api/desktop/tunnel/restart');
+      } catch (err) {
+        shown = '';
+        render({ state: 'error', message: err.message });
+      }
+    }
+
+    async function begin() {
+      render({ state: 'connecting' });
+      try {
+        const c = await apiRetry('GET', '/api/desktop/config');
+        if (!c.tunnelEnabled) await apiRetry('PUT', '/api/desktop/config', { tunnelEnabled: true });
+      } catch (err) {
+        shown = '';
+        render({ state: 'error', message: err.message });
+      }
+      poll();
+    }
+    begin();
   }
 
-  async function finish() {
+  async function finish(hash = '') {
     await apiRetry('POST', '/api/desktop/wizard/complete');
-    location.href = '/admin';
+    location.href = '/admin' + hash;
   }
 
   // ---------- Start ----------

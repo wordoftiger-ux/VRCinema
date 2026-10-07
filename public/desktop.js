@@ -40,9 +40,11 @@ export async function start({ refreshQueue }) {
   block.querySelector('h2').textContent = 'Kanał';
   $('channel-slot').append(block);
 
-  $('channel-hint').textContent = 'Ten link wklejasz do odtwarzacza w VRChat. Musi być adresem publicznym, np. z Cloudflare Tunnel. Adres publiczny ustawisz w zakładce Ustawienia, w sekcji Zaawansowane.';
+  $('channel-hint').textContent = 'Ten link wklejasz do odtwarzacza w VRChat. Adres publiczny pojawia się sam, gdy kanał połączy się z internetem (Ustawienia, sekcja Internet).';
   wireTabs();
+  wireNet();
   wireGeneral();
+  wireInternet();
   wireRemote();
   wireTools();
   wireAdvanced();
@@ -50,7 +52,11 @@ export async function start({ refreshQueue }) {
   wireAbout();
   wireDrop();
   renderBanners();
-  setInterval(refreshInfo, 5000);
+  setInterval(refreshInfo, 3000);
+  if (location.hash === '#internet') {
+    showTab('settings');
+    $('section-internet').scrollIntoView();
+  }
   return true;
 }
 
@@ -86,6 +92,8 @@ async function refreshInfo() {
   }
   updateOffer = info.update;
   renderBanners();
+  renderNet();
+  renderInternet();
 }
 
 function banner(kind, text, ...buttons) {
@@ -141,6 +149,8 @@ async function settle() {
   updateOffer = info.update;
   bannerKey = '';
   renderBanners();
+  renderNet();
+  renderInternet();
   hooks.refreshQueue?.();
 }
 
@@ -200,6 +210,7 @@ function fillConfig() {
   $('cookies-clear').classList.toggle('hidden', !c.ytdlpCookies);
   $('set-pixeldrain').value = c.pixeldrainApiKey ?? '';
   $('set-trust').checked = c.trustCloudflare;
+  renderInternet();
 }
 
 /** Zapisuje część ustawień. Zwraca odpowiedź albo null (błąd pokazany w `target`, widok wraca do zapisanych wartości). */
@@ -241,6 +252,343 @@ function wireGeneral() {
     if (port === config?.port) return notice(n, 'To już jest bieżący port.');
     saveConfig({ port }, n, `Zapisano port ${port}.`);
   });
+}
+
+// ---------- Znacznik połączenia (górna belka panelu) ----------
+
+const NET_LOST = 'Brak internetu — kanał wstrzymany';
+
+/**
+ * Stan połączenia z internetem z odpowiedzi GET /api/desktop/info: rodzaj (kolor kropki), napis, opis
+ * i link kanału do skopiowania (albo null, gdy kanał nie ma adresu publicznego).
+ */
+export function netBadge(i) {
+  const t = i.tunnel ?? { state: 'off' };
+  const reasons = i.pauseReasons ?? [];
+  const lostPause = Boolean(i.paused) && reasons.includes('tunnel');
+  const viewersPause = Boolean(i.paused) && reasons.includes('no_viewers');
+  const link = (base) => `${base}/live/main.m3u8`;
+  if (t.state === 'online') {
+    return { kind: 'online', text: 'W sieci', detail: viewersPause ? 'Kanał wstrzymany — nikt nie ogląda. Wznowi się, gdy ktoś zacznie oglądać.' : '', link: link(t.url) };
+  }
+  if (t.state !== 'off' && lostPause) {
+    return { kind: 'offline', text: NET_LOST, detail: t.message || 'Film wznowi się od tego samego miejsca, gdy wróci połączenie.', link: null };
+  }
+  switch (t.state) {
+    case 'connecting':
+      return { kind: 'connecting', text: 'Łączenie', detail: 'Łączę kanał z internetem…', link: null };
+    case 'reconnecting':
+      return { kind: 'connecting', text: 'Łączenie', detail: 'Połączenie z internetem przerwane — łączę ponownie…', link: null };
+    case 'error':
+      return { kind: 'offline', text: 'Brak internetu', detail: t.message || 'Nie udało się połączyć z internetem.', link: null };
+    default:
+      if (i.publicUrl) return { kind: 'online', text: 'W sieci', detail: 'Adres wpisany ręcznie (tunel jest wyłączony).', link: link(i.publicUrl) };
+      return { kind: 'off', text: 'Tylko lokalnie', detail: 'Tunel jest wyłączony — kanał widać tylko na tym komputerze. Włączysz go w Ustawieniach, w sekcji Internet.', link: null };
+  }
+}
+
+let netLink = null;
+
+function renderNet() {
+  const b = netBadge(info);
+  $('net-badge').dataset.kind = b.kind;
+  $('net-text').textContent = b.text;
+  $('net-detail').textContent = b.detail;
+  netLink = b.link;
+  $('net-copy').classList.toggle('hidden', !b.link);
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const field = el('textarea', { style: 'position:fixed;opacity:0' });
+    field.value = text;
+    document.body.append(field);
+    field.select();
+    document.execCommand('copy');
+    field.remove();
+  }
+}
+
+function wireNet() {
+  $('net-copy').addEventListener('click', async (e) => {
+    if (!netLink) return;
+    const button = e.currentTarget;
+    await copyText(netLink);
+    button.textContent = 'Skopiowano';
+    setTimeout(() => (button.textContent = 'Kopiuj link'), 1500);
+  });
+  renderNet();
+}
+
+// ---------- Internet (tunel, stały link, wstrzymywanie) ----------
+
+const TUNNEL_STATE_TEXT = {
+  off: 'Tunel jest wyłączony.',
+  connecting: 'Łączenie z internetem…',
+  online: 'W sieci.',
+  reconnecting: 'Połączenie przerwane — łączę ponownie…',
+  error: 'Brak internetu.',
+};
+const NAMED_HELP = 'Stały link pozwala mieć ten sam adres po każdym uruchomieniu programu. Potrzebujesz darmowego konta Cloudflare z dodaną własną domeną.';
+
+let internetKey = '';
+let confirmDelete = false;
+let namedRun = 0; // numer kreatora: zmiana przerywa pętle odpytywania poprzedniego
+
+function renderInternet() {
+  if (!config) return;
+  const t = info.tunnel ?? { state: 'off' };
+  const on = config.tunnelEnabled;
+  $('set-tunnel').checked = on;
+  $('set-pause-loss').checked = config.pauseOnTunnelLoss;
+  $('set-pause-viewers').checked = config.pauseWhenNoViewers;
+  $('tunnel-on').classList.toggle('hidden', !on);
+  notice($('tunnel-warning'), on && t.warning ? t.warning : '', 'err');
+  // Ręczny adres i zaufanie do Cloudflare mają sens tylko bez tunelu.
+  $('public-url-form').classList.toggle('hidden', on);
+  $('trust-row').classList.toggle('hidden', on);
+  $('manual-hint').classList.toggle('hidden', !on);
+
+  const named = config.tunnelMode === 'named';
+  const host = config.namedTunnelHostname;
+  const key = JSON.stringify([on, t.state, t.url, t.message, named, host, confirmDelete]);
+  if (key === internetKey) return;
+  internetKey = key;
+
+  $('tunnel-state').textContent = TUNNEL_STATE_TEXT[t.state] ?? t.state;
+  $('tunnel-address').textContent = t.url ? `Adres kanału: ${t.url}` : t.message ? `Powód: ${t.message}` : '';
+  $('tunnel-mode-text').textContent = named && host
+    ? `Stały link: https://${host}. Adres się nie zmienia.`
+    : 'Szybki link: adres jest losowy (trycloudflare.com) i zmienia się przy każdym uruchomieniu programu.';
+
+  const actions = [];
+  if (confirmDelete) {
+    actions.push(
+      el('p', { class: 'small', style: 'flex:1 1 100%;margin:0' }, 'Usunąć stały link? Tunel zostanie usunięty z konta Cloudflare, a certyfikat i poświadczenia z tego komputera. Jeśli rekord DNS tej nazwy zostanie na koncie, usuń go ręcznie w panelu Cloudflare.'),
+      el('button', { type: 'button', class: 'danger fit', onclick: () => namedAction('delete') }, 'Usuń stały link'),
+      el('button', { type: 'button', class: 'quiet fit', onclick: () => { confirmDelete = false; renderInternet(); } }, 'Anuluj'));
+  } else if (named) {
+    actions.push(el('button', { type: 'button', class: 'quiet fit', onclick: () => namedAction('quick') }, 'Wróć do szybkiego tunelu'));
+  } else if (host) {
+    actions.push(el('button', { type: 'button', class: 'quiet fit', onclick: backToNamed }, `Wróć do stałego linku (${host})`));
+  } else {
+    actions.push(el('button', { type: 'button', class: 'fit', onclick: openNamedWizard }, 'Ustaw stały link'));
+  }
+  if (!confirmDelete && host) {
+    actions.push(el('button', { type: 'button', class: 'danger fit', onclick: () => { confirmDelete = true; renderInternet(); } }, 'Usuń stały link'));
+  }
+  $('tunnel-mode-actions').replaceChildren(...actions);
+}
+
+function wireInternet() {
+  const n = $('internet-notice');
+  $('set-tunnel').addEventListener('change', (e) =>
+    saveConfig({ tunnelEnabled: e.target.checked }, n, e.target.checked ? 'Tunel jest włączony — łączę z internetem.' : 'Tunel jest wyłączony. Kanał działa tylko lokalnie albo pod adresem z sekcji Zaawansowane.'));
+  $('set-pause-loss').addEventListener('change', (e) =>
+    saveConfig({ pauseOnTunnelLoss: e.target.checked }, n, e.target.checked ? 'Kanał będzie wstrzymany, gdy zniknie internet.' : 'Kanał nie będzie wstrzymywany po utracie internetu.'));
+  $('set-pause-viewers').addEventListener('change', (e) =>
+    saveConfig({ pauseWhenNoViewers: e.target.checked }, n, e.target.checked ? 'Kanał będzie wstrzymany, gdy nikt nie ogląda.' : 'Kanał nie będzie wstrzymywany, gdy nikt nie ogląda.'));
+  $('tunnel-restart').addEventListener('click', async (e) => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    notice(n, 'Łączę ponownie…');
+    try {
+      await api('POST', '/api/desktop/tunnel/restart');
+      notice(n, 'Tunel uruchomiony ponownie. Szybki link dostaje wtedy nowy adres.', 'ok');
+      await settle();
+    } catch (err) {
+      notice(n, err.message, 'err');
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+async function backToNamed() {
+  await saveConfig({ tunnelMode: 'named' }, $('internet-notice'), 'Działa stały link.');
+}
+
+/** „Wróć do szybkiego tunelu” (`quick`) i „Usuń stały link” (`delete`). */
+async function namedAction(kind) {
+  const n = $('internet-notice');
+  notice(n, kind === 'delete' ? 'Usuwam stały link…' : 'Przełączam na szybki tunel…');
+  try {
+    const r = await api('POST', `/api/desktop/tunnel/named/${kind}`);
+    notice(n, r.message, 'ok');
+  } catch (err) {
+    notice(n, err.message, 'err');
+  }
+  confirmDelete = false;
+  closeNamedWizard();
+  await Promise.all([loadConfig(), settle()]);
+}
+
+// ----- Kreator stałego linku -----
+
+const wizardStep = () => $('named-step');
+const namedNotice = (text, kind) => notice($('named-notice'), text, kind);
+
+function closeNamedWizard() {
+  namedRun++;
+  $('named-wizard').classList.add('hidden');
+  wizardStep().replaceChildren();
+  namedNotice('');
+}
+
+async function openNamedWizard() {
+  const run = ++namedRun;
+  $('named-wizard').classList.remove('hidden');
+  $('named-wizard').scrollIntoView({ block: 'nearest' });
+  namedNotice('');
+  let p;
+  try {
+    p = await apiRetry('GET', '/api/desktop/tunnel/named/progress');
+  } catch (err) {
+    return namedNotice(err.message, 'err');
+  }
+  if (run !== namedRun) return;
+  if (p.running && p.operation === 'login') return watchLogin(run);
+  if (p.loggedIn) return stepHost(run);
+  stepLogin(run);
+}
+
+function stepLogin(run, retry = false) {
+  wizardStep().replaceChildren(
+    el('p', {}, NAMED_HELP),
+    el('p', {}, 'Krok 1 z 2. Otworzę stronę Cloudflare, na której zalogujesz się i wybierzesz domenę dla kanału.'),
+    el('div', { class: 'row' },
+      el('button', { type: 'button', class: 'fit', onclick: () => startLogin(run) }, retry ? 'Spróbuj ponownie' : 'Połącz z Cloudflare'),
+      el('button', { type: 'button', class: 'quiet fit', onclick: closeNamedWizard }, 'Anuluj')));
+}
+
+async function startLogin(run) {
+  namedNotice('');
+  try {
+    await api('POST', '/api/desktop/tunnel/named/login');
+  } catch (err) {
+    // „busy”: logowanie już trwa — tylko je obserwujemy.
+    if (err.data?.code !== 'busy') return failedLogin(run, err.message);
+  }
+  watchLogin(run);
+}
+
+function failedLogin(run, message, helpUrl) {
+  if (run !== namedRun) return;
+  stepLogin(run, true);
+  namedNotice(message, 'err');
+  if (helpUrl) $('named-notice').append(' ', el('a', { href: helpUrl, target: '_blank', rel: 'noopener' }, 'Jak to zrobić'));
+}
+
+async function watchLogin(run) {
+  const msg = el('p', { class: 'notice', role: 'status' }, 'Uruchamiam logowanie…');
+  const link = el('p', { class: 'hidden small' });
+  wizardStep().replaceChildren(
+    el('p', {}, 'Krok 1 z 2. Zaloguj się w Cloudflare i wybierz domenę w otwartym oknie przeglądarki. Masz na to 5 minut.'),
+    msg, link,
+    el('div', { class: 'row' },
+      el('button', { type: 'button', class: 'quiet fit', onclick: cancelLogin }, 'Anuluj')));
+  let opened = false;
+  let bad = 0;
+  for (;;) {
+    await sleep(1000);
+    if (run !== namedRun) return;
+    let p;
+    try {
+      p = await api('GET', '/api/desktop/tunnel/named/progress');
+      bad = 0;
+    } catch (err) {
+      if (++bad > 20) return failedLogin(run, err.message);
+      continue;
+    }
+    if (run !== namedRun) return;
+    msg.textContent = p.message || 'Czekam na logowanie…';
+    if (p.loginUrl) {
+      link.classList.remove('hidden');
+      link.replaceChildren('Jeśli strona się nie otworzyła: ', el('a', { href: p.loginUrl, target: '_blank', rel: 'noopener' }, 'otwórz stronę logowania'));
+      // Gdy cloudflared sam otworzył przeglądarkę, okno tego nie powtarza.
+      if (p.browserOpened === false && !opened) {
+        opened = true;
+        window.open(p.loginUrl, '_blank', 'noopener');
+      }
+    }
+    if (p.running) continue;
+    if (p.state === 'done' || p.loggedIn) return stepHost(run);
+    const text = p.state === 'cancelled' ? 'Logowanie przerwane.' : p.message || 'Logowanie się nie udało.';
+    return failedLogin(run, text, p.helpUrl);
+  }
+}
+
+async function cancelLogin() {
+  try {
+    await api('POST', '/api/desktop/tunnel/named/login', { cancel: true });
+  } catch {
+    // postęp pokaże, co się stało
+  }
+}
+
+function stepHost(run, previous = '') {
+  const host = el('input', { type: 'text', id: 'named-host', placeholder: 'kanal.twojadomena.pl', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', required: true, value: previous });
+  const form = el('form', { class: 'stack' },
+    el('p', {}, 'Krok 2 z 2. Wpisz pełny adres, pod którym ma działać kanał. Domena musi być na Twoim koncie Cloudflare.'),
+    el('div', { class: 'row' },
+      el('label', { class: 'grow' }, 'Adres stałego linku (np. kanal.twojadomena.pl)', host),
+      el('button', { type: 'submit', class: 'fit' }, 'Utwórz stały link')),
+    el('div', { class: 'row' }, el('button', { type: 'button', class: 'quiet fit', onclick: closeNamedWizard }, 'Anuluj')));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    createNamed(run, host.value.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, ''), false, form);
+  });
+  wizardStep().replaceChildren(form);
+  host.focus({ preventScroll: true });
+}
+
+async function createNamed(run, hostname, overwrite, form) {
+  form.querySelectorAll('button, input').forEach((c) => (c.disabled = true));
+  namedNotice('Tworzę stały link…');
+  let working = true;
+  (async () => {
+    while (working && run === namedRun) {
+      await sleep(1000);
+      try {
+        const p = await api('GET', '/api/desktop/tunnel/named/progress');
+        if (working && p.running && p.message) namedNotice(p.message);
+      } catch {
+        // chwilowo bez odpowiedzi
+      }
+    }
+  })();
+  try {
+    const r = await api('POST', '/api/desktop/tunnel/named/create', { hostname, overwrite });
+    working = false;
+    if (run !== namedRun) return;
+    wizardStep().replaceChildren(el('p', {}, `Gotowe. Kanał ma teraz stały adres: https://${r.tunnel?.hostname ?? hostname}`));
+    namedNotice(r.message, 'ok');
+    await Promise.all([loadConfig(), settle()]);
+  } catch (err) {
+    working = false;
+    if (run !== namedRun) return;
+    const code = err.data?.code;
+    if (code === 'not_logged_in') {
+      stepLogin(run, true);
+      return namedNotice(err.message, 'err');
+    }
+    if (code === 'dns_taken') {
+      namedNotice('');
+      return wizardStep().replaceChildren(
+        el('p', { class: 'notice err', role: 'alert' }, err.message),
+        el('p', {}, `Nazwa ${hostname} ma już w Cloudflare inny rekord DNS. Nadpisać go, żeby wskazywał na ten kanał?`),
+        el('div', { class: 'row' },
+          el('button', { type: 'button', class: 'fit', onclick: (e) => createNamed(run, hostname, true, e.currentTarget.closest('#named-step')) }, 'Nadpisz rekord'),
+          el('button', { type: 'button', class: 'quiet fit', onclick: () => { namedNotice(''); stepHost(run, hostname); } }, 'Wybierz inną nazwę')));
+    }
+    stepHost(run, hostname);
+    namedNotice(err.message, 'err');
+    if (code === 'no_domain' && err.data?.helpUrl) {
+      $('named-notice').append(' ', el('a', { href: err.data.helpUrl, target: '_blank', rel: 'noopener' }, 'Jak dodać domenę'));
+    }
+  }
 }
 
 // ---------- Panel zdalny ----------
@@ -348,7 +696,7 @@ function wireAdvanced() {
   const n = $('advanced-notice');
   $('public-url-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    saveConfig({ publicUrl: $('set-public-url').value }, n, 'Zapisano adres publiczny. Pojawi się w linku kanału po ponownym uruchomieniu kanału.');
+    saveConfig({ publicUrl: $('set-public-url').value }, n, 'Zapisano adres publiczny.');
   });
   $('cookies-pick').addEventListener('click', async () => {
     notice(n, 'Wybierz plik w oknie, które się otworzyło…');

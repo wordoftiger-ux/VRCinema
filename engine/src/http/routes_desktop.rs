@@ -6,6 +6,7 @@
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Map, Value, json};
@@ -15,6 +16,7 @@ use super::{
 };
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
 use crate::app_settings::TunnelModeSetting;
+use crate::pipeline::slates::request_url;
 use crate::tools::Tool;
 use crate::tunnel::TunnelState;
 use crate::tunnel::named::{ADD_DOMAIN_HELP, ErrorCode, NamedError, Phase};
@@ -40,6 +42,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/desktop/wizard/complete", post(wizard_complete))
         .route("/api/desktop/restart", post(restart))
         .route("/api/desktop/tunnel", get(tunnel))
+        .route("/api/desktop/tunnel/qr", get(tunnel_qr))
         .route("/api/desktop/tunnel/restart", post(tunnel_restart))
         .route("/api/desktop/tunnel/named/login", post(named_login))
         .route("/api/desktop/tunnel/named/progress", get(named_progress))
@@ -435,6 +438,30 @@ async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult 
 async fn tunnel(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     Ok(json_ok(&tunnel_view(&core)))
+}
+
+/// The QR code (PNG) of the request page at the public address in effect, for the wizard; 404
+/// while there is no address.
+async fn tunnel_qr(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    let address = core.live_settings.public_url.get();
+    if address.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "Kanał nie ma jeszcze adresu publicznego.",
+        ));
+    }
+    let png = crate::pipeline::slates::qr_png(&request_url(&address)).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Nie udało się narysować kodu QR: {e}"),
+        )
+    })?;
+    Ok((
+        [(CONTENT_TYPE, "image/png"), (CACHE_CONTROL, "no-store")],
+        png,
+    )
+        .into_response())
 }
 
 /// A new cloudflared (a quick tunnel gets a new address); 409 while the tunnel is off.

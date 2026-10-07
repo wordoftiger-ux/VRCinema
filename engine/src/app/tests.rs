@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 22] = [
+const ROUTES: [(&str, &str); 23] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -33,6 +33,7 @@ const ROUTES: [(&str, &str); 22] = [
     ("POST", "/api/desktop/wizard/complete"),
     ("POST", "/api/desktop/restart"),
     ("GET", "/api/desktop/tunnel"),
+    ("GET", "/api/desktop/tunnel/qr"),
     ("POST", "/api/desktop/tunnel/restart"),
     ("POST", "/api/desktop/tunnel/named/login"),
     ("GET", "/api/desktop/tunnel/named/progress"),

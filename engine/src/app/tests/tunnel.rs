@@ -447,6 +447,58 @@ async fn without_cloudflared_the_tunnel_shows_why_and_the_app_runs_on() {
 }
 
 #[tokio::test]
+async fn the_qr_route_draws_the_request_page_of_the_address_in_effect() {
+    let app = start(Setup {
+        settings: json!({"publicUrl": "https://reczny.example.com"}),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    wait_online(&app, &cookie).await;
+    let expected = format!("https://{QUICK_HOST}");
+    assert_eq!(app.engine().public_url(), expected);
+    let res = app
+        .http
+        .get(app.url("/api/desktop/tunnel/qr"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["content-type"], "image/png");
+    let png = app.tmp.path().join("qr.png");
+    std::fs::write(&png, res.bytes().await.unwrap()).unwrap();
+    assert_eq!(decode_qr(&png), [format!("{expected}/")]);
+
+    // Tunnel off: the manual address is in effect.
+    let (status, _) = app
+        .put_config(&cookie, json!({"tunnelEnabled": false}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(app.engine().public_url(), "https://reczny.example.com");
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn the_qr_route_has_nothing_to_draw_without_an_address() {
+    let app = start(Setup {
+        runs: None,
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    let cookie = app.window_cookie().await;
+    assert_eq!(app.engine().public_url(), "");
+    let (status, body) = app
+        .call("GET", "/api/desktop/tunnel/qr", Some(&cookie), None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("adres"), "{body}");
+    app.stop().await;
+}
+
+#[tokio::test]
 async fn the_restart_route_starts_a_new_cloudflared_and_needs_the_tunnel_on() {
     let app = start(Setup::default()).await.unwrap();
     let cookie = app.window_cookie().await;

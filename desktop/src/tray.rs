@@ -8,6 +8,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+use vrcinema::tunnel::TunnelState;
+
 use crate::Shell;
 
 const TRAY_ID: &str = "main";
@@ -80,12 +82,46 @@ pub fn submit_link(public_url: &str, port: u16) -> String {
     format!("{}/", base_url(public_url, port))
 }
 
+/// Whether the channel is reachable from the internet, as the tray tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Net {
+    Online,
+    Connecting,
+    Offline,
+}
+
+impl Net {
+    fn text(self) -> &'static str {
+        match self {
+            Net::Online => "W sieci",
+            Net::Connecting => "Łączenie z internetem",
+            Net::Offline => "Brak internetu",
+        }
+    }
+}
+
+/// The tray's view of the tunnel: `None` while it is switched off (nothing to say).
+pub fn net_status(tunnel_enabled: bool, state: &TunnelState) -> Option<Net> {
+    if !tunnel_enabled {
+        return None;
+    }
+    Some(match state {
+        TunnelState::Online { .. } => Net::Online,
+        TunnelState::Connecting => Net::Connecting,
+        TunnelState::Off | TunnelState::Reconnecting | TunnelState::Error { .. } => Net::Offline,
+    })
+}
+
 /// Tooltip of the tray icon, short enough for Windows (a long title is cut with "…").
-pub fn tooltip_text(now_playing: Option<&str>) -> String {
-    let Some(title) = now_playing.map(str::trim).filter(|t| !t.is_empty()) else {
-        return "VRCinema — przerwa".to_string();
+pub fn tooltip_text(net: Option<Net>, now_playing: Option<&str>) -> String {
+    let head = match net {
+        Some(net) => format!("VRCinema — {}", net.text()),
+        None => "VRCinema".to_string(),
     };
-    let text = format!("VRCinema — teraz leci: {title}");
+    let Some(title) = now_playing.map(str::trim).filter(|t| !t.is_empty()) else {
+        return format!("{head} — przerwa");
+    };
+    let text = format!("{head} — teraz leci: {title}");
     if text.encode_utf16().count() <= TOOLTIP_MAX_UNITS {
         return text;
     }
@@ -100,6 +136,17 @@ pub fn tooltip_text(now_playing: Option<&str>) -> String {
     }
     cut.push('…');
     cut
+}
+
+/// What "Kopiuj link kanału" and "Kopiuj link strony zgłoszeń" copy: the link at the address in
+/// effect (the tunnel's or the manual one, else the local server); with the tunnel switched on
+/// but without any address (not online), a note that the link works only on this computer.
+pub fn copied_link(link: String, tunnel_enabled: bool, public_url: &str) -> String {
+    if tunnel_enabled && public_url.trim().is_empty() {
+        format!("{link} (brak internetu)")
+    } else {
+        link
+    }
 }
 
 /// Creates the tray icon with its menu; left click opens the panel.
@@ -118,7 +165,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         )?)?;
     }
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip(tooltip_text(None))
+        .tooltip(tooltip_text(None, None))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(on_menu_event)
@@ -147,8 +194,8 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match action {
         TrayAction::OpenPanel => crate::window::open_panel(app),
         TrayAction::CopyChannelLink | TrayAction::CopySubmitLink => {
-            let Some((public_url, port)) =
-                shell.with_engine(|e| (e.settings().public_url, e.port()))
+            let Some((public_url, port, tunnel_enabled)) =
+                shell.with_engine(|e| (e.public_url(), e.port(), e.settings().tunnel_enabled))
             else {
                 return;
             };
@@ -157,6 +204,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             } else {
                 submit_link(&public_url, port)
             };
+            let link = copied_link(link, tunnel_enabled, &public_url);
             if let Err(e) = app.clipboard().write_text(link) {
                 shell.log(&format!("Nie udało się skopiować linku: {e}"));
             }
@@ -177,7 +225,10 @@ pub fn spawn_tooltip_refresh(app: AppHandle) {
                 let shell = app.state::<Shell>();
                 let engine = shell.engine.read().await;
                 match engine.as_ref() {
-                    Some(engine) => tooltip_text(engine.now_playing().as_deref()),
+                    Some(engine) => tooltip_text(
+                        net_status(engine.settings().tunnel_enabled, &engine.tunnel_state()),
+                        engine.now_playing().as_deref(),
+                    ),
                     None => return, // quitting
                 }
             };
@@ -319,10 +370,10 @@ mod tests {
 
     #[test]
     fn tooltip_shows_the_film_or_the_break() {
-        assert_eq!(tooltip_text(None), "VRCinema — przerwa");
-        assert_eq!(tooltip_text(Some("")), "VRCinema — przerwa");
+        assert_eq!(tooltip_text(None, None), "VRCinema — przerwa");
+        assert_eq!(tooltip_text(None, Some("")), "VRCinema — przerwa");
         assert_eq!(
-            tooltip_text(Some("Odcinek 1")),
+            tooltip_text(None, Some("Odcinek 1")),
             "VRCinema — teraz leci: Odcinek 1"
         );
     }
@@ -330,14 +381,67 @@ mod tests {
     #[test]
     fn long_titles_are_cut_to_fit_windows() {
         let title = "ż".repeat(300);
-        let text = tooltip_text(Some(&title));
+        let text = tooltip_text(Some(Net::Online), Some(&title));
         assert_eq!(text.encode_utf16().count(), TOOLTIP_MAX_UNITS);
-        assert!(text.starts_with("VRCinema — teraz leci: żż"));
+        assert!(text.starts_with("VRCinema — W sieci — teraz leci: żż"));
         assert!(text.ends_with('…'));
         // Characters outside the BMP (two UTF-16 units) are never split.
         let emoji = "🎬".repeat(100);
-        let text = tooltip_text(Some(&emoji));
+        let text = tooltip_text(Some(Net::Offline), Some(&emoji));
         assert!(text.encode_utf16().count() <= TOOLTIP_MAX_UNITS);
         assert!(text.ends_with('…'));
+    }
+    #[test]
+    fn tooltip_tells_whether_the_channel_is_online() {
+        assert_eq!(
+            tooltip_text(Some(Net::Online), None),
+            "VRCinema — W sieci — przerwa"
+        );
+        assert_eq!(
+            tooltip_text(Some(Net::Offline), Some("Odcinek 1")),
+            "VRCinema — Brak internetu — teraz leci: Odcinek 1"
+        );
+        assert_eq!(
+            tooltip_text(Some(Net::Connecting), None),
+            "VRCinema — Łączenie z internetem — przerwa"
+        );
+    }
+
+    #[test]
+    fn the_net_status_follows_the_tunnel_and_is_silent_when_it_is_off() {
+        let online = TunnelState::Online {
+            url: "https://a.trycloudflare.com".into(),
+        };
+        let error = TunnelState::Error {
+            message: "brak cloudflared".into(),
+        };
+        assert_eq!(net_status(false, &online), None);
+        assert_eq!(net_status(false, &TunnelState::Off), None);
+        assert_eq!(net_status(true, &online), Some(Net::Online));
+        assert_eq!(
+            net_status(true, &TunnelState::Connecting),
+            Some(Net::Connecting)
+        );
+        assert_eq!(
+            net_status(true, &TunnelState::Reconnecting),
+            Some(Net::Offline)
+        );
+        assert_eq!(net_status(true, &error), Some(Net::Offline));
+    }
+
+    #[test]
+    fn a_link_without_an_address_is_marked_when_the_tunnel_is_on() {
+        let local = channel_link("", 8181);
+        assert_eq!(
+            copied_link(local.clone(), true, ""),
+            "http://127.0.0.1:8181/live/main.m3u8 (brak internetu)"
+        );
+        // Tunnel off: the local link as before; with an address: the link as it is.
+        assert_eq!(copied_link(local.clone(), false, ""), local);
+        let public = channel_link("https://a.trycloudflare.com", 8181);
+        assert_eq!(
+            copied_link(public.clone(), true, "https://a.trycloudflare.com"),
+            public
+        );
     }
 }

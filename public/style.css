@@ -67,6 +67,8 @@ a { color: var(--amber); }
 .tally[data-status='playing'] { color: var(--text); }
 .tally[data-status='playing']::before { background: var(--tally); box-shadow: 0 0 0 4px rgb(255 84 104 / 0.18); }
 .tally[data-status='buffering']::before { background: var(--amber); }
+.tally[data-status='paused'] { color: var(--text); }
+.tally[data-status='paused']::before { background: var(--amber); box-shadow: 0 0 0 4px rgb(242 184 75 / 0.18); }
 
 /* ---------- Monitor programu ---------- */
 .monitor {
@@ -316,6 +318,34 @@ pre.log {
 .wizard ol.howto-list { padding-left: 1.3em; margin: 0 0 16px; }
 .wizard ol.howto-list li { margin-bottom: 10px; }
 code { font: 0.9em ui-monospace, Consolas, monospace; background: var(--panel-2); padding: 2px 6px; border-radius: 5px; overflow-wrap: anywhere; }
+
+/* Znacznik połączenia z internetem (panel) */
+.net-badge {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 16px;
+  margin: 0 0 12px;
+}
+.net-badge .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
+.net-badge[data-kind='online'] .dot { background: var(--ok); }
+.net-badge[data-kind='connecting'] .dot { background: var(--amber); }
+.net-badge[data-kind='offline'] .dot { background: var(--tally); }
+.net-badge strong { font-weight: 700; }
+.net-badge .detail { color: var(--muted); font-size: 0.92rem; flex: 1 1 220px; overflow-wrap: anywhere; }
+.net-badge button { margin-left: auto; }
+
+/* Internet: ustawienia i kreator stałego linku */
+.sub-block { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+.sub-block h3 { margin: 0 0 8px; font-size: 1rem; font-family: var(--display); }
+.qr-box { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+img.qr { background: #fff; border-radius: 8px; image-rendering: pixelated; }
+.qr-box p { flex: 1 1 200px; margin: 0; }
+.wizard .linkbox input { min-width: 0; }
 
 @media (max-width: 520px) {
   .tabs button { padding: 10px 12px; }

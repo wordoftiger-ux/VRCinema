@@ -32,6 +32,12 @@
       </div>
     </header>
 
+    <div id="net-badge" class="net-badge app-only" data-kind="off" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span>
+      <strong id="net-text">Tylko lokalnie</strong>
+      <span class="detail" id="net-detail"></span>
+      <button type="button" class="quiet fit hidden" id="net-copy">Kopiuj link</button>
+    </div>
     <div id="app-banners" class="app-only"></div>
     <p class="notice app-only" id="drop-notice" role="status"></p>
     <nav class="tabs app-only" role="tablist">
@@ -159,6 +165,42 @@
         </div>
       </section>
 
+      <section class="settings-block" id="section-internet">
+        <h2>Internet</h2>
+        <div class="stack">
+          <label class="check"><input type="checkbox" id="set-tunnel"> Udostępniaj kanał w internecie (wbudowany tunel Cloudflare)</label>
+          <p class="muted small">Program sam łączy się z internetem i podaje gotowy adres kanału dla VRChat. Po wyłączeniu kanał działa tylko na tym komputerze (albo pod adresem wpisanym ręcznie w sekcji Zaawansowane).</p>
+          <p class="notice" id="tunnel-warning" role="status"></p>
+          <div id="tunnel-on" class="stack">
+            <div class="kv">
+              <span class="name" id="tunnel-state">—</span>
+              <button type="button" class="quiet fit" id="tunnel-restart">Połącz ponownie</button>
+            </div>
+            <p class="muted small" id="tunnel-address"></p>
+
+            <div class="sub-block">
+              <h3>Rodzaj linku</h3>
+              <p id="tunnel-mode-text" style="margin:0 0 10px"></p>
+              <div class="row" id="tunnel-mode-actions"></div>
+            </div>
+
+            <div class="sub-block hidden" id="named-wizard">
+              <h3>Stały link</h3>
+              <div id="named-step"></div>
+              <p class="notice" id="named-notice" role="status"></p>
+            </div>
+
+            <div class="sub-block">
+              <h3>Wstrzymywanie kanału</h3>
+              <label class="check"><input type="checkbox" id="set-pause-loss"> Wstrzymaj, gdy zniknie internet</label>
+              <label class="check" style="margin-top:10px"><input type="checkbox" id="set-pause-viewers"> Wstrzymaj, gdy nikt nie ogląda</label>
+              <p class="muted small" style="margin-top:8px">Wstrzymany film wznawia się od tego samego miejsca. Transmisje na żywo nie są wstrzymywane.</p>
+            </div>
+          </div>
+          <p class="notice" id="internet-notice" role="status"></p>
+        </div>
+      </section>
+
       <div id="channel-slot"></div>
 
       <section class="settings-block">
@@ -189,6 +231,7 @@
       <section class="settings-block">
         <h2>Zaawansowane</h2>
         <div class="stack">
+          <p class="muted small hidden" id="manual-hint">Adres ręczny i zaufanie do Cloudflare ustawisz po wyłączeniu tunelu w sekcji Internet — przy włączonym tunelu adres podaje program.</p>
           <form id="public-url-form" class="row">
             <label class="grow">Adres publiczny kanału
               <input type="url" id="set-public-url" placeholder="https://twoja-nazwa.trycloudflare.com">
@@ -209,7 +252,7 @@
             </label>
             <button type="submit" class="fit">Zapisz</button>
           </form>
-          <label class="check"><input type="checkbox" id="set-trust"> Ufaj nagłówkom Cloudflare (potrzebne, gdy kanał działa za Cloudflare Tunnel i ma widzieć prawdziwe adresy widzów)</label>
+          <label class="check" id="trust-row"><input type="checkbox" id="set-trust"> Ufaj nagłówkom Cloudflare (potrzebne, gdy kanał działa za Cloudflare Tunnel i ma widzieć prawdziwe adresy widzów)</label>
           <p class="notice" id="advanced-notice" role="status"></p>
         </div>
       </section>

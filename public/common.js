@@ -40,6 +40,7 @@ export async function api(method, url, body) {
   if (!res.ok) {
     const err = new Error(data?.error || `Błąd ${res.status}`);
     err.status = res.status;
+    err.data = data; // reszta odpowiedzi błędu (np. `code`, `helpUrl` kreatora stałego linku)
     throw err;
   }
   return data;
@@ -50,6 +51,7 @@ const STATUS_TEXT = {
   buffering: 'Ładowanie filmu',
   starting: 'Ładowanie filmu',
   idle: 'Przerwa',
+  paused: 'Wstrzymane',
 };
 
 /** Wypełnia monitor programu: lampka, tytuł, wskaźnik postępu. */
