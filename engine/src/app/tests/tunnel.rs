@@ -113,6 +113,7 @@ struct Setup {
     auto_pause: AutoPauseTimings,
     /// The named tunnel's files in `<home>/tunnel` (as the wizard leaves them).
     named_files: bool,
+    tunnel: TunnelTimings,
 }
 
 impl Default for Setup {
@@ -123,6 +124,7 @@ impl Default for Setup {
             tools: false,
             auto_pause: AutoPauseTimings::default(),
             named_files: false,
+            tunnel: fast_tunnel(),
         }
     }
 }
@@ -152,7 +154,7 @@ async fn start(setup: Setup) -> Option<App> {
         if setup.tools {
             linked = link_real_tools(home);
         }
-        options.tunnel_timings = fast_tunnel();
+        options.tunnel_timings = setup.tunnel;
         options.auto_pause_timings = setup.auto_pause;
     })
     .await;
@@ -721,6 +723,64 @@ async fn a_reason_cleared_during_a_server_restart_is_resumed_on_the_new_channel(
     app.stop().await;
 }
 
+/// Fix round 3: the quick cloudflared dies while the state is already `Reconnecting` (killed
+/// after `reconnect_limit`; the next one never gets an address): the state does not change,
+/// but its address is dead — the public address is cleared and the slates say "Łączenie z
+/// internetem…".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
+    let Some(app) = start(Setup {
+        tools: true,
+        runs: Some(json!([
+            { "hostname": QUICK_HOST, "ready_down": [[6000, 600000]] },
+            { "hostname": "" }
+        ])),
+        tunnel: TunnelTimings {
+            reconnect_limit: Duration::from_millis(1500),
+            ..fast_tunnel()
+        },
+        ..Setup::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let cookie = app.window_cookie().await;
+    wait_online(&app, &cookie).await;
+    let slates = app.home.join("data").join("slates");
+    eventually(90, "the slates for the tunnel address", || async {
+        slates.join("g1").join("idle").join("qr.png").is_file()
+    })
+    .await;
+    let core = Arc::clone(&app.engine().core);
+    eventually(20, "the second cloudflared", || async {
+        fake_starts(&app.home).len() >= 2
+    })
+    .await;
+    eventually(5, "the dead address cleared", || async {
+        core.live_settings.public_url.get().is_empty()
+    })
+    .await;
+    assert_ne!(
+        core.tunnel_state(),
+        TunnelState::Online {
+            url: format!("https://{QUICK_HOST}")
+        }
+    );
+    eventually(90, "the connecting slates", || async {
+        slates.join("g2").join("idle").join("title.txt").is_file()
+            && !slates.join("g2").join("idle").join("qr.png").exists()
+    })
+    .await;
+    if std::path::Path::new("C:/Windows/Fonts/arial.ttf").exists() {
+        assert_eq!(
+            std::fs::read_to_string(slates.join("g2").join("idle").join("subtitle.txt")).unwrap(),
+            "Łączenie z internetem…"
+        );
+    }
+    app.stop().await;
+}
+
 // ---------- Named tunnel ----------
 
 #[tokio::test]
@@ -879,6 +939,7 @@ async fn no_viewers_pause_survive_a_restart_and_a_segment_fetch_resumes_at_once(
             ..AutoPauseTimings::default()
         },
         named_files: false,
+        tunnel: fast_tunnel(),
     })
     .await
     else {

@@ -210,8 +210,17 @@ impl AppCore {
     /// Publishes the state the window sees (and the automatic pause follows); a change puts
     /// the address in effect and refreshes the slates.
     pub(crate) fn update_tunnel_view(self: &Arc<Self>) {
+        // The address in effect can change without the state (a quick cloudflared dies while
+        // already `Reconnecting`): that is a change for the links and the slates too.
+        let mut address_changed = false;
         // Worked out under the view's lock, so a stale view never overwrites a newer one.
-        let changed = self.tunnel_view.send_if_modified(|view| {
+        let view_changed = self.tunnel_view.send_if_modified(|view| {
+            // The count first, then the state: the manager raises the count before it sends
+            // the state that follows a process's end, so a state read after the count is never
+            // older than it. (Read the other way round, an `Online` read just before an exit
+            // could be stamped with the count after it, and its dead address kept.) A count
+            // that is older than the state read is corrected by the notification that follows.
+            let ended = self.tunnel.runs_ended();
             let fresh = if !self.settings().tunnel_enabled {
                 TunnelState::Off
             } else if let Some(why) = lock(&self.tunnel_notes).blocked.clone() {
@@ -221,11 +230,11 @@ impl AppCore {
             };
             // The address in effect follows the state: a short loss keeps it while it still
             // leads to the channel (the same cloudflared, or a named tunnel's fixed host).
-            let ended = self.tunnel.runs_ended();
             let named = lock(&self.tunnel_notes).mode == Some(TunnelModeSetting::Named);
             let mut kept = lock(&self.tunnel_address);
             let still_leads = named || kept.as_ref().is_some_and(|k| k.runs_ended == ended);
             let url = tunnel_address(kept.as_ref().map(|k| k.url.as_str()), &fresh, still_leads);
+            address_changed = kept.as_ref().map(|k| k.url.as_str()) != url.as_deref();
             let since = match &fresh {
                 TunnelState::Online { .. } => ended,
                 _ => kept.as_ref().map_or(ended, |k| k.runs_ended),
@@ -238,7 +247,7 @@ impl AppCore {
             *view = fresh;
             changed
         });
-        if changed {
+        if view_changed || address_changed {
             self.apply_live();
             self.refresh_slates();
         }
