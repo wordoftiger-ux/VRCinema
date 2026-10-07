@@ -70,6 +70,11 @@ function wireTabs() {
 }
 
 export function showTab(name) {
+  // Kreator stałego linku odpytuje serwer tylko przy widocznej sekcji (samo logowanie trwa dalej).
+  const wizardOpen = !$('named-wizard').classList.contains('hidden');
+  const wasOnSettings = !$('tab-settings').classList.contains('hidden');
+  if (name !== 'settings') namedRun++;
+  else if (wizardOpen && !wasOnSettings) openNamedWizard(); // wraca do postępu tego, co trwa na serwerze
   $('tab-channel').classList.toggle('hidden', name !== 'channel');
   $('tab-settings').classList.toggle('hidden', name !== 'settings');
   $('tab-btn-channel').setAttribute('aria-selected', String(name === 'channel'));
@@ -275,6 +280,10 @@ export function netBadge(i) {
     return { kind: 'offline', text: NET_LOST, detail: t.message || 'Film wznowi się od tego samego miejsca, gdy wróci połączenie.', link: null };
   }
   switch (t.state) {
+    case 'off':
+      // Włączony przed chwilą: menedżer jeszcze nie ruszył.
+      if (i.tunnelEnabled) return { kind: 'connecting', text: 'Łączenie', detail: 'Łączę kanał z internetem…', link: null };
+      return manualOrLocal(i, link);
     case 'connecting':
       return { kind: 'connecting', text: 'Łączenie', detail: 'Łączę kanał z internetem…', link: null };
     case 'reconnecting':
@@ -282,9 +291,13 @@ export function netBadge(i) {
     case 'error':
       return { kind: 'offline', text: 'Brak internetu', detail: t.message || 'Nie udało się połączyć z internetem.', link: null };
     default:
-      if (i.publicUrl) return { kind: 'online', text: 'W sieci', detail: 'Adres wpisany ręcznie (tunel jest wyłączony).', link: link(i.publicUrl) };
-      return { kind: 'off', text: 'Tylko lokalnie', detail: 'Tunel jest wyłączony — kanał widać tylko na tym komputerze. Włączysz go w Ustawieniach, w sekcji Internet.', link: null };
+      return manualOrLocal(i, link);
   }
+}
+
+function manualOrLocal(i, link) {
+  if (i.publicUrl) return { kind: 'online', text: 'Adres ręczny', detail: 'Adres wpisany ręcznie (tunel jest wyłączony) — program nie sprawdza, czy działa.', link: link(i.publicUrl) };
+  return { kind: 'off', text: 'Tylko lokalnie', detail: 'Tunel jest wyłączony — kanał widać tylko na tym komputerze. Włączysz go w Ustawieniach, w sekcji Internet.', link: null };
 }
 
 let netLink = null;

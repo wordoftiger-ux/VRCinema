@@ -88,6 +88,8 @@ pub enum Net {
     Online,
     Connecting,
     Offline,
+    /// The tunnel is switched off and an address was typed in by hand.
+    Manual,
 }
 
 impl Net {
@@ -96,19 +98,22 @@ impl Net {
             Net::Online => "W sieci",
             Net::Connecting => "Łączenie z internetem",
             Net::Offline => "Brak internetu",
+            Net::Manual => "Adres ręczny",
         }
     }
 }
 
-/// The tray's view of the tunnel: `None` while it is switched off (nothing to say).
-pub fn net_status(tunnel_enabled: bool, state: &TunnelState) -> Option<Net> {
+/// The tray's view of the connection: `None` when there is nothing to say (tunnel switched off,
+/// no manual address). A tunnel that is enabled but still `Off` has just been switched on: it is
+/// connecting.
+pub fn net_status(tunnel_enabled: bool, state: &TunnelState, public_url: &str) -> Option<Net> {
     if !tunnel_enabled {
-        return None;
+        return (!public_url.trim().is_empty()).then_some(Net::Manual);
     }
     Some(match state {
         TunnelState::Online { .. } => Net::Online,
-        TunnelState::Connecting => Net::Connecting,
-        TunnelState::Off | TunnelState::Reconnecting | TunnelState::Error { .. } => Net::Offline,
+        TunnelState::Connecting | TunnelState::Off => Net::Connecting,
+        TunnelState::Reconnecting | TunnelState::Error { .. } => Net::Offline,
     })
 }
 
@@ -226,7 +231,11 @@ pub fn spawn_tooltip_refresh(app: AppHandle) {
                 let engine = shell.engine.read().await;
                 match engine.as_ref() {
                     Some(engine) => tooltip_text(
-                        net_status(engine.settings().tunnel_enabled, &engine.tunnel_state()),
+                        net_status(
+                            engine.settings().tunnel_enabled,
+                            &engine.tunnel_state(),
+                            &engine.public_url(),
+                        ),
                         engine.now_playing().as_deref(),
                     ),
                     None => return, // quitting
@@ -408,25 +417,53 @@ mod tests {
     }
 
     #[test]
-    fn the_net_status_follows_the_tunnel_and_is_silent_when_it_is_off() {
+    fn the_net_status_follows_the_tunnel() {
         let online = TunnelState::Online {
             url: "https://a.trycloudflare.com".into(),
         };
         let error = TunnelState::Error {
             message: "brak cloudflared".into(),
         };
-        assert_eq!(net_status(false, &online), None);
-        assert_eq!(net_status(false, &TunnelState::Off), None);
-        assert_eq!(net_status(true, &online), Some(Net::Online));
+        assert_eq!(net_status(true, &online, ""), Some(Net::Online));
         assert_eq!(
-            net_status(true, &TunnelState::Connecting),
+            net_status(true, &TunnelState::Connecting, ""),
             Some(Net::Connecting)
         );
         assert_eq!(
-            net_status(true, &TunnelState::Reconnecting),
+            net_status(true, &TunnelState::Reconnecting, ""),
             Some(Net::Offline)
         );
-        assert_eq!(net_status(true, &error), Some(Net::Offline));
+        assert_eq!(net_status(true, &error, ""), Some(Net::Offline));
+    }
+
+    #[test]
+    fn an_enabled_tunnel_that_is_momentarily_off_is_connecting() {
+        // Just after switching it on the manager has not started yet.
+        assert_eq!(
+            net_status(true, &TunnelState::Off, ""),
+            Some(Net::Connecting)
+        );
+        assert_eq!(
+            tooltip_text(Some(Net::Connecting), None),
+            "VRCinema — Łączenie z internetem — przerwa"
+        );
+    }
+
+    #[test]
+    fn without_a_tunnel_only_a_manual_address_is_mentioned() {
+        let online = TunnelState::Online {
+            url: "https://a.trycloudflare.com".into(),
+        };
+        assert_eq!(net_status(false, &online, ""), None);
+        assert_eq!(net_status(false, &TunnelState::Off, "  "), None);
+        assert_eq!(
+            net_status(false, &TunnelState::Off, "https://tv.example.com"),
+            Some(Net::Manual)
+        );
+        assert_eq!(
+            tooltip_text(Some(Net::Manual), None),
+            "VRCinema — Adres ręczny — przerwa"
+        );
     }
 
     #[test]

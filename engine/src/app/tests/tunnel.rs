@@ -247,6 +247,7 @@ async fn an_online_tunnel_gives_the_public_address_and_cloudflare_trust_live() {
     assert_eq!(panel["channelUrl"], format!("{url}/live/main.m3u8"));
     let info = app.get("/api/desktop/info", &cookie).await;
     assert_eq!(info["tunnel"]["state"], "online");
+    assert_eq!(info["tunnelEnabled"], true);
     assert_eq!(info["tunnel"]["url"], url);
     // The saved manual address is kept for when the tunnel is switched off.
     assert_eq!(app.saved()["publicUrl"], "https://reczny.example.com");

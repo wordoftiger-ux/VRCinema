@@ -135,6 +135,7 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "detectedEncoder": s.detected_encoder,
         "update": update,
         "tunnel": tunnel_view(&core),
+        "tunnelEnabled": s.tunnel_enabled,
         "paused": paused,
         "pauseReasons": reasons,
     })))

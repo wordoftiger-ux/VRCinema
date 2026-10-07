@@ -338,6 +338,7 @@ async fn info_describes_the_app() {
     assert_eq!(info["encoder"], "libx264");
     assert_eq!(info["update"], Value::Null);
     assert_eq!(info["tunnel"]["state"], "off");
+    assert_eq!(info["tunnelEnabled"], false);
     assert_eq!(info["tunnel"]["url"], Value::Null);
     assert_eq!(info["paused"], false);
     assert_eq!(info["pauseReasons"], json!([]));
