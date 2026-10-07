@@ -6,13 +6,15 @@ use std::io;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::{TunnelConfig, TunnelMode};
 
 const QUICK_SUFFIX: &str = ".trycloudflare.com";
+/// Longest stderr line kept; the rest of a longer line is dropped (bounded memory).
+const MAX_LINE: usize = 64 * 1024;
 
 /// A running cloudflared. Dropping it kills the process (`kill_on_drop`) without waiting;
 /// [`Cloudflared::kill`] also waits for the exit.
@@ -67,20 +69,35 @@ impl Cloudflared {
     }
 }
 
-async fn forward_lines(pipe: ChildStderr, tx: mpsc::Sender<String>) {
+async fn forward_lines<R: AsyncRead + Unpin>(pipe: R, tx: mpsc::Sender<String>) {
     let mut reader = BufReader::new(pipe);
-    let mut buf = Vec::new();
+    let mut line = Vec::new();
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let line = String::from_utf8_lossy(&buf).trim_end().to_string();
-                // Nobody listens any more: keep draining until the process is gone.
-                let _ = tx.send(line).await;
-            }
+        let chunk = match reader.fill_buf().await {
+            Ok([]) | Err(_) => break,
+            Ok(chunk) => chunk,
+        };
+        let newline = chunk.iter().position(|b| *b == b'\n');
+        let part = &chunk[..newline.unwrap_or(chunk.len())];
+        // Keep at most MAX_LINE bytes of a line; the rest is read and dropped.
+        let room = MAX_LINE.saturating_sub(line.len());
+        line.extend_from_slice(&part[..part.len().min(room)]);
+        let used = newline.map_or(chunk.len(), |i| i + 1);
+        reader.consume(used);
+        if newline.is_some() {
+            send_line(&tx, &mut line).await;
         }
     }
+    if !line.is_empty() {
+        send_line(&tx, &mut line).await;
+    }
+}
+
+async fn send_line(tx: &mpsc::Sender<String>, line: &mut Vec<u8>) {
+    let text = String::from_utf8_lossy(line).trim_end().to_string();
+    line.clear();
+    // Nobody listens any more: keep draining until the process is gone.
+    let _ = tx.send(text).await;
 }
 
 /// A port that is free on 127.0.0.1 right now (for the metrics server).
@@ -323,6 +340,20 @@ mod tests {
         assert!(!is_rate_limited(
             "2026-10-07T10:00:00.429Z INF Version 2026.9.0"
         ));
+    }
+
+    #[tokio::test]
+    async fn an_overlong_stderr_line_is_truncated() {
+        let mut input = vec![b'x'; 200 * 1024];
+        input.extend_from_slice(b"\r\nnext line\nlast without newline");
+        let (tx, mut rx) = mpsc::channel(8);
+        forward_lines(&input[..], tx).await;
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.len(), MAX_LINE);
+        assert!(first.bytes().all(|b| b == b'x'));
+        assert_eq!(rx.recv().await.as_deref(), Some("next line"));
+        assert_eq!(rx.recv().await.as_deref(), Some("last without newline"));
+        assert_eq!(rx.recv().await, None);
     }
 
     #[test]

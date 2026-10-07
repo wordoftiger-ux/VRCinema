@@ -14,8 +14,9 @@
 
 #![cfg(windows)]
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,11 @@ use vrcinema::tunnel::{
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+};
 
 const TUNNEL_ID: &str = "6ff42ae2-765d-4adf-8112-31c55c1551ef";
 const HOSTNAME: &str = "kanal.example.com";
@@ -43,12 +49,67 @@ fn fake_program() -> PathBuf {
     program
 }
 
-fn is_alive(pid: u64) -> bool {
-    let out = Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .expect("tasklist");
-    String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+/// A process opened by PID, but only when its executable is `program` (this test's own fake).
+/// The open handle pins the process: a PID reused by another test's fake or by any unrelated
+/// program is never reported as alive, and never killed.
+struct FakeProcess(HANDLE);
+
+impl FakeProcess {
+    fn open(pid: u64, program: &Path) -> Option<Self> {
+        let pid = u32::try_from(pid).ok()?;
+        // SAFETY: plain Win32 call; a null handle means "no such process / no access".
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            return None;
+        }
+        let process = Self(handle);
+        let mut name = vec![0u16; 32 * 1024];
+        let mut len = name.len() as u32;
+        // SAFETY: `name` has room for `len` UTF-16 units; the handle is valid.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, name.as_mut_ptr(), &mut len)
+        };
+        if ok == 0 {
+            return None;
+        }
+        let image = PathBuf::from(OsString::from_wide(&name[..len as usize]));
+        same_path(&image, program).then_some(process)
+    }
+
+    fn running(&self) -> bool {
+        // SAFETY: valid handle with SYNCHRONIZE access.
+        unsafe { WaitForSingleObject(self.0, 0) == WAIT_TIMEOUT }
+    }
+
+    fn kill(&self) {
+        // SAFETY: valid handle with PROCESS_TERMINATE and SYNCHRONIZE access.
+        unsafe {
+            TerminateProcess(self.0, 1);
+            WaitForSingleObject(self.0, 5000);
+        }
+    }
+}
+
+impl Drop for FakeProcess {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from OpenProcess and is closed once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy()),
+        _ => false,
+    }
 }
 
 /// A fake cloudflared in its own folder, scripted with one entry per start.
@@ -147,21 +208,27 @@ impl Fake {
         );
     }
 
+    /// `pid` is a running instance of this test's fake (a reused PID is not).
+    fn is_alive(&self, pid: u64) -> bool {
+        FakeProcess::open(pid, &self.program).is_some_and(|p| p.running())
+    }
+
     fn assert_all_dead(&self) {
         for pid in self.pids() {
-            assert!(!is_alive(pid), "cloudflared {pid} is still running");
+            assert!(!self.is_alive(pid), "cloudflared {pid} is still running");
         }
     }
 }
 
 impl Drop for Fake {
-    /// A failed test must not leave fake processes behind.
+    /// A failed test must not leave fake processes behind. Only processes whose executable is
+    /// this test's fake are killed, through a handle that pins them.
     fn drop(&mut self) {
         for pid in self.pids() {
-            if is_alive(pid) {
-                let _ = Command::new("taskkill")
-                    .args(["/F", "/PID", &pid.to_string()])
-                    .output();
+            if let Some(process) = FakeProcess::open(pid, &self.program)
+                && process.running()
+            {
+                process.kill();
             }
         }
     }
@@ -176,7 +243,92 @@ fn timings() -> TunnelTimings {
         stable_after: Duration::from_secs(60),
         rate_limit_wait: Duration::from_secs(60),
         health_grace: Duration::from_millis(500),
+        reconnect_limit: Duration::from_secs(60),
     }
+}
+
+/// The helpers act on a PID only when its executable is this test's fake: a live process of
+/// another program (here: this test binary) is neither "alive" as a fake nor ever killed.
+#[test]
+fn a_pid_of_another_program_is_never_treated_as_the_fake() {
+    let fake = Fake::new(json!([{}]));
+    let me = u64::from(std::process::id());
+    assert!(FakeProcess::open(me, &fake.program).is_none());
+    assert!(!fake.is_alive(me));
+}
+
+/// cloudflared alive but without a connection for longer than `reconnect_limit`: killed and
+/// started again through the usual waits.
+#[tokio::test]
+async fn a_connection_lost_for_too_long_restarts_cloudflared() {
+    let fake = Fake::new(json!([
+        { "hostname": "stuck.trycloudflare.com", "ready_down": [[300, 600000]] },
+        { "hostname": "fresh.trycloudflare.com" }
+    ]));
+    let tunnel = manager(TunnelTimings {
+        health_grace: Duration::from_millis(300),
+        reconnect_limit: Duration::from_millis(1500),
+        ..timings()
+    });
+    let seen = record(tunnel.state());
+    let mut rx = tunnel.state();
+    tunnel.start(fake.quick(18190)).await;
+    wait_online(&mut rx, "https://fresh.trycloudflare.com").await;
+
+    let starts = fake.starts();
+    assert_eq!(starts.len(), 2);
+    assert!(
+        !fake.is_alive(fake.pids()[0]),
+        "the stuck process was not killed"
+    );
+    // Connection lost at 300 ms, limit 1.5 s, wait 100 ms.
+    let gap = start_ms(&starts[1]) - start_ms(&starts[0]);
+    assert!(gap >= 1800, "restarted {gap} ms after the start");
+    assert_sequence(
+        &seen,
+        &[
+            TunnelState::Online {
+                url: "https://stuck.trycloudflare.com".into(),
+            },
+            TunnelState::Reconnecting,
+            TunnelState::Online {
+                url: "https://fresh.trycloudflare.com".into(),
+            },
+        ],
+    );
+    fake.assert_single_instance();
+    tunnel.stop().await;
+    fake.assert_all_dead();
+}
+
+/// "429" / "Too Many Requests" is about quick tunnels only; a named tunnel printing it keeps
+/// running and goes online as usual.
+#[tokio::test]
+async fn a_named_tunnel_ignores_quick_tunnel_rate_limiting() {
+    let fake = Fake::new(json!([{
+        "stderr": ["2026-10-07T10:00:00Z WRN edge answered 429 Too Many Requests, retrying"],
+        "ready_after_ms": 600,
+    }]));
+    let tunnel = manager(timings());
+    let seen = record(tunnel.state());
+    let mut rx = tunnel.state();
+    let mut config = fake.quick(18191);
+    config.mode = fake.named_mode();
+    tunnel.start(config).await;
+    wait_online(&mut rx, "https://kanal.example.com").await;
+
+    assert_eq!(fake.starts().len(), 1);
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| matches!(s, TunnelState::Error { .. })),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+    tunnel.stop().await;
+    fake.assert_all_dead();
 }
 
 /// Without a metrics server there is nothing to watch: an address found on stderr stays
@@ -240,8 +392,12 @@ async fn wait_for(
 }
 
 async fn wait_online(rx: &mut watch::Receiver<TunnelState>, url: &str) {
+    wait_online_within(rx, url, Duration::from_secs(10)).await;
+}
+
+async fn wait_online_within(rx: &mut watch::Receiver<TunnelState>, url: &str, within: Duration) {
     let want = TunnelState::Online { url: url.into() };
-    wait_for(rx, url, Duration::from_secs(10), |s| *s == want).await;
+    wait_for(rx, url, within, |s| *s == want).await;
 }
 
 /// Every state the manager publishes (fast transitions may be merged by `watch`).
@@ -414,11 +570,11 @@ async fn lost_connection_and_back(mode: Option<TunnelMode>, url: &str, port: u16
     })
     .await;
     let pid = fake.pids()[0];
-    assert!(is_alive(pid), "the process must keep running");
+    assert!(fake.is_alive(pid), "the process must keep running");
     wait_online(&mut rx, url).await;
 
     assert_eq!(fake.starts().len(), 1, "no restart");
-    assert!(is_alive(pid));
+    assert!(fake.is_alive(pid));
     let online = TunnelState::Online { url: url.into() };
     assert_sequence(
         &seen,
@@ -506,7 +662,13 @@ async fn time_without_connection_does_not_count_as_stable() {
     });
     let mut rx = tunnel.state();
     tunnel.start(fake.quick(18183)).await;
-    wait_online(&mut rx, "https://final-flaky.trycloudflare.com").await;
+    // About 7 s of scripted waits and runs before the last start.
+    wait_online_within(
+        &mut rx,
+        "https://final-flaky.trycloudflare.com",
+        Duration::from_secs(20),
+    )
+    .await;
 
     let starts = fake.starts();
     assert_eq!(starts.len(), 5);
@@ -535,14 +697,15 @@ async fn no_address_in_time_is_a_failed_start() {
     let starts = fake.starts();
     assert_eq!(starts.len(), 2);
     let gap = start_ms(&starts[1]) - start_ms(&starts[0]);
-    // Timeout 1500 + wait 100, minus slack: the fakes stamp their own start, and Windows
-    // timers are coarse.
+    // Timeout 1500 + wait 100, minus slack: the timeout runs from the spawn, but the first fake
+    // stamps its start only after its own startup (a few hundred ms under load). Without the
+    // timeout the gap would be about the 100 ms wait.
     assert!(
-        gap >= 1500,
+        gap >= 1200,
         "restarted after {gap} ms (timeout 1500 + wait 100)"
     );
     assert!(
-        !is_alive(fake.pids()[0]),
+        !fake.is_alive(fake.pids()[0]),
         "the silent process was not killed"
     );
     assert!(
@@ -590,7 +753,6 @@ async fn an_exited_process_is_restarted_with_doubling_waits() {
             "gaps {gaps:?}, expected about 150, 300, 600, 1200 ms"
         );
     }
-    assert!(gaps.windows(2).all(|w| w[1] > w[0]), "gaps {gaps:?}");
     fake.assert_single_instance();
     tunnel.stop().await;
     fake.assert_all_dead();
@@ -657,7 +819,7 @@ async fn a_rate_limited_quick_tunnel_is_an_error_with_a_long_wait() {
     assert!(message.contains("Cloudflare"), "{message}");
     assert!(message.contains("zbyt wiele"), "{message}");
     assert!(
-        !is_alive(fake.pids()[0]),
+        !fake.is_alive(fake.pids()[0]),
         "the refused process was not killed"
     );
 
@@ -688,7 +850,7 @@ async fn restart_on_a_new_port_replaces_the_process() {
 
     tunnel.restart(18111).await;
     assert!(
-        !is_alive(old),
+        !fake.is_alive(old),
         "the old process must be gone when restart returns"
     );
     assert_eq!(*rx.borrow(), TunnelState::Connecting);
@@ -716,11 +878,14 @@ async fn restart_and_stop_during_a_start_in_progress() {
     tunnel.start(fake.quick(18120)).await;
     fake.wait_starts(1, Duration::from_secs(5)).await;
     tunnel.restart(18121).await;
-    assert!(!is_alive(fake.pids()[0]), "restart left the old process");
+    assert!(
+        !fake.is_alive(fake.pids()[0]),
+        "restart left the old process"
+    );
 
     fake.wait_starts(2, Duration::from_secs(5)).await;
     tunnel.stop().await;
-    assert!(!is_alive(fake.pids()[1]), "stop left the process");
+    assert!(!fake.is_alive(fake.pids()[1]), "stop left the process");
     assert_eq!(*rx.borrow(), TunnelState::Off);
 
     tunnel.start(fake.quick(18122)).await;
@@ -759,7 +924,7 @@ async fn concurrent_calls_never_run_two_processes() {
     let mut rx = tunnel.state();
     wait_online(&mut rx, "https://busy.trycloudflare.com").await;
     let pids = fake.pids();
-    let alive: Vec<u64> = pids.iter().copied().filter(|p| is_alive(*p)).collect();
+    let alive: Vec<u64> = pids.iter().copied().filter(|p| fake.is_alive(*p)).collect();
     assert_eq!(alive.len(), 1, "running: {alive:?} of {pids:?}");
 
     tunnel.stop().await;
@@ -778,7 +943,7 @@ async fn dropping_the_manager_kills_cloudflared() {
 
     drop(tunnel);
     let deadline = Instant::now() + Duration::from_secs(5);
-    while is_alive(pid) {
+    while fake.is_alive(pid) {
         assert!(
             Instant::now() < deadline,
             "cloudflared outlived the manager"

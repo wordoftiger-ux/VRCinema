@@ -59,7 +59,8 @@ pub struct NamedTunnel {
 pub struct TunnelTimings {
     /// A start that gives no address within this time failed (30 s).
     pub address_timeout: Duration,
-    /// How often the metrics server is asked for the address (500 ms).
+    /// How often the metrics server is asked: for the address while connecting, and `/ready`
+    /// (is cloudflared still connected to Cloudflare?) once the address is known (500 ms).
     pub poll_interval: Duration,
     /// First wait before a restart (1 s); doubles with every failure.
     pub backoff_initial: Duration,
@@ -72,6 +73,9 @@ pub struct TunnelTimings {
     /// While online, `/ready` must fail this long without a break before the state turns
     /// `Reconnecting` (3 s); a single failed poll is not a lost connection.
     pub health_grace: Duration,
+    /// cloudflared is running but `/ready` has not answered 200 for this long: it is killed
+    /// and started again through the usual waits (5 min).
+    pub reconnect_limit: Duration,
 }
 
 impl Default for TunnelTimings {
@@ -84,6 +88,7 @@ impl Default for TunnelTimings {
             stable_after: Duration::from_secs(60),
             rate_limit_wait: Duration::from_secs(60),
             health_grace: Duration::from_secs(3),
+            reconnect_limit: Duration::from_secs(5 * 60),
         }
     }
 }
@@ -440,6 +445,8 @@ impl Supervisor {
         let mut metrics_seen = false;
         let mut last_line = String::new();
         let mut stderr_open = true;
+        // Refusals of too many requests concern quick tunnels only (spec section 7).
+        let quick = matches!(config.mode, TunnelMode::Quick);
 
         loop {
             tokio::select! {
@@ -454,7 +461,7 @@ impl Supervisor {
                         continue;
                     };
                     if address.is_none() {
-                        if process::is_rate_limited(&line) {
+                        if quick && process::is_rate_limited(&line) {
                             cloudflared.kill().await;
                             let mut failure = Failure::new(
                                 "Cloudflare odmówił szybkiego tunelu (429 Too Many Requests)".into(),
@@ -476,7 +483,8 @@ impl Supervisor {
                     // the end of the pipe itself can come late on Windows, when a process
                     // started at the same moment inherited its handle.
                     let late = cloudflared.remaining_lines(Duration::from_millis(200)).await;
-                    let rate_limited = address.is_none()
+                    let rate_limited = quick
+                        && address.is_none()
                         && late.iter().any(|l| process::is_rate_limited(l));
                     if let Some(line) = late.into_iter().rev().find(|l| !l.trim().is_empty()) {
                         last_line = line;
@@ -537,6 +545,16 @@ impl Supervisor {
                                     "Tunel: cloudflared stracił połączenie z Cloudflare; czekam, aż je odzyska.",
                                 );
                                 self.state.send_replace(TunnelState::Reconnecting);
+                            }
+                            if since.elapsed() >= self.timings.reconnect_limit {
+                                cloudflared.kill().await;
+                                let mut failure = Failure::new(format!(
+                                    "brak połączenia z Cloudflare od {} s mimo działającego cloudflared",
+                                    since.elapsed().as_secs()
+                                ));
+                                failure.online_for = online_since
+                                    .map_or(longest_online, |t| longest_online.max(t.elapsed()));
+                                return Outcome::Failed(failure);
                             }
                         }
                         None => {}
