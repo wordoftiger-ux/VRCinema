@@ -361,7 +361,19 @@ impl SlateSwapper {
     /// Makes the set for `public_url` and hands it to the loop behind `commands`. Calls are
     /// serialized; one for the address already on air does nothing.
     pub async fn swap(&self, public_url: &str, commands: &mpsc::Sender<Command>) -> SwapOutcome {
+        self.swap_to(|| public_url.to_string(), commands).await
+    }
+
+    /// Like [`Self::swap`], with the address read once the lock is held: of several racing
+    /// swaps the one that runs last sees the newest address, so a stale one never wins.
+    pub async fn swap_to(
+        &self,
+        current_url: impl FnOnce() -> String,
+        commands: &mpsc::Sender<Command>,
+    ) -> SwapOutcome {
         let mut state = self.state.lock().await;
+        let public_url = current_url();
+        let public_url = public_url.as_str();
         if state.public_url == public_url {
             return SwapOutcome::Unchanged;
         }
@@ -875,6 +887,45 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(root.path().join("idle").is_dir());
     }
+
+    /// Two swaps race while the address changes: the address is read under the swapper's lock,
+    /// so the set that ends up on air is for the newest one (never N+1 then a stale N).
+    #[tokio::test]
+    async fn racing_swaps_end_on_the_latest_address() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let swapper = swapper(ffmpeg.clone(), root.path(), "", Duration::from_secs(3600));
+        let (tx, mut rx) = mpsc::channel(4);
+        let saved = std::sync::Mutex::new("https://a.example.com".to_string());
+        let read = || saved.lock().unwrap().clone();
+        let first = swapper.swap_to(read, &tx);
+        let second = async {
+            // Starts while the first one holds the lock (generating) and sees a newer address.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            *saved.lock().unwrap() = "https://b.example.com".to_string();
+            swapper.swap_to(read, &tx).await
+        };
+        let (a, b) = tokio::join!(first, second);
+        assert_eq!(a, SwapOutcome::Replaced { generation: 1 });
+        assert_eq!(b, SwapOutcome::Replaced { generation: 2 });
+        let Ok(Command::ReplaceSlates(one)) = rx.try_recv() else {
+            panic!("no first set");
+        };
+        let Ok(Command::ReplaceSlates(two)) = rx.try_recv() else {
+            panic!("no second set");
+        };
+        assert_eq!((one.generation, two.generation), (1, 2));
+        assert_eq!(
+            qr_in_segment(&ffmpeg, &two.idle[0].path, 1.0),
+            vec!["https://b.example.com/".to_string()]
+        );
+        // Nothing stale follows.
+        assert_eq!(swapper.swap_to(read, &tx).await, SwapOutcome::Unchanged);
+    }
+
     #[tokio::test]
     async fn a_stopped_loop_fails_the_swap_and_keeps_the_old_folder() {
         let Some(ffmpeg) = ffmpeg_bin() else {

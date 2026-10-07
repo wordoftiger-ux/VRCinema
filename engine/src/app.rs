@@ -611,9 +611,9 @@ impl AppCore {
         let Some(swapper) = live.slates.clone() else {
             return;
         };
-        // The address saved by now, not the one that triggered this: quick edits collapse.
-        let url = app_config(&self.settings(), &self.home).public_url;
-        match swapper.swap(&url, &live.state.engine.commands).await {
+        // The address saved by the time the swap runs (read under its lock): quick edits collapse.
+        let current = || app_config(&self.settings(), &self.home).public_url;
+        match swapper.swap_to(current, &live.state.engine.commands).await {
             SwapOutcome::Unchanged => {}
             SwapOutcome::Replaced { generation } => self.log(&format!(
                 "Plansze odświeżone dla nowego adresu publicznego (zestaw {generation})."

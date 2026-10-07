@@ -1,5 +1,5 @@
 //! Channel engine loop and its supervisor (replaces the Node `setInterval(250 ms)` that drove
-//! `Broadcaster.tick()` dts.windows(2).all(|w| w[0] <= w[1]) && dts.first() < dts.last()ith the Channel as its source).
+//! `Broadcaster.tick()` with the Channel as its source).
 //!
 //! One task owns the `Broadcaster` and the `Channel`. Every 250 ms it drains the commands sent by
 //! HTTP, ticks the broadcaster and publishes a fresh [`Snapshot`]. HTTP never calls the Channel

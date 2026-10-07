@@ -94,7 +94,7 @@ function banner(kind, text, ...buttons) {
 
 function renderBanners() {
   const restarting = info.restarting || restartInProgress;
-  const key = JSON.stringify([info.restartRequired, info.toolsOk, info.channelRunning, info.channelError, restarting, updateOffer?.version, toolsJobRunning]);
+  const key = JSON.stringify([info.toolsOk, info.channelRunning, info.channelError, restarting, updateOffer?.version, toolsJobRunning]);
   if (key === bannerKey) return;
   bannerKey = key;
   const list = [];
@@ -107,10 +107,6 @@ function renderBanners() {
     list.push(banner('err', `Kanał nie wystartował, choć narzędzia są pobrane — mogą być uszkodzone.${why}`,
       el('button', { type: 'button', disabled: toolsJobRunning, onclick: restartChannel }, 'Uruchom ponownie kanał'),
       repairButton()));
-  }
-  if (info.restartRequired) {
-    list.push(banner('', 'Część zmian zadziała dopiero po ponownym uruchomieniu kanału. Film na antenie zostanie wtedy przerwany.',
-      el('button', { type: 'button', onclick: restartChannel }, 'Uruchom ponownie kanał')));
   }
   if (updateOffer) {
     list.push(banner('', `Dostępna jest nowa wersja programu: ${updateOffer.version}.`,

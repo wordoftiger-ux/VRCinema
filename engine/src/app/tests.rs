@@ -411,10 +411,6 @@ async fn put_config_saves_valid_values_and_never_shows_secrets() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["publicUrl"], "https://tv.example.com");
     assert_eq!(res["restarted"], false, "only port and lanAccess restart");
-    assert_eq!(
-        res["restartRequired"], false,
-        "the slates take the new address live"
-    );
     assert_eq!(res["port"], json!(app.engine().port()));
     assert_eq!(*app.hooks.autostart_calls.lock().unwrap(), vec![true]);
     let saved = app.saved();
@@ -1050,8 +1046,6 @@ async fn minor_settings_take_effect_without_a_restart() {
     // Links and slates use the new address at once (the slates in the background).
     let panel = app.get("/api/admin/channels/main", &cookie).await;
     assert_eq!(panel["channelUrl"], "https://tv.example.com/live/main.m3u8");
-    let info = app.get("/api/desktop/info", &cookie).await;
-    assert_eq!(info["restartRequired"], false);
 
     let (status, res) = app
         .call("POST", "/api/desktop/restart", Some(&cookie), None)
@@ -1060,8 +1054,6 @@ async fn minor_settings_take_effect_without_a_restart() {
     assert_eq!(res["ok"], true);
     assert_eq!(res["port"], json!(app.engine().port()));
     assert_eq!(app.engine().server_starts(), 2);
-    let info = app.get("/api/desktop/info", &cookie).await;
-    assert_eq!(info["restartRequired"], false);
     app.stop().await;
 }
 
@@ -1185,7 +1177,6 @@ async fn a_new_public_address_replaces_the_slates_live() {
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["restarted"], false);
-    assert_eq!(res["restartRequired"], false);
     // The new set appears in a folder of its own and goes on air as one discontinuity.
     eventually(90, "the new slate set", || async {
         slates.join("g1").join("idle").join("qr.png").is_file()
