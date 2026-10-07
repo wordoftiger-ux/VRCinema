@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use vrcinema::config::{VideoEncoder, load_config};
 use vrcinema::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
-use vrcinema::pipeline::broadcaster::{Broadcaster, BroadcasterOptions};
+use vrcinema::pipeline::broadcaster::{
+    Broadcaster, BroadcasterOptions, PublishedSegment, SegmentSource, SourceSegment,
+};
 use vrcinema::pipeline::channel::{Channel, ChannelOptions, ChannelStatus, PauseReason};
 use vrcinema::pipeline::clip_factory::{ClipFactoryDeps, create_clip_factory};
 use vrcinema::pipeline::slates::{SlateOptions, generate_slates};
@@ -275,6 +277,32 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
     }
 }
 
+/// Records what the channel hands to the broadcaster.
+struct Tap<'a> {
+    inner: &'a mut Channel,
+    pulled: &'a mut Vec<(String, f64)>,
+}
+
+impl SegmentSource for Tap<'_> {
+    fn next(&mut self) -> anyhow::Result<SourceSegment> {
+        let seg = self.inner.next()?;
+        self.pulled.push((seg.source_key.clone(), seg.duration));
+        Ok(seg)
+    }
+
+    fn on_published(&mut self, seg: &PublishedSegment) {
+        self.inner.on_published(seg);
+    }
+}
+
+fn clip_seconds(pulled: &[(String, f64)]) -> f64 {
+    pulled
+        .iter()
+        .filter(|(key, _)| key.starts_with("clip-"))
+        .map(|(_, d)| d)
+        .sum()
+}
+
 fn assert_no_dts_backwards(ffprobe: &Path, joined: &Path) {
     for stream in ["v", "a"] {
         let dts = packet_dts(ffprobe, joined, stream);
@@ -390,6 +418,9 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
 
     // What viewers saw, one entry per observed change: (status, film position in seconds).
     let mut seen: Vec<(ChannelStatus, i64)> = Vec::new();
+    // Every segment the channel handed to the broadcaster: (source key, duration in seconds).
+    let mut pulled: Vec<(String, f64)> = Vec::new();
+    let (mut pause_mark, mut resume_mark) = (0, 0);
     let mut paused_at: Option<i64> = None;
     let mut pause_slates = 0;
     let mut resumed = false;
@@ -397,7 +428,10 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         clock.fetch_add(1000, Ordering::SeqCst);
-        broadcaster.tick(&mut channel);
+        broadcaster.tick(&mut Tap {
+            inner: &mut channel,
+            pulled: &mut pulled,
+        });
         let state = channel.state();
         if let Some(cur) = &state.current {
             assert_eq!(cur.title, "p.mp4");
@@ -410,6 +444,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
                 if state.status == ChannelStatus::Playing
                     && state.current.as_ref().is_some_and(|c| c.position_s >= 12)
                 {
+                    pause_mark = pulled.len();
                     channel.pause(PauseReason::Tunnel);
                     paused_at = state.current.map(|c| c.position_s);
                 }
@@ -419,6 +454,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
                     pause_slates += 1;
                 }
                 if pause_slates >= 8 {
+                    resume_mark = pulled.len();
                     channel.resume(PauseReason::Tunnel);
                     resumed = true;
                 }
@@ -473,6 +509,22 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
     assert!(
         after_pause.last().copied().unwrap_or(0) >= 24,
         "film nie doszedł do końca: {seen:?}"
+    );
+    // Content check that the resumed clip really seeked (without -ss it would air ~the whole
+    // 32 s again): the film seconds aired after the resume are what was left at the pause.
+    let before_pause = clip_seconds(&pulled[..pause_mark]);
+    let after_resume = clip_seconds(&pulled[resume_mark..]);
+    assert!(
+        (after_resume - (32.0 - before_pause)).abs() <= 4.5,
+        "po wznowieniu wyemitowano {after_resume} s filmu, a po pauzie (od {before_pause} s) \
+         zostało {} s",
+        32.0 - before_pause
+    );
+    assert!(
+        pulled[resume_mark..]
+            .iter()
+            .any(|(k, _)| k.ends_with("-r1") && k.starts_with("clip-")),
+        "klip po wznowieniu ma ten sam klucz źródła co przed pauzą"
     );
     assert_eq!(
         {

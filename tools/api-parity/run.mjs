@@ -106,7 +106,7 @@ function stripTiming(v, topLevelChannel) {
     for (const [k, val] of Object.entries(v)) {
       if (TIMING_FIELDS.has(k)) continue;
       if (topLevelChannel && (k === 'status' || k === 'current')) continue;
-      // Etap 3: pola dodane przez pauzę, których serwer TS nie ma (zgodność wsteczna: tylko nowe klucze).
+      // Etap 3: pola dodane przez pauzę (wartości sprawdzane osobno po stronie Rust w call()).
       if (topLevelChannel && (k === 'paused' || k === 'pauseReasons')) continue;
       out[k] = stripTiming(val, false);
     }
@@ -294,6 +294,13 @@ class Client {
         bodyShape = `(niepoprawny JSON) ${text}`;
       }
     } else bodyShape = text.length > 300 ? `sha1:${crypto.createHash('sha1').update(text).digest('hex')} len:${text.length}` : text;
+    if (parsed && opts.channelBody === true && this.srv.name === 'rust') {
+      // Etap 3: pola dodane przez pauzę; serwer TS ich nie ma, więc tylko sprawdzamy wartości po stronie Rust.
+      if (parsed.paused !== false) throw new Error(`rust: "${name}": paused = ${JSON.stringify(parsed.paused)}, oczekiwano false`);
+      if (!Array.isArray(parsed.pauseReasons) || parsed.pauseReasons.length !== 0) {
+        throw new Error(`rust: "${name}": pauseReasons = ${JSON.stringify(parsed.pauseReasons)}, oczekiwano []`);
+      }
+    }
     const normalized = JSON.stringify(bodyShape).replaceAll(`:${this.srv.port}`, ':PORT');
     this.records.push({
       name,

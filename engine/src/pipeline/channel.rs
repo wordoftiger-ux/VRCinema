@@ -175,6 +175,8 @@ struct ActiveClip {
     id: u64,
     item: QueueItem,
     attempt: u32,
+    /// How many times a pause relaunched this film; keeps source keys unique per encoder process.
+    resumes: u32,
     /// Film second the current process started from.
     base_s: f64,
     handle: Option<Box<dyn ClipHandle>>,
@@ -189,6 +191,15 @@ struct ActiveClip {
 impl ActiveClip {
     fn position_s(&self) -> f64 {
         self.base_s + self.emitted_s
+    }
+
+    /// Unique per encoder process: a retry (attempt) and every resume after a pause change it,
+    /// so the broadcaster marks a discontinuity even when nothing else aired in between.
+    fn source_key(&self) -> String {
+        match self.resumes {
+            0 => format!("clip-{}-{}", self.item.id, self.attempt),
+            n => format!("clip-{}-{}-r{n}", self.item.id, self.attempt),
+        }
     }
 
     /// Seconds left until the end of the film; `None` for live streams and unknown durations.
@@ -211,7 +222,7 @@ impl ActiveClip {
         let out = SourceSegment {
             path: seg.path.clone(),
             duration: seg.duration,
-            source_key: format!("clip-{}-{}", self.item.id, self.attempt),
+            source_key: self.source_key(),
             index: seg.index as u64,
         };
         let meta = SegmentMeta {
@@ -253,6 +264,7 @@ struct Parked {
     item: QueueItem,
     position_s: f64,
     attempt: u32,
+    resumes: u32,
 }
 
 fn slate_slot(kind: SlateKind) -> usize {
@@ -416,6 +428,7 @@ impl Channel {
         if self.current.as_ref().is_none_or(|c| c.item.is_live) {
             return;
         }
+        self.settle_before_parking();
         if let Some(mut c) = self.current.take() {
             self.log(&format!(
                 "Pauza ({}): film #{} \"{}\" wstrzymany na {:.0} s",
@@ -428,8 +441,45 @@ impl Channel {
             self.parked = Some(Parked {
                 position_s: c.position_s(),
                 attempt: c.attempt,
+                resumes: c.resumes,
                 item: c.item,
             });
+        }
+    }
+
+    /// A clip that already ended or failed must not be parked: a finished film is finished
+    /// (played), a failure goes through the normal retry accounting.
+    fn settle_before_parking(&mut self) {
+        self.poll_launches();
+        let Some(c) = self.current.as_mut() else {
+            return;
+        };
+        let mut failure = c.start_error.clone();
+        let mut done = false;
+        if failure.is_none()
+            && let Some(handle) = c.handle.as_mut()
+        {
+            let fresh = handle.poll();
+            c.ready.extend(fresh);
+            if c.ready.is_empty() {
+                match (handle.state(), handle.error()) {
+                    (SegmenterState::Done, _) => done = true,
+                    (SegmenterState::Failed | SegmenterState::Killed, error) => {
+                        failure = Some(error.unwrap_or_else(|| FFMPEG_STOPPED.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let result = if done {
+            self.finish_current(ItemStatus::Played, None)
+        } else if let Some(error) = failure {
+            self.handle_failure(error)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = result {
+            self.log(&format!("Błąd kanału przy pauzie: {e}"));
         }
     }
 
@@ -444,7 +494,9 @@ impl Channel {
                 "Wznowienie: film #{} \"{}\" od {:.0} s",
                 p.item.id, p.item.title, p.position_s
             ));
-            self.current = Some(self.launch(p.item, p.position_s, p.attempt));
+            let mut clip = self.launch(p.item, p.position_s, p.attempt);
+            clip.resumes = p.resumes + 1;
+            self.current = Some(clip);
         }
     }
 
@@ -710,6 +762,7 @@ impl Channel {
             id,
             item: item.clone(),
             attempt,
+            resumes: 0,
             base_s: start_at_s,
             handle: None,
             start_error: None,
@@ -1647,7 +1700,7 @@ mod tests {
             }
         );
         e.factory.handle(1).produce(2);
-        assert_eq!(e.key(), clip_key(&a, 0));
+        assert_eq!(e.key(), format!("{}-r1", clip_key(&a, 0)));
         assert_eq!(e.get(a.id).status, ItemStatus::Playing);
         assert_eq!(e.channel.current_item_id(), Some(a.id));
     }
@@ -1854,6 +1907,121 @@ mod tests {
         assert_eq!(e.factory.calls().len(), 2);
         assert_eq!(e.factory.calls()[1].item_id, a.id);
         assert_eq!(e.factory.calls()[1].start_at_s, 0.0);
+    }
+
+    /// Pause and resume landing between two `next()` calls must still change the source key,
+    /// otherwise the broadcaster would not mark a discontinuity for the new encoder process.
+    #[tokio::test]
+    async fn a_resumed_clip_has_a_different_source_key_even_without_a_segment_in_between() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 2).await;
+        h0.produce(1);
+        let last = e.next();
+        assert_eq!(last.source_key, clip_key(&a, 0));
+        e.channel.pause(PauseReason::Tunnel);
+        e.channel.resume(PauseReason::Tunnel);
+        e.flush().await;
+        e.factory.handle(1).produce(2);
+        let first_after = e.next();
+        assert!(first_after.source_key.starts_with("clip-"));
+        assert_ne!(first_after.source_key, last.source_key);
+        let second_after = e.next();
+        assert_eq!(second_after.source_key, first_after.source_key);
+        // A second pause and resume changes it again.
+        e.channel.pause(PauseReason::Tunnel);
+        e.channel.resume(PauseReason::Tunnel);
+        e.flush().await;
+        e.factory.handle(2).produce(1);
+        let third = e.next();
+        assert_ne!(third.source_key, first_after.source_key);
+        assert_ne!(third.source_key, last.source_key);
+    }
+
+    #[tokio::test]
+    async fn pausing_a_clip_that_already_finished_marks_the_film_played_instead_of_parking_it() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h = e.air(&a, 2).await;
+        h.set_state(SegmenterState::Done);
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+        assert_eq!(e.key(), "idle");
+        e.channel.resume(PauseReason::Tunnel);
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 1, "a finished film was relaunched");
+        assert_eq!(e.key(), "idle");
+    }
+
+    #[tokio::test]
+    async fn pausing_a_clip_that_failed_goes_through_the_retry_and_resumes_the_retry() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h = e.air(&a, 2).await;
+        h.set_state(SegmenterState::Failed);
+        h.set_error("Connection reset");
+        e.channel.pause(PauseReason::Tunnel);
+        e.flush().await;
+        assert!(h.disposed());
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 8.0,
+                attempt: 1
+            }
+        );
+        assert_eq!(e.key(), "pause");
+        e.channel.resume(PauseReason::Tunnel);
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls()[2],
+            Call {
+                item_id: a.id,
+                start_at_s: 8.0,
+                attempt: 1
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pausing_a_clip_that_failed_after_its_retry_marks_the_film_failed() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 2).await;
+        h0.set_state(SegmenterState::Failed);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        let h1 = e.factory.handle(1);
+        h1.produce(1);
+        assert_eq!(e.key(), clip_key(&a, 1));
+        h1.set_state(SegmenterState::Failed);
+        h1.set_error("boom");
+        e.channel.pause(PauseReason::Tunnel);
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Failed);
+        assert!(fresh.error.unwrap().contains("boom"));
+        assert_eq!(e.key(), "idle");
+        e.channel.resume(PauseReason::Tunnel);
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pausing_a_film_whose_start_failed_goes_through_the_retry() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.factory.lock().fail_next = 1;
+        e.next();
+        e.flush().await;
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        assert_eq!(e.factory.calls()[1].attempt, 1);
+        e.channel.resume(PauseReason::Tunnel);
+        e.flush().await;
+        assert_eq!(e.factory.calls().len(), 3);
+        assert_eq!(e.factory.calls()[2].attempt, 1);
     }
 
     #[tokio::test]
