@@ -171,6 +171,8 @@ ul.plain li { grid-template-columns: 1fr auto; }
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* „Kolejka jest pusta.” to nie pozycja rozpiski: bez numeru. */
+.rundown li.empty::before { content: none; }
 .item-title { overflow-wrap: anywhere; }
 .item-meta { color: var(--muted); font-size: 0.88rem; }
 .item-side { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }

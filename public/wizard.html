@@ -187,15 +187,19 @@
           el('p', { class: 'muted small' }, 'Ten adres zmienia się przy każdym uruchomieniu programu. Jeśli chcesz mieć stały link, możesz go ustawić teraz albo później w Ustawieniach.'));
         buttons.replaceChildren(finishButton, permanent);
         finishButton.focus({ preventScroll: true });
-      } else if (t.state === 'error') {
+      } else if (t.state === 'error' || t.state === 'reconnecting') {
+        // Bez internetu program próbuje w kółko (stan „reconnecting”, nie błąd): zawsze jest wyjście.
+        const fallback = t.state === 'reconnecting'
+          ? 'Nie udało się połączyć z internetem — program próbuje dalej.'
+          : 'Nie udało się połączyć z internetem.';
         body.replaceChildren(
-          el('p', { class: 'notice err', role: 'alert' }, t.message || 'Nie udało się połączyć z internetem.'),
+          el('p', { class: 'notice err', role: 'alert' }, t.message || fallback),
           el('p', { class: 'muted small' }, 'Możesz spróbować jeszcze raz albo pominąć ten krok: kanał będzie wtedy działał tylko na tym komputerze, a połączenie ponowisz w Ustawieniach, w sekcji Internet.'));
         buttons.replaceChildren(retry, skip);
         retry.disabled = false;
       } else {
         body.replaceChildren(el('p', { class: 'notice', role: 'status' }, 'Łączenie z internetem…'), wait);
-        buttons.replaceChildren();
+        buttons.replaceChildren(skip);
       }
     }
 

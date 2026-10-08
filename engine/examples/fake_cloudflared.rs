@@ -277,8 +277,8 @@ fn main() {
 ///   living that long, holding `child.lock`, its PID in `child.pid`). An existing non-empty
 ///   `cert_dir\cert.pem` ends the login at once (the real one refuses to overwrite it). The
 ///   process holds `login.lock` exclusively for its whole life.
-/// - `create`: `exists` (a tunnel `vrcinema` is already there), `id`, `secret` (written into the
-///   credentials file, read-only like the real one's), `error`.
+/// - `create`: `exists` (a tunnel `vrcinema` is already there), `delay_ms` (takes that long),
+///   `id`, `secret` (written into the credentials file, read-only like the real one's), `error`.
 /// - `token`: `id`, `secret` (default: `create`'s), `error`. Without `--cred-file` it prints the
 ///   token (the secret) on stdout, like the real one.
 /// - `route`: `taken` (another DNS record has the name; `--overwrite-dns` replaces it), `zone`
@@ -340,6 +340,8 @@ mod management {
         id: Option<String>,
         secret: Option<String>,
         error: Option<String>,
+        /// Takes this long (a slow Cloudflare API).
+        delay_ms: u64,
     }
 
     #[derive(Debug, Default, Deserialize)]
@@ -446,6 +448,7 @@ mod management {
             .unwrap_or_else(|| "fake-secret".into());
         match command {
             "create" => {
+                std::thread::sleep(Duration::from_millis(script.create.delay_ms));
                 if let Some(error) = &script.create.error {
                     return fail(error);
                 }

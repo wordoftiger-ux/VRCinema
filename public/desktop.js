@@ -107,18 +107,30 @@ function banner(kind, text, ...buttons) {
 
 function renderBanners() {
   const restarting = info.restarting || restartInProgress;
-  const key = JSON.stringify([info.toolsOk, info.channelRunning, info.channelError, restarting, updateOffer?.version, toolsJobRunning]);
+  const missing = info.missingTools ?? [];
+  const jobRunning = toolsJobRunning || Boolean(info.toolsRunning);
+  const key = JSON.stringify([info.toolsOk, missing, info.channelRunning, info.channelError, restarting, updateOffer?.version, jobRunning]);
   if (key === bannerKey) return;
   bannerKey = key;
   const list = [];
-  const repairButton = () => el('button', { type: 'button', disabled: toolsJobRunning, onclick: () => runToolsJob('repair') }, 'Napraw narzędzia');
+  const repairButton = () => el('button', { type: 'button', disabled: jobRunning, onclick: () => runToolsJob('repair') }, 'Napraw narzędzia');
   // W trakcie ponownego uruchamiania kanał chwilowo nie działa: to nie jest awaria.
-  if (!restarting && !info.toolsOk) {
+  if (!restarting && !info.toolsOk && info.channelRunning) {
+    // Kanał nadaje (np. po aktualizacji z wersji bez tunelu brakuje tylko cloudflared).
+    if (missing.length === 1 && missing[0] === 'cloudflared') {
+      list.push(jobRunning
+        ? banner('', 'Pobieranie programu cloudflared…')
+        : banner('', 'Brakuje programu cloudflared (publiczny adres kanału) — kanał działa tylko na tym komputerze.',
+          el('button', { type: 'button', onclick: () => runToolsJob('install') }, 'Pobierz')));
+    } else {
+      list.push(banner('', `Brakuje narzędzi: ${missing.join(', ')}. Kanał nadaje, ale część funkcji nie działa.`, repairButton()));
+    }
+  } else if (!restarting && !info.toolsOk) {
     list.push(banner('err', 'Brakuje narzędzi, więc kanał nie nadaje.', repairButton()));
   } else if (!restarting && !info.channelRunning) {
     const why = info.channelError ? ` Powód: ${info.channelError}` : '';
     list.push(banner('err', `Kanał nie wystartował, choć narzędzia są pobrane — mogą być uszkodzone.${why}`,
-      el('button', { type: 'button', disabled: toolsJobRunning, onclick: restartChannel }, 'Uruchom ponownie kanał'),
+      el('button', { type: 'button', disabled: jobRunning, onclick: restartChannel }, 'Uruchom ponownie kanał'),
       repairButton()));
   }
   if (updateOffer) {
@@ -349,6 +361,8 @@ const NAMED_HELP = 'Stały link pozwala mieć ten sam adres po każdym uruchomie
 let internetKey = '';
 let confirmDelete = false;
 let namedRun = 0; // numer kreatora: zmiana przerywa pętle odpytywania poprzedniego
+let lastCreateHost = ''; // adres ostatniego „Utwórz stały link” z tego okna (powrót do zakładki)
+let openedLoginUrl = ''; // strona logowania już otwarta przez okno (nie otwieramy jej drugi raz)
 
 function renderInternet() {
   if (!config) return;
@@ -445,6 +459,7 @@ const namedNotice = (text, kind) => notice($('named-notice'), text, kind);
 
 function closeNamedWizard() {
   namedRun++;
+  lastCreateHost = '';
   $('named-wizard').classList.add('hidden');
   wizardStep().replaceChildren();
   namedNotice('');
@@ -463,8 +478,46 @@ async function openNamedWizard() {
   }
   if (run !== namedRun) return;
   if (p.running && p.operation === 'login') return watchLogin(run);
+  // Powrót do zakładki w trakcie (albo po) tworzenia stałego linku zaczętego w tym oknie.
+  if (p.operation === 'create' && lastCreateHost) {
+    if (p.running) return watchCreate(run);
+    return createOutcome(run, p);
+  }
   if (p.loggedIn) return stepHost(run);
   stepLogin(run);
+}
+
+/** Tworzenie trwa na serwerze (okno wróciło do zakładki): postęp aż do końca. */
+async function watchCreate(run) {
+  wizardStep().replaceChildren(el('p', {}, `Krok 2 z 2. Adres stałego linku: ${lastCreateHost}`));
+  namedNotice('Tworzę stały link…');
+  for (;;) {
+    await sleep(1000);
+    if (run !== namedRun) return;
+    let p;
+    try {
+      p = await api('GET', '/api/desktop/tunnel/named/progress');
+    } catch {
+      continue; // chwilowo bez odpowiedzi
+    }
+    if (run !== namedRun) return;
+    if (p.running) {
+      namedNotice(p.message || 'Tworzę stały link…');
+      continue;
+    }
+    return createOutcome(run, p);
+  }
+}
+
+/** Wynik zakończonego tworzenia, odczytany z postępu (`done` / `failed`). */
+async function createOutcome(run, p) {
+  if (p.state === 'done') {
+    await Promise.all([loadConfig(), settle()]);
+    if (run !== namedRun) return;
+    wizardStep().replaceChildren(el('p', {}, `Gotowe. Kanał ma teraz stały adres: https://${config?.namedTunnelHostname ?? lastCreateHost}`));
+    return namedNotice(p.message, 'ok');
+  }
+  createFailed(run, lastCreateHost, { message: p.message || 'Nie udało się utworzyć stałego linku.', data: { code: p.code, helpUrl: p.helpUrl } });
 }
 
 function stepLogin(run, retry = false) {
@@ -502,7 +555,6 @@ async function watchLogin(run) {
     msg, link,
     el('div', { class: 'row' },
       el('button', { type: 'button', class: 'quiet fit', onclick: cancelLogin }, 'Anuluj')));
-  let opened = false;
   let bad = 0;
   for (;;) {
     await sleep(1000);
@@ -520,9 +572,10 @@ async function watchLogin(run) {
     if (p.loginUrl) {
       link.classList.remove('hidden');
       link.replaceChildren('Jeśli strona się nie otworzyła: ', el('a', { href: p.loginUrl, target: '_blank', rel: 'noopener' }, 'otwórz stronę logowania'));
-      // Gdy cloudflared sam otworzył przeglądarkę, okno tego nie powtarza.
-      if (p.browserOpened === false && !opened) {
-        opened = true;
+      // Gdy cloudflared sam otworzył przeglądarkę, okno tego nie powtarza; tę samą stronę
+      // otwiera tylko raz (także po powrocie do zakładki w trakcie logowania).
+      if (p.browserOpened === false && p.loginUrl !== openedLoginUrl) {
+        openedLoginUrl = p.loginUrl;
         window.open(p.loginUrl, '_blank', 'noopener');
       }
     }
@@ -559,6 +612,7 @@ function stepHost(run, previous = '') {
 
 async function createNamed(run, hostname, overwrite, form) {
   form.querySelectorAll('button, input').forEach((c) => (c.disabled = true));
+  lastCreateHost = hostname;
   namedNotice('Tworzę stały link…');
   let working = true;
   (async () => {
@@ -582,25 +636,30 @@ async function createNamed(run, hostname, overwrite, form) {
   } catch (err) {
     working = false;
     if (run !== namedRun) return;
-    const code = err.data?.code;
-    if (code === 'not_logged_in') {
-      stepLogin(run, true);
-      return namedNotice(err.message, 'err');
-    }
-    if (code === 'dns_taken') {
-      namedNotice('');
-      return wizardStep().replaceChildren(
-        el('p', { class: 'notice err', role: 'alert' }, err.message),
-        el('p', {}, `Nazwa ${hostname} ma już w Cloudflare inny rekord DNS. Nadpisać go, żeby wskazywał na ten kanał?`),
-        el('div', { class: 'row' },
-          el('button', { type: 'button', class: 'fit', onclick: (e) => createNamed(run, hostname, true, e.currentTarget.closest('#named-step')) }, 'Nadpisz rekord'),
-          el('button', { type: 'button', class: 'quiet fit', onclick: () => { namedNotice(''); stepHost(run, hostname); } }, 'Wybierz inną nazwę')));
-    }
-    stepHost(run, hostname);
-    namedNotice(err.message, 'err');
-    if (code === 'no_domain' && err.data?.helpUrl) {
-      $('named-notice').append(' ', el('a', { href: err.data.helpUrl, target: '_blank', rel: 'noopener' }, 'Jak dodać domenę'));
-    }
+    createFailed(run, hostname, err);
+  }
+}
+
+/** Nieudane tworzenie (`err`: komunikat i `data.code`/`data.helpUrl` z odpowiedzi albo postępu). */
+function createFailed(run, hostname, err) {
+  const code = err.data?.code;
+  if (code === 'not_logged_in') {
+    stepLogin(run, true);
+    return namedNotice(err.message, 'err');
+  }
+  if (code === 'dns_taken') {
+    namedNotice('');
+    return wizardStep().replaceChildren(
+      el('p', { class: 'notice err', role: 'alert' }, err.message),
+      el('p', {}, `Nazwa ${hostname} ma już w Cloudflare inny rekord DNS. Nadpisać go, żeby wskazywał na ten kanał?`),
+      el('div', { class: 'row' },
+        el('button', { type: 'button', class: 'fit', onclick: (e) => createNamed(run, hostname, true, e.currentTarget.closest('#named-step')) }, 'Nadpisz rekord'),
+        el('button', { type: 'button', class: 'quiet fit', onclick: () => { namedNotice(''); stepHost(run, hostname); } }, 'Wybierz inną nazwę')));
+  }
+  stepHost(run, hostname);
+  namedNotice(err.message, 'err');
+  if (code === 'no_domain' && err.data?.helpUrl) {
+    $('named-notice').append(' ', el('a', { href: err.data.helpUrl, target: '_blank', rel: 'noopener' }, 'Jak dodać domenę'));
   }
 }
 
@@ -679,22 +738,25 @@ export async function runToolsJob(kind, tool) {
   const n = $('tools-notice');
   const box = $('tools-progress');
   notice(n, '');
-  const names = kind === 'update' ? [tool] : TOOL_ORDER;
+  // `install`: tylko brakujące (np. cloudflared po aktualizacji programu).
+  const names = kind === 'update' ? [tool] : kind === 'install' ? (info.missingTools?.length ? info.missingTools : TOOL_ORDER) : TOOL_ORDER;
   const list = toolProgressList(names);
   box.replaceChildren(list.root);
   box.scrollIntoView({ block: 'center' });
   toolsJobRunning = true;
   bannerKey = '';
   renderBanners();
+  const route = { update: '/api/desktop/tools/update', install: '/api/desktop/tools/install' }[kind] ?? '/api/desktop/tools/repair';
+  const done = { update: 'Narzędzie jest zaktualizowane.', install: 'Brakujące narzędzia są pobrane.' }[kind] ?? 'Narzędzia są naprawione.';
   try {
     try {
-      await apiRetry('POST', kind === 'update' ? '/api/desktop/tools/update' : '/api/desktop/tools/repair', kind === 'update' ? { tool } : undefined);
+      await apiRetry('POST', route, kind === 'update' ? { tool } : undefined);
     } catch (err) {
       if (err.status !== 409) throw err;
     }
     const p = await watchToolsJob((progress) => list.update(names, progress));
     if (p.error) notice(n, `Nie udało się: ${p.error}`, 'err');
-    else notice(n, kind === 'update' ? 'Narzędzie jest zaktualizowane.' : 'Narzędzia są naprawione.', 'ok');
+    else notice(n, done, 'ok');
   } catch (err) {
     notice(n, err.message, 'err');
   } finally {
