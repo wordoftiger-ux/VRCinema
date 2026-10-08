@@ -492,6 +492,33 @@ async fn quick_tunnel_address_falls_back_to_stderr() {
     fake.assert_all_dead();
 }
 
+/// Final review M2: a quick tunnel's address printed on stderr by a process that exits right
+/// after is dead: the tunnel never goes online with it (it is believed only while the process
+/// still runs one poll interval later, or once `/quicktunnel` confirms it).
+#[tokio::test]
+async fn a_stderr_address_of_a_dying_process_is_never_online() {
+    let fake = Fake::new(json!([{
+        "serve_metrics": false,
+        "stderr": ["2026-10-07T10:00:01Z INF |  https://dying-river.trycloudflare.com  |"],
+        "exit_after_ms": 50,
+        "exit_code": 1,
+    }]));
+    let tunnel = manager(TunnelTimings {
+        poll_interval: Duration::from_millis(500),
+        ..timings()
+    });
+    let seen = record(tunnel.state());
+    tunnel.start(fake.quick(18194)).await;
+    fake.wait_starts(3, Duration::from_secs(20)).await;
+    tunnel.stop().await;
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|s| matches!(s, TunnelState::Online { .. })),
+        "online with a dead address: {seen:?}"
+    );
+    fake.assert_all_dead();
+}
+
 #[tokio::test]
 async fn named_tunnel_is_online_once_ready() {
     let fake = Fake::new(json!([{ "ready_after_ms": 700 }]));

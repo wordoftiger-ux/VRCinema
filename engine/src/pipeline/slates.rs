@@ -207,6 +207,16 @@ pub fn slate_filter(with_text: bool, with_qr: bool, seconds: u32) -> String {
     }
 }
 
+/// Kills the segmenter's ffmpeg when dropped while it still runs ([`ClipSegmenter::kill`] does
+/// nothing once it has ended).
+struct StopOnDrop<'a>(&'a ClipSegmenter);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.kill();
+    }
+}
+
 async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentInfo>, SlateError> {
     // ffmpeg runs with cwd = the slate dir, so the dir handed to it must not be relative.
     let dir = std::path::absolute(o.dir.join(kind.as_str()))?;
@@ -254,6 +264,9 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
         readrate: None,
     });
     let seg = ClipSegmenter::start(&o.ffmpeg_path, args, dir.clone(), Some(dir));
+    // Dropped before the end (the generation aborted: a swap cancelled, the app quitting):
+    // ffmpeg is stopped, not left making a set nobody waits for. A no-op once it ended.
+    let _stop = StopOnDrop(&seg);
     if seg.wait().await != SegmenterState::Done {
         return Err(SlateError::Failed {
             kind: kind.as_str(),
@@ -1073,5 +1086,66 @@ mod tests {
         assert!(matches!(outcome, SwapOutcome::Failed(_)), "{outcome:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(root.path().join("idle").is_dir());
+    }
+
+    /// Final review M1: an aborted slate generation (a swap cancelled, the app quitting) stops
+    /// its ffmpeg instead of leaving it running. The "ffmpeg" here is the fake cloudflared
+    /// (`examples/fake_cloudflared.rs`, built by a plain `cargo test`) scripted to run until
+    /// killed; a process whose working directory is a slate folder keeps that folder from
+    /// being deleted on Windows.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_aborted_generation_stops_its_ffmpeg() {
+        let exe = std::env::current_exe().unwrap();
+        let fake = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples")
+            .join("fake_cloudflared.exe");
+        assert!(
+            fake.exists(),
+            "{} is missing: run `cargo build --example fake_cloudflared`",
+            fake.display()
+        );
+        let bin = tempfile::tempdir().unwrap();
+        let ffmpeg = bin.path().join("ffmpeg.exe");
+        if std::fs::hard_link(&fake, &ffmpeg).is_err() {
+            std::fs::copy(&fake, &ffmpeg).unwrap();
+        }
+        std::fs::write(
+            bin.path().join("fake_cloudflared.json"),
+            r#"[{"serve_metrics": false}]"#,
+        )
+        .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let slates = out.path().join("slates");
+        let options = options(ffmpeg, &slates, "https://tv.example.com/", 0);
+        let generation = tokio::spawn(async move { generate_slates(&options).await });
+        let log = bin.path().join("fake_cloudflared.log");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            < 3
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the three ffmpeg did not start"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        generation.abort();
+        let _ = generation.await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while let Err(e) = std::fs::remove_dir_all(&slates) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the slate folder is still in use (ffmpeg left running): {e}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

@@ -489,6 +489,12 @@ impl Supervisor {
         let mut stderr_open = true;
         // Refusals of too many requests concern quick tunnels only (spec section 7).
         let quick = matches!(config.mode, TunnelMode::Quick);
+        // A quick address seen on stderr only: believed once the process still runs one poll
+        // interval later (or `/quicktunnel` confirms it); one that exits first printed a
+        // dead address.
+        let mut pending: Option<String> = None;
+        let confirm = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(confirm);
 
         loop {
             tokio::select! {
@@ -512,8 +518,17 @@ impl Supervisor {
                             return Outcome::Failed(failure);
                         }
                         if let Some(url) = process::address_in_line(&line, &config.mode) {
-                            online_since = Some(self.online(&url));
-                            address = Some(url);
+                            if quick {
+                                if pending.is_none() {
+                                    confirm
+                                        .as_mut()
+                                        .reset(tokio::time::Instant::now() + poll);
+                                    pending = Some(url);
+                                }
+                            } else {
+                                online_since = Some(self.online(&url));
+                                address = Some(url);
+                            }
                         }
                     }
                     if !line.trim().is_empty() {
@@ -546,6 +561,13 @@ impl Supervisor {
                     failure.online_for = online_since
                         .map_or(longest_online, |t| longest_online.max(t.elapsed()));
                     return Outcome::Failed(failure);
+                }
+                _ = &mut confirm, if address.is_none() && pending.is_some() => {
+                    // Still running a poll interval after printing it: the address is live.
+                    if let Some(url) = pending.take() {
+                        online_since = Some(self.online(&url));
+                        address = Some(url);
+                    }
                 }
                 answer = &mut probe, if address.is_none() => {
                     if let Metrics::Answered(found) = answer {
