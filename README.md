@@ -19,16 +19,44 @@ Polish version: [README.pl.md](README.pl.md). The web interface is currently in 
 
 `VRCinema.exe` is the whole server in one window: no Node.js, no installer, no `.env` file.
 
-- **Download** `VRCinema.exe` from the [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) page (about 18 MB) and put it anywhere, for example on the desktop. Windows 10/11, 64-bit; it needs the Microsoft Edge WebView2 Runtime, which is already part of Windows 11 and most Windows 10 installations (the app tells you where to get it if it is missing).
-- **First run**: a wizard downloads the tools (ffmpeg, yt-dlp and the Deno runtime that YouTube needs, about 250 MB in total) into `%LOCALAPPDATA%\VRCinema`, tests your graphics card to pick the encoder (NVIDIA, Intel, AMD or CPU) and starts the channel. After that the app opens straight to the panel.
+- **Download** `VRCinema.exe` from the [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) page (about 19 MB) and put it anywhere, for example on the desktop. Windows 10/11, 64-bit; it needs the Microsoft Edge WebView2 Runtime, which is already part of Windows 11 and most Windows 10 installations (the app tells you where to get it if it is missing).
+- **First run**: a wizard downloads the tools (ffmpeg, yt-dlp, the Deno runtime that YouTube needs and cloudflared for the public link, about 300 MB in total) into `%LOCALAPPDATA%\VRCinema`, tests your graphics card to pick the encoder (NVIDIA, Intel, AMD or CPU), starts the channel and shows its public link. After that the app opens straight to the panel.
 - **SmartScreen**: the file is not code-signed, so Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**.
 - **Adding films**: drag video files or whole folders onto the window, or paste links in the panel. Dropped files are played from where they are on your disk.
 - **Tray**: closing the window keeps the channel running in the tray (a balloon tells you the first time). The tray menu opens the panel, copies the channel link, skips the current film and quits. **Quit** from the tray stops the channel and every ffmpeg process.
 - **Remote panel**: off by default; the panel is reachable only from this computer. To manage the channel from another device, enable it in the **Ustawienia** tab and set a password.
 - **Updates**: the app checks for a newer `VRCinema.exe` at start and every 24 hours and offers to install it (the file is verified with its SHA-256 and the old one is kept until the new one runs). This needs the repository's releases to be public.
 - **Data**: everything is in `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Set `VRCINEMA_HOME` to use another folder. Deleting the folder resets the app.
-- **Size and memory** (measured, release build): `VRCinema.exe` is 18.2 MB. With the window open it uses about 40 MB itself plus about 340 MB for the WebView2 processes that draw the window; ffmpeg is separate.
+- **Size and memory** (measured, release build): `VRCinema.exe` is 19.4 MB. With the window open it uses about 40 MB itself plus about 330 MB for the WebView2 processes that draw the window; cloudflared takes about 40 MB and ffmpeg is separate.
 - **No window** (a server, Docker): see [VPS with Docker](#vps-with-docker) and [Rust version](#rust-version-experimental) below; the headless `vrcinema` server is unchanged.
+
+### Public link (built-in tunnel)
+
+The app puts the channel on the internet by itself: no account, no terminal, no address to type.
+
+- **Quick tunnel, on by default**: at start the app runs its own copy of [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) and gets an address such as `https://abc-def.trycloudflare.com`. The badge at the top of the panel shows **W sieci** (online) with a button that copies the channel link (`<address>/live/main.m3u8`); the tray menu copies it too.
+- **The address changes every time the app starts** (and when the tunnel has to reconnect). Give friends the new link, or set up a permanent link (below).
+- **It replaces running your own cloudflared.** If you started `cloudflared tunnel --url …` yourself with the previous version, you no longer need to. While the built-in tunnel is on, the public address typed by hand (**Ustawienia** → **Zaawansowane**) and the "trust Cloudflare" option are not used; they apply only with the tunnel switched off in **Ustawienia** → **Internet**. A configuration from the previous version gets the tunnel switched on too.
+- **QR code on the idle screen**: while the queue is empty the channel shows "Brak filmów w kolejce" with a QR code of the request page and the address under it, so friends in VRChat can scan it with a phone and add a film. A new address replaces it live, without a restart. Without an address the screen says "Łączenie z internetem…".
+- **Switching it off**: **Ustawienia** → **Internet** → "Udostępniaj kanał w internecie". With the tunnel off the channel is reachable only from this computer (or at the address entered by hand).
+
+### Permanent link (your own domain)
+
+A link that never changes needs a free [Cloudflare](https://dash.cloudflare.com/sign-up) account and a domain of your own:
+
+1. Buy a domain at any registrar (a cheap one is fine) and [add it to your Cloudflare account](https://developers.cloudflare.com/fundamentals/setup/manage-domains/add-site/): Cloudflare gives you two nameservers to set at the registrar. Wait until Cloudflare shows the domain as **Active**.
+2. In VRCinema open **Ustawienia** → **Internet** → **Ustaw stały link**. The app opens your browser once: log in to Cloudflare and authorize the domain.
+3. Type the full host name for the channel, for example `kanal.example.com`. The app creates a tunnel called `vrcinema` and a DNS record for that name. If the name already has a record, it asks whether to overwrite it or pick another name.
+
+From then on the channel link is `https://kanal.example.com/live/main.m3u8`, also after restarts and port changes. **Wróć do szybkiego tunelu** goes back to the quick tunnel (the permanent link stays set up); **Usuń stały link** deletes the tunnel (if the DNS record is still there afterwards, delete it in the Cloudflare dashboard). The Cloudflare certificate and the tunnel credentials stay in `%LOCALAPPDATA%\VRCinema\tunnel\` and are never shown or logged.
+
+### Automatic pause
+
+Viewers don't miss part of a film because the connection dropped:
+
+- **Internet lost** (on by default): when the tunnel has been down for 10 seconds, the film pauses and the channel shows "Pauza — wracamy za chwilę". When the tunnel is back, the film resumes from the same place. Shorter drops pause nothing.
+- **Nobody watching** (off by default): after 30 seconds without a viewer the film pauses; it resumes as soon as someone starts watching (the preview in the panel counts as a viewer).
+- Live streams are never paused. Both options are in **Ustawienia** → **Internet**. A resumed film starts after a few seconds of the buffering screen; that is expected.
 
 ### Owner's manual test checklist
 
@@ -46,6 +74,10 @@ These need a person at the screen and are not covered by the automatic tests:
 - [ ] Second launch: with the app running (window hidden in the tray, or minimized), start `VRCinema.exe` again; the existing window comes back to the front and no second copy starts (also after **Zakończ**: a new launch starts normally within a few seconds).
 - [ ] Remote panel: in **Ustawienia** set a password and switch the remote panel on (with access from the network or a public address); log in from another device (e.g. a phone) at `/admin`; a wrong password is refused; switching the panel off or changing the password logs that device out.
 - [ ] Repair banner: with broken tools (e.g. replace `tools\ffmpeg.exe` in the data folder with an empty file and restart the app) the panel shows "Kanał nie wystartował…" with **Uruchom ponownie kanał** and **Napraw narzędzia**; repairing brings the channel back.
+- [ ] Permanent link end to end with a real domain: **Ustaw stały link** opens the browser once for the Cloudflare login; the host name step follows; the channel plays at `https://<host>/live/main.m3u8` and keeps that link after an app restart and a port change. Quitting VRCinema (tray → **Zakończ**) during or after the login does not close the browser. A host name that already has a DNS record shows the overwrite question, and overwriting works. **Wróć do szybkiego tunelu** and **Usuń stały link** work (the tunnel disappears from the Cloudflare dashboard).
+- [ ] QR code from VRChat: with an empty queue, scan the QR code on the idle screen in a VRChat world with a phone; the request page opens, and a film added there plays.
+- [ ] Automatic pause: during a film unplug the network cable (or switch Wi-Fi off) for at least 15 s; the badge shows "Brak internetu — kanał wstrzymany" and the film pauses; after reconnecting the tunnel comes back (with a new quick address) and the film continues from the same place.
+- [ ] Update from the previous version: start the new `VRCinema.exe` on the data folder of the previous version (its `config.json`); the tunnel is on; the panel asks for the missing cloudflared (the **Napraw narzędzia** banner, or **Pobierz** next to cloudflared in **Ustawienia** → **Narzędzia**); once it is downloaded the tunnel connects by itself and the panel shows the public link.
 
 ## Requirements
 
@@ -71,6 +103,8 @@ npm start
 ```
 
 ## Making it reachable from VRChat
+
+The desktop app does this by itself (see [Public link](#public-link-built-in-tunnel) above). This section is for the Node.js server and the headless `vrcinema` server.
 
 Every player downloads the stream from your server, so it needs a public address.
 

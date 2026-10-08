@@ -56,6 +56,9 @@ pub struct RunOptions {
     /// Desktop app: the tunnel is enabled but has no address yet, so the start-up idle slate
     /// says "Łączenie z internetem…" (with `config.public_url` empty).
     pub slates_connecting: bool,
+    /// Desktop app: the built-in tunnel gives the public address (the banner then has no
+    /// "run cloudflared" hint and no manual address).
+    pub builtin_tunnel: bool,
     /// Desktop app: pause reasons active right now (automatic pause); the channel loop starts
     /// with them, so a restarted server does not air a film before they reach it.
     pub pause_reasons: Vec<PauseReason>,
@@ -76,6 +79,7 @@ impl RunOptions {
             channel_loops: None,
             live: None,
             slates_connecting: false,
+            builtin_tunnel: false,
             pause_reasons: Vec::new(),
         }
     }
@@ -110,7 +114,8 @@ pub fn log(msg: &str) {
     println!("[{}] {msg}", chrono::Local::now().format("%H:%M:%S"));
 }
 
-fn banner(config: &AppConfig, port: u16) -> String {
+/// `builtin_tunnel`: the desktop app's tunnel gives the public address (it logs it itself).
+fn banner(config: &AppConfig, port: u16, builtin_tunnel: bool) -> String {
     let local = format!("http://localhost:{port}");
     let mut lines = vec![
         String::new(),
@@ -125,7 +130,13 @@ fn banner(config: &AppConfig, port: u16) -> String {
             .into_iter()
             .map(|ip| format!("  W sieci domowej:        http://{ip}:{port}/live/main.m3u8")),
     );
-    if config.public_url.is_empty() {
+    if builtin_tunnel {
+        lines.extend([
+            String::new(),
+            "  Link dla VRChat: przez wbudowany tunel (adres we wpisie „Tunel: w sieci”)."
+                .to_string(),
+        ]);
+    } else if config.public_url.is_empty() {
         lines.extend([
             String::new(),
             "  Dla VRChat potrzebny jest adres publiczny, np.:".to_string(),
@@ -369,6 +380,7 @@ pub async fn run(
         channel_loops,
         live,
         slates_connecting,
+        builtin_tunnel,
         pause_reasons,
     } = opts;
     let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
@@ -456,7 +468,7 @@ pub async fn run(
         let router = build_router(state);
 
         let addr = listener.local_addr()?;
-        let text = banner(&config, addr.port());
+        let text = banner(&config, addr.port(), builtin_tunnel);
         if print_banner {
             println!("{text}");
         } else if start_channel {
@@ -622,6 +634,42 @@ mod tests {
             std::fs::write(m, "x").unwrap();
         }
         (tmp, data, markers)
+    }
+
+    /// The desktop app's built-in tunnel gives the public address: the start-up banner must not
+    /// tell the owner to run cloudflared himself (Task 8 live run).
+    #[test]
+    fn banner_with_the_built_in_tunnel_has_no_cloudflared_hint() {
+        let (_tmp, data, _) = data_with_markers();
+        let config = test_config(&data, 8471);
+        let text = banner(&config, 8471, true);
+        assert!(!text.contains("cloudflared tunnel"), "{text}");
+        assert!(text.contains("wbudowany tunel"), "{text}");
+        // A manual address saved in the settings does not apply while the tunnel is on.
+        let manual = AppConfig {
+            public_url: "https://reczny.example.com".into(),
+            ..config
+        };
+        assert!(!banner(&manual, 8471, true).contains("reczny.example.com"));
+    }
+
+    #[test]
+    fn banner_without_the_built_in_tunnel_is_unchanged() {
+        let (_tmp, data, _) = data_with_markers();
+        let config = test_config(&data, 8471);
+        let text = banner(&config, 8471, false);
+        assert!(
+            text.contains("    cloudflared tunnel --url http://localhost:8471"),
+            "{text}"
+        );
+        let public = AppConfig {
+            public_url: "https://kanal.example.com".into(),
+            ..config
+        };
+        assert!(
+            banner(&public, 8471, false)
+                .contains("  Link dla VRChat:        https://kanal.example.com/live/main.m3u8")
+        );
     }
 
     fn test_config(data: &Path, port: u16) -> AppConfig {

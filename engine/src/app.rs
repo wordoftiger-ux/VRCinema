@@ -507,6 +507,7 @@ impl AppCore {
             channel_loops: Some(Arc::clone(&self.channel_loops)),
             live: Some(self.live_settings.clone()),
             slates_connecting: connecting,
+            builtin_tunnel: settings.tunnel_enabled,
             pause_reasons: started_paused.iter().copied().collect(),
             ..RunOptions::new(self.home.clone())
         };

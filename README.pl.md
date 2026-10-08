@@ -18,16 +18,44 @@ English version: [README.md](README.md).
 
 `VRCinema.exe` to cały serwer w jednym oknie: bez Node.js, bez instalatora, bez pliku `.env`.
 
-- **Pobranie**: `VRCinema.exe` ze strony [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) (około 18 MB). Połóż go gdziekolwiek, np. na pulpicie. Windows 10/11, 64-bitowy; potrzebny jest składnik Microsoft Edge WebView2 Runtime, który jest w Windows 11 i w większości instalacji Windows 10 (jeśli go brakuje, program podpowie, skąd go wziąć).
-- **Pierwsze uruchomienie**: kreator pobiera narzędzia (ffmpeg, yt-dlp i środowisko Deno potrzebne dla YouTube, razem około 250 MB) do `%LOCALAPPDATA%\VRCinema`, sprawdza kartę graficzną i wybiera enkoder (NVIDIA, Intel, AMD albo procesor), po czym uruchamia kanał. Potem program od razu otwiera panel.
+- **Pobranie**: `VRCinema.exe` ze strony [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) (około 19 MB). Połóż go gdziekolwiek, np. na pulpicie. Windows 10/11, 64-bitowy; potrzebny jest składnik Microsoft Edge WebView2 Runtime, który jest w Windows 11 i w większości instalacji Windows 10 (jeśli go brakuje, program podpowie, skąd go wziąć).
+- **Pierwsze uruchomienie**: kreator pobiera narzędzia (ffmpeg, yt-dlp, środowisko Deno potrzebne dla YouTube i cloudflared do linku publicznego, razem około 300 MB) do `%LOCALAPPDATA%\VRCinema`, sprawdza kartę graficzną i wybiera enkoder (NVIDIA, Intel, AMD albo procesor), uruchamia kanał i pokazuje jego link publiczny. Potem program od razu otwiera panel.
 - **SmartScreen**: plik nie jest podpisany certyfikatem, więc Windows może pokazać „System Windows chronił ten komputer”. Kliknij **Więcej informacji**, potem **Uruchom mimo to**.
 - **Dodawanie filmów**: przeciągnij pliki wideo lub całe foldery na okno albo wklej linki w panelu. Przeciągnięte pliki są odtwarzane z miejsca, w którym leżą na dysku.
 - **Zasobnik**: zamknięcie okna zostawia kanał w zasobniku (za pierwszym razem pokaże się dymek). Menu zasobnika otwiera panel, kopiuje link kanału, pomija bieżący film i kończy program. **Zakończ** zatrzymuje kanał i wszystkie procesy ffmpeg.
 - **Panel zdalny**: domyślnie wyłączony; panel jest dostępny tylko z tego komputera. Aby zarządzać kanałem z innego urządzenia, włącz go w zakładce **Ustawienia** i ustaw hasło.
 - **Aktualizacje**: program sprawdza, czy jest nowszy `VRCinema.exe`, przy starcie i co 24 godziny, i proponuje instalację (plik jest weryfikowany sumą SHA-256, a stary zostaje, dopóki nowy się nie uruchomi). Wymaga to publicznych wydań w repozytorium.
 - **Dane**: wszystko leży w `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Zmienna `VRCINEMA_HOME` wskazuje inny folder. Usunięcie folderu przywraca stan początkowy.
-- **Rozmiar i pamięć** (zmierzone, wersja release): `VRCinema.exe` ma 18,2 MB. Przy otwartym oknie sam zajmuje około 40 MB, a procesy WebView2 rysujące okno około 340 MB; ffmpeg to osobny proces.
+- **Rozmiar i pamięć** (zmierzone, wersja release): `VRCinema.exe` ma 19,4 MB. Przy otwartym oknie sam zajmuje około 40 MB, a procesy WebView2 rysujące okno około 330 MB; cloudflared zajmuje około 40 MB, a ffmpeg to osobny proces.
 - **Bez okna** (serwer, Docker): zobacz [VPS (Linux, Docker)](#vps-linux-docker) i [Wersja w Rust](#wersja-w-rust-eksperymentalna) niżej; serwer `vrcinema` bez okna działa jak dotąd.
+
+### Link publiczny (wbudowany tunel)
+
+Program sam udostępnia kanał w internecie: bez konta, bez terminala i bez wpisywania adresu.
+
+- **Szybki tunel, domyślnie włączony**: przy starcie program uruchamia własną kopię [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) i dostaje adres w stylu `https://abc-def.trycloudflare.com`. Znacznik u góry panelu pokazuje **W sieci** i przycisk kopiujący link kanału (`<adres>/live/main.m3u8`); link kopiuje też menu zasobnika.
+- **Adres zmienia się przy każdym uruchomieniu programu** (i gdy tunel musi połączyć się od nowa). Podaj znajomym nowy link albo ustaw stały link (niżej).
+- **Zastępuje własny cloudflared.** Jeśli przy poprzedniej wersji uruchamiałeś sam `cloudflared tunnel --url …`, nie musisz już tego robić. Przy włączonym wbudowanym tunelu ręcznie wpisany adres publiczny (**Ustawienia** → **Zaawansowane**) i zaufanie do Cloudflare nie są używane; działają tylko po wyłączeniu tunelu w **Ustawieniach** → **Internet**. Konfiguracja z poprzedniej wersji też dostaje włączony tunel.
+- **Kod QR na planszy oczekiwania**: gdy kolejka jest pusta, kanał pokazuje „Brak filmów w kolejce”, kod QR strony zgłoszeń i pod nim jej adres. Znajomi w VRChat skanują go telefonem i dodają film. Nowy adres podmienia kod na żywo, bez restartu. Bez adresu plansza mówi „Łączenie z internetem…”.
+- **Wyłączenie**: **Ustawienia** → **Internet** → „Udostępniaj kanał w internecie”. Bez tunelu kanał jest dostępny tylko z tego komputera (albo pod adresem wpisanym ręcznie).
+
+### Stały link (własna domena)
+
+Link, który się nie zmienia, wymaga darmowego konta [Cloudflare](https://dash.cloudflare.com/sign-up) i własnej domeny:
+
+1. Kup domenę u dowolnego rejestratora (wystarczy tania) i [dodaj ją do konta Cloudflare](https://developers.cloudflare.com/fundamentals/setup/manage-domains/add-site/): Cloudflare poda dwa serwery nazw, które ustawiasz u rejestratora. Poczekaj, aż Cloudflare pokaże domenę jako **Active**.
+2. W VRCinema otwórz **Ustawienia** → **Internet** → **Ustaw stały link**. Program raz otworzy przeglądarkę: zaloguj się do Cloudflare i zatwierdź domenę.
+3. Wpisz pełną nazwę hosta dla kanału, np. `kanal.example.com`. Program tworzy tunel o nazwie `vrcinema` i rekord DNS dla tej nazwy. Jeśli nazwa ma już rekord, zapyta, czy go nadpisać, czy wybrać inną nazwę.
+
+Od tej chwili link kanału to `https://kanal.example.com/live/main.m3u8`, także po restarcie i zmianie portu. **Wróć do szybkiego tunelu** przełącza z powrotem na szybki tunel (stały link zostaje ustawiony); **Usuń stały link** usuwa tunel (jeśli rekord DNS nadal istnieje, usuń go w panelu Cloudflare). Certyfikat Cloudflare i poświadczenia tunelu leżą w `%LOCALAPPDATA%\VRCinema\tunnel\` i nigdy nie trafiają do dziennika ani na ekran.
+
+### Automatyczna pauza
+
+Widzowie nie tracą kawałka filmu, gdy zerwie się połączenie:
+
+- **Utrata internetu** (domyślnie włączona): gdy tunel nie działa przez 10 sekund, film się zatrzymuje, a kanał pokazuje „Pauza — wracamy za chwilę”. Po powrocie tunelu film wznawia się od tego samego miejsca. Krótsze przerwy niczego nie wstrzymują.
+- **Nikt nie ogląda** (domyślnie wyłączona): po 30 sekundach bez widzów film się zatrzymuje i wznawia, gdy tylko ktoś zacznie oglądać (podgląd w panelu też liczy się jako widz).
+- Transmisje na żywo nigdy nie są wstrzymywane. Obie opcje są w **Ustawieniach** → **Internet**. Wznowiony film rusza po kilku sekundach planszy buforowania; tak ma być.
 
 ### Lista testów ręcznych dla właściciela
 
@@ -45,6 +73,10 @@ Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
 - [ ] Drugie uruchomienie: przy działającym programie (okno schowane do zasobnika albo zminimalizowane) uruchom `VRCinema.exe` jeszcze raz; istniejące okno wraca na wierzch i nie startuje druga kopia (także po **Zakończ**: nowe uruchomienie startuje normalnie w ciągu kilku sekund).
 - [ ] Panel zdalny: w **Ustawieniach** ustaw hasło i włącz panel zdalny (z dostępem z sieci albo adresem publicznym); zaloguj się z innego urządzenia (np. telefonu) pod `/admin`; złe hasło jest odrzucane; wyłączenie panelu albo zmiana hasła wylogowuje to urządzenie.
 - [ ] Pasek naprawy: przy uszkodzonych narzędziach (np. zamień `tools\ffmpeg.exe` w folderze danych na pusty plik i uruchom program ponownie) panel pokazuje „Kanał nie wystartował…” z przyciskami **Uruchom ponownie kanał** i **Napraw narzędzia**; naprawa przywraca kanał.
+- [ ] Stały link od początku do końca z prawdziwą domeną: **Ustaw stały link** raz otwiera przeglądarkę do logowania w Cloudflare; potem pojawia się krok z nazwą hosta; kanał działa pod `https://<host>/live/main.m3u8` i zachowuje ten link po restarcie programu i zmianie portu. Zakończenie VRCinema (zasobnik → **Zakończ**) w trakcie lub po logowaniu nie zamyka przeglądarki. Nazwa hosta, która ma już rekord DNS, pokazuje pytanie o nadpisanie, a nadpisanie działa. **Wróć do szybkiego tunelu** i **Usuń stały link** działają (tunel znika z panelu Cloudflare).
+- [ ] Kod QR z VRChat: przy pustej kolejce zeskanuj telefonem kod QR z planszy oczekiwania w świecie VRChat; otwiera się strona zgłoszeń, a dodany tam film leci.
+- [ ] Automatyczna pauza: w trakcie filmu odłącz kabel sieciowy (albo wyłącz Wi-Fi) na co najmniej 15 s; znacznik pokazuje „Brak internetu — kanał wstrzymany”, a film się zatrzymuje; po podłączeniu tunel wraca (z nowym szybkim adresem), a film leci dalej od tego samego miejsca.
+- [ ] Aktualizacja z poprzedniej wersji: uruchom nowy `VRCinema.exe` na folderze danych poprzedniej wersji (jej `config.json`); tunel jest włączony; panel prosi o brakujący cloudflared (pasek **Napraw narzędzia** albo **Pobierz** przy cloudflared w **Ustawieniach** → **Narzędzia**); po pobraniu tunel łączy się sam, a panel pokazuje link publiczny.
 
 ## Wymagania
 
@@ -83,6 +115,8 @@ Serwer wypisze adresy. Otwórz `http://localhost:8080/admin`, zaloguj się i wkl
 Przycisk „Włącz podgląd” pokazuje kanał tak, jak zobaczą go widzowie.
 
 ## Udostępnienie dla VRChat
+
+Aplikacja na pulpit robi to sama (zobacz [Link publiczny](#link-publiczny-wbudowany-tunel) wyżej). Ten rozdział dotyczy serwera Node.js i serwera `vrcinema` bez okna.
 
 Każdy gracz w lobby pobiera obraz bezpośrednio z Twojego serwera, więc kanał musi mieć adres publiczny.
 
