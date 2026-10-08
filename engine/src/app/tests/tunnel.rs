@@ -138,7 +138,13 @@ impl Default for Setup {
 /// The app with the tunnel on; `None` when the test needs ffmpeg and it is not there.
 pub(super) async fn start(setup: Setup) -> Option<App> {
     let mut linked = true;
-    let app = App::start_with(|home, options| {
+    // The real ffmpeg: one of the few heavy apps at a time.
+    let heavy = if setup.tools {
+        Some(HEAVY.acquire().await.unwrap())
+    } else {
+        None
+    };
+    let mut app = App::start_with(|home, options| {
         let mut config = json!({"port": 0, "tunnelEnabled": true});
         for (k, v) in setup.settings.as_object().unwrap() {
             config[k] = v.clone();
@@ -173,6 +179,7 @@ pub(super) async fn start(setup: Setup) -> Option<App> {
         options.auto_pause_timings = setup.auto_pause;
     })
     .await;
+    app.heavy = heavy;
     if !linked {
         eprintln!("pomijam: brak bin/ffmpeg.exe lub nie można utworzyć dowiązania");
         app.stop().await;
@@ -799,8 +806,9 @@ async fn a_reason_cleared_during_a_server_restart_is_resumed_on_the_new_channel(
 async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
     let Some(app) = start(Setup {
         tools: true,
+        // The connection is lost once the test creates `offline` (never given back).
         runs: Some(json!([
-            { "hostname": QUICK_HOST, "ready_down": [[6000, 600000]] },
+            { "hostname": QUICK_HOST, "ready_down_while": "offline" },
             { "hostname": "" }
         ])),
         tunnel: TunnelTimings {
@@ -820,6 +828,8 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
         slates.join("g1").join("idle").join("qr.png").is_file()
     })
     .await;
+    // Only now (however long the set took under load) the connection goes.
+    std::fs::write(app.home.join("tools").join("offline"), "").unwrap();
     let core = Arc::clone(&app.engine().core);
     eventually(20, "the second cloudflared", || async {
         fake_starts(&app.home).len() >= 2
@@ -1166,10 +1176,10 @@ async fn the_named_mode_runs_the_named_tunnel_and_never_shows_its_credentials() 
 async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resumes() {
     let Some(app) = start(Setup {
         tools: true,
-        // `/ready` fails 4.0–5.5 s (a loss of about 1.5 s) and 9–16 s (7 s); limit 4 s.
+        // `/ready` fails while the test's file `offline` exists; limit 4 s.
         runs: Some(json!([{
             "hostname": QUICK_HOST,
-            "ready_down": [[4000, 5500], [9000, 16000]],
+            "ready_down_while": "offline",
         }])),
         auto_pause: AutoPauseTimings {
             tunnel_loss: Duration::from_millis(4000),
@@ -1183,39 +1193,75 @@ async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resum
     };
     let cookie = app.window_cookie().await;
     wait_online(&app, &cookie).await;
-    let started_ms = fake_starts(&app.home)[0]["ms"].as_u64().unwrap();
     let core = Arc::clone(&app.engine().core);
-    // (ms after the fake's start, tunnel state, pause reasons), every 25 ms.
-    let mut samples: Vec<(u64, String, Vec<&str>)> = Vec::new();
-    while now_ms() < started_ms + 18_000 {
-        let state = core.tunnel_state();
-        let name = format!("{state:?}");
-        samples.push((now_ms() - started_ms, name, pause_reasons(&core)));
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let lost = |from: u64, to: u64| {
+    // A slow first start of cloudflared alone can already pause the channel for a moment
+    // (limit of a few seconds): the losses begin once it is steadily on air.
+    eventually(60, "the channel on air without a pause", || async {
+        core.channel_running() && pause_reasons(&core).is_empty()
+    })
+    .await;
+    let offline = app.home.join("tools").join("offline");
+    // (ms since the loss began, tunnel state, pause reasons), every 25 ms, for `for_ms`.
+    let sample = |since: Instant, for_ms: u64| {
+        let core = Arc::clone(&core);
+        async move {
+            let mut samples: Vec<(u64, String, Vec<&str>)> = Vec::new();
+            while since.elapsed() < Duration::from_millis(for_ms) {
+                let state = format!("{:?}", core.tunnel_state());
+                samples.push((
+                    since.elapsed().as_millis() as u64,
+                    state,
+                    pause_reasons(&core),
+                ));
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            samples
+        }
+    };
+    let reconnecting = |samples: &[(u64, String, Vec<&str>)]| {
         samples
             .iter()
-            .any(|(t, s, _)| (from..to).contains(t) && s.starts_with("Reconnecting"))
+            .any(|(_, s, _)| s.starts_with("Reconnecting"))
     };
+    let paused_at = |samples: &[(u64, String, Vec<&str>)]| {
+        samples
+            .iter()
+            .find(|(_, _, r)| r.contains(&"tunnel"))
+            .map(|(t, _, _)| *t)
+    };
+
+    // A loss of 1.5 s (well under the limit), watched until long after the limit.
+    std::fs::write(&offline, "").unwrap();
+    let short = Instant::now();
+    let mut samples = sample(short, 1500).await;
+    std::fs::remove_file(&offline).unwrap();
+    samples.extend(sample(short, 6500).await);
     assert!(
-        lost(4000, 5700),
+        reconnecting(&samples),
         "the short loss did not happen: {samples:?}"
     );
+    assert_eq!(
+        paused_at(&samples),
+        None,
+        "the short loss paused: {samples:?}"
+    );
     assert!(
-        lost(9000, 16_000),
+        samples.last().unwrap().1.starts_with("Online"),
+        "not back online: {samples:?}"
+    );
+
+    // A loss of 8 s: paused once the limit has passed since the loss began, not before.
+    std::fs::write(&offline, "").unwrap();
+    let long = Instant::now();
+    let samples = sample(long, 8000).await;
+    std::fs::remove_file(&offline).unwrap();
+    assert!(
+        reconnecting(&samples),
         "the long loss did not happen: {samples:?}"
     );
-    // From 3 s on (steadily online since the start): with a limit of a few seconds, a slow
-    // first start of cloudflared alone can already pause the channel for a moment.
-    let first_pause = samples
-        .iter()
-        .find(|(t, _, r)| *t >= 3000 && r.contains(&"tunnel"))
-        .map(|(t, _, _)| *t)
-        .unwrap_or_else(|| panic!("never paused: {samples:?}"));
-    // ≈ 9.0 s (first failed check) + 4 s limit; the short loss would have paused near 8 s.
+    let first_pause = paused_at(&samples).unwrap_or_else(|| panic!("never paused: {samples:?}"));
     assert!(
-        (12_500..16_000).contains(&first_pause),
+        (4000..8000).contains(&first_pause),
         "paused at {first_pause} ms: {samples:?}"
     );
     eventually(10, "the resume after the tunnel returned", || async {

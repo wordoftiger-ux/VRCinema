@@ -481,8 +481,9 @@ mod tests {
         let err = run_process(&cmd, &args, Duration::from_millis(700))
             .await
             .unwrap_err();
+        // The sleeper runs ~59 s: well under that proves the kill, with room for a loaded machine.
         assert!(
-            started.elapsed() < Duration::from_secs(5),
+            started.elapsed() < Duration::from_secs(30),
             "took {:?}",
             started.elapsed()
         );

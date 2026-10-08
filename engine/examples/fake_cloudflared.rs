@@ -11,6 +11,8 @@
 //! - `ready_down`: `[[from_ms, to_ms], …]` after the start during which `/ready` answers 503
 //!   again (connection to Cloudflare lost while the process keeps running);
 //! - `stderr`: lines printed to stderr;
+//! - `ready_down_while`: a file name; `/ready` answers 503 while that file exists in the fake's
+//!   folder (a loss the test starts and ends on its own clock);
 //! - `exit_after_ms` + `exit_code`: exit on its own (runs until killed when absent).
 //!
 //! Every start appends `{"event":"start","pid","args","ms","overlap"}` to `fake_cloudflared.log`
@@ -39,6 +41,7 @@ struct Run {
     hostname: Option<String>,
     ready_after_ms: u64,
     ready_down: Vec<[u64; 2]>,
+    ready_down_while: Option<String>,
     stderr: Vec<String>,
     exit_after_ms: Option<u64>,
     exit_code: i32,
@@ -52,6 +55,7 @@ impl Default for Run {
             hostname: None,
             ready_after_ms: 0,
             ready_down: Vec::new(),
+            ready_down_while: None,
             stderr: Vec::new(),
             exit_after_ms: None,
             exit_code: 0,
@@ -106,29 +110,37 @@ fn exclusive(path: &Path) -> Option<File> {
         .ok()
 }
 
-fn serve(listener: TcpListener, run: Run, started: Instant, requests: PathBuf) {
+fn serve(listener: TcpListener, run: Run, started: Instant, dir: PathBuf) {
     for stream in listener.incoming().flatten() {
         let run = run.clone();
-        let requests = requests.clone();
-        std::thread::spawn(move || answer(stream, &run, started, &requests));
+        let dir = dir.clone();
+        std::thread::spawn(move || answer(stream, &run, started, &dir));
     }
 }
 
-fn is_ready(run: &Run, started: Instant) -> bool {
+fn is_ready(run: &Run, started: Instant, dir: &Path) -> bool {
     let ms = started.elapsed().as_millis() as u64;
     ms >= run.ready_after_ms
         && !run
             .ready_down
             .iter()
             .any(|[from, to]| (*from..*to).contains(&ms))
+        && !run
+            .ready_down_while
+            .as_ref()
+            .is_some_and(|file| dir.join(file).exists())
 }
 
-fn answer(mut stream: TcpStream, run: &Run, started: Instant, requests: &Path) {
+fn answer(mut stream: TcpStream, run: &Run, started: Instant, dir: &Path) {
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf).unwrap_or(0);
     let request = String::from_utf8_lossy(&buf[..n]);
     let path = request.split_whitespace().nth(1).unwrap_or("");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(requests) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("requests.log"))
+    {
         let _ = file.write_all(format!("{path}\n").as_bytes());
     }
     let (status, body) = match path {
@@ -137,7 +149,7 @@ fn answer(mut stream: TcpStream, run: &Run, started: Instant, requests: &Path) {
             serde_json::json!({ "hostname": run.hostname.clone().unwrap_or_default() }).to_string(),
         ),
         "/ready" => {
-            if is_ready(run, started) {
+            if is_ready(run, started, dir) {
                 (
                     "200 OK",
                     r#"{"status":200,"readyConnections":1}"#.to_string(),
@@ -227,8 +239,8 @@ fn main() {
             .expect("--metrics <address>");
         let listener = TcpListener::bind(metrics).expect("bind the metrics address");
         let served = run.clone();
-        let requests = dir.join("requests.log");
-        std::thread::spawn(move || serve(listener, served, started, requests));
+        let folder = dir.clone();
+        std::thread::spawn(move || serve(listener, served, started, folder));
     }
 
     for line in &run.stderr {

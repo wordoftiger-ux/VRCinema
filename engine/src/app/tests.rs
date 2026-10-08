@@ -80,6 +80,10 @@ fn test_options(tmp: &Path) -> AppOptions {
     }
 }
 
+/// Apps running the real ffmpeg (slates, the channel) run at most three at a time: in a full
+/// parallel `cargo test` more of them starve each other into timeouts.
+static HEAVY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
 /// Hard links (no disk space) of the repo's ffmpeg/ffprobe into `<home>/tools`.
 fn link_real_tools(home: &Path) -> bool {
     let bin = repo_root().join("bin");
@@ -114,6 +118,8 @@ struct App {
     home: PathBuf,
     tmp: tempfile::TempDir,
     http: reqwest::Client,
+    /// Held while the app runs the real ffmpeg (see [`HEAVY`]).
+    heavy: Option<tokio::sync::SemaphorePermit<'static>>,
 }
 
 impl App {
@@ -157,7 +163,17 @@ impl App {
             home,
             tmp,
             http,
+            heavy: None,
         }
+    }
+
+    /// Like [`Self::start_with`] for an app that runs the real ffmpeg: waits for a place among
+    /// the [`HEAVY`] ones first and holds it until the app is dropped.
+    async fn start_heavy(prepare: impl FnOnce(&Path, &mut AppOptions)) -> Self {
+        let permit = HEAVY.acquire().await.unwrap();
+        let mut app = Self::start_with(prepare).await;
+        app.heavy = Some(permit);
+        app
     }
 
     fn engine(&self) -> &AppEngine {
@@ -240,6 +256,20 @@ impl App {
         tokio::time::timeout(Duration::from_secs(30), engine.shutdown())
             .await
             .expect("shutdown took longer than 30 s");
+        // A process that just exited (ffmpeg, cloudflared) may hold a file a moment longer:
+        // the temporary home is deleted with retries, never left behind.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match std::fs::remove_dir_all(self.tmp.path()) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) if tokio::time::Instant::now() >= deadline => {
+                    eprintln!("nie udało się usunąć {}: {e}", self.tmp.path().display());
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
     }
 }
 
@@ -719,7 +749,7 @@ async fn the_wizard_page_is_served_to_the_window_only() {
 #[tokio::test]
 async fn a_new_port_restarts_the_server_there_with_exactly_one_channel_loop() {
     let mut linked = false;
-    let app = App::start_with(|home, _| linked = link_real_tools(home)).await;
+    let app = App::start_heavy(|home, _| linked = link_real_tools(home)).await;
     if !linked {
         eprintln!("pomijam: brak bin/ffmpeg.exe lub nie można utworzyć dowiązania");
         app.stop().await;
@@ -924,7 +954,24 @@ async fn installing_tools_from_the_local_server_updates_status_and_settings() {
         .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     // The job ends with a server restart: a poll may meet the closed port (no answer, retry).
-    eventually(30, "the tools job to finish", || async {
+    // First the restart that follows the install (the fake ffmpeg: the channel fails, the
+    // server comes back without it), then the job's end.
+    eventually(90, "the server back after the install", || async {
+        let res = app
+            .http
+            .get(app.url("/api/desktop/info"))
+            .header("cookie", &cookie)
+            .send()
+            .await;
+        match res {
+            Ok(res) => res.json::<Value>().await.is_ok_and(|v| {
+                v["restarting"] == false && v["toolsOk"] == true && v["channelError"].is_string()
+            }),
+            Err(_) => false,
+        }
+    })
+    .await;
+    eventually(90, "the tools job to finish", || async {
         let res = app
             .http
             .get(app.url("/api/desktop/tools"))
@@ -1208,7 +1255,7 @@ async fn trusting_cloudflare_applies_to_the_next_request() {
 #[tokio::test]
 async fn a_minor_change_keeps_the_stream_running() {
     let mut linked = false;
-    let app = App::start_with(|home, _| linked = link_real_tools(home)).await;
+    let app = App::start_heavy(|home, _| linked = link_real_tools(home)).await;
     if !linked {
         eprintln!("pomijam: brak bin/ffmpeg.exe lub nie można utworzyć dowiązania");
         app.stop().await;
@@ -1264,7 +1311,7 @@ async fn a_minor_change_keeps_the_stream_running() {
 #[tokio::test]
 async fn a_new_public_address_replaces_the_slates_live() {
     let mut linked = false;
-    let app = App::start_with(|home, _| linked = link_real_tools(home)).await;
+    let app = App::start_heavy(|home, _| linked = link_real_tools(home)).await;
     if !linked {
         eprintln!("pomijam: brak bin/ffmpeg.exe lub nie można utworzyć dowiązania");
         app.stop().await;
@@ -1304,9 +1351,7 @@ async fn a_new_public_address_replaces_the_slates_live() {
         slates.join("g1").join("idle").join("qr.png").is_file()
     })
     .await;
-    // The code file is written before ffmpeg makes the set: under a full parallel test run
-    // (many ffmpeg processes) the set may take a while.
-    eventually(180, "the new set on air", || async {
+    eventually(60, "the new set on air", || async {
         playlist().await.contains(TAG)
     })
     .await;
