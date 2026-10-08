@@ -264,8 +264,13 @@ async fn the_login_cloudflared_dies_with_the_login_but_the_browser_it_opens_does
     .await;
     assert!(child_running(&app.home), "the browser stand-in was killed");
     let home = app.home.clone();
-    // The temporary folder cannot go entirely while the stand-in runs from it.
-    app.stop().await;
+    // The temporary folder cannot go entirely while the stand-in runs from it: quit the app
+    // without `App::stop`, which would wait for the folder (until the stand-in ends).
+    let mut app = app;
+    let engine = app.engine.take().unwrap();
+    tokio::time::timeout(Duration::from_secs(30), engine.shutdown())
+        .await
+        .expect("shutdown took longer than 30 s");
     assert!(child_running(&home), "quitting killed the browser stand-in");
     // It ends on its own; then what is left of the temporary folder goes.
     let deadline = Instant::now() + Duration::from_secs(20);
