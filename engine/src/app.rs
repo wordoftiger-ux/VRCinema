@@ -38,6 +38,8 @@ mod tunnel;
 use tunnel::TunnelNotes;
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+/// A missing cloudflared after an upgrade: the next download attempt after a failure.
+const CLOUDFLARED_RETRY: Duration = Duration::from_secs(5 * 60);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Downloads may take long, but a stalled connection must not hang a job forever.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -111,6 +113,9 @@ pub struct AppOptions {
     pub auto_pause_timings: AutoPauseTimings,
     /// The permanent-link wizard's timeouts and cloudflared's own folder (tests: a temporary one).
     pub named_tunnel: NamedOptions,
+    /// How often a missing cloudflared (an upgrade from a version without the tunnel) is
+    /// downloaded again after a failure (5 min; tests shorten it).
+    pub cloudflared_retry: Duration,
 }
 
 impl Default for AppOptions {
@@ -124,6 +129,7 @@ impl Default for AppOptions {
             tunnel_timings: TunnelTimings::default(),
             auto_pause_timings: AutoPauseTimings::default(),
             named_tunnel: NamedOptions::default(),
+            cloudflared_retry: CLOUDFLARED_RETRY,
         }
     }
 }
@@ -310,6 +316,8 @@ pub(crate) struct AppCore {
     tunnel_address: Mutex<Option<tunnel::KeptAddress>>,
     /// A tools job replaces cloudflared: the tunnel stays stopped until it is done.
     tunnel_held: AtomicBool,
+    /// A tools job is downloading a missing cloudflared: the tunnel says so (not "missing").
+    cloudflared_fetching: AtomicBool,
     /// The permanent-link wizard: one operation at a time and its progress.
     named: NamedSetup,
     #[cfg(test)]
@@ -629,6 +637,20 @@ impl AppCore {
                 "Najpierw ustaw hasło panelu zdalnego.".into(),
             ));
         }
+        // The named mode needs the permanent link its wizard set up (a start-up without its
+        // files still falls back to the quick tunnel with a warning).
+        if patch.tunnel_mode == Some(TunnelModeSetting::Named)
+            && tunnel::find_named_tunnel(
+                &self.home,
+                current.named_tunnel_hostname.as_deref(),
+                current.named_tunnel_id.as_deref(),
+            )
+            .is_none()
+        {
+            return Err(OpError::Conflict(
+                "Najpierw ustaw stały link (Ustawienia → Internet → Ustaw stały link).".into(),
+            ));
+        }
         let password_hash = match patch.password.clone() {
             Some(password) => Some(
                 tokio::task::spawn_blocking(move || crate::http::auth::hash_password(&password))
@@ -786,6 +808,13 @@ impl AppCore {
         Ok(found)
     }
 
+    /// The first-run wizard is done and every tool is there but cloudflared: an upgrade from
+    /// a version without the tunnel (the app downloads it by itself).
+    fn cloudflared_only_missing(&self) -> bool {
+        self.settings().first_run_completed
+            && self.tools.status().missing == vec![Tool::Cloudflared]
+    }
+
     pub(crate) fn tools_job_running(&self) -> bool {
         lock(&self.tools_job)
             .as_ref()
@@ -820,12 +849,29 @@ impl AppCore {
         matches!(job, ToolsJob::Update(Tool::Cloudflared) | ToolsJob::Repair)
     }
 
+    /// The job installs cloudflared when it is missing (an update of another tool does not).
+    fn fetches_cloudflared(job: ToolsJob) -> bool {
+        !matches!(job, ToolsJob::Update(tool) if tool != Tool::Cloudflared)
+    }
+
     async fn run_tools_job(self: Arc<Self>, job: ToolsJob) {
         // A running cloudflared.exe would be moved aside by the swap and keep running the old
         // program (the configuration looks unchanged): stop it first, start it after.
         let replaces_cloudflared = Self::replaces_cloudflared(job);
         if replaces_cloudflared {
             self.tunnel_held.store(true, Ordering::SeqCst);
+        }
+        // A missing cloudflared is on its way: the tunnel says so instead of "missing".
+        let fetching = Self::fetches_cloudflared(job)
+            && !self
+                .tools
+                .tools_dir()
+                .join(Tool::Cloudflared.exe())
+                .is_file();
+        if fetching {
+            self.cloudflared_fetching.store(true, Ordering::SeqCst);
+        }
+        if replaces_cloudflared || fetching {
             self.sync_tunnel().await;
         }
         let (what, result) = match job {
@@ -834,6 +880,7 @@ impl AppCore {
             ToolsJob::Repair => ("naprawa", self.tools.repair().await),
         };
         self.tunnel_held.store(false, Ordering::SeqCst);
+        self.cloudflared_fetching.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             self.log(&format!("Narzędzia ({what}): błąd — {e:#}"));
             // cloudflared may have come before the failure, or was stopped for it.
@@ -1008,6 +1055,7 @@ impl AppEngine {
             pause_active: Arc::default(),
             tunnel_address: Mutex::new(None),
             tunnel_held: AtomicBool::new(false),
+            cloudflared_fetching: AtomicBool::new(false),
             named: NamedSetup::default(),
             #[cfg(test)]
             start_pause: Mutex::new(None),
@@ -1027,6 +1075,20 @@ impl AppEngine {
         let auto_pause = tokio::spawn(auto_pause(&core).run());
         lock(&core.background).push(auto_pause);
         core.sync_tunnel().await;
+        // An upgrade from a version without the tunnel: everything is there but cloudflared.
+        if core.cloudflared_only_missing() {
+            core.log(
+                "Narzędzia: brak programu cloudflared (nowy w tej wersji) — pobieram go w tle.",
+            );
+            if let Err(e) = core.start_tools_job(ToolsJob::Install) {
+                core.log(&format!("Narzędzia: {e}"));
+            }
+        }
+        let retry = tokio::spawn(cloudflared_retries(
+            Arc::downgrade(&core),
+            core.options.cloudflared_retry,
+        ));
+        lock(&core.background).push(retry);
         if core.options.check_updates {
             let weak = Arc::downgrade(&core);
             let checks = tokio::spawn(async move { update_checks(weak).await });
@@ -1186,6 +1248,23 @@ async fn update_checks(core: Weak<AppCore>) {
         c.check_update().await;
         drop(c);
         tokio::time::sleep(UPDATE_INTERVAL).await;
+    }
+}
+
+/// After an upgrade whose download of cloudflared failed (no internet at the time): tries
+/// again every `interval` while the engine lives, until cloudflared is there.
+async fn cloudflared_retries(core: Weak<AppCore>, interval: Duration) {
+    loop {
+        tokio::time::sleep(interval).await;
+        let Some(c) = core.upgrade() else {
+            return;
+        };
+        if c.cloudflared_only_missing() && !c.tools_job_running() {
+            c.log("Narzędzia: ponownie pobieram brakujący program cloudflared.");
+            if let Err(e) = c.start_tools_job(ToolsJob::Install) {
+                c.log(&format!("Narzędzia: {e}"));
+            }
+        }
     }
 }
 

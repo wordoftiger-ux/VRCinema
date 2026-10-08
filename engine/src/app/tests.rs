@@ -331,6 +331,11 @@ async fn info_describes_the_app() {
     assert_eq!(info["publicUrl"], "");
     assert_eq!(info["firstRunCompleted"], false);
     assert_eq!(info["toolsOk"], false);
+    assert_eq!(
+        info["missingTools"],
+        json!(["yt-dlp", "ffmpeg", "deno", "cloudflared"])
+    );
+    assert_eq!(info["toolsRunning"], false);
     assert_eq!(info["channelRunning"], false);
     // Missing tools are not a failed start.
     assert_eq!(info["channelError"], Value::Null);
@@ -503,11 +508,28 @@ async fn the_tunnel_settings_are_saved_shown_and_need_no_restart() {
     assert_eq!(view["namedTunnelHostname"], Value::Null);
     assert_eq!(view["pauseOnTunnelLoss"], true);
     assert_eq!(view["pauseWhenNoViewers"], false);
+    // Final review FW-2: the named mode needs a permanent link set up by its wizard.
+    let before = app.saved();
+    let (status, res) = app
+        .put_config(
+            &cookie,
+            json!({"tunnelMode": "named", "pauseWhenNoViewers": true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{res}");
+    assert_eq!(
+        res["error"],
+        "Najpierw ustaw stały link (Ustawienia → Internet → Ustaw stały link)."
+    );
+    assert_eq!(app.saved(), before, "nothing saved");
+    assert_eq!(
+        app.get("/api/desktop/config", &cookie).await["tunnelMode"],
+        "quick"
+    );
     let (status, res) = app
         .put_config(
             &cookie,
             json!({
-                "tunnelMode": "named",
                 "namedTunnelHostname": " Kanal.Example.com ",
                 "pauseOnTunnelLoss": false,
                 "pauseWhenNoViewers": true,
@@ -516,13 +538,13 @@ async fn the_tunnel_settings_are_saved_shown_and_need_no_restart() {
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["restarted"], false);
-    assert_eq!(res["tunnelMode"], "named");
+    assert_eq!(res["tunnelMode"], "quick");
     // The host name belongs to the permanent-link wizard (with the tunnel's id): read-only here.
     assert_eq!(res["namedTunnelHostname"], Value::Null);
     assert_eq!(res["pauseOnTunnelLoss"], false);
     assert_eq!(res["pauseWhenNoViewers"], true);
     let saved = app.saved();
-    assert_eq!(saved["tunnelMode"], "named");
+    assert_eq!(saved["tunnelMode"], "quick");
     assert_eq!(saved["namedTunnelHostname"], Value::Null);
     assert_eq!(saved["pauseWhenNoViewers"], true);
     // Like the other read-only fields, anything there is ignored.

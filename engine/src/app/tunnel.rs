@@ -28,6 +28,7 @@ const MISSING: &str = NO_CLOUDFLARED;
 const LOGGED_IN: &str = "Połączono z Cloudflare. Teraz wpisz adres stałego linku.";
 const LOGGED_IN_BEFORE: &str = "Połączono z Cloudflare przez wcześniejsze logowanie programu cloudflared na tym komputerze: obowiązują konto i domena wybrane wtedy. Teraz wpisz adres stałego linku w tej domenie. (Aby użyć innego konta, usuń certyfikat z folderu .cloudflared w swoim profilu i połącz się ponownie.)";
 const BACK_TO_QUICK: &str = "Działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Pliki stałego linku zostały — możesz do niego wrócić.";
+const FETCHING: &str = "Pobieranie programu cloudflared — tunel połączy się sam po pobraniu.";
 const UPDATING: &str = "Trwa aktualizacja programu cloudflared — tunel wróci za chwilę.";
 const NAMED_FALLBACK: &str = "Brak plików stałego linku — działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Ustaw stały link ponownie.";
 
@@ -113,6 +114,10 @@ impl AppCore {
         }
         let cloudflared = self.tools.tools_dir().join(Tool::Cloudflared.exe());
         if !cloudflared.is_file() {
+            // Not `tools_job_running()`: that is still true in the job's own final sync.
+            if self.cloudflared_fetching.load(Ordering::SeqCst) {
+                return Plan::Blocked(FETCHING.to_string());
+            }
             return Plan::Blocked(MISSING.to_string());
         }
         let (mode, warning) = match settings.tunnel_mode {

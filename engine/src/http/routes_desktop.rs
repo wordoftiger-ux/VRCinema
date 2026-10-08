@@ -120,6 +120,7 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         .map(|r| json!({ "version": r.version.to_string(), "notes": r.notes }));
     let (paused, reasons) = core.pause_state();
     let reasons: Vec<&str> = reasons.iter().map(|r| r.as_str()).collect();
+    let missing = core.tools.status().missing;
     Ok(json_ok(&json!({
         "version": core.version().to_string(),
         "port": core.port(),
@@ -127,7 +128,9 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "lanAccess": s.lan_access,
         "remoteAdmin": s.remote_admin,
         "firstRunCompleted": s.first_run_completed,
-        "toolsOk": core.tools.status().missing.is_empty(),
+        "toolsOk": missing.is_empty(),
+        "missingTools": missing.iter().map(|t| t.name()).collect::<Vec<_>>(),
+        "toolsRunning": core.tools_job_running(),
         "channelRunning": core.channel_running(),
         "channelError": core.channel_error(),
         "restarting": core.restarting(),

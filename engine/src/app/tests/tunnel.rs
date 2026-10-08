@@ -849,6 +849,223 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
     app.stop().await;
 }
 
+// ---------- Upgrade from stage 2 (final review C1) ----------
+
+/// A home as stage 2 leaves it: the wizard done, every tool there except cloudflared (dummy
+/// files: the channel cannot start, which does not matter here), the tunnel on (the new
+/// default). The fake's script: start 1 is `--version` after the install, then the tunnel.
+fn stage_two_home(home: &Path, first_run_completed: bool) {
+    std::fs::write(
+        home.join("config.json"),
+        json!({
+            "port": 0,
+            "tunnelEnabled": true,
+            "firstRunCompleted": first_run_completed,
+            "toolsInstalled": true,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let tools = home.join("tools");
+    for name in [
+        "yt-dlp.exe",
+        "deno.exe",
+        "ffmpeg.exe",
+        "ffprobe.exe",
+        "avcodec-62.dll",
+    ] {
+        std::fs::write(tools.join(name), "x").unwrap();
+    }
+    std::fs::write(
+        tools.join("fake_cloudflared.json"),
+        json!([
+            { "serve_metrics": false, "exit_after_ms": 0 },
+            { "hostname": QUICK_HOST }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// The fake cloudflared as a release on a local server (with its checksum in the notes).
+fn publish_fake_cloudflared(server: &TestServer) {
+    let program = std::fs::read(fake_program()).unwrap();
+    server.put("cf/cloudflared-windows-amd64.exe", program.clone());
+    server.put(
+        "cf-api",
+        json!({
+            "tag_name": "2099.1.0",
+            "body": format!(
+                "## Release\n| File | SHA256 |\n|---|---|\n| cloudflared-windows-amd64.exe | {} |\n",
+                hex(&program)
+            ),
+        })
+        .to_string(),
+    );
+}
+
+async fn tunnel_view(app: &App, cookie: &str) -> Value {
+    app.get("/api/desktop/tunnel", cookie).await
+}
+
+/// Polls `GET tunnel` until online, for up to `secs`; a tools job may restart the server, so
+/// a poll meeting the closed port is retried.
+async fn wait_online_across_restarts(app: &App, cookie: &str, secs: u64) -> Value {
+    let mut last = Value::Null;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        let res = app
+            .http
+            .get(app.url("/api/desktop/tunnel"))
+            .header("cookie", cookie)
+            .send()
+            .await;
+        if let Ok(res) = res
+            && let Ok(body) = res.json::<Value>().await
+        {
+            last = body;
+            if last["state"] == "online" {
+                return last;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the tunnel did not come online in {secs} s: {last}");
+}
+
+#[tokio::test]
+async fn an_upgrade_without_cloudflared_downloads_it_unprompted_and_goes_online() {
+    let server = TestServer::start().await;
+    publish_fake_cloudflared(&server);
+    let base = server.base.clone();
+    let app = App::start_with(|home, options| {
+        stage_two_home(home, true);
+        options.tunnel_timings = fast_tunnel();
+        options.tool_sources.cloudflared_base = format!("{base}/cf");
+        options.tool_sources.cloudflared_release_api = format!("{base}/cf-api");
+    })
+    .await;
+    let cookie = app.window_cookie().await;
+    // The job restarts the server (the dummy ffmpeg): a poll may meet the closed port.
+    let last = wait_online_across_restarts(&app, &cookie, 90).await;
+    assert_eq!(last["url"], format!("https://{QUICK_HOST}"), "{last}");
+    assert!(app.home.join("tools").join("cloudflared.exe").is_file());
+    let log = app.log_text();
+    assert!(
+        log.contains(
+            "Narzędzia: brak programu cloudflared (nowy w tej wersji) — pobieram go w tle."
+        ),
+        "{log}"
+    );
+    assert!(log.contains("Narzędzia (pobieranie): gotowe."), "{log}");
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["toolsOk"], true, "{info}");
+    assert_eq!(info["missingTools"], json!([]));
+    let starts = fake_starts(&app.home);
+    assert_eq!(args_of(&starts[0]), ["--version"]);
+    assert_eq!(args_of(&starts[1])[0], "tunnel");
+    assert_never_two(&app.home);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn while_cloudflared_downloads_the_tunnel_says_so() {
+    // Accepts connections and never answers: the download hangs.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", silent.local_addr().unwrap());
+    let app = App::start_with(|home, options| {
+        stage_two_home(home, true);
+        options.tool_sources.cloudflared_base = format!("{base}/cf");
+        options.tool_sources.cloudflared_release_api = format!("{base}/cf-api");
+    })
+    .await;
+    let cookie = app.window_cookie().await;
+    const FETCHING: &str = "Pobieranie programu cloudflared — tunel połączy się sam po pobraniu.";
+    // The job starts in the background right after the app.
+    eventually(10, "the download shown", || async {
+        tunnel_view(&app, &cookie).await["message"] == FETCHING
+    })
+    .await;
+    assert_eq!(tunnel_view(&app, &cookie).await["state"], "error");
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["toolsRunning"], true, "{info}");
+    assert_eq!(info["missingTools"], json!(["cloudflared"]));
+    // Shutting down does not wait for the hanging download.
+    app.stop().await;
+    drop(silent);
+}
+
+#[tokio::test]
+async fn an_upgrade_whose_download_fails_runs_on_and_shows_cloudflared_missing() {
+    let app = App::start_with(|home, _| stage_two_home(home, true)).await;
+    let cookie = app.window_cookie().await;
+    eventually(60, "the failed download", || async {
+        app.log_text().contains("Narzędzia (pobieranie): błąd")
+    })
+    .await;
+    eventually(10, "the job to end", || async {
+        !app.engine().core.tools_job_running()
+    })
+    .await;
+    let tunnel = tunnel_view(&app, &cookie).await;
+    assert_eq!(tunnel["state"], "error", "{tunnel}");
+    assert_eq!(
+        tunnel["message"],
+        crate::tunnel::named::NO_CLOUDFLARED,
+        "{tunnel}"
+    );
+    let page = app.http.get(app.url("/")).send().await.unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["missingTools"], json!(["cloudflared"]));
+    assert_eq!(info["toolsRunning"], false);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_failed_cloudflared_download_is_tried_again_later() {
+    let server = TestServer::start().await;
+    let base = server.base.clone();
+    let app = App::start_with(|home, options| {
+        stage_two_home(home, true);
+        options.tunnel_timings = fast_tunnel();
+        options.tool_sources.cloudflared_base = format!("{base}/cf");
+        options.tool_sources.cloudflared_release_api = format!("{base}/cf-api");
+        options.cloudflared_retry = Duration::from_secs(1);
+    })
+    .await;
+    let cookie = app.window_cookie().await;
+    // Nothing published yet: the first download fails.
+    eventually(60, "the failed download", || async {
+        app.log_text().contains("Narzędzia (pobieranie): błąd")
+    })
+    .await;
+    publish_fake_cloudflared(&server);
+    wait_online_across_restarts(&app, &cookie, 90).await;
+    assert!(app.home.join("tools").join("cloudflared.exe").is_file());
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn before_the_first_run_wizard_nothing_is_downloaded_by_itself() {
+    let app = App::start_with(|home, _| stage_two_home(home, false)).await;
+    let cookie = app.window_cookie().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!app.engine().core.tools_job_running());
+    assert!(
+        !app.log_text().contains("nowy w tej wersji"),
+        "{}",
+        app.log_text()
+    );
+    let tunnel = tunnel_view(&app, &cookie).await;
+    assert_eq!(
+        tunnel["message"],
+        crate::tunnel::named::NO_CLOUDFLARED,
+        "{tunnel}"
+    );
+    app.stop().await;
+}
+
 // ---------- Named tunnel ----------
 
 #[tokio::test]
@@ -926,6 +1143,17 @@ async fn the_named_mode_runs_the_named_tunnel_and_never_shows_its_credentials() 
     .await;
     assert!(!args_of(&fake_starts(&app.home)[1]).contains(&"run".to_string()));
     assert!(credentials.is_file());
+    // And back ("Wróć do stałego linku"): allowed, its files are there.
+    let (status, res) = app
+        .put_config(&cookie, json!({"tunnelMode": "named"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["tunnelMode"], "named");
+    eventually(20, "the named cloudflared again", || async {
+        fake_starts(&app.home).len() == 3
+    })
+    .await;
+    assert!(args_of(&fake_starts(&app.home)[2]).contains(&"run".to_string()));
     assert_never_two(&app.home);
     app.stop().await;
 }
