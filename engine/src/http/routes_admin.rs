@@ -22,6 +22,7 @@ use crate::engine::Command;
 use crate::library::LibraryError;
 use crate::pipeline::channel::{ControlState, PauseReason};
 use crate::rules::parse_source_url;
+use crate::stats::process_usage;
 
 const MAX_PLAYLIST_ITEMS: usize = 200;
 
@@ -40,6 +41,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/channels/main/resume", post(resume))
         .route("/api/admin/channels/main/seek", post(seek))
         .route("/api/admin/channels/main/restart", post(restart))
+        .route("/api/admin/channels/main/stats", get(stats))
         .route("/api/admin/channels/main/play-now", post(play_now))
         .route(
             "/api/admin/channels/main/settings",
@@ -542,6 +544,31 @@ async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
         ));
     }
     apply_control(&state, Command::PlayNow { item_id: item.id }).await
+}
+
+/// Nerd stats (spec section 5): computed per request from counters kept in memory. Viewer
+/// addresses are counted, never returned. Unavailable values are `null`.
+async fn stats(State(state): State<AppState>) -> ApiResult {
+    let snapshot = state.snapshot();
+    let now = std::time::Instant::now();
+    let ffmpeg = snapshot.stats.ffmpeg.clone().map(|mut ffmpeg| {
+        if let Some(usage) = process_usage(ffmpeg.pid) {
+            let cores = std::thread::available_parallelism().map_or(1, usize::from);
+            ffmpeg.rss_bytes = Some(usage.rss_bytes);
+            ffmpeg.cpu_percent = state.cpu.percent(ffmpeg.pid, usage.cpu_time, now, cores);
+        }
+        ffmpeg
+    });
+    let tunnel = state.app_core().and_then(|core| core.tunnel_stats());
+    let value = |v: Result<Value, serde_json::Error>| v.unwrap_or(Value::Null);
+    Ok(json_ok(&json!({
+        "onAir": value(serde_json::to_value(&snapshot.stats.on_air)),
+        "hls": value(serde_json::to_value(&snapshot.stats.hls)),
+        "next": value(serde_json::to_value(&snapshot.stats.next)),
+        "ffmpeg": value(serde_json::to_value(&ffmpeg)),
+        "viewers": value(serde_json::to_value(state.viewers.stats(now))),
+        "tunnel": value(serde_json::to_value(&tunnel)),
+    })))
 }
 
 async fn get_settings(State(state): State<AppState>) -> ApiResult {

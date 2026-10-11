@@ -15,6 +15,7 @@ use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::resolver::MediaResolver;
+use crate::stats::{ClipStats, ProbeSummary, StreamMode};
 
 /// Retries when removing a clip directory (Windows may hold a file lock for a moment).
 const REMOVE_RETRIES: u32 = 3;
@@ -87,6 +88,10 @@ struct RealClipHandle {
     out_dir: PathBuf,
     duration_s: Option<f64>,
     copies_video: bool,
+    probe: ProbeSummary,
+    mode: StreamMode,
+    /// `None` when the video is copied.
+    encoder: Option<VideoEncoder>,
     disposed: bool,
 }
 
@@ -113,6 +118,16 @@ impl ClipHandle for RealClipHandle {
 
     fn kill(&mut self) {
         self.seg.kill();
+    }
+
+    fn stats(&self) -> ClipStats {
+        ClipStats {
+            probe: Some(self.probe.clone()),
+            mode: Some(self.mode),
+            encoder: self.encoder.map(|e| e.as_str().to_string()),
+            pid: self.seg.pid(),
+            speed: self.seg.speed(),
+        }
     }
 
     /// Non-blocking: kills ffmpeg, and a background task removes the directory once the process
@@ -188,12 +203,13 @@ async fn start_clip(
     if let Some(log) = &d.log {
         log(&clip_start_line(&item, mode, &info, start_at_s));
     }
+    let encoder = d.encoder.get();
     let args = build_clip_args(&ClipArgsOptions {
         inputs: stream.inputs,
         input_format: None,
         mode,
         info: info.clone(),
-        encoder: d.encoder.get(),
+        encoder,
         segment_seconds: d.segment_seconds,
         out_dir: out_dir.clone(),
         start_at_s: if live { 0.0 } else { start_at_s },
@@ -205,6 +221,19 @@ async fn start_clip(
         out_dir,
         duration_s: info.duration_s.or(stream.duration_s),
         copies_video: mode == VideoMode::Copy,
+        probe: ProbeSummary {
+            codec: info.codec.clone(),
+            height: info.height,
+            fps: info.fps,
+            pix_fmt: info.pix_fmt.clone(),
+            has_audio: info.has_audio,
+            duration_s: info.duration_s,
+        },
+        mode: match mode {
+            VideoMode::Copy => StreamMode::Copy,
+            VideoMode::Transcode => StreamMode::Transcode,
+        },
+        encoder: (mode == VideoMode::Transcode).then_some(encoder),
         disposed: false,
     }))
 }

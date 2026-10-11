@@ -20,6 +20,7 @@ use tokio::time::MissedTickBehavior;
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
 use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
 use crate::pipeline::slates::Slates;
+use crate::stats::ChannelStats;
 
 /// Requests from HTTP, applied by the loop between ticks.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +62,8 @@ pub struct Snapshot {
     pub live_dir: PathBuf,
     pub state: ChannelState,
     pub prefetched_item_id: Option<i64>,
+    /// Numbers for the nerd stats.
+    pub stats: ChannelStats,
 }
 
 /// HTTP's side of the engine. Dropping every handle stops the loop.
@@ -86,6 +89,10 @@ pub trait ChannelControl: SegmentSource + Send {
     fn on_tick(&mut self);
     fn state(&self) -> ChannelState;
     fn prefetched_item_id(&self) -> Option<i64>;
+    /// Numbers for the nerd stats (test doubles have none).
+    fn stats(&self) -> ChannelStats {
+        ChannelStats::default()
+    }
     /// The queue item being aired right now (not the one viewers see, which lags behind).
     fn current_item_id(&self) -> Option<i64>;
     /// Marks the item failed with `error` (unless the owner removed it meanwhile).
@@ -131,6 +138,9 @@ impl ChannelControl for Channel {
     }
     fn prefetched_item_id(&self) -> Option<i64> {
         Channel::prefetched_item_id(self)
+    }
+    fn stats(&self) -> ChannelStats {
+        Channel::stats(self)
     }
     fn current_item_id(&self) -> Option<i64> {
         Channel::current_item_id(self)
@@ -260,6 +270,7 @@ impl Snapshot {
                 control: Default::default(),
             },
             prefetched_item_id: None,
+            stats: ChannelStats::default(),
         }
     }
 }
@@ -529,6 +540,10 @@ impl<C: ChannelControl> Core<C> {
             live_dir: self.broadcaster.dir().to_path_buf(),
             state: self.channel.state(),
             prefetched_item_id: self.channel.prefetched_item_id(),
+            stats: ChannelStats {
+                hls: Some(self.broadcaster.counters()),
+                ..self.channel.stats()
+            },
         }
     }
 }

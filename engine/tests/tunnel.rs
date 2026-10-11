@@ -473,6 +473,44 @@ async fn quick_tunnel_goes_online_with_the_address_from_the_metrics_server() {
     assert_eq!(fake.starts().len(), 1);
 }
 
+/// The stats read the connections' Cloudflare locations from cloudflared's log: a lost one
+/// goes, and everything is gone with the process.
+#[tokio::test]
+async fn the_stats_list_the_locations_of_the_registered_connections() {
+    let fake = Fake::new(json!([{
+        "hostname": "stats-fox.trycloudflare.com",
+        "stderr": [
+            "2026-10-07T10:00:01Z INF Registered tunnel connection connIndex=0 connection=a event=0 ip=198.41.200.13 location=waw01 protocol=quic",
+            "2026-10-07T10:00:02Z INF Registered tunnel connection connIndex=1 connection=b event=0 ip=198.41.192.7 location=fra07 protocol=quic",
+            "2026-10-07T10:00:03Z INF Unregistered tunnel connection connIndex=1",
+            "2026-10-07T10:00:04Z INF Registered tunnel connection connIndex=2 connection=c event=0 ip=198.41.200.43 location=vie01 protocol=quic",
+        ],
+    }]));
+    let tunnel = manager(timings());
+    let mut rx = tunnel.state();
+    assert_eq!(tunnel.stats().online_for, None);
+    tunnel.start(fake.quick(18199)).await;
+    wait_online(&mut rx, "https://stats-fox.trycloudflare.com").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while tunnel.stats().locations != ["waw01", "vie01"] {
+        assert!(
+            Instant::now() < deadline,
+            "locations {:?}",
+            tunnel.stats().locations
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let stats = tunnel.stats();
+    assert!(stats.online_for.is_some());
+    assert_eq!(stats.reconnects, 0);
+
+    tunnel.stop().await;
+    let stats = tunnel.stats();
+    assert_eq!(stats.online_for, None);
+    assert!(stats.locations.is_empty());
+    fake.assert_all_dead();
+}
+
 #[tokio::test]
 async fn quick_tunnel_address_falls_back_to_stderr() {
     let fake = Fake::new(json!([{

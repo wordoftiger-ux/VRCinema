@@ -14,6 +14,7 @@
 //! that rebuilds its channel after a crash re-applies the reasons itself (`engine.rs`).
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -25,6 +26,7 @@ use tokio::time::Instant;
 use crate::engine::Command;
 use crate::pipeline::channel::PauseReason;
 use crate::pipeline::clip_factory::SharedLogFn;
+use crate::stats::{ViewerStats, ViewersView};
 use crate::tunnel::TunnelState;
 
 /// Timings of the controller; the defaults are the spec's, tests shorten them.
@@ -57,14 +59,16 @@ pub struct AutoPauseSettings {
     pub pause_when_no_viewers: bool,
 }
 
-/// When a viewer last fetched a segment. Recording is a store and a wake-up: cheap enough for
-/// every segment request.
+/// When a viewer last fetched a segment, and how much the viewers fetch (the nerd stats).
+/// Recording is a store, a short lock and a wake-up: cheap enough for every segment request.
 #[derive(Debug)]
 pub struct ViewerActivity {
     base: Instant,
     /// Milliseconds after `base` of the latest fetch, plus one; 0: none yet.
     last_ms: AtomicU64,
     fetched: Notify,
+    /// Per-address and per-second counts of the same fetches.
+    stats: ViewerStats,
 }
 
 impl Default for ViewerActivity {
@@ -79,10 +83,23 @@ impl ViewerActivity {
             base: Instant::now(),
             last_ms: AtomicU64::new(0),
             fetched: Notify::new(),
+            stats: ViewerStats::new(),
         }
     }
 
-    /// A viewer (the in-app preview too) fetched a segment.
+    /// `ip` (the in-app preview too) fetched a segment of `bytes` bytes: the automatic pause
+    /// and the stats both see it.
+    pub fn record(&self, ip: IpAddr, bytes: u64) {
+        self.stats.record(ip, bytes);
+        self.segment_fetched();
+    }
+
+    /// The viewers' numbers for the stats route.
+    pub fn stats(&self, now: std::time::Instant) -> ViewersView {
+        self.stats.snapshot(now)
+    }
+
+    /// A viewer fetched a segment (address and size unknown: only the pause counts it).
     pub fn segment_fetched(&self) {
         let ms = u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX - 1);
         self.last_ms.store(ms + 1, Ordering::Relaxed);
@@ -732,6 +749,19 @@ mod tests {
         let first = activity.last_fetch().unwrap();
         assert!(first <= Instant::now());
         assert!(Instant::now().duration_since(first) < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_recorded_fetch_counts_for_the_pause_and_for_the_stats() {
+        let activity = ViewerActivity::new();
+        let ip = IpAddr::from([192, 168, 1, 9]);
+        activity.record(ip, 1000);
+        activity.record(ip, 500);
+        assert!(activity.last_fetch().is_some());
+        let view = activity.stats(std::time::Instant::now());
+        assert_eq!(view.watching, 1);
+        assert_eq!(view.fetches_per_min, 2);
+        assert_eq!(view.history.iter().sum::<u64>(), 1500);
     }
 
     #[test]

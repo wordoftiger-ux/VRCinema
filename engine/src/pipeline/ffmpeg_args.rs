@@ -167,7 +167,17 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
     let mut args = Vec::new();
     push_all(
         &mut args,
-        &["-hide_banner", "-loglevel", "error", "-nostdin", "-y"],
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            // Progress on stdout (`speed=` for the stats); stderr keeps only errors.
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ],
     );
     for input in &o.inputs {
         args.extend(input_options(input));
@@ -354,6 +364,17 @@ mod tests {
         );
         assert_eq!(value_after(&args, "-map", 0).as_deref(), Some("0:v:0"));
         assert_eq!(value_after(&args, "-map", 1).as_deref(), Some("0:a:0"));
+    }
+
+    #[test]
+    fn progress_goes_to_stdout_so_stderr_keeps_only_errors() {
+        let args = build(&opts());
+        assert_eq!(
+            value_after(&args, "-progress", 0).as_deref(),
+            Some("pipe:1")
+        );
+        assert!(pos(&args, "-progress") < pos(&args, "-i"));
+        assert!(args.iter().any(|a| a == "-nostats"));
     }
 
     #[test]

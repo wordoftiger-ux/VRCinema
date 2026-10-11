@@ -7,7 +7,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
-use super::{ApiError, AppState};
+use super::{ApiError, AppState, Ctx};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -34,7 +34,7 @@ fn is_segment_name(name: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-async fn segment(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+async fn segment(State(state): State<AppState>, ctx: Ctx, Path(name): Path<String>) -> Response {
     let missing = || ApiError::new(StatusCode::NOT_FOUND, "Brak fragmentu").into_response();
     let snapshot = state.snapshot();
     if !is_segment_name(&name) || !snapshot.segments.contains(&name) {
@@ -43,8 +43,12 @@ async fn segment(State(state): State<AppState>, Path(name): Path<String>) -> Res
     let Ok(bytes) = tokio::fs::read(snapshot.live_dir.join(&name)).await else {
         return missing();
     };
-    // Someone is watching (the app's own preview too): the automatic pause counts this.
-    state.viewers.segment_fetched();
+    // Someone is watching (the app's own preview too): the automatic pause and the stats count this.
+    let viewer = ctx
+        .ip
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    state.viewers.record(viewer, bytes.len() as u64);
     let mut res = bytes.into_response();
     let headers = res.headers_mut();
     headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));

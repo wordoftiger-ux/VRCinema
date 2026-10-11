@@ -263,6 +263,11 @@ impl AppCore {
         self.tunnel_view.borrow().clone()
     }
 
+    /// The tunnel for the nerd stats (`None`: switched off).
+    pub(crate) fn tunnel_stats(&self) -> Option<crate::stats::TunnelStatsView> {
+        crate::stats::TunnelStatsView::of(&self.tunnel_state(), &self.tunnel.stats())
+    }
+
     pub(crate) fn tunnel_info(&self) -> TunnelInfo {
         let settings = self.settings();
         let notes = lock(&self.tunnel_notes).clone();

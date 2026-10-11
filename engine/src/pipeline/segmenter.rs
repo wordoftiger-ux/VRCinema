@@ -4,12 +4,14 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::{Notify, watch};
 
 use crate::process;
+use crate::stats::parse_speed;
 
 /// How many trailing non-empty stderr lines are kept for the error message.
 const STDERR_TAIL_LINES: usize = 20;
@@ -83,6 +85,10 @@ pub struct ClipSegmenter {
     consumed: Mutex<usize>,
     status: watch::Sender<Snapshot>,
     kill: Arc<Notify>,
+    /// The ffmpeg process, once it runs.
+    pid: Option<u32>,
+    /// `speed=` of the latest progress report, as `f64` bits ([`NO_SPEED`]: none yet).
+    speed: Arc<AtomicU64>,
 }
 
 impl ClipSegmenter {
@@ -100,11 +106,13 @@ impl ClipSegmenter {
             error: None,
             exited: false,
         });
-        let segmenter = ClipSegmenter {
+        let mut segmenter = ClipSegmenter {
             out_dir,
             consumed: Mutex::new(0),
             status,
             kill: Arc::new(Notify::new()),
+            pid: None,
+            speed: Arc::new(AtomicU64::new(NO_SPEED)),
         };
         if let Err(e) = std::fs::create_dir_all(&segmenter.out_dir) {
             segmenter.finish(SegmenterState::Failed, Some(e.to_string()));
@@ -115,7 +123,9 @@ impl ClipSegmenter {
         command
             .args(&args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            // `-progress pipe:1` (see `build_clip_args`) reports on stdout, so stderr stays
+            // errors only; ffmpegs without the option write nothing here.
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(cwd) = &cwd {
             command.current_dir(cwd);
@@ -128,7 +138,11 @@ impl ClipSegmenter {
             }
         };
 
+        segmenter.pid = child.id();
         let stderr = child.stderr.take();
+        if let Some(progress) = child.stdout.take() {
+            tokio::spawn(read_progress(progress, Arc::clone(&segmenter.speed)));
+        }
         let status = segmenter.status.clone();
         let kill = Arc::clone(&segmenter.kill);
         tokio::spawn(async move {
@@ -171,6 +185,22 @@ impl ClipSegmenter {
             s.error = error;
             s.exited = true;
         });
+    }
+
+    /// The ffmpeg process id while it runs (it can be reused once the process is gone).
+    pub fn pid(&self) -> Option<u32> {
+        let s = self.status.borrow();
+        (s.state == SegmenterState::Running && !s.exited)
+            .then_some(self.pid)
+            .flatten()
+    }
+
+    /// ffmpeg's `speed=` from its latest progress report (1.0: as fast as it plays).
+    pub fn speed(&self) -> Option<f64> {
+        match self.speed.load(Ordering::Relaxed) {
+            NO_SPEED => None,
+            bits => Some(f64::from_bits(bits)),
+        }
     }
 
     pub fn state(&self) -> SegmenterState {
@@ -236,6 +266,19 @@ impl ClipSegmenter {
         if moved {
             // notify_one stores a permit, so the waiting task sees it even if it is not parked yet.
             self.kill.notify_one();
+        }
+    }
+}
+
+/// No `speed=` reported yet.
+const NO_SPEED: u64 = u64::MAX;
+
+/// Follows ffmpeg's `-progress` report (`key=value` lines) and keeps the latest `speed`.
+async fn read_progress<R: AsyncRead + Unpin>(progress: R, speed: Arc<AtomicU64>) {
+    let mut lines = BufReader::new(progress).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(value) = parse_speed(&line) {
+            speed.store(value.to_bits(), Ordering::Relaxed);
         }
     }
 }
@@ -390,6 +433,53 @@ mod tests {
         assert_eq!(seg.error(), None);
     }
 
+    #[tokio::test]
+    async fn pid_and_speed_come_from_the_running_process_and_the_progress_report() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let args: Vec<OsString> = [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=25",
+            "-f",
+            "null",
+            "-",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let seg = ClipSegmenter::start(
+            &ffmpeg,
+            args,
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+        );
+        assert!(seg.pid().is_some_and(|pid| pid > 0));
+        assert_eq!(seg.speed(), None, "nothing reported yet");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while seg.speed().is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let speed = seg.speed().expect("a speed from the progress report");
+        // Real time input (-re): about 1x.
+        assert!((0.3..3.0).contains(&speed), "speed {speed}");
+        seg.kill();
+        seg.wait().await;
+        assert_eq!(seg.pid(), None, "no pid once the process is gone");
+    }
+
     /// A segmenter that never started a child, to exercise `poll()` on hand-written lists.
     fn poll_only(dir: &Path) -> ClipSegmenter {
         let (status, _) = watch::channel(Snapshot {
@@ -402,6 +492,8 @@ mod tests {
             consumed: Mutex::new(0),
             status,
             kill: Arc::new(Notify::new()),
+            pid: None,
+            speed: Arc::new(AtomicU64::new(NO_SPEED)),
         }
     }
 

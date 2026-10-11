@@ -84,6 +84,8 @@ pub struct AppState {
     live: LiveSettings,
     /// Segment fetches (viewers), for the automatic pause of the app.
     pub(crate) viewers: Arc<ViewerActivity>,
+    /// Previous sample of the encoder's CPU time, for the stats route.
+    pub(crate) cpu: Arc<crate::stats::CpuSampler>,
 }
 
 impl AppState {
@@ -137,6 +139,7 @@ impl AppState {
             engine,
             library: None,
             viewers: Arc::new(ViewerActivity::new()),
+            cpu: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -196,6 +199,11 @@ impl AppState {
     pub(crate) fn with_desktop(mut self, core: Weak<crate::app::AppCore>) -> Self {
         self.desktop = Some(core);
         self
+    }
+
+    /// The app engine, if this server belongs to one (the stats show its tunnel).
+    pub(crate) fn app_core(&self) -> Option<Arc<crate::app::AppCore>> {
+        self.desktop.as_ref().and_then(Weak::upgrade)
     }
 
     /// The app engine behind the desktop routes (503 while it is going away).

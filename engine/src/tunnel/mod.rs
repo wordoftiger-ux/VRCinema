@@ -108,6 +108,8 @@ pub struct TunnelManager {
     lost: LostSince,
     /// See [`TunnelManager::runs_ended`].
     runs_ended: Arc<AtomicU64>,
+    /// See [`TunnelManager::stats`].
+    counters: SharedCounters,
     slot: Arc<Mutex<Slot>>,
     /// Set (or dropped) when the manager goes away: every supervisor stops, including one
     /// launched by an operation still in flight at that moment.
@@ -120,6 +122,34 @@ type LostSince = Arc<std::sync::Mutex<Option<Instant>>>;
 fn lock_lost(lost: &LostSince) -> std::sync::MutexGuard<'_, Option<Instant>> {
     lost.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What the nerd stats show about the tunnel besides its state.
+#[derive(Debug, Default)]
+struct Counters {
+    /// Since when the state is `Online` (`None` otherwise).
+    online_since: Option<Instant>,
+    /// Edge locations of the live connections, by cloudflared's connection index.
+    connections: std::collections::BTreeMap<u32, String>,
+}
+
+type SharedCounters = Arc<std::sync::Mutex<Counters>>;
+
+fn lock_counters(counters: &SharedCounters) -> std::sync::MutexGuard<'_, Counters> {
+    counters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The tunnel in numbers (see [`TunnelManager::stats`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelStats {
+    /// How long the tunnel has been online without a break; `None` while it is not online.
+    pub online_for: Option<Duration>,
+    /// How many times cloudflared ended without being asked to.
+    pub reconnects: u64,
+    /// Cloudflare locations of the live connections (`waw01`, ...), by connection index.
+    pub locations: Vec<String>,
 }
 
 /// The configuration and the supervisor currently running it (at most one).
@@ -162,6 +192,7 @@ impl TunnelManager {
             state: Arc::new(watch::channel(TunnelState::Off).0),
             lost: LostSince::default(),
             runs_ended: Arc::default(),
+            counters: SharedCounters::default(),
             slot: Arc::new(Mutex::new(Slot::default())),
             shutdown: watch::channel(false).0,
         }
@@ -197,6 +228,16 @@ impl TunnelManager {
         self.runs_ended.load(AtomicOrdering::SeqCst)
     }
 
+    /// Uptime, restarts and the Cloudflare locations of the connections, for the nerd stats.
+    pub fn stats(&self) -> TunnelStats {
+        let counters = lock_counters(&self.counters);
+        TunnelStats {
+            online_for: counters.online_since.map(|t| t.elapsed()),
+            reconnects: self.runs_ended(),
+            locations: counters.connections.values().cloned().collect(),
+        }
+    }
+
     /// Runs the tunnel for `config`, replacing a running one (which has exited before the new
     /// one starts).
     pub async fn start(&self, config: TunnelConfig) {
@@ -227,6 +268,7 @@ impl TunnelManager {
             state: self.state.clone(),
             lost: self.lost.clone(),
             runs_ended: self.runs_ended.clone(),
+            counters: self.counters.clone(),
         };
         let slot = self.slot.clone();
         let shutdown = self.shutdown.subscribe();
@@ -384,6 +426,7 @@ struct Supervisor {
     state: Arc<watch::Sender<TunnelState>>,
     lost: LostSince,
     runs_ended: Arc<AtomicU64>,
+    counters: SharedCounters,
 }
 
 impl Supervisor {
@@ -407,6 +450,8 @@ impl Supervisor {
             }
             first = false;
             let outcome = self.attempt(&config, &client, &mut stop).await;
+            // The process is gone: so are its connections and the time it was online.
+            *lock_counters(&self.counters) = Counters::default();
             if matches!(outcome, Outcome::Failed(_)) {
                 lock_lost(&self.lost).get_or_insert_with(Instant::now);
                 // Before the state says so: whoever sees the new state sees the count.
@@ -508,6 +553,15 @@ impl Supervisor {
                         stderr_open = false;
                         continue;
                     };
+                    match process::connection_event(&line) {
+                        Some(process::ConnectionEvent::Registered { index, location }) => {
+                            lock_counters(&self.counters).connections.insert(index, location);
+                        }
+                        Some(process::ConnectionEvent::Unregistered { index }) => {
+                            lock_counters(&self.counters).connections.remove(&index);
+                        }
+                        None => {}
+                    }
                     if address.is_none() {
                         if quick && process::is_rate_limited(&line) {
                             cloudflared.kill().await;
@@ -605,6 +659,7 @@ impl Supervisor {
                             {
                                 longest_online = longest_online.max(online.elapsed());
                                 online_since = None;
+                                lock_counters(&self.counters).online_since = None;
                                 lock_lost(&self.lost).get_or_insert(since);
                                 (self.log)(
                                     "Tunel: cloudflared stracił połączenie z Cloudflare; czekam, aż je odzyska.",
@@ -640,9 +695,11 @@ impl Supervisor {
     fn online(&self, url: &str) -> Instant {
         *lock_lost(&self.lost) = None;
         (self.log)(&format!("Tunel: w sieci — {url}"));
+        let now = Instant::now();
+        lock_counters(&self.counters).online_since = Some(now);
         self.state
             .send_replace(TunnelState::Online { url: url.into() });
-        Instant::now()
+        now
     }
 }
 

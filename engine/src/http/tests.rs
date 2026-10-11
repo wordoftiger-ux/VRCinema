@@ -104,6 +104,7 @@ fn snapshot(live_dir: &Path, segments: &[&str], state: ChannelState) -> Arc<Snap
         live_dir: live_dir.to_path_buf(),
         state,
         prefetched_item_id: None,
+        stats: Default::default(),
     })
 }
 
@@ -2655,4 +2656,149 @@ async fn the_panel_shows_the_control_state_and_the_public_state_does_not() {
     assert_eq!(body["control"]["durationS"], 100);
     let public = h.send(get("/api/channels/main/state")).await.json();
     assert!(public.get("control").is_none());
+}
+
+// ---------- nerd stats ----------
+
+const STATS_ROUTE: &str = "/api/admin/channels/main/stats";
+
+fn stats_snapshot(h: &Harness) -> Arc<Snapshot> {
+    use crate::stats::{
+        ChannelStats, FfmpegInfo, HlsCounters, NextInfo, NextState, OnAirInfo, ProbeSummary,
+        StreamMode,
+    };
+    let mut snapshot = (**h.snapshots.borrow()).clone();
+    snapshot.stats = ChannelStats {
+        on_air: Some(OnAirInfo {
+            title: "Kot".into(),
+            source: "https://youtu.be/a".into(),
+            position_s: 42.5,
+            attempt: 1,
+            probe: Some(ProbeSummary {
+                codec: "h264".into(),
+                height: 720,
+                fps: 25.0,
+                pix_fmt: "yuv420p".into(),
+                has_audio: true,
+                duration_s: Some(100.0),
+            }),
+            mode: Some(StreamMode::Copy),
+            encoder: None,
+            ready_segments: 2,
+        }),
+        hls: Some(HlsCounters {
+            sequence: 17,
+            window: 10,
+            segment_s: 4.0,
+            discontinuities: 3,
+            last_pts: Some(88.25),
+            dts_continuous: true,
+        }),
+        next: Some(NextInfo {
+            title: "Pies".into(),
+            state: NextState::Preparing,
+            ready_segments: 0,
+        }),
+        ffmpeg: Some(FfmpegInfo {
+            pid: std::process::id(),
+            speed: Some(1.9),
+            cpu_percent: None,
+            rss_bytes: None,
+        }),
+    };
+    Arc::new(snapshot)
+}
+
+#[tokio::test]
+async fn the_stats_route_needs_a_session() {
+    let h = Harness::new();
+    let res = h.send(get(STATS_ROUTE)).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_stats_route_reports_every_group_and_no_viewer_address() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    h.snapshots.send_replace(stats_snapshot(&h));
+    for ip in ["203.0.113.7", "203.0.113.8", "203.0.113.7"] {
+        let res = h.send(get("/live/main/5.ts").ip(ip)).await;
+        assert_eq!(res.status, StatusCode::OK);
+    }
+
+    let res = h.send(get(STATS_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let text = String::from_utf8(res.body.clone()).unwrap();
+    assert!(!text.contains("203.0.113"), "an address leaked: {text}");
+    let body = res.json();
+    let keys: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["onAir", "hls", "next", "ffmpeg", "viewers", "tunnel"]
+    );
+
+    assert_eq!(body["onAir"]["title"], "Kot");
+    assert_eq!(body["onAir"]["positionS"], 42.5);
+    assert_eq!(body["onAir"]["mode"], "copy");
+    assert_eq!(body["onAir"]["encoder"], Value::Null);
+    assert_eq!(body["onAir"]["readySegments"], 2);
+    assert_eq!(body["onAir"]["probe"]["codec"], "h264");
+    assert_eq!(body["onAir"]["probe"]["pixFmt"], "yuv420p");
+    assert_eq!(body["onAir"]["probe"]["hasAudio"], true);
+    assert_eq!(
+        body["hls"],
+        json!({
+            "sequence": 17, "window": 10, "segmentS": 4.0, "discontinuities": 3,
+            "lastPts": 88.25, "dtsContinuous": true
+        })
+    );
+    assert_eq!(body["next"]["state"], "preparing");
+    assert_eq!(body["ffmpeg"]["pid"], std::process::id());
+    assert_eq!(body["ffmpeg"]["speed"], 1.9);
+    #[cfg(windows)]
+    assert!(body["ffmpeg"]["rssBytes"].as_u64().unwrap() > 0);
+
+    let viewers = &body["viewers"];
+    assert_eq!(viewers["watching"], 2);
+    assert_eq!(viewers["fetchesPerMin"], 3);
+    assert_eq!(viewers["history"].as_array().unwrap().len(), 60);
+    assert_eq!(
+        viewers["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .sum::<u64>(),
+        3 * 188
+    );
+    // No app engine behind this server: no tunnel.
+    assert_eq!(body["tunnel"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_stats_route_has_null_for_what_is_missing() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let res = h.send(get(STATS_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let body = res.json();
+    for key in ["onAir", "hls", "next", "ffmpeg", "tunnel"] {
+        assert_eq!(body[key], Value::Null, "{key}");
+    }
+    assert_eq!(body["viewers"]["watching"], 0);
+    assert_eq!(body["viewers"]["bytesPerS"], 0);
+    assert_eq!(body["viewers"]["history"], json!(vec![0; 60]));
+}
+
+#[tokio::test]
+async fn the_stats_route_works_with_a_remote_password_session_too() {
+    let (a, _key) = app_harness(remote_on("sekret"));
+    let remote = cookie_of(&remote_login(&a, "sekret").await);
+    let res = a.h.send(get(STATS_ROUTE).cookie(&remote)).await;
+    assert_eq!(res.status, StatusCode::OK);
 }

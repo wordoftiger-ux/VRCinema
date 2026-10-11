@@ -242,6 +242,41 @@ pub fn is_connection_registered(line: &str) -> bool {
     line.contains("Registered tunnel connection")
 }
 
+/// A connection cloudflared registered with, or lost from, Cloudflare's edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    /// `Registered tunnel connection connIndex=0 ... location=waw01 ...`
+    Registered { index: u32, location: String },
+    /// `Unregistered tunnel connection connIndex=0`
+    Unregistered { index: u32 },
+}
+
+/// The value of `key=value` in a cloudflared log line.
+fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// The connection event a stderr line reports, if any.
+pub fn connection_event(line: &str) -> Option<ConnectionEvent> {
+    let index = field(line, "connIndex")?.parse().ok()?;
+    if line.contains("Unregistered tunnel connection") {
+        return Some(ConnectionEvent::Unregistered { index });
+    }
+    if !is_connection_registered(line) {
+        return None;
+    }
+    let location = field(line, "location")?;
+    // Edge locations are short codes like `waw01`; anything else is not shown.
+    let valid = !location.is_empty()
+        && location.len() <= 16
+        && location.bytes().all(|b| b.is_ascii_alphanumeric());
+    valid.then(|| ConnectionEvent::Registered {
+        index,
+        location: location.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +390,53 @@ mod tests {
         assert_eq!(rx.recv().await.as_deref(), Some("next line"));
         assert_eq!(rx.recv().await.as_deref(), Some("last without newline"));
         assert_eq!(rx.recv().await, None);
+    }
+
+    #[test]
+    fn reads_the_location_of_a_registered_connection() {
+        assert_eq!(
+            connection_event(
+                "2026-10-07T10:00:01Z INF Registered tunnel connection connIndex=0 connection=abc-123 event=0 ip=198.41.200.13 location=waw01 protocol=quic"
+            ),
+            Some(ConnectionEvent::Registered {
+                index: 0,
+                location: "waw01".into()
+            })
+        );
+        assert_eq!(
+            connection_event(
+                "2026-10-07T10:00:02Z INF Registered tunnel connection connIndex=3 connection=def event=0 ip=1.2.3.4 location=fra07 protocol=quic"
+            ),
+            Some(ConnectionEvent::Registered {
+                index: 3,
+                location: "fra07".into()
+            })
+        );
+    }
+
+    #[test]
+    fn reads_a_lost_connection() {
+        assert_eq!(
+            connection_event("2026-10-07T10:05:00Z INF Unregistered tunnel connection connIndex=1"),
+            Some(ConnectionEvent::Unregistered { index: 1 })
+        );
+    }
+
+    #[test]
+    fn other_lines_and_odd_locations_are_not_connections() {
+        assert_eq!(connection_event("INF Starting tunnel tunnelID=abc"), None);
+        assert_eq!(
+            connection_event("INF Registered tunnel connection connIndex=0 location="),
+            None
+        );
+        assert_eq!(
+            connection_event("INF Registered tunnel connection connIndex=0 location=<b>x</b>"),
+            None
+        );
+        assert_eq!(
+            connection_event("INF Registered tunnel connection connIndex=x location=waw01"),
+            None
+        );
     }
 
     #[test]

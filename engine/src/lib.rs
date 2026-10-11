@@ -18,6 +18,7 @@ pub mod rules;
 pub mod self_update;
 pub mod server;
 pub mod setup;
+pub mod stats;
 pub mod tools;
 pub mod tunnel;
 pub mod updater;

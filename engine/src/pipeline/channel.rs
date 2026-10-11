@@ -17,6 +17,7 @@ use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{SlateKind, Slates};
+use crate::stats::{ChannelStats, ClipStats, FfmpegInfo, NextInfo, NextState, OnAirInfo};
 
 /// A boxed, sendable future (like `futures::future::BoxFuture`).
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -37,6 +38,10 @@ pub trait ClipHandle: Send {
         false
     }
     fn kill(&mut self);
+    /// What the stats show about this clip (analysis, mode, process).
+    fn stats(&self) -> ClipStats {
+        ClipStats::default()
+    }
     /// Kills the process and removes the clip files.
     fn dispose(&mut self);
 }
@@ -876,6 +881,71 @@ impl Channel {
         !self.pause_reasons.is_empty() && !self.current.as_ref().is_some_and(|c| c.item.is_live)
     }
 
+    /// What the stats show about the film being cut, the one prepared after it and the encoder
+    /// process (CPU and memory are added per request). The playlist counters come from the
+    /// broadcaster.
+    pub fn stats(&self) -> ChannelStats {
+        let on_air = if let Some(c) = &self.current {
+            let clip = c.handle.as_ref().map(|h| h.stats()).unwrap_or_default();
+            Some((
+                OnAirInfo {
+                    title: c.item.title.clone(),
+                    source: c.item.source_url.clone(),
+                    position_s: c.position_s(),
+                    attempt: c.attempt,
+                    probe: clip.probe.clone(),
+                    mode: clip.mode,
+                    encoder: clip.encoder.clone(),
+                    ready_segments: c.ready.len(),
+                },
+                clip,
+            ))
+        } else {
+            // Paused or seeking: no process, the film is only parked.
+            self.parked.as_ref().map(|p| {
+                (
+                    OnAirInfo {
+                        title: p.item.title.clone(),
+                        source: p.item.source_url.clone(),
+                        position_s: p.position_s,
+                        attempt: p.attempt,
+                        probe: None,
+                        mode: None,
+                        encoder: None,
+                        ready_segments: 0,
+                    },
+                    ClipStats::default(),
+                )
+            })
+        };
+        let next = self.prefetched.as_ref().map(|c| NextInfo {
+            title: c.item.title.clone(),
+            state: if c.failure().is_some() {
+                NextState::Failed
+            } else if c.is_starting() {
+                NextState::Preparing
+            } else {
+                NextState::Ready
+            },
+            ready_segments: c.ready.len(),
+        });
+        let ffmpeg = on_air
+            .as_ref()
+            .and_then(|(_, clip)| Some((clip.pid?, clip.speed)))
+            .map(|(pid, speed)| FfmpegInfo {
+                pid,
+                speed,
+                cpu_percent: None,
+                rss_bytes: None,
+            });
+        ChannelStats {
+            on_air: on_air.map(|(info, _)| info),
+            hls: None,
+            next,
+            ffmpeg,
+        }
+    }
+
     /// The item being started in the background ahead of time (shown in the admin panel).
     pub fn prefetched_item_id(&self) -> Option<i64> {
         self.prefetched.as_ref().map(|c| c.item.id)
@@ -1282,6 +1352,7 @@ impl SegmentSource for Channel {
 mod tests {
     use super::*;
     use crate::db::{AddedBy, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+    use crate::stats::StreamMode;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::oneshot;
 
@@ -1374,6 +1445,18 @@ mod tests {
             s.killed = true;
             if s.state == SegmenterState::Running {
                 s.state = SegmenterState::Killed;
+            }
+        }
+        fn stats(&self) -> ClipStats {
+            ClipStats {
+                mode: Some(if self.copies_video {
+                    StreamMode::Copy
+                } else {
+                    StreamMode::Transcode
+                }),
+                pid: Some(4321),
+                speed: Some(1.5),
+                ..ClipStats::default()
             }
         }
         fn dispose(&mut self) {
@@ -1770,6 +1853,45 @@ mod tests {
         assert_eq!(e.get(a.id).status, ItemStatus::Played);
         assert_eq!(e.get(b.id).status, ItemStatus::Playing);
         assert_eq!(e.channel.prefetched_item_id(), None);
+    }
+
+    #[tokio::test]
+    async fn stats_describe_the_film_being_cut_the_next_one_and_the_process() {
+        let mut e = setup();
+        assert_eq!(e.channel.stats(), ChannelStats::default());
+        e.add("a", Some(40.0), false);
+        let b = e.add_item("b");
+        e.next();
+        e.flush().await;
+        e.factory.handle(0).produce(10);
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.handle(1).item_id(), b.id);
+
+        let stats = e.channel.stats();
+        let on_air = stats.on_air.expect("a film is on air");
+        assert_eq!(on_air.title, "a");
+        assert_eq!(on_air.attempt, 0);
+        assert_eq!(on_air.mode, Some(StreamMode::Transcode));
+        assert!(on_air.position_s >= 0.0);
+        let next = stats.next.expect("the next film is prepared");
+        assert_eq!(next.title, "b");
+        assert_eq!(next.state, NextState::Ready);
+        assert_eq!(
+            stats.ffmpeg,
+            Some(FfmpegInfo {
+                pid: 4321,
+                speed: Some(1.5),
+                cpu_percent: None,
+                rss_bytes: None
+            })
+        );
+        // The counters of the playlist belong to the broadcaster.
+        assert_eq!(stats.hls, None);
+
+        // A failing next film shows as failed.
+        e.factory.handle(1).set_state(SegmenterState::Failed);
+        assert_eq!(e.channel.stats().next.unwrap().state, NextState::Failed);
     }
 
     #[tokio::test]

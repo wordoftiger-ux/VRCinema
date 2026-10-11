@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::pipeline::playlist::{LivePlaylistInput, PlaylistSegment, build_live_playlist};
 use crate::pipeline::tsrewrite::{TsRewriter, content_end, min_dts};
+use crate::stats::{DtsMonitor, HlsCounters};
 
 /// Start of the channel timeline (10 s) so shifted DTS values are never negative.
 pub const START_PTS: i64 = 10 * 90_000;
@@ -79,6 +80,9 @@ pub struct Broadcaster {
     last: Option<SourceSegment>,
     target_duration: f64,
     discontinuity_sequence: u64,
+    /// Discontinuity tags published so far (the ones that left the window included).
+    discontinuities: u64,
+    dts: DtsMonitor,
     /// Milliseconds on the `now` clock; fractional, so 4.004 s segments do not drift.
     next_publish_at: f64,
 }
@@ -99,6 +103,8 @@ impl Broadcaster {
             last: None,
             target_duration,
             discontinuity_sequence: 0,
+            discontinuities: 0,
+            dts: DtsMonitor::new(),
             next_publish_at: 0.0,
         }
     }
@@ -148,6 +154,18 @@ impl Broadcaster {
     /// Channel time in seconds (sum of the published segments).
     pub fn channel_time(&self) -> f64 {
         self.clock
+    }
+
+    /// The playlist in numbers, for the stats.
+    pub fn counters(&self) -> HlsCounters {
+        HlsCounters {
+            sequence: self.published.first().map_or(self.seq, |s| s.seq),
+            window: self.published.len(),
+            segment_s: self.o.segment_seconds,
+            discontinuities: self.discontinuities,
+            last_pts: self.last_end.map(|end| end as f64 / 90_000.0),
+            dts_continuous: self.dts.is_continuous(),
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -241,7 +259,9 @@ impl Broadcaster {
         let seq = self.seq;
         self.seq += 1;
         let name = format!("{seq}.ts");
+        let min_out = min_dts(&output);
         std::fs::write(self.o.dir.join(&name), output)?;
+        self.dts.observe(min_out);
 
         let published = PublishedSegment {
             path: seg.path.clone(),
@@ -260,6 +280,7 @@ impl Broadcaster {
         // HLS: EXTINF rounded to an integer must not exceed TARGETDURATION.
         self.target_duration = self.target_duration.max(seg.duration.round());
         let discontinuity = source_changed && (self.o.discontinuity_tags)();
+        self.discontinuities += u64::from(discontinuity);
         self.published.push(PlaylistSegment {
             seq,
             name,
@@ -562,6 +583,57 @@ mod tests {
         b.tick(&mut src);
         // markers at seq 1 (b) and seq 2 (back to the slate) left the window
         assert!(b.playlist().contains("#EXT-X-DISCONTINUITY-SEQUENCE:2"));
+    }
+
+    #[test]
+    fn counters_report_the_window_discontinuities_and_the_last_pts() {
+        let env = Env::new();
+        let mut src = env.source();
+        for (key, index, pts) in [("a", 0, 126_000), ("a", 1, 486_000), ("b", 0, 9_000_000)] {
+            let s = src.make_with(key, index, 4.0, pts);
+            src.push(s);
+        }
+        let mut b = env.broadcaster(true);
+        b.start_initial(&mut src);
+        let c = b.counters();
+        assert_eq!(c.sequence, 0);
+        assert_eq!(c.window, 3);
+        assert_eq!(c.segment_s, 4.0);
+        // Only the switch from "a" to "b" is tagged.
+        assert_eq!(c.discontinuities, 1);
+        assert!(c.last_pts.is_some_and(|p| p > 10.0), "{:?}", c.last_pts);
+        assert!(c.dts_continuous);
+    }
+
+    #[test]
+    fn a_timeline_that_steps_back_clears_the_dts_flag_for_good() {
+        let env = Env::new();
+        let mut src = env.source();
+        // One source whose second segment starts before the first (broken input): the
+        // broadcaster continues the same offset, so the published timeline steps back.
+        for (index, pts) in [(0, 486_000), (1, 126_000), (2, 846_000)] {
+            let s = src.make_with("a", index, 4.0, pts);
+            src.push(s);
+        }
+        let mut b = env.broadcaster(true);
+        b.start_initial(&mut src);
+        assert!(!b.counters().dts_continuous);
+        env.advance(4_000);
+        b.tick(&mut src);
+        assert!(!b.counters().dts_continuous, "stays false");
+    }
+
+    #[test]
+    fn a_normal_run_keeps_the_dts_flag_on() {
+        let env = Env::new();
+        let mut src = env.source();
+        for (index, pts) in [(0, 126_000), (1, 486_000), (2, 846_000)] {
+            let s = src.make_with("a", index, 4.0, pts);
+            src.push(s);
+        }
+        let mut b = env.broadcaster(true);
+        b.start_initial(&mut src);
+        assert!(b.counters().dts_continuous);
     }
 
     #[test]
