@@ -106,6 +106,11 @@ pub struct ChannelTarget {
     pub started_with: BTreeSet<PauseReason>,
 }
 
+/// The reasons the automatic pause sets and clears (not the owner's manual pause).
+fn is_automatic(reason: PauseReason) -> bool {
+    matches!(reason, PauseReason::Tunnel | PauseReason::NoViewers)
+}
+
 /// The channel loop running right now (`None`: no channel, e.g. while the server restarts or
 /// runs without tools).
 pub type CommandTarget = Arc<dyn Fn() -> Option<ChannelTarget> + Send + Sync>;
@@ -243,9 +248,17 @@ impl AutoPause {
         if !same {
             // A new loop has exactly the reasons it was started with: the ones no longer
             // wanted are resumed, the missing ones paused.
+            // Only the reasons this controller owns: the owner's manual pause is never its to
+            // resume, whatever the loop was started with.
             delivered.reasons = target
                 .as_ref()
-                .map(|t| t.started_with.clone())
+                .map(|t| {
+                    t.started_with
+                        .iter()
+                        .copied()
+                        .filter(|r| is_automatic(*r))
+                        .collect()
+                })
                 .unwrap_or_default();
             delivered.to = target.as_ref().map(|t| t.commands.clone());
         }
@@ -620,6 +633,39 @@ mod tests {
         );
         after_ms(5_000).await;
         assert!(rx.try_recv().is_err(), "sent once");
+    }
+
+    /// Stage 4 fix round 1: the owner's manual pause is not the automatic pause's to clear,
+    /// even when a new loop was started with it.
+    #[tokio::test(start_paused = true)]
+    async fn the_manual_pause_is_never_resumed_by_the_automatic_pause() {
+        let mut env = start(ON_LOSS, online());
+        after_ms(1_000).await;
+        assert!(env.sent().is_empty());
+        let (tx, mut rx) = mpsc::channel(64);
+        *env.target.lock().unwrap() =
+            Some(channel(tx, &[PauseReason::Tunnel, PauseReason::Manual]));
+        env.kick.notify_one();
+        after_ms(1).await;
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(Command::Resume(PauseReason::Tunnel))
+        );
+        env.tunnel.send_replace(TunnelState::Reconnecting);
+        after_ms(10_100).await;
+        env.tunnel.send_replace(online());
+        after_ms(60_000).await;
+        let mut rest = Vec::new();
+        while let Ok(c) = rx.try_recv() {
+            rest.push(c);
+        }
+        assert_eq!(
+            rest,
+            [
+                Command::Pause(PauseReason::Tunnel),
+                Command::Resume(PauseReason::Tunnel)
+            ]
+        );
     }
 
     /// Fix round 2: a reason that came while no channel ran pauses the new loop; one it was

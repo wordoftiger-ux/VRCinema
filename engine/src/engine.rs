@@ -45,7 +45,8 @@ pub enum Command {
     },
     /// The current film from its start (a seek to 0).
     Restart,
-    /// Airs this queue or history item now; the current film ends as skipped.
+    /// Airs this queue or history item now; the current film ends as skipped and the manual
+    /// pause ends.
     PlayNow {
         item_id: i64,
     },
@@ -441,8 +442,14 @@ where
                     | Command::Restart
                     | Command::PlayNow { .. } => {}
                 }
+                let play_now = matches!(command, Command::PlayNow { .. });
                 match guarded(|| core.apply(command)) {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => {
+                        // A play-now ends the manual pause (see `Channel::play_now`).
+                        if play_now {
+                            self.pause_reasons.remove(&PauseReason::Manual);
+                        }
+                    }
                     Ok(Err(e)) => (self.log)(&format!("Polecenie kanału nie powiodło się: {e}")),
                     Err(panic) => return Exit::Failed(panic),
                 }
@@ -960,6 +967,41 @@ mod tests {
             next_snapshot(&mut handle.snapshot).await;
         }
         assert_eq!(env.count(|p| &p.ticks), before + 4);
+    }
+
+    /// Controller's ruling: a successful play-now clears the manual pause, also for a channel
+    /// rebuilt later.
+    #[tokio::test(start_paused = true)]
+    async fn play_now_clears_the_manual_pause_for_a_rebuilt_channel_too() {
+        let env = Env::new();
+        env.probe.panic_at_next.store(5, Ordering::SeqCst);
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        for command in [
+            Command::Pause(PauseReason::Manual),
+            Command::Pause(PauseReason::Tunnel),
+            Command::PlayNow { item_id: 5 },
+        ] {
+            handle.commands.send(command).await.unwrap();
+        }
+        next_snapshot(&mut handle.snapshot).await;
+        let probe = Arc::clone(&env.probe);
+        wait_until(&mut handle.snapshot, |s| {
+            probe.builds.load(Ordering::SeqCst) == 2 && !s.segments.is_empty()
+        })
+        .await;
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            [
+                "start",
+                "pause manual",
+                "pause tunnel",
+                "play_now 5",
+                "stop",
+                "pause tunnel",
+                "start"
+            ]
+        );
     }
 
     /// A manual pause survives a crashed loop like the automatic reasons.

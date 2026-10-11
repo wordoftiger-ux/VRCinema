@@ -646,32 +646,10 @@ impl SegmentSource for PublishTap<'_> {
     }
 }
 
-/// The clip directory started last (`{item}-{attempt}-{n}`, highest `n`) has a finished
-/// segment in its list.
-fn newest_clip_has_a_segment(clips_dir: &Path) -> bool {
-    let newest = std::fs::read_dir(clips_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let n = e
-                .file_name()
-                .to_string_lossy()
-                .rsplit('-')
-                .next()?
-                .parse::<u64>()
-                .ok()?;
-            Some((n, e.path()))
-        })
-        .max_by_key(|(n, _)| *n);
-    newest.is_some_and(|(_, dir)| {
-        std::fs::read_to_string(dir.join("list.csv")).is_ok_and(|list| list.contains('\n'))
-    })
-}
-
 /// Review Focus 1 with real ffmpeg: a seek to 30 s of a 60 s film. The first segment after it
 /// shows 30 s (±1 s converted; copied: the keyframe at or before 30 s), the DTS of the whole
-/// stream never go back, and the seek adds exactly one discontinuity.
+/// stream never go back (also across the buffering slate aired while the new clip starts), and
+/// every source change is exactly one discontinuity.
 async fn seek_lands_on_its_target(force_transcode: bool) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -797,20 +775,8 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
     let control = channel.state().control;
     assert!(control.seek_pending);
     assert_eq!(control.position_s, 30.0);
-    // The broadcaster holds still while the seek waits for its quiet and the new clip cuts its
-    // first segment: no buffering slate between the two clips.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while channel.state().control.seek_pending {
-        assert!(Instant::now() < deadline, "skok nie ruszył");
-        channel.on_tick();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !newest_clip_has_a_segment(&clips_dir) {
-        assert!(Instant::now() < deadline, "klip po skoku nie dał fragmentu");
-        channel.poll_launches();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // The broadcaster keeps going as in the real loop: the old clip, the buffering slate while
+    // the new clip starts, then the new clip.
     let deadline = Instant::now() + Duration::from_secs(90);
     while clip_segments(&published, true) < 3 {
         assert!(Instant::now() < deadline, "po skoku za mało fragmentów");
@@ -833,11 +799,6 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
         .find(|(_, k)| k.starts_with("clip-") && k.ends_with("-r1"))
         .cloned()
         .unwrap();
-    assert_eq!(
-        first_after,
-        last_before + 1,
-        "między klipami wyemitowano coś jeszcze: {published:?}"
-    );
     let counter = counter_in(
         &cfg.ffmpeg_path,
         &live_dir.join(format!("{first_after}.ts")),
@@ -859,24 +820,57 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
     );
     assert!(before < 12, "przed skokiem licznik {before}");
 
-    // Exactly one discontinuity from the seek: before the first segment of the new clip.
+    // Exactly one discontinuity per source change (old clip → slate → new clip), none
+    // elsewhere; the whole run is in the playlist.
+    let keys: HashMap<u64, String> = published.iter().cloned().collect();
     let mut discontinuity = false;
-    let mut after_seek = Vec::new();
+    let mut listed: Vec<(u64, bool)> = Vec::new();
     for line in playlist.lines() {
         if line == "#EXT-X-DISCONTINUITY" {
             discontinuity = true;
         } else if let Some(seq) = line.strip_suffix(".ts").and_then(|s| s.parse::<u64>().ok()) {
-            if seq > last_before {
-                after_seek.push((seq, discontinuity));
-            }
+            listed.push((seq, discontinuity));
             discontinuity = false;
         }
     }
-    assert!(after_seek.len() >= 3, "{playlist}");
+    assert_eq!(listed.len(), published.len(), "{playlist}");
+    for pair in listed.windows(2) {
+        let (prev, (seq, tagged)) = (pair[0].0, pair[1]);
+        let changed = keys[&prev] != keys[&seq];
+        assert_eq!(
+            tagged, changed,
+            "segment {seq} ({} after {}): {playlist}",
+            keys[&seq], keys[&prev]
+        );
+    }
+    // The old clip may air a little longer while the seek waits for its quiet; after its last
+    // segment: old clip → new clip directly (one change), or through the buffering slate (two).
+    let last_old = published
+        .iter()
+        .filter(|(_, k)| k.starts_with("clip-") && !k.ends_with("-r1"))
+        .map(|(seq, _)| *seq)
+        .max()
+        .unwrap();
+    assert!(last_old < first_after, "{published:?}");
+    let changes_after_old = listed
+        .iter()
+        .filter(|(seq, tagged)| *seq > last_old && *tagged)
+        .count();
+    let slates_between = published
+        .iter()
+        .filter(|(seq, _)| *seq > last_old && *seq < first_after)
+        .count();
+    assert!(
+        published
+            .iter()
+            .filter(|(seq, _)| *seq > last_old && *seq < first_after)
+            .all(|(_, k)| k.starts_with("buffering")),
+        "{published:?}"
+    );
     assert_eq!(
-        after_seek.iter().filter(|(_, d)| *d).collect::<Vec<_>>(),
-        [&(first_after, true)],
-        "{playlist}"
+        changes_after_old,
+        if slates_between > 0 { 2 } else { 1 },
+        "{published:?}"
     );
 
     let joined = work_dir.join("joined.ts");

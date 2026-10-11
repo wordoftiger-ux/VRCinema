@@ -2498,6 +2498,95 @@ async fn a_film_of_unknown_length_seeks_only_forward_or_back_to_the_start() {
     );
 }
 
+/// Fix round 1 (5): the unknown-length rule agrees with the engine (`toS ≤ 0` is the restart).
+#[tokio::test(start_paused = true)]
+async fn a_film_of_unknown_length_may_seek_to_the_start() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(None, false));
+    for (body, command) in [
+        (json!({"toS": 0}), Command::Seek { to_s: 0.0 }),
+        (json!({"toS": -3}), Command::Seek { to_s: -3.0 }),
+    ] {
+        let res = h
+            .send(control_route("seek").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::OK, "{body}");
+        assert_eq!(h.commands(), [command]);
+    }
+}
+
+/// Fix round 1 (5): |byS| ≤ 1 day, |toS| ≤ 7 days.
+#[tokio::test(start_paused = true)]
+async fn seek_values_are_bounded() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(Some(100.0), false));
+    for body in [
+        json!({"byS": 86_401}),
+        json!({"byS": -86_401}),
+        json!({"toS": 604_801}),
+        json!({"toS": -604_801}),
+        json!({"toS": 1e300}),
+    ] {
+        let res = h
+            .send(control_route("seek").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(res.json()["code"], "bad_request", "{body}");
+    }
+    assert!(h.commands().is_empty());
+    for (body, command) in [
+        (
+            json!({"byS": 86_400}),
+            Command::SeekBy { delta_s: 86_400.0 },
+        ),
+        (
+            json!({"byS": -86_400}),
+            Command::SeekBy { delta_s: -86_400.0 },
+        ),
+        (json!({"toS": 604_800}), Command::Seek { to_s: 604_800.0 }),
+    ] {
+        let res = h
+            .send(control_route("seek").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::OK, "{body}");
+        assert_eq!(h.commands(), [command]);
+    }
+}
+
+/// Fix round 1 (4): a command the engine loop cannot take is 503, not a stale 200.
+#[tokio::test(start_paused = true)]
+async fn a_control_command_without_an_engine_loop_is_503() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(Some(100.0), false));
+    // No loop behind the queue any more.
+    drop(std::mem::replace(&mut h.commands, mpsc::channel(1).1));
+    for (route, body) in [
+        ("pause", json!(null)),
+        ("resume", json!(null)),
+        ("seek", json!({"toS": 10})),
+        ("restart", json!(null)),
+    ] {
+        let res = h
+            .send(control_route(route).cookie(&cookie).json(body))
+            .await;
+        assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{route}");
+        assert_eq!(res.json()["code"], "engine_unavailable", "{route}");
+        assert!(!res.error().is_empty());
+    }
+    let queued = h.add("Q", ItemStatus::Queued);
+    let res = h
+        .send(
+            control_route("play-now")
+                .cookie(&cookie)
+                .json(json!({"itemId": queued.id})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
 #[tokio::test(start_paused = true)]
 async fn play_now_takes_a_queued_or_finished_item() {
     let mut h = Harness::new();

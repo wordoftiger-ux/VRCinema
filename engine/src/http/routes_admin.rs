@@ -449,60 +449,78 @@ fn controllable_film(state: &AppState) -> ApiResult<ControlState> {
 
 /// Sends `command` and answers with the control state once the loop has applied it: it drains
 /// commands, ticks and then publishes, so the second snapshot after sending has it. After
-/// [`CONTROL_WAIT`] the latest state is returned anyway.
-async fn apply_control(state: &AppState, command: Command) -> Response {
+/// [`CONTROL_WAIT`] the latest state is returned anyway. A loop that cannot take the command
+/// (none running, or its queue full) is 503.
+async fn apply_control(state: &AppState, command: Command) -> ApiResult {
     let mut snapshots = state.engine.snapshot.clone();
     snapshots.borrow_and_update();
-    if state.send_command(command) {
-        let _ = tokio::time::timeout(CONTROL_WAIT, async {
-            for _ in 0..2 {
-                if snapshots.changed().await.is_err() {
-                    break;
-                }
-            }
-        })
-        .await;
+    if !state.send_command(command) {
+        return Err(ApiError::with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "engine_unavailable",
+            "Kanał nie przyjmuje teraz poleceń. Spróbuj za chwilę.",
+        ));
     }
-    json_ok(&json!({ "control": control_json(&state.snapshot().state) }))
+    let _ = tokio::time::timeout(CONTROL_WAIT, async {
+        for _ in 0..2 {
+            if snapshots.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    Ok(json_ok(
+        &json!({ "control": control_json(&state.snapshot().state) }),
+    ))
 }
 
 async fn pause(State(state): State<AppState>) -> ApiResult {
     controllable_film(&state)?;
-    Ok(apply_control(&state, Command::Pause(PauseReason::Manual)).await)
+    apply_control(&state, Command::Pause(PauseReason::Manual)).await
 }
 
 /// Clears only the manual pause; other active reasons stay (and are shown).
-async fn resume(State(state): State<AppState>) -> Response {
+async fn resume(State(state): State<AppState>) -> ApiResult {
     apply_control(&state, Command::Resume(PauseReason::Manual)).await
 }
 
-/// `{"toS": seconds}` or `{"byS": seconds}` (exactly one, finite numbers).
+/// Largest relative seek (one day).
+const MAX_SEEK_BY_S: f64 = 86_400.0;
+/// Largest absolute seek target (seven days).
+const MAX_SEEK_TO_S: f64 = 7.0 * 86_400.0;
+
+/// `{"toS": seconds}` or `{"byS": seconds}` (exactly one number; |byS| ≤ 1 day, |toS| ≤ 7 days).
 async fn seek(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
-    let number = |key: &str| {
+    let number = |key: &str, max: f64| {
         body.get(key).map(|v| {
             v.as_f64()
-                .filter(|n| n.is_finite())
+                .filter(|n| n.abs() <= max)
                 .ok_or_else(|| control_bad_request("Podaj liczbę sekund."))
         })
     };
-    let command = match (number("toS"), number("byS")) {
+    let command = match (number("toS", MAX_SEEK_TO_S), number("byS", MAX_SEEK_BY_S)) {
         (Some(to), None) => Command::Seek { to_s: to? },
         (None, Some(by)) => Command::SeekBy { delta_s: by? },
         _ => return Err(control_bad_request("Podaj toS albo byS (sekundy).")),
     };
     let control = controllable_film(&state)?;
-    let forward = matches!(command, Command::SeekBy { delta_s } if delta_s >= 0.0);
-    if control.duration_s.is_none() && !forward {
+    // Like the engine: without a known length only forward, or back to the start.
+    let allowed = match command {
+        Command::SeekBy { delta_s } => delta_s >= 0.0,
+        Command::Seek { to_s } => to_s <= 0.0,
+        _ => false,
+    };
+    if control.duration_s.is_none() && !allowed {
         return Err(control_bad_request(
             "Długość tego filmu nie jest znana: można go tylko przewinąć do przodu.",
         ));
     }
-    Ok(apply_control(&state, command).await)
+    apply_control(&state, command).await
 }
 
 async fn restart(State(state): State<AppState>) -> ApiResult {
     controllable_film(&state)?;
-    Ok(apply_control(&state, Command::Restart).await)
+    apply_control(&state, Command::Restart).await
 }
 
 /// `{"itemId": id}` of a queued film or one from the history (played or failed).
@@ -523,7 +541,7 @@ async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             "Odtworzyć teraz można tylko film z kolejki albo z historii.",
         ));
     }
-    Ok(apply_control(&state, Command::PlayNow { item_id: item.id }).await)
+    apply_control(&state, Command::PlayNow { item_id: item.id }).await
 }
 
 async fn get_settings(State(state): State<AppState>) -> ApiResult {

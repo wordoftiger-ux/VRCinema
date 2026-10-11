@@ -219,6 +219,8 @@ struct ActiveClip {
     stalled_since: Option<u64>,
     /// What an earlier process of this film found out (kept while the new one starts).
     earlier: Probed,
+    /// The background start, so a seek can cancel it.
+    start: Option<tokio::task::AbortHandle>,
 }
 
 /// What the clip's analysis found out about a film.
@@ -293,6 +295,24 @@ impl ActiveClip {
         if let Some(handle) = self.handle.as_mut() {
             handle.dispose();
         }
+    }
+
+    /// Its start is still in flight (neither a clip nor an error yet).
+    fn is_starting(&self) -> bool {
+        self.handle.is_none() && self.start_error.is_none()
+    }
+
+    /// The start or the process failed (and `next()` has not dealt with it yet).
+    fn failure(&self) -> Option<String> {
+        if let Some(error) = &self.start_error {
+            return Some(error.clone());
+        }
+        let handle = self.handle.as_ref()?;
+        matches!(
+            handle.state(),
+            SegmenterState::Failed | SegmenterState::Killed
+        )
+        .then(|| handle.error().unwrap_or_else(|| FFMPEG_STOPPED.to_string()))
     }
 }
 
@@ -646,17 +666,32 @@ impl Channel {
     }
 
     fn run_due_seek(&mut self) -> anyhow::Result<()> {
-        if self
+        let Some(item_id) = self
             .pending_seek
             .as_ref()
-            .is_none_or(|s| (self.now)() < s.due_at)
+            .filter(|s| (self.now)() >= s.due_at)
+            .map(|s| s.item_id)
+        else {
+            return Ok(());
+        };
+        // Never two processes of the same film: a start still in flight is cancelled, and the
+        // seek runs only once it is gone (whatever it produced in the meantime is taken by
+        // `poll_launches` below and disposed with the clip).
+        if let Some(start) = self
+            .current
+            .as_ref()
+            .filter(|c| c.item.id == item_id && c.is_starting())
+            .and_then(|c| c.start.as_ref())
+            .filter(|start| !start.is_finished())
         {
+            start.abort();
             return Ok(());
         }
+        self.poll_launches();
         let Some(seek) = self.pending_seek.take() else {
             return Ok(());
         };
-        let Some(c) = self
+        let Some(mut c) = self
             .current
             .take_if(|c| c.item.id == seek.item_id && !c.item.is_live)
         else {
@@ -671,6 +706,14 @@ impl Channel {
         }
         // The prefetched film may now be far from its turn; it is prefetched again near the end.
         self.drop_prefetched();
+        if let Some(error) = c.failure() {
+            // The process had already failed: the usual retry accounting, from the target.
+            c.base_s = seek.target_s;
+            c.emitted_s = 0.0;
+            c.ready.clear();
+            self.current = Some(c);
+            return self.handle_failure(error);
+        }
         let mut off = Parked::off_air(c);
         self.log(&format!(
             "Skok: film #{} \"{}\" z {:.0} s na {:.0} s",
@@ -691,8 +734,8 @@ impl Channel {
 
     /// Airs `item_id` next: a queued film moves to the front, a film from the history (played
     /// or failed) is added again (a new entry with the same link and nick) at the front. The
-    /// current film ends as skipped. Pending approval, removed, rejected or playing films are
-    /// refused.
+    /// current film ends as skipped and the manual pause ends (automatic reasons stay).
+    /// Pending approval, removed, rejected or playing films are refused.
     pub fn play_now(&mut self, item_id: i64) -> anyhow::Result<()> {
         let channel_id = self.o.channel_id;
         let item = self
@@ -706,7 +749,7 @@ impl Channel {
             }
             ItemStatus::Played | ItemStatus::Failed => {
                 let again = self.queue(|q| {
-                    let again = q.add(&NewItem {
+                    q.add_first(&NewItem {
                         channel_id,
                         source_url: item.source_url.clone(),
                         title: item.title.clone(),
@@ -717,9 +760,7 @@ impl Channel {
                         requester_name: item.requester_name.clone(),
                         // The owner's choice: it does not count towards the viewer's limit.
                         requester_ip: None,
-                    })?;
-                    q.move_item(again.id, 0)?;
-                    Ok(again)
+                    })
                 })?;
                 again.id
             }
@@ -730,6 +771,9 @@ impl Channel {
         };
         self.log(&format!("Odtwórz teraz: \"{}\" (#{chosen})", item.title));
         self.skip()?;
+        // The owner's explicit "play this now" ends the manual pause (the paused film was just
+        // skipped, so nothing is relaunched); automatic reasons keep holding the film.
+        self.resume(PauseReason::Manual);
         self.on_queue_changed()
     }
 
@@ -1098,12 +1142,13 @@ impl Channel {
             emitted_s: 0.0,
             stalled_since: None,
             earlier: Probed::default(),
+            start: None,
         };
         let start = self.o.factory.create(item, start_at_s, attempt);
         let tx = self.launch_tx.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(rt) => {
-                rt.spawn(async move {
+                let task = rt.spawn(async move {
                     let result = start.await;
                     if let Err(mpsc::error::SendError(launch)) = tx.send(Launch {
                         clip_id: id,
@@ -1114,6 +1159,7 @@ impl Channel {
                         handle.dispose();
                     }
                 });
+                clip.start = Some(task.abort_handle());
             }
             Err(e) => clip.start_error = Some(e.to_string()),
         }
@@ -1557,6 +1603,18 @@ mod tests {
         fn release(&self, i: usize) {
             let gate = std::mem::replace(&mut self.factory.lock().gates[i], oneshot::channel().0);
             gate.send(()).unwrap();
+        }
+        /// Releases every held start; a cancelled one is gone already.
+        fn release_all(&self) {
+            for gate in std::mem::take(&mut self.factory.lock().gates) {
+                let _ = gate.send(());
+            }
+        }
+        /// Lets spawned starts run without handing their results to the channel.
+        async fn yield_only(&self) {
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
         }
         fn live_handles(&self) -> usize {
             let handles = self.factory.lock().handles.clone();
@@ -2649,6 +2707,7 @@ mod tests {
         e.advance(700);
         e.tick();
         assert_eq!(e.factory.calls()[1].start_at_s, 0.0);
+        e.flush().await;
         e.channel.seek_to(-5.0);
         e.advance(700);
         e.tick();
@@ -2723,6 +2782,7 @@ mod tests {
         e.tick();
         assert_eq!(e.factory.calls()[1].start_at_s, 5_008.0);
         assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        e.flush().await;
         // Back to the start (⏮) works for it too.
         e.channel.seek_to(0.0);
         e.advance(700);
@@ -2743,20 +2803,27 @@ mod tests {
             e.tick();
         }
         e.advance(700);
+        // The old start is cancelled; the new one waits until it is gone.
+        e.tick();
+        assert_eq!(e.starts(), 1);
+        assert!(e.control().seek_pending);
+        e.flush().await;
         e.tick();
         assert_eq!(e.starts(), 2);
         assert_eq!(e.factory.calls()[1].start_at_s, 80.0);
-        // The old start finishes late: its clip is disposed.
-        e.release(0);
+        // The cancelled start is gone: nothing waits on its gate any more.
+        let gate = std::mem::replace(&mut e.factory.lock().gates[0], oneshot::channel().0);
+        assert!(gate.send(()).is_err(), "start #0 was not cancelled");
         e.flush().await;
-        assert!(e.factory.handle(0).disposed());
-        // Another seek while start #1 is still in flight.
+        assert!(e.factory.lock().handles.is_empty());
+        // Another seek while start #1 is held in flight (its gate is gone: a new burst).
         e.channel.seek_to(20.0);
         e.advance(700);
         e.tick();
+        e.flush().await;
+        e.tick();
         assert_eq!(e.factory.calls()[2].start_at_s, 20.0);
-        e.release(1);
-        e.release(2);
+        e.release_all();
         e.flush().await;
         assert_eq!(e.live_handles(), 1);
         let live = e
@@ -2869,6 +2936,154 @@ mod tests {
         // The old entry stays in the history; the rest of the queue waits.
         assert_eq!(e.get(a.id).status, ItemStatus::Played);
         assert_eq!(e.get(c.id).status, ItemStatus::Queued);
+    }
+
+    /// Fix round 1 (2): a seek onto a clip whose process failed (not yet noticed by `next()`)
+    /// goes through the retry accounting, from the seek target.
+    #[tokio::test]
+    async fn a_seek_onto_a_failed_clip_is_the_retry_from_the_target() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 2).await;
+        h0.set_state(SegmenterState::Failed);
+        h0.set_error("Connection reset");
+        e.channel.seek_to(50.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 50.0,
+                attempt: 1
+            }
+        );
+        e.flush().await;
+        let h1 = e.factory.handle(1);
+        h1.produce(1);
+        assert_eq!(e.key(), clip_key(&a, 1));
+        // The retry failing too, then a seek: the film fails instead of starting again.
+        h1.set_state(SegmenterState::Failed);
+        e.channel.seek_to(20.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 2);
+        assert_eq!(e.get(a.id).status, ItemStatus::Failed);
+    }
+
+    /// Fix round 1 (2): a start that failed (not yet noticed) is the retry from the target.
+    #[tokio::test]
+    async fn a_seek_onto_a_failed_start_is_the_retry_from_the_target() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.factory.lock().fail_next = 1;
+        e.next();
+        e.flush().await;
+        e.channel.seek_to(40.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 40.0,
+                attempt: 1
+            }
+        );
+    }
+
+    /// Fix round 1 (3): a seek never leaves two processes of the same film: the start still in
+    /// flight is cancelled and the new one waits until it is gone.
+    #[tokio::test]
+    async fn a_seek_during_a_slow_start_never_runs_two_clips_of_the_film() {
+        let mut e = setup();
+        e.factory.lock().manual = true;
+        let a = e.add_item("a");
+        assert_eq!(e.key(), "buffering"); // start #0 in flight
+        e.channel.seek_to(30.0);
+        e.advance(700);
+        e.tick();
+        // Every start that is still held finishes now, before the channel looks at them.
+        e.release_all();
+        e.yield_only().await;
+        assert!(e.live_handles() <= 1, "two clips of the film at once");
+        e.flush().await;
+        e.tick();
+        e.release_all();
+        e.yield_only().await;
+        assert!(e.live_handles() <= 1, "two clips of the film at once");
+        e.flush().await;
+        assert_eq!(e.live_handles(), 1);
+        assert_eq!(e.factory.calls().last().unwrap().start_at_s, 30.0);
+        assert!(!e.control().seek_pending);
+        let live = e
+            .factory
+            .lock()
+            .handles
+            .iter()
+            .find(|h| !h.disposed())
+            .cloned()
+            .unwrap();
+        assert_eq!(live.lock().start_at_s, 30.0);
+        live.produce(1);
+        assert_eq!(e.key(), relaunched_key(&a, 0, 1));
+    }
+
+    /// Fix round 1 (3): a start that finished just before the seek runs is disposed before the
+    /// film starts again.
+    #[tokio::test]
+    async fn a_start_that_lands_as_the_seek_runs_is_disposed_before_the_relaunch() {
+        let mut e = setup();
+        e.factory.lock().manual = true;
+        let a = e.add_item("a");
+        assert_eq!(e.key(), "buffering");
+        e.channel.seek_to(30.0);
+        e.release(0);
+        e.yield_only().await; // handle #0 exists but the channel has not taken it yet
+        assert_eq!(e.live_handles(), 1);
+        e.advance(700);
+        e.tick();
+        assert!(e.factory.handle(0).disposed());
+        assert_eq!(e.starts(), 2);
+        e.release_all();
+        e.flush().await;
+        assert_eq!(e.live_handles(), 1);
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), relaunched_key(&a, 0, 1));
+    }
+
+    /// Controller's ruling: play-now is the owner's explicit "play this now", so it clears the
+    /// manual pause; automatic reasons stay and keep holding the film.
+    #[tokio::test]
+    async fn play_now_clears_the_manual_pause_but_not_the_automatic_ones() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        let c = e.add_item("c");
+        e.air(&a, 2).await;
+        e.channel.pause(PauseReason::Manual);
+        e.channel.play_now(b.id).unwrap();
+        assert!(e.channel.state().pause_reasons.is_empty());
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        assert_eq!(e.starts(), 2, "the skipped paused film is not relaunched");
+
+        e.factory.handle(1).produce(1);
+        e.next();
+        e.channel.pause(PauseReason::Manual);
+        e.channel.pause(PauseReason::NoViewers);
+        e.channel.play_now(c.id).unwrap();
+        assert_eq!(e.channel.state().pause_reasons, [PauseReason::NoViewers]);
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert_eq!(e.starts(), 2);
+        assert_eq!(e.get(c.id).status, ItemStatus::Queued);
+        e.channel.resume(PauseReason::NoViewers);
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), c.id);
     }
 
     #[tokio::test]

@@ -199,6 +199,37 @@ impl<'a> QueueRepo<'a> {
         self.get(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
+    /// Adds the item at the front of the channel's queue, in one transaction (nothing is left
+    /// behind when it fails).
+    pub fn add_first(&self, item: &NewItem) -> rusqlite::Result<QueueItem> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO queue_items (channel_id, position, source_url, title, duration_s, is_live, status,
+               added_by, requester_name, requester_ip, created_at)
+             VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                item.channel_id,
+                item.source_url,
+                item.title,
+                item.duration_s,
+                i64::from(item.is_live),
+                item.status.as_str(),
+                item.added_by.as_str(),
+                item.requester_name,
+                item.requester_ip,
+                now_ms(),
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        let others = QueueRepo::new(&tx).list_by_status(item.channel_id, &[ItemStatus::Queued])?;
+        let ids: Vec<i64> = std::iter::once(id)
+            .chain(others.iter().map(|i| i.id).filter(|&i| i != id))
+            .collect();
+        renumber_in(&tx, &ids)?;
+        tx.commit()?;
+        self.get(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+    }
+
     pub fn get(&self, id: i64) -> rusqlite::Result<Option<QueueItem>> {
         self.conn
             .query_row("SELECT * FROM queue_items WHERE id = ?", [id], to_item)

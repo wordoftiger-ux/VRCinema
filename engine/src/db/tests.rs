@@ -749,3 +749,35 @@ fn typescript_numeric_settings_edge_cases_are_readable() {
     assert_eq!(s.request_limit_count, 2);
     assert_eq!(s.max_active_per_requester, 4);
 }
+
+#[test]
+fn add_first_puts_the_new_item_at_the_head_of_the_queue() {
+    let conn = mem();
+    let q = QueueRepo::new(&conn);
+    q.add(&item("a")).unwrap();
+    q.add(&item("b")).unwrap();
+    let c = q.add_first(&item("c")).unwrap();
+    assert_eq!(c.status, ItemStatus::Queued);
+    assert_eq!(queued_titles(&q), ["c", "a", "b"]);
+    assert_eq!(q.next_queued(MAIN_CHANNEL_ID).unwrap().unwrap().id, c.id);
+}
+
+/// Stage 4 fix round 1 (6): adding and moving to the front is one transaction: when the
+/// renumbering fails, the new entry is not left at the end of the queue.
+#[test]
+fn add_first_leaves_nothing_behind_when_it_fails() {
+    let conn = mem();
+    let q = QueueRepo::new(&conn);
+    q.add(&item("a")).unwrap();
+    conn.execute_batch(
+        "CREATE TEMP TRIGGER no_moves BEFORE UPDATE OF position ON queue_items
+         BEGIN SELECT RAISE(ABORT, 'zablokowane'); END;",
+    )
+    .unwrap();
+    assert!(q.add_first(&item("c")).is_err());
+    let all: i64 = conn
+        .query_row("SELECT COUNT(*) FROM queue_items", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(all, 1);
+    assert_eq!(queued_titles(&q), ["a"]);
+}

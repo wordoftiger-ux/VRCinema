@@ -311,6 +311,9 @@ pub(crate) struct AppCore {
     pause_kick: Arc<Notify>,
     /// The automatic pause's active reasons: a new server's channel loop starts with them.
     pause_active: Arc<Mutex<BTreeSet<PauseReason>>>,
+    /// The owner had paused the channel of the server stopped last: the next one starts paused
+    /// too (the automatic pause never sets or clears this reason).
+    manual_pause: AtomicBool,
     /// The tunnel's public address in effect (kept through a short `Reconnecting`, see
     /// [`crate::live::tunnel_address`]); updated with `tunnel_view`.
     tunnel_address: Mutex<Option<tunnel::KeptAddress>>,
@@ -501,7 +504,13 @@ impl AppCore {
             })
         };
         self.live_settings.apply(config);
+        // `started_paused` (handed to the automatic pause as what the loop started with) keeps
+        // only the automatic reasons; the loop itself also gets the owner's manual pause.
         let started_paused = lock(&self.pause_active).clone();
+        let mut pause_reasons: Vec<PauseReason> = started_paused.iter().copied().collect();
+        if self.manual_pause.load(Ordering::SeqCst) {
+            pause_reasons.push(PauseReason::Manual);
+        }
         let opts = RunOptions {
             fake_resolver: self.options.fake_resolver.clone(),
             update_ytdlp: channel
@@ -516,7 +525,7 @@ impl AppCore {
             live: Some(self.live_settings.clone()),
             slates_connecting: connecting,
             builtin_tunnel: settings.tunnel_enabled,
-            pause_reasons: started_paused.iter().copied().collect(),
+            pause_reasons,
             ..RunOptions::new(self.home.clone())
         };
         let mut join = tokio::spawn(run(config.clone(), opts, async move {
@@ -578,6 +587,18 @@ impl AppCore {
     /// Stops the server and waits until its channel loop, port and data-folder lock are gone
     /// (a server that does not finish in time is aborted).
     async fn stop_server(&self, slot: &mut Option<Running>) {
+        // The owner's manual pause outlives the server (its loop knows it, nothing else does).
+        if let Some(live) = self.live().filter(|l| l.channel) {
+            let manual = live
+                .state
+                .engine
+                .snapshot
+                .borrow()
+                .state
+                .pause_reasons
+                .contains(&PauseReason::Manual);
+            self.manual_pause.store(manual, Ordering::SeqCst);
+        }
         self.set_live(None);
         if let Some(running) = slot.take() {
             let _ = running.stop.send(());
@@ -1053,6 +1074,7 @@ impl AppEngine {
             viewers: Arc::new(ViewerActivity::new()),
             pause_kick: Arc::new(Notify::new()),
             pause_active: Arc::default(),
+            manual_pause: AtomicBool::new(false),
             tunnel_address: Mutex::new(None),
             tunnel_held: AtomicBool::new(false),
             cloudflared_fetching: AtomicBool::new(false),

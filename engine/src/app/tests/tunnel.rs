@@ -1274,6 +1274,75 @@ async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resum
     app.stop().await;
 }
 
+/// Stage 4 fix round 1: the owner's manual pause survives a server restart (the new loop
+/// starts with it), and the automatic pause never resumes it: a segment fetch clears only
+/// `no_viewers`.
+#[tokio::test]
+async fn a_manual_pause_survives_a_server_restart_and_the_automatic_pause_leaves_it() {
+    let Some(app) = start(Setup {
+        tools: true,
+        runs: None,
+        settings: json!({"tunnelEnabled": false, "pauseWhenNoViewers": true}),
+        auto_pause: AutoPauseTimings {
+            no_viewers: Duration::from_secs(2),
+            recheck: Duration::from_secs(10),
+            ..AutoPauseTimings::default()
+        },
+        ..Setup::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let core = Arc::clone(&app.engine().core);
+    core.live()
+        .unwrap()
+        .state
+        .engine
+        .commands
+        .send(crate::engine::Command::Pause(PauseReason::Manual))
+        .await
+        .unwrap();
+    eventually(30, "the manual and no-viewers pause", || async {
+        pause_reasons(&core) == ["no_viewers", "manual"]
+    })
+    .await;
+
+    app.engine().restart().await.unwrap();
+    assert_eq!(app.engine().server_starts(), 2);
+    // The new loop starts with both reasons.
+    assert_eq!(pause_reasons(&core), ["no_viewers", "manual"]);
+
+    let playlist = app
+        .http
+        .get(app.url("/live/main.m3u8"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let segment = playlist
+        .lines()
+        .rfind(|l| l.ends_with(".ts"))
+        .unwrap()
+        .to_string();
+    let res = app
+        .http
+        .get(app.url(&format!("/live/{segment}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "{segment}");
+    eventually(5, "the no-viewers resume", || async {
+        pause_reasons(&core) == ["manual"]
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(pause_reasons(&core), ["manual"]);
+    app.stop().await;
+}
+
 /// No segment fetched for the limit: paused; the pause survives a server restart (the new
 /// channel gets the reason again); the first segment fetch resumes without waiting for the
 /// periodic check (set to 10 s here).
