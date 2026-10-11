@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::pipeline::tsrewrite::ts_ahead;
 use crate::tunnel::{TunnelState, TunnelStats};
 
 /// An address with a fetch this recent counts as watching.
@@ -17,14 +18,15 @@ pub const WATCHING_WINDOW: Duration = Duration::from_secs(30);
 pub const HISTORY_LEN: usize = 60;
 /// `bytes_per_s` is averaged over this many seconds.
 const RATE_WINDOW_S: u64 = 5;
-/// Addresses kept before the old ones are dropped on a record (bounds memory under a flood).
-const MAX_TRACKED_ADDRESSES: usize = 4096;
+/// Most addresses remembered at once (bounds memory under a flood). Beyond it a new address is
+/// still counted in the fetches and bytes but not as a watcher, so `watching` saturates here.
+pub const MAX_TRACKED_ADDRESSES: usize = 4096;
 
 /// What the viewers' `.ts` fetches amount to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewersView {
-    /// Distinct addresses with a fetch in the last 30 s.
+    /// Distinct addresses with a fetch in the last 30 s, at most [`MAX_TRACKED_ADDRESSES`].
     pub watching: usize,
     /// Fetches in the last 60 s.
     pub fetches_per_min: u64,
@@ -46,6 +48,8 @@ struct ViewerInner {
     last_seen: HashMap<IpAddr, Instant>,
     /// One bucket per second that had a fetch, oldest first.
     buckets: VecDeque<Bucket>,
+    /// Second of the latest sweep of `last_seen`.
+    pruned_second: u64,
 }
 
 /// Counts segment fetches per viewer address and per second. Recording takes a short lock; the
@@ -81,6 +85,15 @@ impl ViewerStats {
     }
 
     pub fn record_at(&self, ip: IpAddr, bytes: u64, now: Instant) {
+        self.add(Some(ip), bytes, now);
+    }
+
+    /// A fetch from an address that could not be read: counted, but nobody to remember.
+    pub fn record_unknown(&self, bytes: u64) {
+        self.add(None, bytes, Instant::now());
+    }
+
+    fn add(&self, ip: Option<IpAddr>, bytes: u64, now: Instant) {
         let second = self.second_of(now);
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         match inner.buckets.back_mut() {
@@ -101,11 +114,20 @@ impl ViewerStats {
         {
             inner.buckets.pop_front();
         }
-        inner.last_seen.insert(ip, now);
-        if inner.last_seen.len() > MAX_TRACKED_ADDRESSES {
+        // Old addresses are dropped at most once a second, so a request never pays for a sweep
+        // of the whole table.
+        if inner.pruned_second != second {
+            inner.pruned_second = second;
             inner
                 .last_seen
                 .retain(|_, seen| now.saturating_duration_since(*seen) <= WATCHING_WINDOW);
+        }
+        if let Some(ip) = ip {
+            if let Some(seen) = inner.last_seen.get_mut(&ip) {
+                *seen = now;
+            } else if inner.last_seen.len() < MAX_TRACKED_ADDRESSES {
+                inner.last_seen.insert(ip, now);
+            }
         }
     }
 
@@ -139,16 +161,32 @@ impl ViewerStats {
         }
     }
 
+    /// Addresses currently remembered (tests).
+    pub fn tracked(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_seen
+            .len()
+    }
+
     fn second_of(&self, at: Instant) -> u64 {
         at.saturating_duration_since(self.base).as_secs()
     }
 }
 
+/// How far (90 kHz, 1 s) a segment may start before the previous one ended: audio runs ahead of
+/// video and B-frames reorder, so neighbouring segments overlap a little. A step back deeper
+/// into the previous segment than this is a regression; a smaller one is not noticed.
+const DTS_TOLERANCE: i64 = 90_000;
+
 /// Whether the published timeline ever stepped back (the channel promises it never does).
-/// Fed with the smallest DTS of every published segment, in publishing order.
+/// Fed with the span (first and last DTS) of every published segment, in publishing order.
+/// Timestamps are wrapped modulo 2^33 (about 26.5 h), so they are compared on the wrapped
+/// timeline: a drop in the numbers across the wrap is not a step back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DtsMonitor {
-    last_min: Option<u64>,
+    previous_end: Option<u64>,
     continuous: bool,
 }
 
@@ -161,21 +199,24 @@ impl Default for DtsMonitor {
 impl DtsMonitor {
     pub fn new() -> Self {
         Self {
-            last_min: None,
+            previous_end: None,
             continuous: true,
         }
     }
 
-    /// A segment was published whose smallest DTS is `min_dts` (90 kHz). A value below the
-    /// previous segment's turns the flag off for good.
-    pub fn observe(&mut self, min_dts: Option<u64>) {
-        let Some(min) = min_dts else {
+    /// A segment was published that covers `span` (see `tsrewrite::dts_span`). Starting more
+    /// than [`DTS_TOLERANCE`] before the previous segment's end turns the flag off for good.
+    pub fn observe(&mut self, span: Option<(u64, u64)>) {
+        let Some((start, end)) = span else {
             return;
         };
-        if self.last_min.is_some_and(|last| min < last) {
+        if self
+            .previous_end
+            .is_some_and(|previous| ts_ahead(previous, start) < -DTS_TOLERANCE)
+        {
             self.continuous = false;
         }
-        self.last_min = Some(min);
+        self.previous_end = Some(end);
     }
 
     pub fn is_continuous(&self) -> bool {
@@ -333,6 +374,8 @@ pub struct ProcessUsage {
     pub cpu_time: Duration,
     /// Working set.
     pub rss_bytes: u64,
+    /// When the process started (FILETIME ticks): tells a reused pid from the process sampled.
+    pub started: u64,
 }
 
 /// CPU time and working set of `pid` (Windows; `None` elsewhere or when the process is gone).
@@ -372,6 +415,7 @@ pub fn process_usage(pid: u32) -> Option<ProcessUsage> {
         Some(ProcessUsage {
             cpu_time: Duration::from_nanos(hundred_ns.saturating_mul(100)),
             rss_bytes: counters.WorkingSetSize as u64,
+            started: ticks(created),
         })
     }
 }
@@ -381,26 +425,84 @@ pub fn process_usage(_pid: u32) -> Option<ProcessUsage> {
     None
 }
 
-/// Turns two samples of a process' CPU time into a percentage of the whole machine
-/// (all logical cores = 100 %, like Task Manager's CPU column).
+/// CPU and memory of a process worth showing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampledUsage {
+    pub cpu_percent: Option<f64>,
+    pub rss_bytes: u64,
+}
+/// A pid not sampled for this long may belong to another process by now.
+const SAMPLE_EXPIRY: Duration = Duration::from_secs(10);
+/// A CPU percentage is measured over at least this long (two pollers a few ms apart share one
+/// longer window instead of each measuring a tiny one).
+const MIN_WINDOW: Duration = Duration::from_millis(500);
+
+#[derive(Debug)]
+struct PidSamples {
+    /// Creation time of the process first sampled under this pid.
+    started: u64,
+    /// The sample CPU % is measured from.
+    baseline: (Duration, Instant),
+    latest: (Duration, Instant),
+    seen: Instant,
+}
+
+/// Turns samples of processes' CPU time into a percentage of the whole machine (all logical
+/// cores = 100 %, like Task Manager's CPU column), and tells a reused pid from the process that
+/// was sampled (by its creation time). Baselines are kept per pid.
 #[derive(Debug, Default)]
 pub struct CpuSampler {
-    last: Mutex<Option<(u32, Duration, Instant)>>,
+    pids: Mutex<HashMap<u32, PidSamples>>,
 }
 
 impl CpuSampler {
-    /// CPU % of `pid` since the previous call for the same process; `None` on the first.
-    pub fn percent(&self, pid: u32, cpu_time: Duration, now: Instant, cores: usize) -> Option<f64> {
-        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
-        let previous = last.replace((pid, cpu_time, now));
-        let (old_pid, old_cpu, old_at) = previous?;
-        let wall = now.saturating_duration_since(old_at).as_secs_f64();
-        if old_pid != pid || wall < 0.05 {
+    /// CPU % since the baseline sample of `pid` (`None` on the first sample) and its memory.
+    /// `None` when `pid` now belongs to another process than the one sampled first.
+    pub fn sample(
+        &self,
+        pid: u32,
+        usage: ProcessUsage,
+        now: Instant,
+        cores: usize,
+    ) -> Option<SampledUsage> {
+        let mut pids = self.pids.lock().unwrap_or_else(PoisonError::into_inner);
+        pids.retain(|_, e| now.saturating_duration_since(e.seen) <= SAMPLE_EXPIRY);
+        let entry = match pids.entry(pid) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(PidSamples {
+                    started: usage.started,
+                    baseline: (usage.cpu_time, now),
+                    latest: (usage.cpu_time, now),
+                    seen: now,
+                });
+                return Some(SampledUsage {
+                    cpu_percent: None,
+                    rss_bytes: usage.rss_bytes,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+        };
+        if entry.started != usage.started {
             return None;
         }
-        let used = cpu_time.saturating_sub(old_cpu).as_secs_f64();
-        let percent = used / wall / cores.max(1) as f64 * 100.0;
-        Some((percent * 10.0).round() / 10.0)
+        if now.saturating_duration_since(entry.latest.1) >= MIN_WINDOW {
+            entry.baseline = entry.latest;
+        }
+        entry.latest = (usage.cpu_time, now);
+        entry.seen = now;
+        let wall = now.saturating_duration_since(entry.baseline.1);
+        let cpu_percent = (wall >= MIN_WINDOW).then(|| {
+            let used = usage
+                .cpu_time
+                .saturating_sub(entry.baseline.0)
+                .as_secs_f64();
+            let percent = used / wall.as_secs_f64() / cores.max(1) as f64 * 100.0;
+            (percent * 10.0).round() / 10.0
+        });
+        Some(SampledUsage {
+            cpu_percent,
+            rss_bytes: usage.rss_bytes,
+        })
     }
 }
 
@@ -483,21 +585,74 @@ mod tests {
         assert!(!json.contains("10.0.0.77"));
     }
 
+    const W: u64 = 1 << 33;
+
+    /// Contiguous 4 s segments of 90 kHz ticks starting at `from` (wrapped).
+    fn segments(from: u64, count: u64) -> Vec<Option<(u64, u64)>> {
+        (0..count)
+            .map(|i| {
+                let start = from + i * 360_000;
+                Some((start % W, (start + 350_000) % W))
+            })
+            .collect()
+    }
+
+    fn continuous_after(spans: &[Option<(u64, u64)>]) -> bool {
+        let mut m = DtsMonitor::new();
+        for span in spans {
+            m.observe(*span);
+        }
+        m.is_continuous()
+    }
+
     #[test]
     fn dts_continuity_turns_false_on_a_step_back_and_stays() {
         let mut m = DtsMonitor::new();
         assert!(m.is_continuous());
-        for dts in [900_000, 1_260_000, 1_620_000] {
-            m.observe(Some(dts));
+        for span in segments(900_000, 3) {
+            m.observe(span);
         }
         m.observe(None);
         assert!(m.is_continuous());
-        m.observe(Some(1_000_000));
+        m.observe(Some((200_000, 550_000)));
         assert!(!m.is_continuous());
-        for dts in [2_000_000, 2_360_000] {
-            m.observe(Some(dts));
+        for span in segments(2_000_000, 3) {
+            m.observe(span);
         }
         assert!(!m.is_continuous(), "stays false");
+    }
+
+    #[test]
+    fn dts_continuity_survives_the_wrap_after_26_hours() {
+        // Segments before, across and after 2^33: the wrapped values drop, the timeline does not.
+        assert!(continuous_after(&segments(W - 5 * 360_000, 12)));
+        // One segment whose own span straddles the wrap.
+        assert!(continuous_after(&[
+            Some((W - 460_000, W - 110_000)),
+            Some((W - 100_000, 250_000)),
+            Some((260_000, 610_000)),
+        ]));
+    }
+
+    #[test]
+    fn dts_continuity_notices_a_step_back_across_the_wrap_too() {
+        let mut spans = segments(W - 2 * 360_000, 4);
+        spans.push(Some((W - 400_000, W - 50_000)));
+        assert!(!continuous_after(&spans));
+    }
+
+    #[test]
+    fn a_segment_starting_inside_the_previous_ones_span_is_a_step_back() {
+        // The next segment starts after the previous one began but long before it ended.
+        assert!(!continuous_after(&[
+            Some((1_000_000, 1_350_000)),
+            Some((1_100_000, 1_450_000)),
+        ]));
+        // Small overlaps (audio running ahead of video, B-frames) are not.
+        assert!(continuous_after(&[
+            Some((1_000_000, 1_350_000)),
+            Some((1_300_000, 1_650_000)),
+        ]));
     }
 
     #[test]
@@ -550,14 +705,117 @@ mod tests {
         assert_eq!(process_usage(u32::MAX - 1), None);
     }
 
+    fn usage(cpu_s: u64, started: u64) -> ProcessUsage {
+        ProcessUsage {
+            cpu_time: secs(cpu_s),
+            rss_bytes: 1000,
+            started,
+        }
+    }
+
     #[test]
     fn cpu_percent_needs_two_samples_of_the_same_process() {
         let t0 = Instant::now();
         let sampler = CpuSampler::default();
-        assert_eq!(sampler.percent(7, secs(10), t0, 4), None);
+        let first = sampler.sample(7, usage(10, 1), t0, 4).unwrap();
+        assert_eq!(first.cpu_percent, None);
         // 2 CPU-seconds in 1 s on 4 cores: 50 %.
-        assert_eq!(sampler.percent(7, secs(12), t0 + secs(1), 4), Some(50.0));
-        // Another process: starts over.
-        assert_eq!(sampler.percent(8, secs(1), t0 + secs(2), 4), None);
+        let second = sampler.sample(7, usage(12, 1), t0 + secs(1), 4).unwrap();
+        assert_eq!(second.cpu_percent, Some(50.0));
+        assert_eq!(second.rss_bytes, 1000);
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_the_process_that_was_sampled() {
+        let t0 = Instant::now();
+        let sampler = CpuSampler::default();
+        sampler.sample(7, usage(10, 111), t0, 4).unwrap();
+        // Same pid, another creation time: another process, nothing to show.
+        assert_eq!(sampler.sample(7, usage(500, 222), t0 + secs(1), 4), None);
+        // The one sampled first is still known.
+        assert!(sampler.sample(7, usage(12, 111), t0 + secs(2), 4).is_some());
+        // A pid not sampled for a while may belong to a new process.
+        let later = t0 + secs(2) + SAMPLE_EXPIRY + secs(1);
+        let fresh = sampler.sample(7, usage(1, 333), later, 4).unwrap();
+        assert_eq!(fresh.cpu_percent, None);
+    }
+
+    #[test]
+    fn baselines_are_kept_per_pid() {
+        let t0 = Instant::now();
+        let sampler = CpuSampler::default();
+        sampler.sample(1, usage(10, 1), t0, 1).unwrap();
+        sampler.sample(2, usage(100, 2), t0 + secs(1), 1).unwrap();
+        // Process 1 again: measured from its own earlier sample, not from process 2's.
+        let p1 = sampler.sample(1, usage(12, 1), t0 + secs(2), 1).unwrap();
+        assert_eq!(p1.cpu_percent, Some(100.0));
+        let p2 = sampler.sample(2, usage(101, 2), t0 + secs(3), 1).unwrap();
+        assert_eq!(p2.cpu_percent, Some(50.0));
+    }
+
+    #[test]
+    fn two_pollers_close_together_do_not_measure_a_tiny_window() {
+        let t0 = Instant::now();
+        let sampler = CpuSampler::default();
+        let ms = Duration::from_millis;
+        let busy = |cpu_ms: u64| ProcessUsage {
+            cpu_time: ms(cpu_ms),
+            rss_bytes: 1,
+            started: 1,
+        };
+        sampler.sample(1, busy(0), t0, 1).unwrap();
+        // The process is busy all the time. A polls every second, B 20 ms after A: B must not
+        // measure a 20 ms window (a wild number), nor take A's baseline away.
+        let a = sampler.sample(1, busy(1000), t0 + secs(1), 1).unwrap();
+        assert_eq!(a.cpu_percent, Some(100.0));
+        let b = sampler
+            .sample(1, busy(1020), t0 + secs(1) + ms(20), 1)
+            .unwrap();
+        assert_eq!(b.cpu_percent, Some(100.0));
+        let a2 = sampler.sample(1, busy(2000), t0 + secs(2), 1).unwrap();
+        let percent = a2.cpu_percent.unwrap();
+        assert!((95.0..=105.0).contains(&percent), "{percent}");
+    }
+
+    #[test]
+    fn a_flood_of_distinct_addresses_is_capped() {
+        let t0 = Instant::now();
+        let stats = ViewerStats::starting_at(t0);
+        let started = Instant::now();
+        for n in 0..100_000u32 {
+            let addr = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + n));
+            // 100k fetches spread over 29 s.
+            let at = t0 + Duration::from_millis(u64::from(n) * 29_000 / 100_000);
+            stats.record_at(addr, 10, at);
+            assert!(stats.tracked() <= MAX_TRACKED_ADDRESSES);
+        }
+        assert!(
+            started.elapsed() < secs(10),
+            "recording must not be O(n) per request: {:?}",
+            started.elapsed()
+        );
+        let view = stats.snapshot(t0 + secs(29));
+        // "watching" saturates at the cap; every fetch and byte is still counted.
+        assert_eq!(view.watching, MAX_TRACKED_ADDRESSES);
+        assert_eq!(view.fetches_per_min, 100_000);
+        assert_eq!(view.history.iter().sum::<u64>(), 1_000_000);
+        // Once the old ones expire, new addresses are tracked again.
+        stats.record_at(ip(1), 10, t0 + secs(70));
+        assert_eq!(stats.snapshot(t0 + secs(70)).watching, 1);
+        assert_eq!(stats.tracked(), 1);
+    }
+
+    #[test]
+    fn a_known_address_is_refreshed_even_when_the_table_is_full() {
+        let t0 = Instant::now();
+        let stats = ViewerStats::starting_at(t0);
+        for n in 0..MAX_TRACKED_ADDRESSES as u32 {
+            stats.record_at(IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + n)), 1, t0);
+        }
+        let known = IpAddr::V4(Ipv4Addr::from(0x0a00_0000));
+        stats.record_at(known, 1, t0 + secs(25));
+        // The others are old after 31 s, the refreshed one is not.
+        stats.record_at(ip(200), 1, t0 + secs(31));
+        assert_eq!(stats.snapshot(t0 + secs(31)).watching, 2);
     }
 }

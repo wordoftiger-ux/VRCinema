@@ -162,6 +162,40 @@ pub fn min_dts(buf: &[u8]) -> Option<u64> {
         .min()
 }
 
+/// Timestamps wrap at 2^33 (see `shift`).
+pub const TS_WRAP: u64 = 1 << 33;
+
+/// How far `to` is ahead of `from` on the wrapped timeline, negative when it is behind
+/// (a difference over half the range counts as the shorter way round).
+pub fn ts_ahead(from: u64, to: u64) -> i64 {
+    let forward = (to % TS_WRAP + TS_WRAP - from % TS_WRAP) % TS_WRAP;
+    if forward > TS_WRAP / 2 {
+        forward as i64 - TS_WRAP as i64
+    } else {
+        forward as i64
+    }
+}
+
+/// First and last moment (DTS, or PTS when there is no DTS; 90 kHz) the segment covers. The
+/// values are wrapped like the stream's, so a segment straddling the wrap runs from a large
+/// value to a small one: the span is worked out on the wrapped timeline, not by comparing
+/// numbers. Packets that are cut off or out of sync are skipped.
+pub fn dts_span(buf: &[u8]) -> Option<(u64, u64)> {
+    let mut stamps = buf.chunks_exact(PACKET).enumerate().filter_map(|(i, _)| {
+        let (pts, dts) = read_pes_timestamps(buf, i * PACKET);
+        dts.or(pts)
+    });
+    let first = stamps.next()?;
+    let (mut behind, mut ahead) = (0i64, 0i64);
+    for stamp in stamps {
+        let d = ts_ahead(first, stamp);
+        behind = behind.min(d);
+        ahead = ahead.max(d);
+    }
+    let at = |d: i64| (i128::from(first) + i128::from(d)).rem_euclid(i128::from(TS_WRAP)) as u64;
+    Some((at(behind), at(ahead)))
+}
+
 /// Payload start (relative to the packet), or `None` when the packet has no payload.
 fn payload_offset(pkt: &[u8; PACKET]) -> Option<usize> {
     let afc = (pkt[3] >> 4) & 0x3;
@@ -782,5 +816,36 @@ mod tests {
             ..pid(0)
         });
         assert_eq!(min_dts(&pat), None);
+    }
+
+    fn at(pts: u64) -> Vec<u8> {
+        packet(PacketOpts {
+            pusi: true,
+            pts: Some(pts),
+            ..pid(0x100)
+        })
+    }
+
+    #[test]
+    fn dts_span_is_the_first_and_last_moment_of_the_segment() {
+        let seg = [at(128_000), at(300_000), at(200_000)].concat();
+        assert_eq!(dts_span(&seg), Some((128_000, 300_000)));
+        assert_eq!(dts_span(&[]), None);
+    }
+
+    #[test]
+    fn dts_span_of_a_segment_straddling_the_wrap_runs_from_before_it_to_after_it() {
+        // Timestamps are wrapped modulo 2^33: the smallest value is not the start.
+        let seg = [
+            at(WRAP - 100_000),
+            at(WRAP - 10_000),
+            at(20_000),
+            at(250_000),
+        ]
+        .concat();
+        assert_eq!(dts_span(&seg), Some((WRAP - 100_000, 250_000)));
+        // The same with another order of packets (audio before video).
+        let seg = [at(5_000), at(WRAP - 100_000), at(250_000)].concat();
+        assert_eq!(dts_span(&seg), Some((WRAP - 100_000, 250_000)));
     }
 }

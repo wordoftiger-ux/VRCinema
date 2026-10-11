@@ -552,10 +552,11 @@ async fn stats(State(state): State<AppState>) -> ApiResult {
     let snapshot = state.snapshot();
     let now = std::time::Instant::now();
     let ffmpeg = snapshot.stats.ffmpeg.clone().map(|mut ffmpeg| {
-        if let Some(usage) = process_usage(ffmpeg.pid) {
-            let cores = std::thread::available_parallelism().map_or(1, usize::from);
-            ffmpeg.rss_bytes = Some(usage.rss_bytes);
-            ffmpeg.cpu_percent = state.cpu.percent(ffmpeg.pid, usage.cpu_time, now, cores);
+        let usage = process_usage(ffmpeg.pid);
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        if let Some(sampled) = usage.and_then(|u| state.cpu.sample(ffmpeg.pid, u, now, cores)) {
+            ffmpeg.rss_bytes = Some(sampled.rss_bytes);
+            ffmpeg.cpu_percent = sampled.cpu_percent;
         }
         ffmpeg
     });

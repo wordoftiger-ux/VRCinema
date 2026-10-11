@@ -87,10 +87,14 @@ impl ViewerActivity {
         }
     }
 
-    /// `ip` (the in-app preview too) fetched a segment of `bytes` bytes: the automatic pause
+    /// `ip` (`None`: unreadable) fetched a segment of `bytes` bytes (the in-app preview too): the
+    /// automatic pause
     /// and the stats both see it.
-    pub fn record(&self, ip: IpAddr, bytes: u64) {
-        self.stats.record(ip, bytes);
+    pub fn record(&self, ip: Option<IpAddr>, bytes: u64) {
+        match ip {
+            Some(ip) => self.stats.record(ip, bytes),
+            None => self.stats.record_unknown(bytes),
+        }
         self.segment_fetched();
     }
 
@@ -755,13 +759,24 @@ mod tests {
     fn a_recorded_fetch_counts_for_the_pause_and_for_the_stats() {
         let activity = ViewerActivity::new();
         let ip = IpAddr::from([192, 168, 1, 9]);
-        activity.record(ip, 1000);
-        activity.record(ip, 500);
+        activity.record(Some(ip), 1000);
+        activity.record(Some(ip), 500);
         assert!(activity.last_fetch().is_some());
         let view = activity.stats(std::time::Instant::now());
         assert_eq!(view.watching, 1);
         assert_eq!(view.fetches_per_min, 2);
         assert_eq!(view.history.iter().sum::<u64>(), 1500);
+    }
+
+    #[test]
+    fn a_fetch_without_a_usable_address_still_counts_but_is_not_a_watcher() {
+        let activity = ViewerActivity::new();
+        activity.record(None, 700);
+        assert!(activity.last_fetch().is_some());
+        let view = activity.stats(std::time::Instant::now());
+        assert_eq!(view.watching, 0);
+        assert_eq!(view.fetches_per_min, 1);
+        assert_eq!(view.history.iter().sum::<u64>(), 700);
     }
 
     #[test]

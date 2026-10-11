@@ -44,10 +44,8 @@ async fn segment(State(state): State<AppState>, ctx: Ctx, Path(name): Path<Strin
         return missing();
     };
     // Someone is watching (the app's own preview too): the automatic pause and the stats count this.
-    let viewer = ctx
-        .ip
-        .parse()
-        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    // An address that does not parse (a forged header) is not remembered, the fetch still counts.
+    let viewer = ctx.ip.parse().ok();
     state.viewers.record(viewer, bytes.len() as u64);
     let mut res = bytes.into_response();
     let headers = res.headers_mut();

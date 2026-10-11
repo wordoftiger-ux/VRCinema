@@ -259,7 +259,7 @@ impl Broadcaster {
         let seq = self.seq;
         self.seq += 1;
         let name = format!("{seq}.ts");
-        let min_out = min_dts(&output);
+        let min_out = crate::pipeline::tsrewrite::dts_span(&output);
         std::fs::write(self.o.dir.join(&name), output)?;
         self.dts.observe(min_out);
 

@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::{Notify, watch};
 
 use crate::process;
@@ -275,10 +275,25 @@ const NO_SPEED: u64 = u64::MAX;
 
 /// Follows ffmpeg's `-progress` report (`key=value` lines) and keeps the latest `speed`.
 async fn read_progress<R: AsyncRead + Unpin>(progress: R, speed: Arc<AtomicU64>) {
-    let mut lines = BufReader::new(progress).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Some(value) = parse_speed(&line) {
-            speed.store(value.to_bits(), Ordering::Relaxed);
+    /// A longer line is read in pieces (bounded memory); the report's lines are short.
+    const MAX_LINE: u64 = 4096;
+    let mut reader = BufReader::new(progress);
+    let mut buf = Vec::new();
+    // Read as bytes until the end of the pipe: a line that is not UTF-8 (a metadata title) must
+    // not stop the reading, or ffmpeg would block on a full pipe.
+    loop {
+        buf.clear();
+        match (&mut reader)
+            .take(MAX_LINE)
+            .read_until(b'\n', &mut buf)
+            .await
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if let Some(value) = parse_speed(&String::from_utf8_lossy(&buf)) {
+                    speed.store(value.to_bits(), Ordering::Relaxed);
+                }
+            }
         }
     }
 }
@@ -478,6 +493,24 @@ mod tests {
         seg.kill();
         seg.wait().await;
         assert_eq!(seg.pid(), None, "no pid once the process is gone");
+    }
+
+    #[tokio::test]
+    async fn progress_reading_survives_bytes_that_are_not_utf8() {
+        use tokio::io::AsyncWriteExt;
+        let (mut tx, rx) = tokio::io::duplex(64);
+        let speed = Arc::new(AtomicU64::new(NO_SPEED));
+        let reader = tokio::spawn(read_progress(rx, Arc::clone(&speed)));
+        // A title with a broken encoding, then more reports, more than the pipe holds.
+        tx.write_all(b"stream_0_0_q=\xff\xfe\xfd\nspeed=2x\n")
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            tx.write_all(b"frame=1\nspeed=1.5x\n").await.unwrap();
+        }
+        drop(tx);
+        reader.await.unwrap();
+        assert_eq!(f64::from_bits(speed.load(Ordering::Relaxed)), 1.5);
     }
 
     /// A segmenter that never started a child, to exercise `poll()` on hand-written lists.
