@@ -30,7 +30,9 @@ use crate::db::{
 };
 use crate::engine::{Command, EngineHandle, Snapshot};
 use crate::library::MediaLibrary;
-use crate::pipeline::channel::{ChannelState, ChannelStatus, NowPlaying, PauseReason};
+use crate::pipeline::channel::{
+    ChannelState, ChannelStatus, ControlState, NowPlaying, PauseReason,
+};
 use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream};
 
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;
@@ -88,6 +90,7 @@ fn idle_state() -> ChannelState {
         current: None,
         paused: false,
         pause_reasons: Vec::new(),
+        control: Default::default(),
     }
 }
 
@@ -747,6 +750,7 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
             }),
             paused: false,
             pause_reasons: Vec::new(),
+            control: Default::default(),
         },
     ));
     let body = h.send(get("/api/channels/main/state")).await.json();
@@ -780,6 +784,7 @@ async fn a_paused_channel_reports_status_paused_reasons_and_the_paused_film() {
             }),
             paused: true,
             pause_reasons: vec![PauseReason::Tunnel, PauseReason::NoViewers],
+            control: Default::default(),
         },
     ));
     let body = h.send(get("/api/channels/main/state")).await.json();
@@ -2243,4 +2248,322 @@ async fn headless_mode_has_no_desktop_routes() {
         assert_eq!(res.status, StatusCode::NOT_FOUND, "{method} {url}");
         assert_eq!(res.json()["error"], "Not Found");
     }
+}
+
+// ---------- Channel controls (stage 4) ----------
+
+const CONTROL_ROUTES: [&str; 5] = ["pause", "resume", "seek", "restart", "play-now"];
+
+fn film_control(duration_s: Option<f64>, is_live: bool) -> ControlState {
+    ControlState {
+        item_id: Some(7),
+        is_live,
+        position_s: 12.0,
+        duration_s,
+        can_pause: !is_live,
+        can_seek: !is_live,
+        seek_pending: false,
+        position_approx: false,
+    }
+}
+
+fn control_route(route: &str) -> Call {
+    call("POST", &format!("/api/admin/channels/main/{route}"))
+}
+
+fn playing_with(live_dir: &Path, control: ControlState) -> Arc<Snapshot> {
+    let mut state = idle_state();
+    state.status = ChannelStatus::Playing;
+    state.control = control;
+    snapshot(live_dir, &["5.ts"], state)
+}
+
+impl Harness {
+    fn set_control(&self, control: ControlState) {
+        self.snapshots
+            .send_replace(playing_with(self.live_dir.path(), control));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn control_routes_need_a_session() {
+    let mut h = Harness::new();
+    h.set_control(film_control(Some(100.0), false));
+    for route in CONTROL_ROUTES {
+        let res = h
+            .send(control_route(route).json(json!({"toS": 1, "itemId": 1})))
+            .await;
+        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{route}");
+    }
+    assert!(h.commands().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn control_routes_work_with_a_window_session_and_a_remote_password_session() {
+    let (a, key) = app_harness(remote_on("sekret"));
+    a.h.set_control(film_control(Some(100.0), false));
+    let window = window_cookie(&a, &key).await;
+    let remote = cookie_of(&remote_login(&a, "sekret").await);
+    for cookie in [window, remote] {
+        let res = a.h.send(control_route("pause").cookie(&cookie)).await;
+        assert_eq!(res.status, StatusCode::OK);
+        assert_eq!(res.json()["control"]["canPause"], true);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_and_resume_send_the_manual_reason_and_answer_with_the_control_state() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let mut control = film_control(Some(100.0), false);
+    control.position_approx = true;
+    let mut state = idle_state();
+    state.status = ChannelStatus::Paused;
+    state.paused = true;
+    state.pause_reasons = vec![PauseReason::Tunnel, PauseReason::Manual];
+    state.control = control;
+    h.snapshots
+        .send_replace(snapshot(h.live_dir.path(), &["5.ts"], state));
+    let res = h.send(control_route("pause").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(
+        res.json(),
+        json!({"control": {
+            "itemId": 7, "isLive": false, "positionS": 12, "durationS": 100,
+            "canPause": true, "canSeek": true, "seekPending": false, "positionApprox": true,
+            "paused": true, "pauseReasons": ["tunnel", "manual"]
+        }})
+    );
+    assert_eq!(h.commands(), [Command::Pause(PauseReason::Manual)]);
+    let res = h.send(control_route("resume").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(h.commands(), [Command::Resume(PauseReason::Manual)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_answer_waits_until_the_loop_has_applied_the_command() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(Some(100.0), false));
+    let mut commands = std::mem::replace(&mut h.commands, mpsc::channel(1).1);
+    let placeholder = playing_with(h.live_dir.path(), ControlState::default());
+    let snapshots = std::mem::replace(&mut h.snapshots, watch::channel(placeholder).0);
+    let live_dir = h.live_dir.path().to_path_buf();
+    let engine = tokio::spawn(async move {
+        let command = commands.recv().await.unwrap();
+        // A tick that had drained the commands just before this one, then the one applying it.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        snapshots.send_replace(playing_with(&live_dir, film_control(Some(100.0), false)));
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let mut applied = film_control(Some(100.0), false);
+        applied.seek_pending = true;
+        applied.position_s = 40.0;
+        snapshots.send_replace(playing_with(&live_dir, applied));
+        (command, snapshots)
+    });
+    let res = h
+        .send(
+            control_route("seek")
+                .cookie(&cookie)
+                .json(json!({"toS": 40})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    let control = &res.json()["control"];
+    assert_eq!(control["seekPending"], true);
+    assert_eq!(control["positionS"], 40);
+    assert_eq!(engine.await.unwrap().0, Command::Seek { to_s: 40.0 });
+}
+
+#[tokio::test(start_paused = true)]
+async fn seek_takes_to_s_or_by_s_and_restart_is_its_own_command() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(Some(100.0), false));
+    for (body, command) in [
+        (json!({"toS": 30}), Command::Seek { to_s: 30.0 }),
+        (json!({"toS": 12.5}), Command::Seek { to_s: 12.5 }),
+        (json!({"byS": -10}), Command::SeekBy { delta_s: -10.0 }),
+        (json!({"byS": 60}), Command::SeekBy { delta_s: 60.0 }),
+    ] {
+        let res = h
+            .send(control_route("seek").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::OK, "{body}");
+        assert_eq!(h.commands(), [command]);
+    }
+    let res = h.send(control_route("restart").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(h.commands(), [Command::Restart]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn seek_refuses_bad_bodies_with_bad_request() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(Some(100.0), false));
+    for body in [
+        json!({}),
+        json!({"toS": 1, "byS": 2}),
+        json!({"toS": "10"}),
+        json!({"byS": null}),
+        json!({"to": 3}),
+        json!([1]),
+        json!(5),
+    ] {
+        let res = h
+            .send(control_route("seek").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(res.json()["code"], "bad_request", "{body}");
+        assert!(!res.error().is_empty());
+    }
+    let res = h.send(control_route("seek").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(res.json()["code"], "bad_request");
+    assert!(h.commands().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_a_film_pause_and_seek_are_a_conflict_but_resume_works() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    for (route, body) in [
+        ("pause", json!(null)),
+        ("seek", json!({"byS": 10})),
+        ("restart", json!(null)),
+    ] {
+        let res = h
+            .send(control_route(route).cookie(&cookie).json(body))
+            .await;
+        assert_eq!(res.status, StatusCode::CONFLICT, "{route}");
+        assert_eq!(res.json()["code"], "nothing_playing", "{route}");
+        assert!(!res.error().is_empty());
+    }
+    assert!(h.commands().is_empty());
+    let res = h.send(control_route("resume").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.json()["control"]["itemId"], Value::Null);
+    assert_eq!(h.commands(), [Command::Resume(PauseReason::Manual)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_live_stream_is_a_conflict_for_pause_and_seek_but_skip_works() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(None, true));
+    for (route, body) in [
+        ("pause", json!(null)),
+        ("seek", json!({"byS": 10})),
+        ("restart", json!(null)),
+    ] {
+        let res = h
+            .send(control_route(route).cookie(&cookie).json(body))
+            .await;
+        assert_eq!(res.status, StatusCode::CONFLICT, "{route}");
+        assert_eq!(res.json()["code"], "live_item", "{route}");
+    }
+    assert!(h.commands().is_empty());
+    let res = h.send(control_route("skip").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(h.commands(), [Command::Skip]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_film_of_unknown_length_seeks_only_forward_or_back_to_the_start() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(None, false));
+    for body in [json!({"toS": 30}), json!({"byS": -10})] {
+        let res = h
+            .send(control_route("seek").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(res.json()["code"], "bad_request");
+    }
+    assert!(h.commands().is_empty());
+    let res = h
+        .send(
+            control_route("seek")
+                .cookie(&cookie)
+                .json(json!({"byS": 10})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    let res = h.send(control_route("restart").cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(
+        h.commands(),
+        [Command::SeekBy { delta_s: 10.0 }, Command::Restart]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn play_now_takes_a_queued_or_finished_item() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let queued = h.add("Q", ItemStatus::Queued);
+    let played = h.add("P", ItemStatus::Played);
+    let failed = h.add("F", ItemStatus::Failed);
+    for item in [&queued, &played, &failed] {
+        let res = h
+            .send(
+                control_route("play-now")
+                    .cookie(&cookie)
+                    .json(json!({"itemId": item.id})),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::OK, "{}", item.title);
+        assert!(res.json()["control"].is_object());
+        assert_eq!(h.commands(), [Command::PlayNow { item_id: item.id }]);
+    }
+    for status in [
+        ItemStatus::PendingApproval,
+        ItemStatus::Removed,
+        ItemStatus::Rejected,
+        ItemStatus::Playing,
+    ] {
+        let item = h.add("X", status);
+        let res = h
+            .send(
+                control_route("play-now")
+                    .cookie(&cookie)
+                    .json(json!({"itemId": item.id})),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{status:?}");
+        assert_eq!(res.json()["code"], "bad_request");
+    }
+    let res = h
+        .send(
+            control_route("play-now")
+                .cookie(&cookie)
+                .json(json!({"itemId": 9_999})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    for body in [json!({"itemId": "1"}), json!({"itemId": 1.5}), json!({})] {
+        let res = h
+            .send(control_route("play-now").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(res.json()["code"], "bad_request");
+    }
+    assert!(h.commands().is_empty());
+}
+
+#[tokio::test]
+async fn the_panel_shows_the_control_state_and_the_public_state_does_not() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    h.set_control(film_control(Some(100.0), false));
+    let body = h
+        .send(get("/api/admin/channels/main").cookie(&cookie))
+        .await
+        .json();
+    assert_eq!(body["control"]["itemId"], 7);
+    assert_eq!(body["control"]["canSeek"], true);
+    assert_eq!(body["control"]["durationS"], 100);
+    let public = h.send(get("/api/channels/main/state")).await.json();
+    assert!(public.get("control").is_none());
 }

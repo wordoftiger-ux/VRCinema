@@ -108,6 +108,8 @@ function stripTiming(v, topLevelChannel) {
       if (topLevelChannel && (k === 'status' || k === 'current')) continue;
       // Etap 3: pola dodane przez pauzę (wartości sprawdzane osobno po stronie Rust w call()).
       if (topLevelChannel && (k === 'paused' || k === 'pauseReasons')) continue;
+      // Etap 4: stan sterowania w panelu (serwer TS go nie ma).
+      if (topLevelChannel && k === 'control') continue;
       out[k] = stripTiming(val, false);
     }
     return out;

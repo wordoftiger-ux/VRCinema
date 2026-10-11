@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use vrcinema::config::{VideoEncoder, load_config};
-use vrcinema::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+use vrcinema::db::{
+    AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, SettingsPatch, SettingsRepo,
+    open_database,
+};
 use vrcinema::pipeline::broadcaster::{
     Broadcaster, BroadcasterOptions, PublishedSegment, SegmentSource, SourceSegment,
 };
@@ -562,4 +565,347 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+// ---------- Seek (stage 4) ----------
+
+/// GOP of the counter film: a keyframe every 2 s (50 frames at 25 fps).
+const COUNTER_GOP_S: i64 = 2;
+
+/// A film whose picture is its own counter: the brightness of every frame is
+/// `16 + 3 × whole second` (luma), with a tone. Keyframes every [`COUNTER_GOP_S`].
+fn make_counter_clip(ffmpeg: &Path, file: &Path, seconds: u32) {
+    let out = Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!(
+            "color=c=black:s=320x240:r=25:d={seconds},format=yuv420p,\
+             geq=lum='16+3*floor(T)':cb=128:cr=128"
+        ))
+        .args(["-f", "lavfi", "-i"])
+        .arg(format!("sine=frequency=440:duration={seconds}"))
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .args(["-g", "50", "-c:a", "aac"])
+        .arg(file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The counter shown in the first frame of a segment: the mean of its luma plane as coded
+/// (raw yuv420p, no range conversion; the Y plane is the first two thirds).
+fn counter_in(ffmpeg: &Path, segment: &Path) -> i64 {
+    let out = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(segment)
+        .args([
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && !out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let luma = &out.stdout[..out.stdout.len() * 2 / 3];
+    let mean = luma.iter().map(|&b| f64::from(b)).sum::<f64>() / luma.len() as f64;
+    ((mean - 16.0) / 3.0).round() as i64
+}
+
+/// Records what the broadcaster published: (sequence number, source key).
+struct PublishTap<'a> {
+    inner: &'a mut Channel,
+    published: &'a mut Vec<(u64, String)>,
+}
+
+impl SegmentSource for PublishTap<'_> {
+    fn next(&mut self) -> anyhow::Result<SourceSegment> {
+        self.inner.next()
+    }
+
+    fn on_published(&mut self, seg: &PublishedSegment) {
+        self.published.push((seg.seq, seg.source_key.clone()));
+        self.inner.on_published(seg);
+    }
+}
+
+/// The clip directory started last (`{item}-{attempt}-{n}`, highest `n`) has a finished
+/// segment in its list.
+fn newest_clip_has_a_segment(clips_dir: &Path) -> bool {
+    let newest = std::fs::read_dir(clips_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e
+                .file_name()
+                .to_string_lossy()
+                .rsplit('-')
+                .next()?
+                .parse::<u64>()
+                .ok()?;
+            Some((n, e.path()))
+        })
+        .max_by_key(|(n, _)| *n);
+    newest.is_some_and(|(_, dir)| {
+        std::fs::read_to_string(dir.join("list.csv")).is_ok_and(|list| list.contains('\n'))
+    })
+}
+
+/// Review Focus 1 with real ffmpeg: a seek to 30 s of a 60 s film. The first segment after it
+/// shows 30 s (±1 s converted; copied: the keyframe at or before 30 s), the DTS of the whole
+/// stream never go back, and the seek adds exactly one discontinuity.
+async fn seek_lands_on_its_target(force_transcode: bool) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let env: HashMap<String, String> = HashMap::from([(
+        "ADMIN_PASSWORD".to_string(),
+        "haslo-testowe-123".to_string(),
+    )]);
+    let cfg = load_config(&env, &root, cfg!(windows)).unwrap();
+    if !cfg.ffmpeg_path.exists() || !cfg.ffprobe_path.exists() {
+        eprintln!("pomijam: brak bin/ffmpeg lub bin/ffprobe");
+        return;
+    }
+    let work = tempfile::tempdir().unwrap();
+    let work_dir = work.path();
+    let source = work_dir.join("licznik.mp4");
+    make_counter_clip(&cfg.ffmpeg_path, &source, 60);
+
+    let db = Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap()));
+    {
+        let conn = db.lock().unwrap();
+        SettingsRepo::new(&conn)
+            .update(
+                MAIN_CHANNEL_ID,
+                &SettingsPatch {
+                    force_transcode: Some(force_transcode),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        QueueRepo::new(&conn)
+            .add(&NewItem {
+                channel_id: MAIN_CHANNEL_ID,
+                source_url: source.to_string_lossy().into_owned(),
+                title: "licznik.mp4".to_string(),
+                duration_s: Some(60.0),
+                is_live: false,
+                status: ItemStatus::Queued,
+                added_by: AddedBy::Admin,
+                requester_name: None,
+                requester_ip: None,
+            })
+            .unwrap();
+    }
+    let slates = generate_slates(&SlateOptions {
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        font_file: cfg.font_file.clone(),
+        dir: work_dir.join("slates"),
+        request_url: String::new(),
+        connecting: false,
+        segment_seconds: 4,
+        generation: 0,
+    })
+    .await
+    .unwrap();
+    let clips_dir = work_dir.join("clips");
+    let factory = create_clip_factory(ClipFactoryDeps {
+        resolver: Arc::new(PathResolver),
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        ffprobe_path: cfg.ffprobe_path.clone(),
+        encoder: vrcinema::live::LiveValue::new(VideoEncoder::Libx264),
+        segment_seconds: 4,
+        clips_dir: clips_dir.clone(),
+        db: Arc::clone(&db),
+        channel_id: MAIN_CHANNEL_ID,
+        log: None,
+    });
+    let mut channel = Channel::new(ChannelOptions::new(
+        MAIN_CHANNEL_ID,
+        Arc::clone(&db),
+        Arc::new(factory),
+        slates,
+    ));
+    channel.start().unwrap();
+    let clock = Arc::new(AtomicU64::new(0));
+    let live_dir = work_dir.join("live");
+    let clock_for_broadcaster = Arc::clone(&clock);
+    let mut broadcaster = Broadcaster::new(
+        BroadcasterOptions {
+            dir: live_dir.clone(),
+            // The whole run stays in the playlist.
+            window_size: 500,
+            segment_seconds: 4.0,
+            path_prefix: String::new(),
+            discontinuity_tags: Box::new(|| true),
+            retain_s: Some(100_000),
+            log: None,
+        },
+        Box::new(move || clock_for_broadcaster.load(Ordering::SeqCst)),
+    );
+    let mut published: Vec<(u64, String)> = Vec::new();
+    broadcaster.start_initial(&mut PublishTap {
+        inner: &mut channel,
+        published: &mut published,
+    });
+    let clip_segments = |published: &[(u64, String)], relaunched: bool| {
+        published
+            .iter()
+            .filter(|(_, k)| k.starts_with("clip-") && k.ends_with("-r1") == relaunched)
+            .count()
+    };
+
+    // Two segments of the film from its start, then the seek.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while clip_segments(&published, false) < 2 {
+        assert!(Instant::now() < deadline, "film nie wystartował");
+        clock.fetch_add(1000, Ordering::SeqCst);
+        channel.on_tick();
+        broadcaster.tick(&mut PublishTap {
+            inner: &mut channel,
+            published: &mut published,
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let last_before = published
+        .iter()
+        .rev()
+        .find(|(_, k)| k.starts_with("clip-"))
+        .unwrap()
+        .0;
+    channel.seek_to(30.0);
+    let control = channel.state().control;
+    assert!(control.seek_pending);
+    assert_eq!(control.position_s, 30.0);
+    // The broadcaster holds still while the seek waits for its quiet and the new clip cuts its
+    // first segment: no buffering slate between the two clips.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while channel.state().control.seek_pending {
+        assert!(Instant::now() < deadline, "skok nie ruszył");
+        channel.on_tick();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !newest_clip_has_a_segment(&clips_dir) {
+        assert!(Instant::now() < deadline, "klip po skoku nie dał fragmentu");
+        channel.poll_launches();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while clip_segments(&published, true) < 3 {
+        assert!(Instant::now() < deadline, "po skoku za mało fragmentów");
+        clock.fetch_add(1000, Ordering::SeqCst);
+        channel.on_tick();
+        broadcaster.tick(&mut PublishTap {
+            inner: &mut channel,
+            published: &mut published,
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let approx = channel.state().control.position_approx;
+    let playlist = broadcaster.playlist();
+    let all = broadcaster.known_segments();
+    channel.stop();
+
+    assert_eq!(approx, !force_transcode, "positionApprox");
+    let (first_after, key) = published
+        .iter()
+        .find(|(_, k)| k.starts_with("clip-") && k.ends_with("-r1"))
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        first_after,
+        last_before + 1,
+        "między klipami wyemitowano coś jeszcze: {published:?}"
+    );
+    let counter = counter_in(
+        &cfg.ffmpeg_path,
+        &live_dir.join(format!("{first_after}.ts")),
+    );
+    if force_transcode {
+        assert!(
+            (counter - 30).abs() <= 1,
+            "konwersja: licznik {counter} ({key})"
+        );
+    } else {
+        assert!(
+            (30 - COUNTER_GOP_S..=30).contains(&counter),
+            "kopiowanie: licznik {counter} ({key})"
+        );
+    }
+    let before = counter_in(
+        &cfg.ffmpeg_path,
+        &live_dir.join(format!("{last_before}.ts")),
+    );
+    assert!(before < 12, "przed skokiem licznik {before}");
+
+    // Exactly one discontinuity from the seek: before the first segment of the new clip.
+    let mut discontinuity = false;
+    let mut after_seek = Vec::new();
+    for line in playlist.lines() {
+        if line == "#EXT-X-DISCONTINUITY" {
+            discontinuity = true;
+        } else if let Some(seq) = line.strip_suffix(".ts").and_then(|s| s.parse::<u64>().ok()) {
+            if seq > last_before {
+                after_seek.push((seq, discontinuity));
+            }
+            discontinuity = false;
+        }
+    }
+    assert!(after_seek.len() >= 3, "{playlist}");
+    assert_eq!(
+        after_seek.iter().filter(|(_, d)| *d).collect::<Vec<_>>(),
+        [&(first_after, true)],
+        "{playlist}"
+    );
+
+    let joined = work_dir.join("joined.ts");
+    let mut bytes = Vec::new();
+    for name in &all {
+        bytes.extend(std::fs::read(live_dir.join(name)).unwrap());
+    }
+    std::fs::write(&joined, bytes).unwrap();
+    assert_no_dts_backwards(&cfg.ffprobe_path, &joined);
+
+    let cleanup_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let leftover = std::fs::read_dir(&clips_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        if leftover == 0 || Instant::now() > cleanup_deadline {
+            assert_eq!(leftover, 0, "katalogi klipów nie zostały usunięte");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seek_of_a_copied_film_lands_on_the_keyframe_at_or_before_the_target() {
+    seek_lands_on_its_target(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seek_of_a_converted_film_lands_on_the_target() {
+    seek_lands_on_its_target(true).await;
 }

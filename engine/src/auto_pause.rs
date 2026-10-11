@@ -217,6 +217,8 @@ impl AutoPause {
                     "Automatyczna pauza: nikt nie ogląda od {} s — filmy czekają na widza.",
                     self.timings.no_viewers.as_secs()
                 ),
+                // Never wanted by the automatic pause (it is the owner's own reason).
+                PauseReason::Manual => "Pauza ręczna.".to_string(),
             };
             (self.log)(&message);
         }
@@ -224,6 +226,7 @@ impl AutoPause {
             (self.log)(match reason {
                 PauseReason::Tunnel => "Koniec pauzy z powodu tunelu.",
                 PauseReason::NoViewers => "Koniec pauzy z powodu braku widzów.",
+                PauseReason::Manual => "Koniec pauzy ręcznej.",
             });
         }
     }

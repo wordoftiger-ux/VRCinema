@@ -86,6 +86,7 @@ struct RealClipHandle {
     seg: Arc<ClipSegmenter>,
     out_dir: PathBuf,
     duration_s: Option<f64>,
+    copies_video: bool,
     disposed: bool,
 }
 
@@ -100,6 +101,10 @@ impl ClipHandle for RealClipHandle {
 
     fn duration_s(&self) -> Option<f64> {
         self.duration_s
+    }
+
+    fn copies_video(&self) -> bool {
+        self.copies_video
     }
 
     fn poll(&mut self) -> Vec<SegmentInfo> {
@@ -199,6 +204,7 @@ async fn start_clip(
         seg: Arc::new(seg),
         out_dir,
         duration_s: info.duration_s.or(stream.duration_s),
+        copies_video: mode == VideoMode::Copy,
         disposed: false,
     }))
 }

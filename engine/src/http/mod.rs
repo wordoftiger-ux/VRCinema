@@ -230,12 +230,16 @@ impl AppState {
         Arc::clone(&self.engine.snapshot.borrow())
     }
 
-    /// Fire-and-forget: HTTP never waits for the engine loop.
-    fn send_command(&self, command: Command) {
-        if let Err(e) = self.engine.commands.try_send(command.clone()) {
-            (self.log)(&format!(
-                "Nie można przekazać polecenia {command:?} do kanału: {e}"
-            ));
+    /// Fire-and-forget: never blocks on the engine loop. Returns whether the loop got it.
+    fn send_command(&self, command: Command) -> bool {
+        match self.engine.commands.try_send(command.clone()) {
+            Ok(()) => true,
+            Err(e) => {
+                (self.log)(&format!(
+                    "Nie można przekazać polecenia {command:?} do kanału: {e}"
+                ));
+                false
+            }
         }
     }
 
@@ -329,6 +333,8 @@ struct InternalError(String);
 
 pub(crate) enum ApiError {
     Http(StatusCode, String),
+    /// With a machine-readable `code` next to the message.
+    Coded(StatusCode, &'static str, String),
     Internal(String),
 }
 
@@ -339,6 +345,15 @@ impl ApiError {
 
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
+    }
+
+    /// JSON `{"error": message, "code": code}`.
+    pub(crate) fn with_code(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Coded(status, code, message.into())
     }
 }
 
@@ -352,6 +367,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             Self::Http(status, message) => json_response(status, &json!({ "error": message })),
+            Self::Coded(status, code, message) => {
+                json_response(status, &json!({ "error": message, "code": code }))
+            }
             Self::Internal(message) => {
                 let mut res = json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -619,6 +637,24 @@ pub(crate) fn state_map(state: &ChannelState) -> Map<String, Value> {
         ),
     );
     map
+}
+
+/// The owner's controls for the panel: the film they act on (`itemId`, `isLive`), the server
+/// position (or the target of a waiting seek) and what is possible now, plus the pause state.
+pub(crate) fn control_json(state: &ChannelState) -> Value {
+    let c = &state.control;
+    json!({
+        "itemId": c.item_id,
+        "isLive": c.is_live,
+        "positionS": num_json(c.position_s),
+        "durationS": opt_num_json(c.duration_s),
+        "canPause": c.can_pause,
+        "canSeek": c.can_seek,
+        "seekPending": c.seek_pending,
+        "positionApprox": c.position_approx,
+        "paused": state.paused,
+        "pauseReasons": state.pause_reasons.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+    })
 }
 
 // ---------- Router ----------

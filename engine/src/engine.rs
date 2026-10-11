@@ -34,6 +34,21 @@ pub enum Command {
     /// Airs another slate set from now on (a new public address is drawn on it). The loop
     /// keeps it, so a channel rebuilt after a crash starts with the newest set.
     ReplaceSlates(Slates),
+    /// Seeks the current film to `to_s` seconds (a burst of seeks is joined, see
+    /// [`Channel::seek_by`]).
+    Seek {
+        to_s: f64,
+    },
+    /// Seeks `delta_s` seconds from the server position (or from the target still waiting).
+    SeekBy {
+        delta_s: f64,
+    },
+    /// The current film from its start (a seek to 0).
+    Restart,
+    /// Airs this queue or history item now; the current film ends as skipped.
+    PlayNow {
+        item_id: i64,
+    },
 }
 
 /// What HTTP reads: the state right after the latest tick.
@@ -63,6 +78,11 @@ pub trait ChannelControl: SegmentSource + Send {
     fn pause(&mut self, reason: PauseReason);
     fn resume(&mut self, reason: PauseReason);
     fn replace_slates(&mut self, slates: Slates);
+    fn seek_to(&mut self, to_s: f64);
+    fn seek_by(&mut self, delta_s: f64);
+    fn play_now(&mut self, item_id: i64) -> anyhow::Result<()>;
+    /// Called every tick before the broadcaster (runs a seek once its quiet has passed).
+    fn on_tick(&mut self);
     fn state(&self) -> ChannelState;
     fn prefetched_item_id(&self) -> Option<i64>;
     /// The queue item being aired right now (not the one viewers see, which lags behind).
@@ -92,6 +112,18 @@ impl ChannelControl for Channel {
     }
     fn replace_slates(&mut self, slates: Slates) {
         Channel::replace_slates(self, slates)
+    }
+    fn seek_to(&mut self, to_s: f64) {
+        Channel::seek_to(self, to_s)
+    }
+    fn seek_by(&mut self, delta_s: f64) {
+        Channel::seek_by(self, delta_s)
+    }
+    fn play_now(&mut self, item_id: i64) -> anyhow::Result<()> {
+        Channel::play_now(self, item_id)
+    }
+    fn on_tick(&mut self) {
+        Channel::on_tick(self)
     }
     fn state(&self) -> ChannelState {
         Channel::state(self)
@@ -224,6 +256,7 @@ impl Snapshot {
                 current: None,
                 paused: false,
                 pause_reasons: Vec::new(),
+                control: Default::default(),
             },
             prefetched_item_id: None,
         }
@@ -401,7 +434,12 @@ where
                     Command::Resume(reason) => {
                         self.pause_reasons.remove(reason);
                     }
-                    Command::Skip | Command::QueueChanged => {}
+                    Command::Skip
+                    | Command::QueueChanged
+                    | Command::Seek { .. }
+                    | Command::SeekBy { .. }
+                    | Command::Restart
+                    | Command::PlayNow { .. } => {}
                 }
                 match guarded(|| core.apply(command)) {
                     Ok(Ok(())) => {}
@@ -454,10 +492,24 @@ impl<C: ChannelControl> Core<C> {
                 self.channel.replace_slates(slates);
                 Ok(())
             }
+            Command::Seek { to_s } => {
+                self.channel.seek_to(to_s);
+                Ok(())
+            }
+            Command::SeekBy { delta_s } => {
+                self.channel.seek_by(delta_s);
+                Ok(())
+            }
+            Command::Restart => {
+                self.channel.seek_to(0.0);
+                Ok(())
+            }
+            Command::PlayNow { item_id } => self.channel.play_now(item_id),
         }
     }
 
     fn tick(&mut self) {
+        self.channel.on_tick();
         self.broadcaster.tick(&mut self.channel);
     }
 
@@ -549,6 +601,8 @@ mod tests {
         skips: AtomicUsize,
         queue_changes: AtomicUsize,
         nexts: AtomicUsize,
+        /// `on_tick()` calls.
+        ticks: AtomicUsize,
         panic_build_once: AtomicBool,
         fail_start_once: AtomicBool,
         fail_skip: AtomicBool,
@@ -665,12 +719,26 @@ mod tests {
         fn replace_slates(&mut self, slates: Slates) {
             self.probe.event(format!("slates g{}", slates.generation));
         }
+        fn seek_to(&mut self, to_s: f64) {
+            self.probe.event(format!("seek_to {to_s}"));
+        }
+        fn seek_by(&mut self, delta_s: f64) {
+            self.probe.event(format!("seek_by {delta_s}"));
+        }
+        fn play_now(&mut self, item_id: i64) -> anyhow::Result<()> {
+            self.probe.event(format!("play_now {item_id}"));
+            Ok(())
+        }
+        fn on_tick(&mut self) {
+            self.probe.ticks.fetch_add(1, Ordering::SeqCst);
+        }
         fn state(&self) -> ChannelState {
             ChannelState {
                 status: ChannelStatus::Buffering,
                 current: None,
                 paused: false,
                 pause_reasons: Vec::new(),
+                control: Default::default(),
             }
         }
         fn prefetched_item_id(&self) -> Option<i64> {
@@ -855,6 +923,66 @@ mod tests {
         assert_eq!(
             events,
             ["start", "pause tunnel", "pause no_viewers", "resume tunnel"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_commands_reach_the_channel_and_it_is_ticked_every_250_ms() {
+        let env = Env::new();
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        for command in [
+            Command::Pause(PauseReason::Manual),
+            Command::Seek { to_s: 30.0 },
+            Command::SeekBy { delta_s: -10.0 },
+            Command::Restart,
+            Command::PlayNow { item_id: 5 },
+            Command::Resume(PauseReason::Manual),
+        ] {
+            handle.commands.send(command).await.unwrap();
+        }
+        next_snapshot(&mut handle.snapshot).await;
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            [
+                "start",
+                "pause manual",
+                "seek_to 30",
+                "seek_by -10",
+                "seek_to 0",
+                "play_now 5",
+                "resume manual"
+            ]
+        );
+        let before = env.count(|p| &p.ticks);
+        assert!(before >= 1);
+        for _ in 0..4 {
+            next_snapshot(&mut handle.snapshot).await;
+        }
+        assert_eq!(env.count(|p| &p.ticks), before + 4);
+    }
+
+    /// A manual pause survives a crashed loop like the automatic reasons.
+    #[tokio::test(start_paused = true)]
+    async fn a_rebuilt_channel_keeps_the_manual_pause() {
+        let env = Env::new();
+        env.probe.panic_at_next.store(5, Ordering::SeqCst);
+        let (mut handle, _task) = env.spawn();
+        wait_until(&mut handle.snapshot, |s| !s.segments.is_empty()).await;
+        handle
+            .commands
+            .send(Command::Pause(PauseReason::Manual))
+            .await
+            .unwrap();
+        next_snapshot(&mut handle.snapshot).await;
+        let probe = Arc::clone(&env.probe);
+        wait_until(&mut handle.snapshot, |s| {
+            probe.builds.load(Ordering::SeqCst) == 2 && !s.segments.is_empty()
+        })
+        .await;
+        assert_eq!(
+            *env.probe.events.lock().unwrap(),
+            ["start", "pause manual", "stop", "pause manual", "start"]
         );
     }
 

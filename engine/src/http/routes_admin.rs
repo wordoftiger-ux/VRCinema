@@ -12,13 +12,15 @@ use axum::routing::{get, patch, post};
 use serde_json::{Value, json};
 
 use super::{
-    ApiError, ApiResult, AppState, Ctx, JsonBody, admin_item, json_ok, json_response, state_map,
+    ApiError, ApiResult, AppState, Ctx, JsonBody, admin_item, control_json, json_ok, json_response,
+    state_map,
 };
 use crate::db::{
     AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo, SettingsRepo, sanitize_settings_patch,
 };
 use crate::engine::Command;
 use crate::library::LibraryError;
+use crate::pipeline::channel::{ControlState, PauseReason};
 use crate::rules::parse_source_url;
 
 const MAX_PLAYLIST_ITEMS: usize = 200;
@@ -34,6 +36,11 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/library", get(library))
         .route("/api/admin/channels/main/local", post(add_local))
         .route("/api/admin/channels/main/skip", post(skip))
+        .route("/api/admin/channels/main/pause", post(pause))
+        .route("/api/admin/channels/main/resume", post(resume))
+        .route("/api/admin/channels/main/seek", post(seek))
+        .route("/api/admin/channels/main/restart", post(restart))
+        .route("/api/admin/channels/main/play-now", post(play_now))
         .route(
             "/api/admin/channels/main/settings",
             get(get_settings).put(put_settings),
@@ -86,6 +93,7 @@ async fn panel(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
     body.insert("pending".into(), items_json(&pending));
     body.insert("history".into(), items_json(&history));
     body.insert("settings".into(), json!(settings));
+    body.insert("control".into(), control_json(&snapshot.state));
     body.insert(
         "channelUrl".into(),
         json!(format!("{}/live/main.m3u8", ctx.base_url)),
@@ -408,6 +416,114 @@ async fn add_local(State(state): State<AppState>, JsonBody(body): JsonBody) -> A
 async fn skip(State(state): State<AppState>) -> Response {
     state.send_command(Command::Skip);
     ok()
+}
+
+// ---------- Sterowanie kanałem ----------
+
+/// How long a control route waits for the engine loop to apply its command.
+const CONTROL_WAIT: Duration = Duration::from_secs(1);
+
+fn control_bad_request(message: &str) -> ApiError {
+    ApiError::with_code(StatusCode::BAD_REQUEST, "bad_request", message)
+}
+
+/// The film the controls act on, when it can be paused and seeked; otherwise 409.
+fn controllable_film(state: &AppState) -> ApiResult<ControlState> {
+    let control = state.snapshot().state.control.clone();
+    if control.item_id.is_none() {
+        return Err(ApiError::with_code(
+            StatusCode::CONFLICT,
+            "nothing_playing",
+            "Teraz nic nie leci.",
+        ));
+    }
+    if control.is_live {
+        return Err(ApiError::with_code(
+            StatusCode::CONFLICT,
+            "live_item",
+            "Transmisji na żywo nie można wstrzymać ani przewinąć.",
+        ));
+    }
+    Ok(control)
+}
+
+/// Sends `command` and answers with the control state once the loop has applied it: it drains
+/// commands, ticks and then publishes, so the second snapshot after sending has it. After
+/// [`CONTROL_WAIT`] the latest state is returned anyway.
+async fn apply_control(state: &AppState, command: Command) -> Response {
+    let mut snapshots = state.engine.snapshot.clone();
+    snapshots.borrow_and_update();
+    if state.send_command(command) {
+        let _ = tokio::time::timeout(CONTROL_WAIT, async {
+            for _ in 0..2 {
+                if snapshots.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+    json_ok(&json!({ "control": control_json(&state.snapshot().state) }))
+}
+
+async fn pause(State(state): State<AppState>) -> ApiResult {
+    controllable_film(&state)?;
+    Ok(apply_control(&state, Command::Pause(PauseReason::Manual)).await)
+}
+
+/// Clears only the manual pause; other active reasons stay (and are shown).
+async fn resume(State(state): State<AppState>) -> Response {
+    apply_control(&state, Command::Resume(PauseReason::Manual)).await
+}
+
+/// `{"toS": seconds}` or `{"byS": seconds}` (exactly one, finite numbers).
+async fn seek(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let number = |key: &str| {
+        body.get(key).map(|v| {
+            v.as_f64()
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| control_bad_request("Podaj liczbę sekund."))
+        })
+    };
+    let command = match (number("toS"), number("byS")) {
+        (Some(to), None) => Command::Seek { to_s: to? },
+        (None, Some(by)) => Command::SeekBy { delta_s: by? },
+        _ => return Err(control_bad_request("Podaj toS albo byS (sekundy).")),
+    };
+    let control = controllable_film(&state)?;
+    let forward = matches!(command, Command::SeekBy { delta_s } if delta_s >= 0.0);
+    if control.duration_s.is_none() && !forward {
+        return Err(control_bad_request(
+            "Długość tego filmu nie jest znana: można go tylko przewinąć do przodu.",
+        ));
+    }
+    Ok(apply_control(&state, command).await)
+}
+
+async fn restart(State(state): State<AppState>) -> ApiResult {
+    controllable_film(&state)?;
+    Ok(apply_control(&state, Command::Restart).await)
+}
+
+/// `{"itemId": id}` of a queued film or one from the history (played or failed).
+async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let id = body
+        .get("itemId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| control_bad_request("Podaj itemId."))?;
+    let item = state
+        .with_db(|c| QueueRepo::new(c).get(id))?
+        .filter(|i| i.channel_id == state.channel_id)
+        .ok_or_else(no_such_item)?;
+    if !matches!(
+        item.status,
+        ItemStatus::Queued | ItemStatus::Played | ItemStatus::Failed
+    ) {
+        return Err(control_bad_request(
+            "Odtworzyć teraz można tylko film z kolejki albo z historii.",
+        ));
+    }
+    Ok(apply_control(&state, Command::PlayNow { item_id: item.id }).await)
 }
 
 async fn get_settings(State(state): State<AppState>) -> ApiResult {

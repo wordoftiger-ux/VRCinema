@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
-use crate::db::{ItemStatus, QueueItem, QueueRepo};
+use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{SlateKind, Slates};
@@ -32,6 +32,10 @@ pub trait ClipHandle: Send {
     /// Source duration from ffprobe (may fill in a duration missing from the queue).
     fn duration_s(&self) -> Option<f64>;
     fn poll(&mut self) -> Vec<SegmentInfo>;
+    /// The video is copied, not converted: a start midway lands on the keyframe before it.
+    fn copies_video(&self) -> bool {
+        false
+    }
     fn kill(&mut self);
     /// Kills the process and removes the clip files.
     fn dispose(&mut self);
@@ -71,13 +75,14 @@ impl ChannelStatus {
 }
 
 /// Why the channel is paused. The channel airs films again once no reason is active.
-/// Stage 4 adds `Manual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PauseReason {
     /// The tunnel is being set up or restarted.
     Tunnel,
     /// Nobody is watching.
     NoViewers,
+    /// The owner paused the channel.
+    Manual,
 }
 
 impl PauseReason {
@@ -85,6 +90,7 @@ impl PauseReason {
         match self {
             Self::Tunnel => "tunnel",
             Self::NoViewers => "no_viewers",
+            Self::Manual => "manual",
         }
     }
 }
@@ -111,6 +117,26 @@ pub struct ChannelState {
     pub paused: bool,
     /// Active pause reasons, in a stable order.
     pub pause_reasons: Vec<PauseReason>,
+    /// What the owner's controls act on right now.
+    pub control: ControlState,
+}
+
+/// The film the owner's controls act on: the one being aired (or started) or paused right
+/// now. Unlike [`ChannelState::current`] it does not lag behind the viewers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ControlState {
+    pub item_id: Option<i64>,
+    pub is_live: bool,
+    /// Server position in the film (where the channel is cutting it, or resumes it from;
+    /// viewers are a few segments behind). While a seek waits, its target.
+    pub position_s: f64,
+    pub duration_s: Option<f64>,
+    pub can_pause: bool,
+    pub can_seek: bool,
+    /// A seek waits for 700 ms of quiet before the film is started again from its target.
+    pub seek_pending: bool,
+    /// The video is copied: a seek lands on the keyframe before its target.
+    pub position_approx: bool,
 }
 
 pub struct ChannelOptions {
@@ -162,6 +188,10 @@ const DEFAULT_VIEWER_LAG_SEGMENTS: usize = 3;
 const AIRED_KEEP: usize = 20;
 /// Upper bound on state transitions within one `next()` call.
 const NEXT_GUARD: usize = 50;
+/// A seek runs after this much quiet; every new seek command moves the deadline (and target).
+const SEEK_QUIET_MS: u64 = 700;
+/// A seek target this close to the end ends the film (like a skip).
+const SEEK_END_MARGIN_S: f64 = 1.0;
 
 const STALL_ERROR: &str = "Źródło nie dostarczało danych przez 30 s";
 const START_TIMEOUT_ERROR: &str = "Przekroczono czas uruchamiania źródła";
@@ -175,8 +205,9 @@ struct ActiveClip {
     id: u64,
     item: QueueItem,
     attempt: u32,
-    /// How many times a pause relaunched this film; keeps source keys unique per encoder process.
-    resumes: u32,
+    /// How many times a resume or a seek relaunched this film; keeps source keys unique per
+    /// encoder process.
+    relaunches: u32,
     /// Film second the current process started from.
     base_s: f64,
     handle: Option<Box<dyn ClipHandle>>,
@@ -186,6 +217,15 @@ struct ActiveClip {
     /// Seconds aired from the current process.
     emitted_s: f64,
     stalled_since: Option<u64>,
+    /// What an earlier process of this film found out (kept while the new one starts).
+    earlier: Probed,
+}
+
+/// What the clip's analysis found out about a film.
+#[derive(Debug, Clone, Copy, Default)]
+struct Probed {
+    duration_s: Option<f64>,
+    copies_video: Option<bool>,
 }
 
 impl ActiveClip {
@@ -193,25 +233,41 @@ impl ActiveClip {
         self.base_s + self.emitted_s
     }
 
-    /// Unique per encoder process: a retry (attempt) and every resume after a pause change it,
-    /// so the broadcaster marks a discontinuity even when nothing else aired in between.
+    /// Unique per encoder process: a retry (attempt) and every relaunch after a pause or a seek
+    /// change it, so the broadcaster marks a discontinuity even when nothing else aired in
+    /// between.
     fn source_key(&self) -> String {
-        match self.resumes {
+        match self.relaunches {
             0 => format!("clip-{}-{}", self.item.id, self.attempt),
             n => format!("clip-{}-{}-r{n}", self.item.id, self.attempt),
         }
     }
 
-    /// Seconds left until the end of the film; `None` for live streams and unknown durations.
-    fn remaining_s(&self) -> Option<f64> {
+    /// `None` for live streams and unknown durations.
+    fn duration_s(&self) -> Option<f64> {
         if self.item.is_live {
             return None;
         }
-        let duration = self
-            .item
+        self.item
             .duration_s
-            .or_else(|| self.handle.as_ref().and_then(|h| h.duration_s()))?;
-        Some(duration - self.position_s())
+            .or_else(|| self.handle.as_ref().and_then(|h| h.duration_s()))
+            .or(self.earlier.duration_s)
+    }
+
+    fn probed(&self) -> Probed {
+        Probed {
+            duration_s: self.duration_s(),
+            copies_video: self
+                .handle
+                .as_ref()
+                .map(|h| h.copies_video())
+                .or(self.earlier.copies_video),
+        }
+    }
+
+    /// Seconds left until the end of the film; `None` for live streams and unknown durations.
+    fn remaining_s(&self) -> Option<f64> {
+        Some(self.duration_s()? - self.position_s())
     }
 
     /// Accounts one aired segment of this clip.
@@ -259,12 +315,67 @@ struct Launch {
     result: Result<Box<dyn ClipHandle>, String>,
 }
 
-/// A non-live film taken off the air by a pause; resumed from `position_s`.
+/// A non-live film taken off the air (its clip disposed): by a pause until the resume, or by a
+/// seek for the moment of its relaunch. It goes on from `position_s`.
 struct Parked {
     item: QueueItem,
     position_s: f64,
     attempt: u32,
-    resumes: u32,
+    relaunches: u32,
+    probed: Probed,
+}
+
+impl Parked {
+    /// Takes the clip off the air (disposes it) at its current position.
+    fn off_air(mut c: ActiveClip) -> Self {
+        c.dispose();
+        Self {
+            position_s: c.position_s(),
+            attempt: c.attempt,
+            relaunches: c.relaunches,
+            probed: c.probed(),
+            item: c.item,
+        }
+    }
+}
+
+/// A seek waiting for quiet (see [`SEEK_QUIET_MS`]).
+struct PendingSeek {
+    item_id: i64,
+    target_s: f64,
+    due_at: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SeekRequest {
+    To(f64),
+    By(f64),
+}
+
+impl SeekRequest {
+    /// The target from `from_s`, never before the start; `None` when the request is not finite
+    /// or the film's length is unknown and the request is not a forward relative seek (or a
+    /// seek back to the start).
+    fn target(self, from_s: f64, duration_s: Option<f64>) -> Option<f64> {
+        let target = match self {
+            Self::To(to) => to,
+            Self::By(delta) => from_s + delta,
+        };
+        if !target.is_finite() {
+            return None;
+        }
+        let allowed = duration_s.is_some()
+            || match self {
+                Self::To(to) => to <= 0.0,
+                Self::By(delta) => delta >= 0.0,
+            };
+        allowed.then_some(target.max(0.0))
+    }
+}
+
+/// The target ends the film (it is in its last second).
+fn ends_film(target_s: f64, duration_s: Option<f64>) -> bool {
+    duration_s.is_some_and(|d| target_s >= d - SEEK_END_MARGIN_S)
 }
 
 fn slate_slot(kind: SlateKind) -> usize {
@@ -294,6 +405,7 @@ pub struct Channel {
     /// The film a pause took off the air (its clip is disposed; the queue item stays playing).
     parked: Option<Parked>,
     pause_reasons: BTreeSet<PauseReason>,
+    pending_seek: Option<PendingSeek>,
     slate_index: [usize; 3],
     last_slate_kind: Option<SlateKind>,
     previous_clip_segment: Option<PathBuf>,
@@ -315,6 +427,7 @@ impl Channel {
             prefetched: None,
             parked: None,
             pause_reasons: BTreeSet::new(),
+            pending_seek: None,
             slate_index: [0; 3],
             last_slate_kind: None,
             previous_clip_segment: None,
@@ -334,6 +447,7 @@ impl Channel {
 
     pub fn stop(&mut self) {
         self.parked = None;
+        self.pending_seek = None;
         for mut clip in [self.current.take(), self.prefetched.take()]
             .into_iter()
             .flatten()
@@ -419,7 +533,204 @@ impl Channel {
             current,
             paused: self.is_holding_back(),
             pause_reasons: self.pause_reasons.iter().copied().collect(),
+            control: self.control_state(),
         }
+    }
+
+    fn control_state(&self) -> ControlState {
+        if let Some(p) = &self.parked {
+            return ControlState {
+                item_id: Some(p.item.id),
+                is_live: false,
+                position_s: p.position_s,
+                duration_s: p.probed.duration_s,
+                can_pause: true,
+                can_seek: true,
+                seek_pending: false,
+                position_approx: p.probed.copies_video.unwrap_or(false),
+            };
+        }
+        let Some(c) = &self.current else {
+            return ControlState::default();
+        };
+        let live = c.item.is_live;
+        let probed = c.probed();
+        let pending = self.pending_seek_of(c.item.id);
+        let position_s = match pending {
+            Some(target) => probed.duration_s.map_or(target, |d| target.min(d)),
+            None => c.position_s(),
+        };
+        ControlState {
+            item_id: Some(c.item.id),
+            is_live: live,
+            position_s,
+            duration_s: probed.duration_s,
+            can_pause: !live,
+            can_seek: !live,
+            seek_pending: pending.is_some(),
+            position_approx: !live && probed.copies_video.unwrap_or(false),
+        }
+    }
+
+    /// Target of the seek waiting for film `item_id`.
+    fn pending_seek_of(&self, item_id: i64) -> Option<f64> {
+        self.pending_seek
+            .as_ref()
+            .filter(|s| s.item_id == item_id)
+            .map(|s| s.target_s)
+    }
+
+    /// Seeks to `to_s` seconds of the current film (see [`Self::seek_by`]).
+    pub fn seek_to(&mut self, to_s: f64) {
+        self.request_seek(SeekRequest::To(to_s));
+    }
+
+    /// Seeks `delta_s` seconds from the server position, or from the target of a seek still
+    /// waiting. A paused film only gets a new remembered position. Otherwise the seek runs after
+    /// 700 ms of quiet: the clip stops and the film starts again from the target (a new source
+    /// key, so a discontinuity; the buffering slate until its first segment). A target in the
+    /// last second ends the film like a skip. Live streams are not seeked; a film of unknown
+    /// length only forward (or back to the start).
+    pub fn seek_by(&mut self, delta_s: f64) {
+        self.request_seek(SeekRequest::By(delta_s));
+    }
+
+    fn request_seek(&mut self, request: SeekRequest) {
+        if let Some(p) = &self.parked {
+            let Some(target) = request.target(p.position_s, p.probed.duration_s) else {
+                self.log(&format!(
+                    "Pominięto skok {request:?}: niedozwolony dla tego filmu"
+                ));
+                return;
+            };
+            if ends_film(target, p.probed.duration_s) {
+                self.log(&format!(
+                    "Skok na koniec wstrzymanego filmu #{} \"{}\" — film pominięty",
+                    p.item.id, p.item.title
+                ));
+                if let Err(e) = self.skip() {
+                    self.log(&format!("Błąd kanału przy skoku: {e}"));
+                }
+            } else if let Some(p) = self.parked.as_mut() {
+                p.position_s = target;
+            }
+            return;
+        }
+        let Some(c) = self.current.as_ref().filter(|c| !c.item.is_live) else {
+            self.log(&format!(
+                "Pominięto skok {request:?}: nic nie leci albo to transmisja na żywo"
+            ));
+            return;
+        };
+        let from = self
+            .pending_seek_of(c.item.id)
+            .unwrap_or_else(|| c.position_s());
+        let Some(target_s) = request.target(from, c.duration_s()) else {
+            self.log(&format!(
+                "Pominięto skok {request:?}: niedozwolony dla tego filmu"
+            ));
+            return;
+        };
+        self.pending_seek = Some(PendingSeek {
+            item_id: c.item.id,
+            target_s,
+            due_at: (self.now)().saturating_add(SEEK_QUIET_MS),
+        });
+    }
+
+    /// Called by the engine loop every tick: runs a seek whose quiet has passed.
+    pub fn on_tick(&mut self) {
+        if let Err(e) = self.run_due_seek() {
+            self.log(&format!("Błąd kanału przy skoku: {e}"));
+        }
+    }
+
+    fn run_due_seek(&mut self) -> anyhow::Result<()> {
+        if self
+            .pending_seek
+            .as_ref()
+            .is_none_or(|s| (self.now)() < s.due_at)
+        {
+            return Ok(());
+        }
+        let Some(seek) = self.pending_seek.take() else {
+            return Ok(());
+        };
+        let Some(c) = self
+            .current
+            .take_if(|c| c.item.id == seek.item_id && !c.item.is_live)
+        else {
+            return Ok(());
+        };
+        if ends_film(seek.target_s, c.duration_s()) {
+            self.log(&format!(
+                "Skok na koniec filmu #{} \"{}\" — film pominięty",
+                c.item.id, c.item.title
+            ));
+            return self.finish(c, ItemStatus::Played, Some(SKIPPED));
+        }
+        // The prefetched film may now be far from its turn; it is prefetched again near the end.
+        self.drop_prefetched();
+        let mut off = Parked::off_air(c);
+        self.log(&format!(
+            "Skok: film #{} \"{}\" z {:.0} s na {:.0} s",
+            off.item.id, off.item.title, off.position_s, seek.target_s
+        ));
+        off.position_s = seek.target_s;
+        self.current = Some(self.relaunch(off));
+        Ok(())
+    }
+
+    /// Starts a film taken off the air again from its position, under a new source key.
+    fn relaunch(&mut self, p: Parked) -> ActiveClip {
+        let mut clip = self.launch(p.item, p.position_s, p.attempt);
+        clip.relaunches = p.relaunches + 1;
+        clip.earlier = p.probed;
+        clip
+    }
+
+    /// Airs `item_id` next: a queued film moves to the front, a film from the history (played
+    /// or failed) is added again (a new entry with the same link and nick) at the front. The
+    /// current film ends as skipped. Pending approval, removed, rejected or playing films are
+    /// refused.
+    pub fn play_now(&mut self, item_id: i64) -> anyhow::Result<()> {
+        let channel_id = self.o.channel_id;
+        let item = self
+            .queue(|q| q.get(item_id))?
+            .filter(|i| i.channel_id == channel_id)
+            .ok_or_else(|| anyhow::anyhow!("Nie ma pozycji #{item_id}."))?;
+        let chosen = match item.status {
+            ItemStatus::Queued => {
+                self.queue(|q| q.move_item(item.id, 0))?;
+                item.id
+            }
+            ItemStatus::Played | ItemStatus::Failed => {
+                let again = self.queue(|q| {
+                    let again = q.add(&NewItem {
+                        channel_id,
+                        source_url: item.source_url.clone(),
+                        title: item.title.clone(),
+                        duration_s: item.duration_s,
+                        is_live: item.is_live,
+                        status: ItemStatus::Queued,
+                        added_by: item.added_by,
+                        requester_name: item.requester_name.clone(),
+                        // The owner's choice: it does not count towards the viewer's limit.
+                        requester_ip: None,
+                    })?;
+                    q.move_item(again.id, 0)?;
+                    Ok(again)
+                })?;
+                again.id
+            }
+            status => anyhow::bail!(
+                "Pozycji #{item_id} nie można odtworzyć teraz (status {}).",
+                status.as_str()
+            ),
+        };
+        self.log(&format!("Odtwórz teraz: \"{}\" (#{chosen})", item.title));
+        self.skip()?;
+        self.on_queue_changed()
     }
 
     /// Takes the current film off the air and shows the pause slate until every reason is
@@ -436,23 +747,33 @@ impl Channel {
         if self.current.as_ref().is_none_or(|c| c.item.is_live) {
             return;
         }
+        // A seek still waiting decides where the film is parked.
+        let seek = self.pending_seek.take();
         self.settle_before_parking();
-        if let Some(mut c) = self.current.take() {
-            self.log(&format!(
-                "Pauza ({}): film #{} \"{}\" wstrzymany na {:.0} s",
-                reason.as_str(),
-                c.item.id,
-                c.item.title,
-                c.position_s()
-            ));
-            c.dispose();
-            self.parked = Some(Parked {
-                position_s: c.position_s(),
-                attempt: c.attempt,
-                resumes: c.resumes,
-                item: c.item,
-            });
+        let Some(c) = self.current.take() else {
+            return;
+        };
+        let target = seek.filter(|s| s.item_id == c.item.id).map(|s| s.target_s);
+        if let Some(target) = target
+            && ends_film(target, c.duration_s())
+        {
+            if let Err(e) = self.finish(c, ItemStatus::Played, Some(SKIPPED)) {
+                self.log(&format!("Błąd kanału przy pauzie: {e}"));
+            }
+            return;
         }
+        let mut p = Parked::off_air(c);
+        if let Some(target) = target {
+            p.position_s = target;
+        }
+        self.log(&format!(
+            "Pauza ({}): film #{} \"{}\" wstrzymany na {:.0} s",
+            reason.as_str(),
+            p.item.id,
+            p.item.title,
+            p.position_s
+        ));
+        self.parked = Some(p);
     }
 
     /// A clip that already ended or failed must not be parked: a finished film is finished
@@ -502,9 +823,7 @@ impl Channel {
                 "Wznowienie: film #{} \"{}\" od {:.0} s",
                 p.item.id, p.item.title, p.position_s
             ));
-            let mut clip = self.launch(p.item, p.position_s, p.attempt);
-            clip.resumes = p.resumes + 1;
-            self.current = Some(clip);
+            self.current = Some(self.relaunch(p));
         }
     }
 
@@ -770,7 +1089,7 @@ impl Channel {
             id,
             item: item.clone(),
             attempt,
-            resumes: 0,
+            relaunches: 0,
             base_s: start_at_s,
             handle: None,
             start_error: None,
@@ -778,6 +1097,7 @@ impl Channel {
             ready: VecDeque::new(),
             emitted_s: 0.0,
             stalled_since: None,
+            earlier: Probed::default(),
         };
         let start = self.o.factory.create(item, start_at_s, attempt);
         let tx = self.launch_tx.clone();
@@ -808,13 +1128,16 @@ impl Channel {
             "Film #{} \"{}\": {error}",
             c.item.id, c.item.title
         ));
+        let probed = c.probed();
         if let Some(mut handle) = c.handle.take() {
             handle.dispose();
         }
         if c.attempt == 0 {
             // One retry from where it stopped (resolved anew, the old address may have expired).
             let resume_at = if c.item.is_live { 0.0 } else { c.position_s() };
-            self.current = Some(self.launch(c.item, resume_at, 1));
+            let mut retry = self.launch(c.item, resume_at, 1);
+            retry.earlier = probed;
+            self.current = Some(retry);
             return Ok(());
         }
         self.finish(c, ItemStatus::Failed, Some(&error))
@@ -836,12 +1159,21 @@ impl Channel {
         // Conditional: an owner's removal (status `removed`) is never overwritten.
         let result = self.queue(|q| q.finish(c.item.id, status, error));
         c.dispose();
+        self.forget_seek_of(c.item.id);
         result.map(|_| ())
     }
 
     fn drop_current(&mut self) {
         if let Some(mut c) = self.current.take() {
             c.dispose();
+            self.forget_seek_of(c.item.id);
+        }
+    }
+
+    /// A seek waiting for a film that is gone never runs.
+    fn forget_seek_of(&mut self, item_id: i64) {
+        if self.pending_seek_of(item_id).is_some() {
+            self.pending_seek = None;
         }
     }
 
@@ -869,6 +1201,7 @@ impl SegmentSource for Channel {
     /// Always yields a segment: a clip segment or a slate. Queue errors fall back to a slate.
     fn next(&mut self) -> anyhow::Result<SourceSegment> {
         self.poll_launches();
+        self.on_tick();
         self.release_previous_segment();
         match self.next_inner() {
             Ok(seg) => Ok(seg),
@@ -971,6 +1304,7 @@ mod tests {
     struct FakeHandle {
         fake: Fake,
         duration_s: Option<f64>,
+        copies_video: bool,
     }
 
     impl ClipHandle for FakeHandle {
@@ -982,6 +1316,9 @@ mod tests {
         }
         fn duration_s(&self) -> Option<f64> {
             self.duration_s
+        }
+        fn copies_video(&self) -> bool {
+            self.copies_video
         }
         fn poll(&mut self) -> Vec<SegmentInfo> {
             std::mem::take(&mut self.fake.lock().pending)
@@ -1018,6 +1355,8 @@ mod tests {
         gates: Vec<oneshot::Sender<()>>,
         /// Runs inside create(), i.e. between the channel reading the queue head and starting it.
         on_create: Option<CreateHook>,
+        /// Clips started from now on copy the video (instead of converting it).
+        copies_video: bool,
     }
 
     #[derive(Clone, Default)]
@@ -1063,6 +1402,7 @@ mod tests {
                 s.gates.push(tx);
                 rx
             });
+            let copies_video = s.copies_video;
             let shared = Arc::clone(&self.0);
             Box::pin(async move {
                 if let Some(gate) = gate {
@@ -1082,6 +1422,7 @@ mod tests {
                 Ok(Box::new(FakeHandle {
                     fake,
                     duration_s: item.duration_s,
+                    copies_video,
                 }) as Box<dyn ClipHandle>)
             })
         }
@@ -1201,6 +1542,25 @@ mod tests {
                 tokio::task::yield_now().await;
             }
             self.channel.poll_launches();
+        }
+        /// One loop tick of the engine (runs a seek whose 700 ms of quiet have passed).
+        fn tick(&mut self) {
+            self.channel.on_tick();
+        }
+        fn control(&self) -> ControlState {
+            self.channel.state().control
+        }
+        fn starts(&self) -> usize {
+            self.factory.calls().len()
+        }
+        /// Releases the `i`-th held clip start (manual factory).
+        fn release(&self, i: usize) {
+            let gate = std::mem::replace(&mut self.factory.lock().gates[i], oneshot::channel().0);
+            gate.send(()).unwrap();
+        }
+        fn live_handles(&self) -> usize {
+            let handles = self.factory.lock().handles.clone();
+            handles.iter().filter(|h| !h.disposed()).count()
         }
     }
 
@@ -2115,5 +2475,471 @@ mod tests {
         e.channel.stop();
         assert!(h.disposed());
         assert_eq!(e.factory.calls().len(), 1);
+    }
+
+    // ---------- Owner's controls (stage 4) ----------
+
+    fn relaunched_key(item: &QueueItem, attempt: u32, n: u32) -> String {
+        format!("{}-r{n}", clip_key(item, attempt))
+    }
+
+    #[tokio::test]
+    async fn resuming_the_manual_pause_leaves_the_tunnel_pause_in_place() {
+        assert_eq!(PauseReason::Manual.as_str(), "manual");
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.pause(PauseReason::Manual);
+        e.channel.pause(PauseReason::Tunnel);
+        assert_eq!(
+            e.channel.state().pause_reasons,
+            [PauseReason::Tunnel, PauseReason::Manual]
+        );
+        e.channel.resume(PauseReason::Manual);
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert_eq!(e.starts(), 1, "the film must stay paused");
+        let st = e.channel.state();
+        assert!(st.paused);
+        assert_eq!(st.pause_reasons, [PauseReason::Tunnel]);
+        assert_eq!(st.control.position_s, 12.0);
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 12.0,
+                attempt: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seek_starts_the_film_from_the_target_under_a_new_source_key() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await; // 12 s aired
+        e.channel.seek_to(50.0);
+        let c = e.control();
+        assert!(c.seek_pending);
+        assert_eq!((c.item_id, c.position_s), (Some(a.id), 50.0));
+        // Nothing happens before 700 ms of quiet.
+        e.advance(699);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        assert!(!h0.disposed());
+        e.advance(1);
+        e.tick();
+        assert!(h0.disposed(), "the old clip is stopped");
+        assert!(!e.control().seek_pending);
+        assert_eq!(
+            e.factory.calls()[1],
+            Call {
+                item_id: a.id,
+                start_at_s: 50.0,
+                attempt: 0
+            }
+        );
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        e.factory.handle(1).produce(2);
+        let first = e.next();
+        assert_eq!(first.source_key, relaunched_key(&a, 0, 1));
+        assert_ne!(first.source_key, clip_key(&a, 0));
+        assert_eq!(e.control().position_s, 54.0);
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+    }
+
+    /// Review Focus 1: a burst of relative seeks is one clip start.
+    #[tokio::test]
+    async fn eight_plus_10_s_seeks_within_2_s_start_one_clip_80_s_further() {
+        let mut e = setup();
+        let a = e.add("a", Some(300.0), false);
+        let h0 = e.air(&a, 3).await; // 12 s aired
+        for n in 1..=8 {
+            e.channel.seek_by(10.0);
+            let c = e.control();
+            assert!(c.seek_pending);
+            assert_eq!(c.position_s, 12.0 + 10.0 * f64::from(n));
+            if n == 4 {
+                // The old clip keeps airing while the seek waits; it does not move the target.
+                h0.produce(1);
+                assert_eq!(e.key(), clip_key(&a, 0));
+            }
+            e.advance(250);
+            e.tick();
+            e.flush().await;
+            assert_eq!(e.starts(), 1, "started before the burst ended (n = {n})");
+        }
+        e.advance(449); // 699 ms after the last command
+        e.tick();
+        assert_eq!(e.starts(), 1);
+        assert!(e.control().seek_pending);
+        e.advance(1);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 2);
+        assert_eq!(e.factory.calls()[1].start_at_s, 92.0);
+        let c = e.control();
+        assert!(!c.seek_pending);
+        assert_eq!(c.position_s, 92.0);
+        // Nothing else starts later.
+        for _ in 0..10 {
+            e.advance(250);
+            e.tick();
+        }
+        e.flush().await;
+        assert_eq!(e.starts(), 2);
+        assert_eq!(e.live_handles(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_seek_while_paused_moves_the_remembered_position_without_starting_a_clip() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.pause(PauseReason::Manual);
+        e.channel.seek_to(40.0);
+        let c = e.control();
+        assert_eq!((c.position_s, c.seek_pending), (40.0, false));
+        e.channel.seek_by(-15.0);
+        assert_eq!(e.control().position_s, 25.0);
+        e.advance(1_000);
+        e.tick();
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        e.channel.resume(PauseReason::Manual);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.calls()[1].start_at_s, 25.0);
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), relaunched_key(&a, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn pausing_with_a_seek_pending_parks_the_film_at_the_target() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.seek_to(60.0);
+        e.channel.pause(PauseReason::Manual);
+        let c = e.control();
+        assert_eq!((c.position_s, c.seek_pending), (60.0, false));
+        e.advance(1_000);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        e.channel.resume(PauseReason::Manual);
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.calls()[1].start_at_s, 60.0);
+    }
+
+    #[tokio::test]
+    async fn a_target_before_the_start_is_the_start() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.seek_by(-60.0);
+        assert_eq!(e.control().position_s, 0.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[1].start_at_s, 0.0);
+        e.channel.seek_to(-5.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[2].start_at_s, 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_target_in_the_last_second_ends_the_film_as_skipped_and_the_next_one_starts() {
+        let mut e = setup();
+        let a = e.add_item("a"); // 100 s
+        let b = e.add_item("b");
+        let h0 = e.air(&a, 2).await;
+        e.channel.seek_to(99.0);
+        assert_eq!(e.control().position_s, 99.0);
+        e.advance(700);
+        e.tick();
+        assert!(h0.disposed());
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Played);
+        assert_eq!(fresh.error.as_deref(), Some(SKIPPED));
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        assert_eq!(e.factory.calls()[1].start_at_s, 0.0);
+        assert!(!e.control().seek_pending);
+
+        // Far past the end, relative: the same; the shown target stops at the end.
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), clip_key(&b, 0));
+        e.channel.seek_by(500.0);
+        assert_eq!(e.control().position_s, 100.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.get(b.id).status, ItemStatus::Played);
+        assert_eq!(e.key(), "idle");
+    }
+
+    #[tokio::test]
+    async fn a_seek_into_the_last_second_of_a_paused_film_skips_it_and_stays_paused() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 2).await;
+        e.channel.pause(PauseReason::Manual);
+        e.channel.seek_to(99.5);
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Played);
+        assert_eq!(fresh.error.as_deref(), Some(SKIPPED));
+        assert_eq!(e.key(), "pause");
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn a_film_of_unknown_length_only_seeks_forward_without_an_upper_bound() {
+        let mut e = setup();
+        let a = e.add("a", None, false);
+        e.air(&a, 2).await; // 8 s
+        let c = e.control();
+        assert_eq!(c.duration_s, None);
+        assert!(c.can_seek);
+        e.channel.seek_to(30.0);
+        e.channel.seek_by(-5.0);
+        assert!(!e.control().seek_pending, "only forward relative seeks");
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 1);
+        e.channel.seek_by(5_000.0);
+        assert_eq!(e.control().position_s, 5_008.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[1].start_at_s, 5_008.0);
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        // Back to the start (⏮) works for it too.
+        e.channel.seek_to(0.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[2].start_at_s, 0.0);
+    }
+
+    /// Review Focus 1: seeks while a clip start is in flight end with exactly one clip.
+    #[tokio::test]
+    async fn seeks_while_the_clip_is_still_starting_discard_the_old_start() {
+        let mut e = setup();
+        e.factory.lock().manual = true;
+        let a = e.add_item("a");
+        assert_eq!(e.key(), "buffering"); // start #0 in flight
+        for _ in 0..8 {
+            e.channel.seek_by(10.0);
+            e.advance(250);
+            e.tick();
+        }
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 2);
+        assert_eq!(e.factory.calls()[1].start_at_s, 80.0);
+        // The old start finishes late: its clip is disposed.
+        e.release(0);
+        e.flush().await;
+        assert!(e.factory.handle(0).disposed());
+        // Another seek while start #1 is still in flight.
+        e.channel.seek_to(20.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[2].start_at_s, 20.0);
+        e.release(1);
+        e.release(2);
+        e.flush().await;
+        assert_eq!(e.live_handles(), 1);
+        let live = e
+            .factory
+            .lock()
+            .handles
+            .iter()
+            .find(|h| !h.disposed())
+            .cloned()
+            .unwrap();
+        assert_eq!(live.lock().start_at_s, 20.0);
+        live.produce(1);
+        assert_eq!(e.key(), relaunched_key(&a, 0, 2));
+        assert!(!e.control().seek_pending);
+    }
+
+    #[tokio::test]
+    async fn a_pending_seek_never_outlives_its_film() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 2).await;
+        e.channel.seek_to(50.0);
+        e.channel.skip().unwrap();
+        assert!(!e.control().seek_pending);
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert_eq!(
+            e.starts(),
+            2,
+            "the seek of the skipped film must not touch the next one"
+        );
+        // A removed film takes its pending seek with it.
+        e.factory.handle(1).produce(1);
+        e.next();
+        e.channel.seek_to(30.0);
+        e.set_status(b.id, ItemStatus::Removed);
+        e.channel.on_queue_changed().unwrap();
+        assert!(!e.control().seek_pending);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_seek_drops_the_prefetched_film_which_is_prefetched_again_near_the_end() {
+        let mut e = setup();
+        let a = e.add("a", Some(40.0), false);
+        let b = e.add_item("b");
+        e.air(&a, 1).await;
+        e.factory.handle(0).produce(1);
+        e.next();
+        e.flush().await;
+        let prefetched = e.factory.handle(1);
+        assert_eq!(prefetched.item_id(), b.id);
+        e.channel.seek_to(0.0);
+        e.advance(700);
+        e.tick();
+        assert!(prefetched.disposed());
+        assert_eq!(e.channel.prefetched_item_id(), None);
+    }
+
+    #[tokio::test]
+    async fn play_now_from_the_queue_moves_it_first_and_skips_the_current_film() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        let c = e.add_item("c");
+        e.air(&a, 2).await;
+        e.channel.play_now(c.id).unwrap();
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Played);
+        assert_eq!(fresh.error.as_deref(), Some(SKIPPED));
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), c.id);
+        assert_eq!(e.get(c.id).status, ItemStatus::Playing);
+        assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn play_now_from_history_adds_the_film_again_with_the_same_link_and_nick() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        let c = e.add_item("c");
+        e.set_status(a.id, ItemStatus::Played);
+        e.air(&b, 2).await;
+        e.channel.play_now(a.id).unwrap();
+        assert_eq!(e.get(b.id).status, ItemStatus::Played);
+        e.next();
+        e.flush().await;
+        let again = {
+            let conn = e.db.lock().unwrap();
+            QueueRepo::new(&conn)
+                .list_by_status(MAIN_CHANNEL_ID, &[ItemStatus::Playing])
+                .unwrap()
+        };
+        assert_eq!(again.len(), 1);
+        let again = &again[0];
+        assert_ne!(again.id, a.id, "a new entry");
+        assert_eq!(again.source_url, a.source_url);
+        assert_eq!(again.title, a.title);
+        assert_eq!(again.requester_name.as_deref(), Some("Ola"));
+        assert_eq!(e.factory.last_call_item(), again.id);
+        // The old entry stays in the history; the rest of the queue waits.
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+        assert_eq!(e.get(c.id).status, ItemStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn play_now_on_an_idle_channel_just_starts_it_and_refuses_unplayable_items() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.channel.play_now(b.id).unwrap();
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        assert_eq!(e.get(a.id).status, ItemStatus::Queued);
+        e.set_status(a.id, ItemStatus::PendingApproval);
+        assert!(e.channel.play_now(a.id).is_err());
+        assert!(e.channel.play_now(9_999).is_err());
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn a_live_stream_cannot_be_paused_or_seeked_but_can_be_skipped() {
+        let mut e = setup();
+        let live = e.add("live", None, true);
+        let h = e.air(&live, 2).await;
+        let c = e.control();
+        assert_eq!(c.item_id, Some(live.id));
+        assert!(c.is_live);
+        assert!(!c.can_pause && !c.can_seek);
+        e.channel.seek_to(30.0);
+        e.channel.seek_by(10.0);
+        assert!(!e.control().seek_pending);
+        e.advance(700);
+        e.tick();
+        assert!(!h.disposed());
+        assert_eq!(e.starts(), 1);
+        e.channel.skip().unwrap();
+        assert_eq!(e.get(live.id).status, ItemStatus::Played);
+    }
+
+    #[tokio::test]
+    async fn control_state_without_a_film_allows_nothing() {
+        let e = setup();
+        let c = e.control();
+        assert_eq!(c, ControlState::default());
+        assert_eq!(c.item_id, None);
+        assert!(!c.can_pause && !c.can_seek && !c.seek_pending);
+    }
+
+    #[tokio::test]
+    async fn the_position_is_approximate_when_the_film_is_copied_and_exact_when_converted() {
+        let mut e = setup();
+        e.factory.lock().copies_video = true;
+        let a = e.add_item("a");
+        e.air(&a, 1).await;
+        let c = e.control();
+        assert_eq!(
+            (c.duration_s, c.can_pause, c.can_seek),
+            (Some(100.0), true, true)
+        );
+        assert!(c.position_approx);
+        // Still known while the relaunched clip is starting, and while paused.
+        e.channel.seek_to(30.0);
+        e.advance(700);
+        e.tick();
+        assert!(e.control().position_approx);
+        e.channel.pause(PauseReason::Manual);
+        assert!(e.control().position_approx);
+        e.channel.resume(PauseReason::Manual);
+
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 1).await;
+        assert!(!e.control().position_approx);
     }
 }
