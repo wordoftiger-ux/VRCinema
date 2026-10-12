@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::i18n::Msg;
+use crate::i18n::{Msg, error_msg};
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
 use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
 use crate::pipeline::slates::Slates;
@@ -197,7 +197,7 @@ impl EngineTask {
 /// Starts the engine (tick 250 ms, supervised) and logs to stdout. Must be called inside a tokio
 /// runtime. The loop runs until every [`EngineHandle`] is dropped.
 pub fn spawn_engine(build: impl Fn() -> (Broadcaster, Channel) + Send + 'static) -> EngineHandle {
-    spawn_engine_with(build, |msg: &str| println!("{msg}")).0
+    spawn_engine_with(build, |msg: Msg| println!("{msg}")).0
 }
 
 /// Like [`spawn_engine`], with any channel, an injected log and a handle for explicit shutdown.
@@ -206,7 +206,7 @@ pub fn spawn_engine_with<C, F, L>(build: F, log: L) -> (EngineHandle, EngineTask
 where
     C: ChannelControl + 'static,
     F: Fn() -> (Broadcaster, C) + Send + 'static,
-    L: Fn(&str) + Send + Sync + 'static,
+    L: Fn(Msg) + Send + Sync + 'static,
 {
     spawn_engine_paused(build, log, [])
 }
@@ -222,7 +222,7 @@ pub fn spawn_engine_paused<C, F, L>(
 where
     C: ChannelControl + 'static,
     F: Fn() -> (Broadcaster, C) + Send + 'static,
-    L: Fn(&str) + Send + Sync + 'static,
+    L: Fn(Msg) + Send + Sync + 'static,
 {
     let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
     let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(Snapshot::starting()));
@@ -328,7 +328,7 @@ impl<C, F, L> Supervisor<F, L>
 where
     C: ChannelControl,
     F: Fn() -> (Broadcaster, C),
-    L: Fn(&str) + Sync,
+    L: Fn(Msg) + Sync,
 {
     /// Restarts a failed run with exponential backoff (1 s, 2 s, 4 s … 30 s; back to 1 s after a
     /// run of at least 60 s). A film current in 3 crashed runs in a row is marked failed
@@ -355,7 +355,7 @@ where
                     // Also after a panic: dispose the crashed channel's clips (ffmpeg processes)
                     // instead of leaving them to a plain drop.
                     if let Err(panic) = guarded(|| core.channel.stop()) {
-                        (self.log)(&format!("Błąd przy zatrzymywaniu kanału: {panic}"));
+                        (self.log)(Msg::new("log.channel_stop_error").arg("error", panic));
                     }
                     match exit {
                         Exit::Shutdown => return,
@@ -366,9 +366,7 @@ where
             if started.elapsed() >= HEALTHY_RUN {
                 delay = RESTART_DELAY;
             }
-            (self.log)(&format!(
-                "Pętla kanału zakończyła się błędem: {failure} — uruchamiam ponownie"
-            ));
+            (self.log)(Msg::new("log.channel_loop_failed").arg("error", &failure));
             tokio::select! {
                 () = tokio::time::sleep(delay) => {}
                 () = stop_requested(&mut self.stop) => return,
@@ -391,19 +389,24 @@ where
             return;
         }
         streak.clear();
-        (self.log)(&format!(
-            "Film #{id} przerwał pętlę kanału {CRASHES_BEFORE_FAILING_ITEM} razy z rzędu — \
-             oznaczam go jako nieudany: {}",
-            internal_error()
-        ));
+        (self.log)(
+            Msg::new("log.item_keeps_crashing")
+                .arg("id", id)
+                .arg("count", CRASHES_BEFORE_FAILING_ITEM)
+                .arg_msg("reason", internal_error()),
+        );
         match guarded(|| channel.fail_item(id, &internal_error())) {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => (self.log)(&format!(
-                "Nie udało się oznaczyć filmu #{id} jako nieudanego: {e}"
-            )),
-            Err(panic) => (self.log)(&format!(
-                "Nie udało się oznaczyć filmu #{id} jako nieudanego: {panic}"
-            )),
+            Ok(Err(e)) => (self.log)(
+                Msg::new("log.item_fail_mark_failed")
+                    .arg("id", id)
+                    .arg_msg("error", error_msg(&e)),
+            ),
+            Err(panic) => (self.log)(
+                Msg::new("log.item_fail_mark_failed")
+                    .arg("id", id)
+                    .arg("error", panic),
+            ),
         }
     }
 
@@ -465,7 +468,9 @@ where
                             self.pause_reasons.remove(&PauseReason::Manual);
                         }
                     }
-                    Ok(Err(e)) => (self.log)(&format!("Polecenie kanału nie powiodło się: {e}")),
+                    Ok(Err(e)) => (self.log)(
+                        Msg::new("log.channel_command_failed").arg_msg("error", error_msg(&e)),
+                    ),
                     Err(panic) => return Exit::Failed(panic),
                 }
             }
@@ -833,7 +838,7 @@ mod tests {
             let logs = Arc::clone(&self.logs);
             spawn_engine_paused(
                 build,
-                move |m: &str| logs.lock().unwrap().push(m.to_string()),
+                move |m: Msg| logs.lock().unwrap().push(m.to_string()),
                 reasons.iter().copied(),
             )
         }
@@ -914,7 +919,7 @@ mod tests {
         next_snapshot(&mut handle.snapshot).await;
         assert!(
             env.logs()
-                .contains(&"Polecenie kanału nie powiodło się: nie można pominąć".to_string()),
+                .contains(&"A channel command failed: nie można pominąć".to_string()),
             "{:?}",
             env.logs()
         );
@@ -1093,7 +1098,7 @@ mod tests {
         assert_eq!(names(&restarted), vec!["0.ts", "1.ts", "2.ts"]);
         assert_eq!(
             env.logs(),
-            vec!["Pętla kanału zakończyła się błędem: atrapa źródła: awaria — uruchamiam ponownie"]
+            vec!["The channel loop ended with an error: atrapa źródła: awaria — restarting"]
         );
         // The crashed channel was stopped (its clips disposed) before the rebuild.
         assert_eq!(env.count(|p| &p.stops), 1);
@@ -1121,8 +1126,8 @@ mod tests {
         assert_eq!(
             env.logs(),
             vec![
-                "Pętla kanału zakończyła się błędem: atrapa budowy: awaria — uruchamiam ponownie",
-                "Pętla kanału zakończyła się błędem: baza zablokowana — uruchamiam ponownie",
+                "The channel loop ended with an error: atrapa budowy: awaria — restarting",
+                "The channel loop ended with an error: baza zablokowana — restarting",
             ]
         );
         assert_eq!(env.count(|p| &p.builds), 3);
@@ -1202,7 +1207,7 @@ mod tests {
         let logs = env.logs();
         assert!(
             logs.iter()
-                .any(|l| l.contains("Film #7") && l.contains("Internal error")),
+                .any(|l| l.contains("Video #7") && l.contains("Internal error")),
             "{logs:?}"
         );
         assert_eq!(start_gaps(&env.probe), vec![1, 2, 4]);
@@ -1258,7 +1263,7 @@ mod tests {
             _item: QueueItem,
             _start_at_s: f64,
             _attempt: u32,
-        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>> {
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
             Box::pin(std::future::pending())
         }
     }
@@ -1272,7 +1277,7 @@ mod tests {
         fn state(&self) -> crate::pipeline::segmenter::SegmenterState {
             crate::pipeline::segmenter::SegmenterState::Running
         }
-        fn error(&self) -> Option<String> {
+        fn error(&self) -> Option<Msg> {
             None
         }
         fn duration_s(&self) -> Option<f64> {
@@ -1291,7 +1296,7 @@ mod tests {
             _item: QueueItem,
             _start_at_s: f64,
             _attempt: u32,
-        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>> {
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
             Box::pin(async { Ok(Box::new(PanickingClip) as Box<dyn ClipHandle>) })
         }
     }
@@ -1358,7 +1363,7 @@ mod tests {
                 };
                 (Broadcaster::new(options, tokio_clock()), channel)
             },
-            move |m: &str| sink.lock().unwrap().push(m.to_string()),
+            move |m: Msg| sink.lock().unwrap().push(m.to_string()),
         );
         let status = |db: &Arc<Mutex<rusqlite::Connection>>| {
             let conn = db.lock().unwrap();
@@ -1371,7 +1376,14 @@ mod tests {
         .await;
         let failed = status(&db);
         assert_eq!(failed.status, ItemStatus::Failed);
-        assert_eq!(failed.error.as_deref(), Some("Internal error"));
+        assert_eq!(
+            failed.error_text(Lang::En).as_deref(),
+            Some("Internal error")
+        );
+        assert_eq!(
+            failed.error_text(Lang::Pl).as_deref(),
+            Some("Błąd wewnętrzny")
+        );
         // The rebuilt channel stays up on the idle slate; no further crashes.
         tokio::time::sleep(Duration::from_secs(60)).await;
         assert_eq!(builds.load(Ordering::SeqCst), 4);
@@ -1385,7 +1397,7 @@ mod tests {
         assert_eq!(crashes, 3, "{logs:?}");
         assert!(
             logs.iter()
-                .any(|l| l.contains(&format!("Film #{}", bad.id)) && l.contains("Internal error")),
+                .any(|l| l.contains(&format!("Video #{}", bad.id)) && l.contains("Internal error")),
             "{logs:?}"
         );
     }
@@ -1462,7 +1474,10 @@ mod tests {
         next_snapshot(&mut handle.snapshot).await;
         let skipped = status(&db);
         assert_eq!(skipped.status, ItemStatus::Played);
-        assert_eq!(skipped.error.as_deref(), Some("Skipped by the owner"));
+        assert_eq!(
+            skipped.error_text(Lang::En).as_deref(),
+            Some("Skipped by the owner")
+        );
     }
 
     #[tokio::test(start_paused = true)]

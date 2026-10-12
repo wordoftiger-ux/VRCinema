@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
-use crate::i18n::{self, Lang};
+use crate::i18n::{self, Lang, Msg};
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
@@ -110,14 +110,38 @@ impl From<&str> for SlateAddress {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum SlateError {
-    #[error("Nie udało się wygenerować planszy \"{kind}\": {message}")]
-    Failed { kind: &'static str, message: String },
-    #[error("Plansza \"{0}\" nie ma fragmentów.")]
+    Failed { kind: &'static str, message: Msg },
     Empty(&'static str),
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
+}
+
+impl SlateError {
+    /// Why, for a person.
+    pub fn message(&self) -> Msg {
+        match self {
+            Self::Failed { kind, message } => Msg::new("log.slate_failed")
+                .arg("kind", kind)
+                .arg_msg("message", message.clone()),
+            Self::Empty(kind) => Msg::new("log.slate_empty").arg("kind", kind),
+            Self::Io(e) => Msg::text(e),
+        }
+    }
+}
+
+impl std::fmt::Display for SlateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.message(), f)
+    }
+}
+
+impl std::error::Error for SlateError {}
+
+impl From<std::io::Error> for SlateError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 /// Address of the request page for a public address (no trailing slash); empty stays empty.
@@ -156,12 +180,12 @@ pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
     use image::{ImageFormat, Luma};
     use qrcode::{Color, EcLevel, QrCode};
 
-    let failed = |message: String| SlateError::Failed {
+    let failed = |message: Msg| SlateError::Failed {
         kind: SlateKind::Idle.as_str(),
         message,
     };
     let code = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M)
-        .map_err(|e| failed(format!("kod QR: {e}")))?;
+        .map_err(|e| failed(Msg::new("log.slate_qr_failed").arg("error", e)))?;
     let modules = u32::try_from(code.width()).unwrap_or(u32::MAX);
     let total = modules + 2 * QR_QUIET_MODULES;
     let scale = (QR_TARGET_PX / total).max(1);
@@ -178,7 +202,7 @@ pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
     let mut png = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut png, ImageFormat::Png)
-        .map_err(|e| failed(format!("zapis kodu QR: {e}")))?;
+        .map_err(|e| failed(Msg::new("log.slate_qr_save_failed").arg("error", e)))?;
     Ok(png.into_inner())
 }
 
@@ -273,7 +297,7 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
     if seg.wait().await != SegmenterState::Done {
         return Err(SlateError::Failed {
             kind: kind.as_str(),
-            message: seg.error().map(|e| e.to_string()).unwrap_or_default(),
+            message: seg.error().unwrap_or_else(|| Msg::text("")),
         });
     }
     let segments = seg.poll();
@@ -335,7 +359,7 @@ pub enum SwapOutcome {
     /// A new set was made and handed to the channel loop.
     Replaced { generation: u32 },
     /// Nothing changed: the previous set stays on air.
-    Failed(String),
+    Failed(Msg),
 }
 
 /// Replaces the slate set of a running channel when the public address changes: the new set is
@@ -456,12 +480,12 @@ impl SlateSwapper {
             Ok(slates) => slates,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&dir);
-                return SwapOutcome::Failed(e.to_string());
+                return SwapOutcome::Failed(e.message());
             }
         };
         if commands.send(Command::ReplaceSlates(slates)).await.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
-            return SwapOutcome::Failed("Pętla kanału nie działa.".to_string());
+            return SwapOutcome::Failed(Msg::new("log.channel_loop_not_running"));
         }
         let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
         state.address = address;
@@ -725,7 +749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broken_ffmpeg_reports_the_polish_error() {
+    async fn broken_ffmpeg_reports_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = generate_slates(&SlateOptions {
             font_file: dir.path().join("brak.ttf"),
@@ -740,7 +764,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .starts_with("Nie udało się wygenerować planszy \"idle\": "),
+                .starts_with("Could not generate the slate \"idle\": "),
             "{err}"
         );
     }
@@ -1024,7 +1048,10 @@ mod tests {
         let SwapOutcome::Failed(why) = outcome else {
             panic!("{outcome:?}");
         };
-        assert!(why.contains("Nie udało się wygenerować planszy"), "{why}");
+        assert!(
+            why.to_string().contains("Could not generate the slate"),
+            "{why}"
+        );
         assert!(rx.try_recv().is_err(), "nothing may reach the loop");
         // The old set and its folders are untouched even after the hold would have passed.
         tokio::time::sleep(Duration::from_millis(100)).await;

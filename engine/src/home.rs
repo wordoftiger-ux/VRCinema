@@ -3,6 +3,8 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::i18n::{Msg, msg_error};
+
 /// Subfolders created inside the home directory.
 pub const SUBDIRS: [&str; 3] = ["data", "tools", "logs"];
 
@@ -26,15 +28,20 @@ pub fn resolve_home(
             .join("share")
             .join("VRCinema"));
     }
-    anyhow::bail!("Nie można ustalić folderu danych aplikacji (brak VRCINEMA_HOME i LOCALAPPDATA).")
+    Err(msg_error(Msg::error("home_unknown")))
 }
 
 /// Creates the home directory with its `data`, `tools` and `logs` subfolders.
 pub fn ensure_home(home: &Path) -> anyhow::Result<()> {
     for sub in SUBDIRS {
         let dir = home.join(sub);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| anyhow::anyhow!("Nie można utworzyć folderu {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            msg_error(
+                Msg::error("cannot_create_data_dir")
+                    .arg("path", dir.display())
+                    .arg("detail", e),
+            )
+        })?;
     }
     Ok(())
 }

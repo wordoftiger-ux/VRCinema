@@ -3,11 +3,13 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+
+use crate::i18n::{Msg, MsgContext, msg_error};
 
 /// Finds the checksum of `name` in a sums file: lines `<hex>  <name>` (or `<hex> *<name>`);
 /// a file that holds just one bare hex digest applies to `name` as well (Deno).
@@ -92,13 +94,17 @@ pub async fn fetch_text(http: &reqwest::Client, url: &str) -> Result<Option<Stri
         .get(url)
         .send()
         .await
-        .with_context(|| format!("Pobieranie nie powiodło się: {url}"))?;
+        .msg_context(Msg::error("download_failed").arg("url", url))?;
     let status = res.status();
     if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
         return Ok(None);
     }
     if !status.is_success() {
-        bail!("Pobieranie nie powiodło się: {} {url}", status.as_u16());
+        return Err(msg_error(
+            Msg::error("download_failed_status")
+                .arg("status", status.as_u16())
+                .arg("url", url),
+        ));
     }
     Ok(Some(res.text().await?))
 }
@@ -155,7 +161,7 @@ pub async fn download_file(
     let mut res = request
         .send()
         .await
-        .with_context(|| format!("Pobieranie nie powiodło się: {url}"))?;
+        .msg_context(Msg::error("download_failed").arg("url", url))?;
     let status = res.status();
 
     if status == StatusCode::RANGE_NOT_SATISFIABLE && existing > 0 {
@@ -173,7 +179,11 @@ pub async fn download_file(
         return Box::pin(download_file(http, url, part, on_progress)).await;
     }
     if !status.is_success() {
-        bail!("Pobieranie nie powiodło się: {} {url}", status.as_u16());
+        return Err(msg_error(
+            Msg::error("download_failed_status")
+                .arg("status", status.as_u16())
+                .arg("url", url),
+        ));
     }
 
     let range_start = res
@@ -187,7 +197,9 @@ pub async fn download_file(
     } else if status == StatusCode::PARTIAL_CONTENT {
         // The partial file cannot be continued from what the server sends: never again.
         let _ = fs::remove_file(part);
-        bail!("Serwer zwrócił nieoczekiwany zakres danych: {url}");
+        return Err(msg_error(
+            Msg::error("download_unexpected_range").arg("url", url),
+        ));
     } else {
         (0, res.content_length())
     };
@@ -205,7 +217,7 @@ pub async fn download_file(
         while let Some(chunk) = res
             .chunk()
             .await
-            .with_context(|| format!("Pobieranie przerwane: {url}"))?
+            .msg_context(Msg::error("download_interrupted").arg("url", url))?
         {
             file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
@@ -224,7 +236,12 @@ pub async fn download_file(
     if let Some(total) = total
         && downloaded != total
     {
-        bail!("Pobieranie przerwane ({downloaded} z {total} bajtów): {url}");
+        return Err(msg_error(
+            Msg::error("download_incomplete")
+                .arg("downloaded", downloaded)
+                .arg("total", total)
+                .arg("url", url),
+        ));
     }
     Ok(downloaded)
 }
@@ -390,7 +407,7 @@ mod tests {
         let err = download_file(&client(), &url, &part, &mut |_, _| {})
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("przerwane"), "{err:#}");
+        assert!(format!("{err:#}").contains("interrupted"), "{err:#}");
         let kept = fs::metadata(&part).unwrap().len();
         assert!(kept > 0 && kept < 300_000, "kept {kept}");
 
@@ -450,7 +467,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-            assert!(format!("{err:#}").contains("przerwane"), "{err:#}");
+            assert!(format!("{err:#}").contains("interrupted"), "{err:#}");
             let on_disk = fs::metadata(&part).unwrap().len();
             assert_eq!(on_disk, last, "reported {last}, on disk {on_disk}");
         });
@@ -469,10 +486,7 @@ mod tests {
         let err = download_file(&client(), &url, &part, &mut |_, _| {})
             .await
             .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("nieoczekiwany zakres"),
-            "{err:#}"
-        );
+        assert!(format!("{err:#}").contains("unexpected range"), "{err:#}");
         assert!(!part.exists(), "the partial file must not be resumed again");
         server.set_wrong_range_start(false);
         download_file(&client(), &url, &part, &mut |_, _| {})

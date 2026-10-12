@@ -12,13 +12,14 @@ use axum::routing::{get, patch, post};
 use serde_json::{Value, json};
 
 use super::{
-    ApiError, ApiResult, AppState, Ctx, JsonBody, admin_item, control_json, json_ok, json_response,
-    state_map,
+    ApiError, ApiResult, AppState, Ctx, JsonBody, ReqLang, admin_item, control_json, json_ok,
+    json_response, state_map,
 };
 use crate::db::{
     AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo, SettingsRepo, sanitize_settings_patch,
 };
 use crate::engine::Command;
+use crate::i18n::Lang;
 use crate::library::LibraryError;
 use crate::pipeline::channel::{ControlState, PauseReason};
 use crate::rules::parse_source_url;
@@ -69,11 +70,11 @@ fn ok() -> Response {
     json_ok(&json!({ "ok": true }))
 }
 
-fn items_json(items: &[QueueItem]) -> Value {
-    Value::Array(items.iter().map(admin_item).collect())
+fn items_json(items: &[QueueItem], lang: Lang) -> Value {
+    Value::Array(items.iter().map(|i| admin_item(i, lang)).collect())
 }
 
-async fn panel(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
+async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -> ApiResult {
     let id = state.channel_id;
     let (playing, queue, pending, history) = state.with_db(|c| {
         let q = QueueRepo::new(c);
@@ -91,10 +92,10 @@ async fn panel(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
         "prefetchedItemId".into(),
         json!(snapshot.prefetched_item_id),
     );
-    body.insert("playing".into(), items_json(&playing));
-    body.insert("queue".into(), items_json(&queue));
-    body.insert("pending".into(), items_json(&pending));
-    body.insert("history".into(), items_json(&history));
+    body.insert("playing".into(), items_json(&playing, lang));
+    body.insert("queue".into(), items_json(&queue, lang));
+    body.insert("pending".into(), items_json(&pending, lang));
+    body.insert("history".into(), items_json(&history, lang));
     body.insert("settings".into(), json!(settings));
     body.insert("control".into(), control_json(&snapshot.state));
     body.insert(

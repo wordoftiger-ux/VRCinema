@@ -36,7 +36,7 @@ pub enum ProbeError {
     /// ffprobe's last words (empty: it said nothing).
     #[error("{}", failed(.0))]
     Failed(String),
-    #[error("{}", process_failed(.0))]
+    #[error("{}", .0.message())]
     Process(#[from] ProcessError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
@@ -52,22 +52,13 @@ fn failed(reason: &str) -> Msg {
     }
 }
 
-fn process_failed(e: &ProcessError) -> Msg {
-    match e {
-        ProcessError::Timeout { secs, cmd } => Msg::error("process_timeout")
-            .arg("seconds", secs)
-            .arg("command", cmd),
-        ProcessError::Io(e) => Msg::error("source_message").arg("detail", e),
-    }
-}
-
 impl ProbeError {
     /// Why, for a person (kept with a film that failed).
     pub fn message(&self) -> Msg {
         match self {
             Self::NoVideoStream => Msg::new(NO_VIDEO),
             Self::Failed(reason) => failed(reason),
-            Self::Process(e) => process_failed(e),
+            Self::Process(e) => e.message(),
             Self::Json(e) => Msg::error("source_message").arg("detail", e),
         }
     }

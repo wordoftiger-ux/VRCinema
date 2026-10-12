@@ -1,5 +1,6 @@
 //! The tray icon: its menu, the "now playing" tooltip, the copied links and the one-time
-//! balloon shown when the window is first hidden.
+//! balloon shown when the window is first hidden. Every text comes from the dictionaries in the
+//! app's language; a change of the `language` setting rebuilds the menu and the tooltip at once.
 
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+use vrcinema::i18n::{Lang, Msg, t};
 use vrcinema::tunnel::TunnelState;
 
 use crate::Shell;
@@ -47,14 +49,19 @@ impl TrayAction {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    /// The dictionary key of the entry's label.
+    pub fn key(self) -> &'static str {
         match self {
-            TrayAction::OpenPanel => "Otwórz panel",
-            TrayAction::CopyChannelLink => "Kopiuj link kanału",
-            TrayAction::CopySubmitLink => "Kopiuj link strony zgłoszeń",
-            TrayAction::Skip => "Pomiń film",
-            TrayAction::Quit => "Zakończ",
+            TrayAction::OpenPanel => "tray.open_panel",
+            TrayAction::CopyChannelLink => "tray.copy_channel_link",
+            TrayAction::CopySubmitLink => "tray.copy_submit_link",
+            TrayAction::Skip => "tray.skip",
+            TrayAction::Quit => "tray.quit",
         }
+    }
+
+    pub fn label(self, lang: Lang) -> String {
+        t(lang, self.key(), &[])
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
@@ -93,13 +100,17 @@ pub enum Net {
 }
 
 impl Net {
-    fn text(self) -> &'static str {
+    fn key(self) -> &'static str {
         match self {
-            Net::Online => "W sieci",
-            Net::Connecting => "Łączenie z internetem",
-            Net::Offline => "Brak internetu",
-            Net::Manual => "Adres ręczny",
+            Net::Online => "tray.net_online",
+            Net::Connecting => "tray.net_connecting",
+            Net::Offline => "tray.net_offline",
+            Net::Manual => "tray.net_manual",
         }
+    }
+
+    fn text(self, lang: Lang) -> String {
+        t(lang, self.key(), &[])
     }
 }
 
@@ -118,15 +129,19 @@ pub fn net_status(tunnel_enabled: bool, state: &TunnelState, public_url: &str) -
 }
 
 /// Tooltip of the tray icon, short enough for Windows (a long title is cut with "…").
-pub fn tooltip_text(net: Option<Net>, now_playing: Option<&str>) -> String {
+pub fn tooltip_text(lang: Lang, net: Option<Net>, now_playing: Option<&str>) -> String {
     let head = match net {
-        Some(net) => format!("VRCinema — {}", net.text()),
+        Some(net) => t(lang, "tray.tooltip_head", &[("net", &net.text(lang))]),
         None => "VRCinema".to_string(),
     };
     let Some(title) = now_playing.map(str::trim).filter(|t| !t.is_empty()) else {
-        return format!("{head} — przerwa");
+        return t(lang, "tray.tooltip_idle", &[("head", &head)]);
     };
-    let text = format!("{head} — teraz leci: {title}");
+    let text = t(
+        lang,
+        "tray.tooltip_playing",
+        &[("head", &head), ("title", title)],
+    );
     if text.encode_utf16().count() <= TOOLTIP_MAX_UNITS {
         return text;
     }
@@ -143,19 +158,19 @@ pub fn tooltip_text(net: Option<Net>, now_playing: Option<&str>) -> String {
     cut
 }
 
-/// What "Kopiuj link kanału" and "Kopiuj link strony zgłoszeń" copy: the link at the address in
+/// What "Copy channel link" and "Copy request page link" copy: the link at the address in
 /// effect (the tunnel's or the manual one, else the local server); with the tunnel switched on
 /// but without any address (not online), a note that the link works only on this computer.
-pub fn copied_link(link: String, tunnel_enabled: bool, public_url: &str) -> String {
+pub fn copied_link(lang: Lang, link: String, tunnel_enabled: bool, public_url: &str) -> String {
     if tunnel_enabled && public_url.trim().is_empty() {
-        format!("{link} (brak internetu)")
+        t(lang, "tray.link_without_internet", &[("link", &link)])
     } else {
         link
     }
 }
 
-/// Creates the tray icon with its menu; left click opens the panel.
-pub fn create(app: &AppHandle) -> tauri::Result<()> {
+/// The tray menu in `lang`.
+fn build_menu(app: &AppHandle, lang: Lang) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     for action in TrayAction::ALL {
         if action == TrayAction::Quit {
@@ -164,13 +179,19 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         menu.append(&MenuItem::with_id(
             app,
             action.id(),
-            action.label(),
+            action.label(lang),
             true,
             None::<&str>,
         )?)?;
     }
+    Ok(menu)
+}
+
+/// Creates the tray icon with its menu in `lang`; left click opens the panel.
+pub fn create(app: &AppHandle, lang: Lang) -> tauri::Result<()> {
+    let menu = build_menu(app, lang)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
-        .tooltip(tooltip_text(None, None))
+        .tooltip(tooltip_text(lang, None, None))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(on_menu_event)
@@ -191,6 +212,14 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Puts a new menu in `lang` on the tray icon (the tooltip follows on the next refresh).
+fn rebuild_menu(app: &AppHandle, lang: Lang) -> tauri::Result<()> {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return Ok(());
+    };
+    tray.set_menu(Some(build_menu(app, lang)?))
+}
+
 fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     let Some(action) = TrayAction::from_id(event.id().as_ref()) else {
         return;
@@ -199,9 +228,10 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match action {
         TrayAction::OpenPanel => crate::window::open_panel(app),
         TrayAction::CopyChannelLink | TrayAction::CopySubmitLink => {
-            let Some((public_url, port, tunnel_enabled)) =
-                shell.with_engine(|e| (e.public_url(), e.port(), e.settings().tunnel_enabled))
-            else {
+            let Some((public_url, port, tunnel_enabled, lang)) = shell.with_engine(|e| {
+                let s = e.settings();
+                (e.public_url(), e.port(), s.tunnel_enabled, s.language)
+            }) else {
                 return;
             };
             let link = if action == TrayAction::CopyChannelLink {
@@ -209,9 +239,9 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             } else {
                 submit_link(&public_url, port)
             };
-            let link = copied_link(link, tunnel_enabled, &public_url);
+            let link = copied_link(lang, link, tunnel_enabled, &public_url);
             if let Err(e) = app.clipboard().write_text(link) {
-                shell.log(&format!("Nie udało się skopiować linku: {e}"));
+                shell.log(Msg::new("log.tray_copy_failed").arg("error", e));
             }
         }
         TrayAction::Skip => {
@@ -221,33 +251,63 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-/// Refreshes the tooltip with the film on air every few seconds, for the life of the app.
-pub fn spawn_tooltip_refresh(app: AppHandle) {
+/// Keeps the tray in step with the app for the life of the app: the tooltip with the film on
+/// air every few seconds, and — at once — the menu and the tooltip when the language changes.
+pub fn spawn_tooltip_refresh(app: AppHandle, created_in: Lang) {
     tauri::async_runtime::spawn(async move {
         let mut last = String::new();
+        let mut shown_lang = Some(created_in);
+        let mut changes = {
+            let shell = app.state::<Shell>();
+            let engine = shell.engine.read().await;
+            match engine.as_ref() {
+                Some(engine) => engine.language_changes(),
+                None => return, // quitting
+            }
+        };
         loop {
-            let text = {
+            let (lang, text) = {
                 let shell = app.state::<Shell>();
                 let engine = shell.engine.read().await;
                 match engine.as_ref() {
-                    Some(engine) => tooltip_text(
-                        net_status(
-                            engine.settings().tunnel_enabled,
-                            &engine.tunnel_state(),
-                            &engine.public_url(),
-                        ),
-                        engine.now_playing().as_deref(),
-                    ),
+                    Some(engine) => {
+                        let lang = engine.language();
+                        let text = tooltip_text(
+                            lang,
+                            net_status(
+                                engine.settings().tunnel_enabled,
+                                &engine.tunnel_state(),
+                                &engine.public_url(),
+                            ),
+                            engine.now_playing().as_deref(),
+                        );
+                        (lang, text)
+                    }
                     None => return, // quitting
                 }
             };
+            if shown_lang.is_some_and(|shown| shown != lang) {
+                // Only a change rebuilds the menu: the first pass shows what `create` made.
+                if let Err(e) = rebuild_menu(&app, lang) {
+                    app.state::<Shell>()
+                        .log(Msg::new("log.tray_menu_failed").arg("error", e));
+                }
+            }
+            shown_lang = Some(lang);
             if text != last
                 && let Some(tray) = app.tray_by_id(TRAY_ID)
                 && tray.set_tooltip(Some(&text)).is_ok()
             {
                 last = text;
             }
-            tokio::time::sleep(TOOLTIP_REFRESH).await;
+            tokio::select! {
+                () = tokio::time::sleep(TOOLTIP_REFRESH) => {}
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return; // the engine is gone
+                    }
+                }
+            }
         }
     });
 }
@@ -332,6 +392,9 @@ mod balloon {
 mod tests {
     use super::*;
 
+    const PL: Lang = Lang::Pl;
+    const EN: Lang = Lang::En;
+
     #[test]
     fn menu_ids_map_back_to_their_actions() {
         for action in TrayAction::ALL {
@@ -341,11 +404,14 @@ mod tests {
         assert_eq!(TrayAction::from_id(""), None);
     }
 
+    fn labels(lang: Lang) -> Vec<String> {
+        TrayAction::ALL.iter().map(|a| a.label(lang)).collect()
+    }
+
     #[test]
-    fn menu_labels_are_the_polish_ones_in_order() {
-        let labels: Vec<_> = TrayAction::ALL.iter().map(|a| a.label()).collect();
+    fn menu_labels_come_from_the_keys_in_each_language_in_order() {
         assert_eq!(
-            labels,
+            labels(PL),
             [
                 "Otwórz panel",
                 "Kopiuj link kanału",
@@ -354,6 +420,43 @@ mod tests {
                 "Zakończ"
             ]
         );
+        assert_eq!(
+            labels(EN),
+            [
+                "Open panel",
+                "Copy channel link",
+                "Copy request page link",
+                "Skip video",
+                "Quit"
+            ]
+        );
+        // Every language shows a real text for every entry (a missing key would show the key).
+        for lang in Lang::ALL {
+            for (action, label) in TrayAction::ALL.iter().zip(labels(lang)) {
+                assert_ne!(label, action.key(), "{lang:?}");
+                assert!(!label.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn every_text_of_the_tray_exists_in_english_and_polish() {
+        for lang in [EN, PL] {
+            for key in [
+                "tray.net_online",
+                "tray.net_connecting",
+                "tray.net_offline",
+                "tray.net_manual",
+                "tray.tooltip_head",
+                "tray.tooltip_idle",
+                "tray.tooltip_playing",
+                "tray.link_without_internet",
+                "tray.hidden_title",
+                "tray.hidden_text",
+            ] {
+                assert_ne!(t(lang, key, &[]), key, "{lang:?} {key}");
+            }
+        }
     }
 
     #[test]
@@ -378,41 +481,60 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_shows_the_film_or_the_break() {
-        assert_eq!(tooltip_text(None, None), "VRCinema — przerwa");
-        assert_eq!(tooltip_text(None, Some("")), "VRCinema — przerwa");
+    fn tooltip_shows_the_film_or_the_break_in_the_language_of_the_app() {
+        assert_eq!(tooltip_text(PL, None, None), "VRCinema — przerwa");
+        assert_eq!(tooltip_text(PL, None, Some("")), "VRCinema — przerwa");
         assert_eq!(
-            tooltip_text(None, Some("Odcinek 1")),
+            tooltip_text(PL, None, Some("Odcinek 1")),
             "VRCinema — teraz leci: Odcinek 1"
+        );
+        assert_eq!(tooltip_text(EN, None, None), "VRCinema — break");
+        assert_eq!(
+            tooltip_text(EN, None, Some("Episode 1")),
+            "VRCinema — now playing: Episode 1"
         );
     }
 
     #[test]
     fn long_titles_are_cut_to_fit_windows() {
         let title = "ż".repeat(300);
-        let text = tooltip_text(Some(Net::Online), Some(&title));
-        assert_eq!(text.encode_utf16().count(), TOOLTIP_MAX_UNITS);
-        assert!(text.starts_with("VRCinema — W sieci — teraz leci: żż"));
-        assert!(text.ends_with('…'));
+        for (lang, start) in [
+            (PL, "VRCinema — W sieci — teraz leci: żż"),
+            (EN, "VRCinema — Online — now playing: żż"),
+        ] {
+            let text = tooltip_text(lang, Some(Net::Online), Some(&title));
+            assert_eq!(text.encode_utf16().count(), TOOLTIP_MAX_UNITS);
+            assert!(text.starts_with(start), "{text}");
+            assert!(text.ends_with('…'));
+        }
         // Characters outside the BMP (two UTF-16 units) are never split.
         let emoji = "🎬".repeat(100);
-        let text = tooltip_text(Some(Net::Offline), Some(&emoji));
+        let text = tooltip_text(PL, Some(Net::Offline), Some(&emoji));
         assert!(text.encode_utf16().count() <= TOOLTIP_MAX_UNITS);
         assert!(text.ends_with('…'));
     }
+
     #[test]
     fn tooltip_tells_whether_the_channel_is_online() {
         assert_eq!(
-            tooltip_text(Some(Net::Online), None),
+            tooltip_text(PL, Some(Net::Online), None),
             "VRCinema — W sieci — przerwa"
         );
         assert_eq!(
-            tooltip_text(Some(Net::Offline), Some("Odcinek 1")),
+            tooltip_text(PL, Some(Net::Offline), Some("Odcinek 1")),
             "VRCinema — Brak internetu — teraz leci: Odcinek 1"
         );
         assert_eq!(
-            tooltip_text(Some(Net::Connecting), None),
+            tooltip_text(PL, Some(Net::Connecting), None),
             "VRCinema — Łączenie z internetem — przerwa"
+        );
+        assert_eq!(
+            tooltip_text(EN, Some(Net::Offline), Some("Episode 1")),
+            "VRCinema — No internet — now playing: Episode 1"
+        );
+        assert_eq!(
+            tooltip_text(EN, Some(Net::Connecting), None),
+            "VRCinema — Connecting to the internet — break"
         );
     }
 
@@ -444,7 +566,7 @@ mod tests {
             Some(Net::Connecting)
         );
         assert_eq!(
-            tooltip_text(Some(Net::Connecting), None),
+            tooltip_text(PL, Some(Net::Connecting), None),
             "VRCinema — Łączenie z internetem — przerwa"
         );
     }
@@ -461,8 +583,12 @@ mod tests {
             Some(Net::Manual)
         );
         assert_eq!(
-            tooltip_text(Some(Net::Manual), None),
+            tooltip_text(PL, Some(Net::Manual), None),
             "VRCinema — Adres ręczny — przerwa"
+        );
+        assert_eq!(
+            tooltip_text(EN, Some(Net::Manual), None),
+            "VRCinema — Manual address — break"
         );
     }
 
@@ -470,14 +596,18 @@ mod tests {
     fn a_link_without_an_address_is_marked_when_the_tunnel_is_on() {
         let local = channel_link("", 8181);
         assert_eq!(
-            copied_link(local.clone(), true, ""),
+            copied_link(PL, local.clone(), true, ""),
             "http://127.0.0.1:8181/live/main.m3u8 (brak internetu)"
         );
+        assert_eq!(
+            copied_link(EN, local.clone(), true, ""),
+            "http://127.0.0.1:8181/live/main.m3u8 (no internet)"
+        );
         // Tunnel off: the local link as before; with an address: the link as it is.
-        assert_eq!(copied_link(local.clone(), false, ""), local);
+        assert_eq!(copied_link(PL, local.clone(), false, ""), local);
         let public = channel_link("https://a.trycloudflare.com", 8181);
         assert_eq!(
-            copied_link(public.clone(), true, "https://a.trycloudflare.com"),
+            copied_link(PL, public.clone(), true, "https://a.trycloudflare.com"),
             public
         );
     }

@@ -6,10 +6,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{Msg, MsgContext, error_msg, msg_error, msg_error_with};
 use crate::tools::download::{download_file, fetch_text, parse_sums, sha256_file};
 
 pub const DEFAULT_API_URL: &str =
@@ -33,7 +34,8 @@ pub struct Release {
 pub struct UpdateInfo {
     pub current: Version,
     pub available: Option<Release>,
-    pub error: Option<String>,
+    #[serde(skip)]
+    pub error: Option<Msg>,
 }
 
 // Serialized for the HTTP layer (camelCase, version as a string).
@@ -75,7 +77,8 @@ fn parse_version(tag: &str) -> Option<Version> {
 /// Turns the API answer into a usable release (`None`: draft/prerelease, bad tag or missing
 /// assets).
 fn parse_release(body: &str) -> Result<Option<Release>> {
-    let api: ApiRelease = serde_json::from_str(body).context("Niepoprawna odpowiedź GitHuba")?;
+    let api: ApiRelease =
+        serde_json::from_str(body).msg_context(Msg::error("github_bad_answer"))?;
     if api.draft || api.prerelease {
         return Ok(None);
     }
@@ -106,10 +109,12 @@ async fn fetch_latest(http: &reqwest::Client, api_base: &str) -> Result<Option<R
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .context("Brak połączenia z GitHubem")?;
+        .msg_context(Msg::error("github_unreachable"))?;
     let status = res.status();
     if !status.is_success() {
-        bail!("GitHub odpowiedział kodem {}", status.as_u16());
+        return Err(msg_error(
+            Msg::error("github_status").arg("status", status.as_u16()),
+        ));
     }
     parse_release(&res.text().await?)
 }
@@ -130,7 +135,7 @@ pub async fn check_latest(
                 .filter(|r| skipped.as_ref() != Some(&r.version));
             (release, None)
         }
-        Err(e) => (None, Some(format!("{e:#}"))),
+        Err(e) => (None, Some(error_msg(&e))),
     };
     UpdateInfo {
         current: current.clone(),
@@ -170,13 +175,13 @@ async fn apply_with(
 async fn prepare(release: &Release, new_path: &Path, http: &reqwest::Client) -> Result<()> {
     let sums = fetch_text(http, &release.sha256_url)
         .await?
-        .ok_or_else(|| anyhow!("Brak pliku sumy kontrolnej ({SUM_ASSET})"))?;
+        .ok_or_else(|| msg_error(Msg::error("update_sum_missing").arg("file", SUM_ASSET)))?;
     let expected = parse_sums(&sums, EXE_ASSET)
-        .ok_or_else(|| anyhow!("Nieczytelny plik sumy kontrolnej ({SUM_ASSET})"))?;
+        .ok_or_else(|| msg_error(Msg::error("update_sum_unreadable").arg("file", SUM_ASSET)))?;
     download_file(http, &release.exe_url, new_path, &mut |_, _| {}).await?;
     let actual = sha256_file(new_path)?;
     if actual != expected {
-        bail!("Suma kontrolna pobranego pliku się nie zgadza");
+        return Err(msg_error(Msg::error("update_sum_mismatch")));
     }
     Ok(())
 }
@@ -189,18 +194,18 @@ fn swap(
     rename: &(dyn Fn(&Path, &Path) -> io::Result<()> + Sync),
 ) -> Result<()> {
     if old_path.exists() {
-        fs::remove_file(old_path).context("Nie można usunąć poprzedniej kopii programu")?;
+        fs::remove_file(old_path).msg_context(Msg::error("update_cannot_remove_old"))?;
     }
-    rename(exe_path, old_path).context("Nie można zmienić nazwy bieżącego programu")?;
+    rename(exe_path, old_path).msg_context(Msg::error("update_cannot_rename"))?;
     if let Err(e) = rename(new_path, exe_path) {
         let restored = rename(old_path, exe_path);
-        return Err(match restored {
-            Ok(()) => anyhow!(e).context("Nie można zainstalować nowej wersji"),
-            Err(r) => anyhow!(e).context(format!(
-                "Nie można zainstalować nowej wersji ani przywrócić starej (kopia: {}): {r}",
-                old_path.display()
-            )),
-        });
+        let msg = match restored {
+            Ok(()) => Msg::error("update_cannot_install"),
+            Err(r) => Msg::error("update_cannot_install_or_restore")
+                .arg("path", old_path.display())
+                .arg("detail", r),
+        };
+        return Err(msg_error_with(msg, e));
     }
     Ok(())
 }
@@ -349,7 +354,7 @@ mod tests {
         let api = format!("{}/api/missing", server.base);
         let info = check_latest(&http(), &api, &v("0.2.0"), None).await;
         assert!(info.available.is_none());
-        assert!(info.error.unwrap().contains("404"));
+        assert!(info.error.unwrap().to_string().contains("404"));
     }
 
     #[tokio::test]
@@ -416,7 +421,7 @@ mod tests {
         publish(&server, "v9.9.9", &data, Some(&hex(b"something else")));
         let (dir, exe) = setup();
         let err = apply(&release(&server), &exe, &http()).await.unwrap_err();
-        assert!(format!("{err:#}").contains("Suma kontrolna"));
+        assert!(format!("{err:#}").contains("checksum"));
         assert_eq!(fs::read(&exe).unwrap(), b"old-bytes");
         assert_eq!(leftovers(dir.path()), ["VRCinema.exe"]);
     }

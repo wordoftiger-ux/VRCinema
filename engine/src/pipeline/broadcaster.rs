@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::{Msg, error_msg};
 use crate::pipeline::playlist::{LivePlaylistInput, PlaylistSegment, build_live_playlist};
 use crate::pipeline::tsrewrite::{TsRewriter, content_end, min_dts};
 use crate::stats::{DtsMonitor, HlsCounters};
@@ -49,7 +50,7 @@ const REQUEUE_DELAY_MS: u64 = 4_000;
 /// trust the packets over the clock: 1 s.
 const JOIN_WINDOW: i64 = 90_000;
 
-pub type LogFn = Box<dyn Fn(&str) + Send>;
+pub type LogFn = Box<dyn Fn(Msg) + Send>;
 
 pub struct BroadcasterOptions {
     pub dir: PathBuf,
@@ -109,7 +110,7 @@ impl Broadcaster {
         }
     }
 
-    fn log(&self, msg: &str) {
+    fn log(&self, msg: Msg) {
         if let Some(log) = &self.o.log {
             log(msg);
         }
@@ -126,10 +127,11 @@ impl Broadcaster {
     pub fn start_initial(&mut self, source: &mut dyn SegmentSource) {
         let _ = std::fs::remove_dir_all(&self.o.dir);
         if let Err(e) = std::fs::create_dir_all(&self.o.dir) {
-            self.log(&format!(
-                "Nie można utworzyć katalogu {}: {e}",
-                self.o.dir.display()
-            ));
+            self.log(
+                Msg::new("log.cannot_create_dir")
+                    .arg("path", self.o.dir.display())
+                    .arg("error", e),
+            );
         }
         let mut first = 0.0;
         for i in 0..INITIAL_SEGMENTS {
@@ -206,16 +208,17 @@ impl Broadcaster {
                 Ok(seg) => seg,
                 Err(e) => {
                     // A source error must not take the server down: retry on the next tick.
-                    self.log(&format!("Błąd źródła fragmentów: {e}"));
+                    self.log(Msg::new("log.segment_source_error").arg_msg("error", error_msg(&e)));
                     return 1.0;
                 }
             };
             match self.publish(source, &seg) {
                 Ok(d) => return d,
-                Err(e) => self.log(&format!(
-                    "Pominięto uszkodzony fragment {}: {e}",
-                    seg.path.display()
-                )),
+                Err(e) => self.log(
+                    Msg::new("log.bad_segment_skipped")
+                        .arg("path", seg.path.display())
+                        .arg_msg("error", error_msg(&e)),
+                ),
             }
         }
         // The source keeps returning bad data: short pause, retry on the next tick.
@@ -773,7 +776,7 @@ mod tests {
             logs.lock()
                 .unwrap()
                 .iter()
-                .any(|l| l == "Błąd źródła fragmentów: baza niedostępna")
+                .any(|l| l == "Segment source error: baza niedostępna")
         );
         fail.store(false, Ordering::SeqCst);
         env.advance(5_000);

@@ -963,11 +963,11 @@ async fn an_upgrade_without_cloudflared_downloads_it_unprompted_and_goes_online(
     let log = app.log_text();
     assert!(
         log.contains(
-            "Narzędzia: brak programu cloudflared (nowy w tej wersji) — pobieram go w tle."
+            "Tools: the cloudflared program is missing (new in this version) — downloading it in the background."
         ),
         "{log}"
     );
-    assert!(log.contains("Narzędzia (pobieranie): gotowe."), "{log}");
+    assert!(log.contains("Tools (downloading): done."), "{log}");
     let info = app.get("/api/desktop/info", &cookie).await;
     assert_eq!(info["toolsOk"], true, "{info}");
     assert_eq!(info["missingTools"], json!([]));
@@ -1010,7 +1010,7 @@ async fn an_upgrade_whose_download_fails_runs_on_and_shows_cloudflared_missing()
     let app = App::start_with(|home, _| stage_two_home(home, true)).await;
     let cookie = app.window_cookie().await;
     eventually(60, "the failed download", || async {
-        app.log_text().contains("Narzędzia (pobieranie): błąd")
+        app.log_text().contains("Tools (downloading): error")
     })
     .await;
     eventually(10, "the job to end", || async {
@@ -1047,7 +1047,7 @@ async fn a_failed_cloudflared_download_is_tried_again_later() {
     let cookie = app.window_cookie().await;
     // Nothing published yet: the first download fails.
     eventually(60, "the failed download", || async {
-        app.log_text().contains("Narzędzia (pobieranie): błąd")
+        app.log_text().contains("Tools (downloading): error")
     })
     .await;
     publish_fake_cloudflared(&server);
@@ -1063,7 +1063,7 @@ async fn before_the_first_run_wizard_nothing_is_downloaded_by_itself() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!app.engine().core.tools_job_running());
     assert!(
-        !app.log_text().contains("nowy w tej wersji"),
+        !app.log_text().contains("new in this version"),
         "{}",
         app.log_text()
     );
@@ -1270,7 +1270,7 @@ async fn a_short_tunnel_loss_does_not_pause_a_long_one_does_and_the_return_resum
     .await;
     let info = app.get("/api/desktop/info", &cookie).await;
     assert_eq!(info["paused"], false);
-    assert!(app.log_text().contains("Automatyczna pauza"));
+    assert!(app.log_text().contains("Automatic pause"));
     app.stop().await;
 }
 

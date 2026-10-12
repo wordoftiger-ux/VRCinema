@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use vrcinema::config::{AppConfig, fake_resolver_file, find_root, load_config, merged_env};
+use vrcinema::i18n::{Lang, Msg};
 use vrcinema::process::contain_this_process;
 use vrcinema::server::{RunOptions, log, run};
 use vrcinema::setup::{SetupOptions, run_setup};
@@ -22,7 +23,7 @@ fn load_env(root: &std::path::Path) -> Result<HashMap<String, String>, String> {
     merged_env(std::env::vars_os(), root)
 }
 
-fn check_tools(config: &AppConfig) -> Result<(), String> {
+fn check_tools(config: &AppConfig) -> Result<(), Msg> {
     let missing: Vec<String> = [
         &config.ffmpeg_path,
         &config.ffprobe_path,
@@ -35,23 +36,21 @@ fn check_tools(config: &AppConfig) -> Result<(), String> {
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "\nBrak narzędzi: {}\nUruchom najpierw: vrcinema setup\n",
-            missing.join(", ")
-        ))
+        Err(Msg::new("log.headless_tools_missing").arg("tools", missing.join(", ")))
     }
 }
 
 /// The configuration and the merged variables (environment + `.env`).
 fn prepare_server(root: &std::path::Path) -> Result<(AppConfig, HashMap<String, String>), String> {
     let env = load_env(root)?;
-    let config = load_config(&env, root, cfg!(windows))
-        .map_err(|e| format!("\nBłąd konfiguracji: {e}\n"))?;
-    check_tools(&config)?;
+    let config = load_config(&env, root, cfg!(windows)).map_err(|e| {
+        Msg::new("log.headless_config_error")
+            .arg("error", e)
+            .render(Lang::En)
+    })?;
+    check_tools(&config).map_err(|m| m.render(config.language))?;
     if !env.contains_key("SESSION_SECRET") || env["SESSION_SECRET"].trim().is_empty() {
-        log(
-            "Uwaga: brak SESSION_SECRET w .env — po restarcie trzeba będzie zalogować się ponownie.",
-        );
+        log(config.language, &Msg::new("log.session_secret_missing"));
     }
     Ok((config, env))
 }
@@ -106,7 +105,12 @@ async fn main() -> ExitCode {
         };
     }
     if let Some(other) = args.first() {
-        eprintln!("Nieznane polecenie: {other}\nUżycie: vrcinema [setup [--force] [--no-env]]");
+        eprintln!(
+            "{}",
+            Msg::new("log.headless_unknown_command")
+                .arg("command", other)
+                .render(Lang::En)
+        );
         return ExitCode::FAILURE;
     }
 
@@ -120,9 +124,10 @@ async fn main() -> ExitCode {
     // Every process started from here on (ffmpeg, yt-dlp and whatever they start) is born
     // inside the job object and dies with this program (Windows; a no-op elsewhere).
     if let Err(e) = contain_this_process() {
-        log(&format!(
-            "Uwaga: nie można powiązać procesów potomnych z serwerem: {e}"
-        ));
+        log(
+            config.language,
+            &Msg::new("log.job_containment_failed").arg("error", e),
+        );
     }
     // Read after .env was applied; an empty value counts as unset (like TS).
     let fake_resolver = fake_resolver_file(&env);

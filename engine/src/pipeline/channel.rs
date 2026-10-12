@@ -14,8 +14,7 @@ use rusqlite::Connection;
 use tokio::sync::mpsc;
 
 use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
-use crate::i18n::{self, Lang, Msg};
-use crate::live::LiveValue;
+use crate::i18n::{Msg, error_msg, msg_error};
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{SlateKind, Slates};
@@ -31,7 +30,7 @@ pub type RemoveFileFn = Box<dyn Fn(&Path) + Send>;
 /// A running cut of one film (real: `ClipSegmenter`; in tests: a fake).
 pub trait ClipHandle: Send {
     fn state(&self) -> SegmenterState;
-    fn error(&self) -> Option<String>;
+    fn error(&self) -> Option<Msg>;
     /// Source duration from ffprobe (may fill in a duration missing from the queue).
     fn duration_s(&self) -> Option<f64>;
     fn poll(&mut self) -> Vec<SegmentInfo>;
@@ -56,7 +55,7 @@ pub trait ClipFactory: Send + Sync {
         item: QueueItem,
         start_at_s: f64,
         attempt: u32,
-    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>>;
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,8 +160,6 @@ pub struct ChannelOptions {
     pub prefetch_s: Option<f64>,
     /// How many segments viewers lag behind the newest published one (for "now playing").
     pub viewer_lag_segments: Option<usize>,
-    /// Language of the reasons kept with failed and skipped films.
-    pub language: LiveValue<Lang>,
 }
 
 impl ChannelOptions {
@@ -185,7 +182,6 @@ impl ChannelOptions {
             start_timeout_s: None,
             prefetch_s: None,
             viewer_lag_segments: None,
-            language: LiveValue::new(Lang::En),
         }
     }
 }
@@ -203,8 +199,8 @@ const SEEK_QUIET_MS: u64 = 700;
 /// A seek target this close to the end ends the film (like a skip).
 const SEEK_END_MARGIN_S: f64 = 1.0;
 
-// Why a film ended without playing to the end (kept with it in the history, in the channel's
-// language).
+// Why a film ended without playing to the end (kept with it in the history as a message, shown
+// in the reader's language).
 const STALL_ERROR: &str = "item_errors.stalled";
 const START_TIMEOUT_ERROR: &str = "item_errors.start_timeout";
 const SKIPPED: &str = "item_errors.skipped";
@@ -223,7 +219,7 @@ struct ActiveClip {
     /// Film second the current process started from.
     base_s: f64,
     handle: Option<Box<dyn ClipHandle>>,
-    start_error: Option<String>,
+    start_error: Option<Msg>,
     started_at: u64,
     ready: VecDeque<SegmentInfo>,
     /// Seconds aired from the current process.
@@ -315,7 +311,7 @@ impl ActiveClip {
     }
 
     /// The start or the process failed (and `next()` has not dealt with it yet).
-    fn failure(&self, lang: Lang) -> Option<String> {
+    fn failure(&self) -> Option<Msg> {
         if let Some(error) = &self.start_error {
             return Some(error.clone());
         }
@@ -324,11 +320,7 @@ impl ActiveClip {
             handle.state(),
             SegmenterState::Failed | SegmenterState::Killed
         )
-        .then(|| {
-            handle
-                .error()
-                .unwrap_or_else(|| i18n::t(lang, FFMPEG_STOPPED, &[]))
-        })
+        .then(|| handle.error().unwrap_or_else(|| Msg::new(FFMPEG_STOPPED)))
     }
 }
 
@@ -348,7 +340,7 @@ struct SegmentMeta {
 /// Result of an asynchronous clip start.
 struct Launch {
     clip_id: u64,
-    result: Result<Box<dyn ClipHandle>, String>,
+    result: Result<Box<dyn ClipHandle>, Msg>,
 }
 
 /// A non-live film taken off the air (its clip disposed): by a pause until the resume, or by a
@@ -493,19 +485,14 @@ impl Channel {
     }
 
     pub fn skip(&mut self) -> anyhow::Result<()> {
-        let skipped = self.text(SKIPPED);
+        let skipped = Msg::new(SKIPPED);
         if let Some(p) = self.parked.take() {
             // Paused film: its clip is already gone. The channel stays paused for the next one.
             return self
-                .queue(|q| q.finish(p.item.id, ItemStatus::Played, Some(&skipped)))
+                .queue(|q| q.finish(p.item.id, ItemStatus::Played, Some(&skipped.to_stored())))
                 .map(|_| ());
         }
         self.finish_current(ItemStatus::Played, Some(&skipped))
-    }
-
-    /// A reason kept with a film, in the channel's language.
-    fn text(&self, key: &str) -> String {
-        i18n::t(self.o.language.get(), key, &[])
     }
 
     /// Airs `slates` from now on (a new address was drawn on them). Films are not touched; the
@@ -640,18 +627,17 @@ impl Channel {
     fn request_seek(&mut self, request: SeekRequest) {
         if let Some(p) = &self.parked {
             let Some(target) = request.target(p.position_s, p.probed.duration_s) else {
-                self.log(&format!(
-                    "Pominięto skok {request:?}: niedozwolony dla tego filmu"
-                ));
+                self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
                 return;
             };
             if ends_film(target, p.probed.duration_s) {
-                self.log(&format!(
-                    "Skok na koniec wstrzymanego filmu #{} \"{}\" — film pominięty",
-                    p.item.id, p.item.title
-                ));
+                self.log(
+                    Msg::new("log.seek_to_end_paused")
+                        .arg("id", p.item.id)
+                        .arg("title", &p.item.title),
+                );
                 if let Err(e) = self.skip() {
-                    self.log(&format!("Błąd kanału przy skoku: {e}"));
+                    self.log_error("log.channel_error_seek", &e);
                 }
             } else if let Some(p) = self.parked.as_mut() {
                 p.position_s = target;
@@ -659,18 +645,14 @@ impl Channel {
             return;
         }
         let Some(c) = self.current.as_ref().filter(|c| !c.item.is_live) else {
-            self.log(&format!(
-                "Pominięto skok {request:?}: nic nie leci albo to transmisja na żywo"
-            ));
+            self.log(Msg::new("log.seek_nothing_to_seek").arg("request", format!("{request:?}")));
             return;
         };
         let from = self
             .pending_seek_of(c.item.id)
             .unwrap_or_else(|| c.position_s());
         let Some(target_s) = request.target(from, c.duration_s()) else {
-            self.log(&format!(
-                "Pominięto skok {request:?}: niedozwolony dla tego filmu"
-            ));
+            self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
             return;
         };
         self.pending_seek = Some(PendingSeek {
@@ -683,7 +665,7 @@ impl Channel {
     /// Called by the engine loop every tick: runs a seek whose quiet has passed.
     pub fn on_tick(&mut self) {
         if let Err(e) = self.run_due_seek() {
-            self.log(&format!("Błąd kanału przy skoku: {e}"));
+            self.log_error("log.channel_error_seek", &e);
         }
     }
 
@@ -720,16 +702,17 @@ impl Channel {
             return Ok(());
         };
         if ends_film(seek.target_s, c.duration_s()) {
-            self.log(&format!(
-                "Skok na koniec filmu #{} \"{}\" — film pominięty",
-                c.item.id, c.item.title
-            ));
-            let skipped = self.text(SKIPPED);
+            self.log(
+                Msg::new("log.seek_to_end")
+                    .arg("id", c.item.id)
+                    .arg("title", &c.item.title),
+            );
+            let skipped = Msg::new(SKIPPED);
             return self.finish(c, ItemStatus::Played, Some(&skipped));
         }
         // The prefetched film may now be far from its turn; it is prefetched again near the end.
         self.drop_prefetched();
-        if let Some(error) = c.failure(self.o.language.get()) {
+        if let Some(error) = c.failure() {
             // The process had already failed: the usual retry accounting, from the target.
             c.base_s = seek.target_s;
             c.emitted_s = 0.0;
@@ -738,10 +721,13 @@ impl Channel {
             return self.handle_failure(error);
         }
         let mut off = Parked::off_air(c);
-        self.log(&format!(
-            "Skok: film #{} \"{}\" z {:.0} s na {:.0} s",
-            off.item.id, off.item.title, off.position_s, seek.target_s
-        ));
+        self.log(
+            Msg::new("log.seek")
+                .arg("id", off.item.id)
+                .arg("title", &off.item.title)
+                .arg("from", format!("{:.0}", off.position_s))
+                .arg("to", format!("{:.0}", seek.target_s)),
+        );
         off.position_s = seek.target_s;
         self.current = Some(self.relaunch(off));
         Ok(())
@@ -787,12 +773,19 @@ impl Channel {
                 })?;
                 again.id
             }
-            status => anyhow::bail!(
-                "Pozycji #{item_id} nie można odtworzyć teraz (status {}).",
-                status.as_str()
-            ),
+            status => {
+                return Err(msg_error(
+                    Msg::error("item_not_playable")
+                        .arg("id", item_id)
+                        .arg("status", status.as_str()),
+                ));
+            }
         };
-        self.log(&format!("Odtwórz teraz: \"{}\" (#{chosen})", item.title));
+        self.log(
+            Msg::new("log.play_now")
+                .arg("title", &item.title)
+                .arg("id", chosen),
+        );
         self.skip()?;
         // The owner's explicit "play this now" ends the manual pause (the paused film was just
         // skipped, so nothing is relaunched); automatic reasons keep holding the film.
@@ -824,9 +817,9 @@ impl Channel {
         if let Some(target) = target
             && ends_film(target, c.duration_s())
         {
-            let skipped = self.text(SKIPPED);
+            let skipped = Msg::new(SKIPPED);
             if let Err(e) = self.finish(c, ItemStatus::Played, Some(&skipped)) {
-                self.log(&format!("Błąd kanału przy pauzie: {e}"));
+                self.log_error("log.channel_error_pause", &e);
             }
             return;
         }
@@ -834,13 +827,13 @@ impl Channel {
         if let Some(target) = target {
             p.position_s = target;
         }
-        self.log(&format!(
-            "Pauza ({}): film #{} \"{}\" wstrzymany na {:.0} s",
-            reason.as_str(),
-            p.item.id,
-            p.item.title,
-            p.position_s
-        ));
+        self.log(
+            Msg::new("log.pause")
+                .arg("reason", reason.as_str())
+                .arg("id", p.item.id)
+                .arg("title", &p.item.title)
+                .arg("seconds", format!("{:.0}", p.position_s)),
+        );
         self.parked = Some(p);
     }
 
@@ -848,7 +841,7 @@ impl Channel {
     /// (played), a failure goes through the normal retry accounting.
     fn settle_before_parking(&mut self) {
         self.poll_launches();
-        let stopped = self.text(FFMPEG_STOPPED);
+        let stopped = Msg::new(FFMPEG_STOPPED);
         let Some(c) = self.current.as_mut() else {
             return;
         };
@@ -877,7 +870,7 @@ impl Channel {
             Ok(())
         };
         if let Err(e) = result {
-            self.log(&format!("Błąd kanału przy pauzie: {e}"));
+            self.log_error("log.channel_error_pause", &e);
         }
     }
 
@@ -888,10 +881,12 @@ impl Channel {
             return;
         }
         if let Some(p) = self.parked.take() {
-            self.log(&format!(
-                "Wznowienie: film #{} \"{}\" od {:.0} s",
-                p.item.id, p.item.title, p.position_s
-            ));
+            self.log(
+                Msg::new("log.resume")
+                    .arg("id", p.item.id)
+                    .arg("title", &p.item.title)
+                    .arg("seconds", format!("{:.0}", p.position_s)),
+            );
             self.current = Some(self.relaunch(p));
         }
     }
@@ -940,7 +935,7 @@ impl Channel {
         };
         let next = self.prefetched.as_ref().map(|c| NextInfo {
             title: c.item.title.clone(),
-            state: if c.failure(Lang::En).is_some() {
+            state: if c.failure().is_some() {
                 NextState::Failed
             } else if c.is_starting() {
                 NextState::Preparing
@@ -979,7 +974,7 @@ impl Channel {
     /// Marks `id` failed with `error` (the supervisor's verdict on a film that keeps crashing
     /// the loop). An owner's removal is not overwritten. The clips are disposed by `stop()`.
     pub fn fail_item(&mut self, id: i64, error: &Msg) -> anyhow::Result<()> {
-        let error = error.render(self.o.language.get());
+        let error = error.to_stored();
         self.queue(|q| q.finish(id, ItemStatus::Failed, Some(&error)))
             .map(|_| ())
     }
@@ -987,7 +982,6 @@ impl Channel {
     /// Hands finished clip starts to their clips; a start whose clip was dropped meanwhile is
     /// disposed.
     pub fn poll_launches(&mut self) {
-        let lang = self.o.language.get();
         while let Ok(launch) = self.launch_rx.try_recv() {
             let target = [self.current.as_mut(), self.prefetched.as_mut()]
                 .into_iter()
@@ -996,8 +990,8 @@ impl Channel {
             match (target, launch.result) {
                 (Some(clip), Ok(handle)) => clip.handle = Some(handle),
                 (Some(clip), Err(e)) => {
-                    clip.start_error = Some(if e.is_empty() {
-                        i18n::t(lang, UNKNOWN_ERROR, &[])
+                    clip.start_error = Some(if e.to_string().is_empty() {
+                        Msg::new(UNKNOWN_ERROR)
                     } else {
                         e
                     });
@@ -1015,10 +1009,15 @@ impl Channel {
         Ok(f(&QueueRepo::new(&conn))?)
     }
 
-    fn log(&self, msg: &str) {
+    fn log(&self, msg: Msg) {
         if let Some(log) = &self.o.log {
             log(msg);
         }
+    }
+
+    /// A log entry `key` with the error and its causes (`{error}`).
+    fn log_error(&self, key: &'static str, e: &anyhow::Error) {
+        self.log(Msg::new(key).arg_msg("error", error_msg(e)));
     }
 
     fn next_inner(&mut self) -> anyhow::Result<SourceSegment> {
@@ -1069,14 +1068,14 @@ impl Channel {
                     continue;
                 }
                 Some((SegmenterState::Failed | SegmenterState::Killed, error)) => {
-                    let stopped = self.text(FFMPEG_STOPPED);
+                    let stopped = Msg::new(FFMPEG_STOPPED);
                     self.handle_failure(error.unwrap_or(stopped))?;
                     continue;
                 }
                 Some(_) => {}
                 None => {
                     if now.saturating_sub(c.started_at) > start_timeout_ms {
-                        self.handle_failure(self.text(START_TIMEOUT_ERROR))?;
+                        self.handle_failure(Msg::new(START_TIMEOUT_ERROR))?;
                         continue;
                     }
                     return self.slate(SlateKind::Buffering);
@@ -1087,7 +1086,7 @@ impl Channel {
                 if let Some(handle) = c.handle.as_mut() {
                     handle.kill();
                 }
-                let stalled = self.text(STALL_ERROR);
+                let stalled = Msg::new(STALL_ERROR);
                 self.finish_current(ItemStatus::Failed, Some(&stalled))?;
                 continue;
             }
@@ -1115,7 +1114,9 @@ impl Channel {
             SlateKind::Pause => &self.o.slates.pause,
         };
         if list.is_empty() {
-            anyhow::bail!("Plansza \"{}\" nie ma fragmentów.", kind.as_str());
+            return Err(msg_error(
+                Msg::new("log.slate_empty").arg("kind", kind.as_str()),
+            ));
         }
         let slot = slate_slot(kind);
         if self.last_slate_kind != Some(kind) {
@@ -1215,7 +1216,7 @@ impl Channel {
         match self.queue(|q| q.next_queued(channel_id)) {
             Ok(Some(head)) => self.prefetched = Some(self.launch(head, 0.0, 0)),
             Ok(None) => {}
-            Err(e) => self.log(&format!("Błąd kolejki przy wyprzedzaniu: {e}")),
+            Err(e) => self.log_error("log.queue_error_prefetch", &e),
         }
     }
 
@@ -1255,19 +1256,21 @@ impl Channel {
                 });
                 clip.start = Some(task.abort_handle());
             }
-            Err(e) => clip.start_error = Some(e.to_string()),
+            Err(e) => clip.start_error = Some(Msg::text(e)),
         }
         clip
     }
 
-    fn handle_failure(&mut self, error: String) -> anyhow::Result<()> {
+    fn handle_failure(&mut self, error: Msg) -> anyhow::Result<()> {
         let Some(mut c) = self.current.take() else {
             return Ok(());
         };
-        self.log(&format!(
-            "Film #{} \"{}\": {error}",
-            c.item.id, c.item.title
-        ));
+        self.log(
+            Msg::new("log.clip_failed")
+                .arg("id", c.item.id)
+                .arg("title", &c.item.title)
+                .arg_msg("error", error.clone()),
+        );
         let probed = c.probed();
         if let Some(mut handle) = c.handle.take() {
             handle.dispose();
@@ -1283,7 +1286,7 @@ impl Channel {
         self.finish(c, ItemStatus::Failed, Some(&error))
     }
 
-    fn finish_current(&mut self, status: ItemStatus, error: Option<&str>) -> anyhow::Result<()> {
+    fn finish_current(&mut self, status: ItemStatus, error: Option<&Msg>) -> anyhow::Result<()> {
         match self.current.take() {
             Some(c) => self.finish(c, status, error),
             None => Ok(()),
@@ -1294,10 +1297,11 @@ impl Channel {
         &mut self,
         mut c: ActiveClip,
         status: ItemStatus,
-        error: Option<&str>,
+        error: Option<&Msg>,
     ) -> anyhow::Result<()> {
         // Conditional: an owner's removal (status `removed`) is never overwritten.
-        let result = self.queue(|q| q.finish(c.item.id, status, error));
+        let stored = error.map(Msg::to_stored);
+        let result = self.queue(|q| q.finish(c.item.id, status, stored.as_deref()));
         c.dispose();
         self.forget_seek_of(c.item.id);
         result.map(|_| ())
@@ -1346,7 +1350,7 @@ impl SegmentSource for Channel {
         match self.next_inner() {
             Ok(seg) => Ok(seg),
             Err(e) => {
-                self.log(&format!("Błąd kanału: {e}"));
+                self.log_error("log.channel_error", &e);
                 let kind = if self.current.is_some() {
                     SlateKind::Buffering
                 } else {
@@ -1376,6 +1380,7 @@ impl SegmentSource for Channel {
 mod tests {
     use super::*;
     use crate::db::{AddedBy, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+    use crate::i18n::Lang;
     use crate::stats::StreamMode;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::oneshot;
@@ -1399,7 +1404,7 @@ mod tests {
 
     struct FakeState {
         state: SegmenterState,
-        error: Option<String>,
+        error: Option<Msg>,
         killed: bool,
         disposed: bool,
         pending: Vec<SegmentInfo>,
@@ -1429,7 +1434,7 @@ mod tests {
             self.lock().state = state;
         }
         fn set_error(&self, error: &str) {
-            self.lock().error = Some(error.into());
+            self.lock().error = Some(Msg::text(error));
         }
         fn killed(&self) -> bool {
             self.lock().killed
@@ -1452,7 +1457,7 @@ mod tests {
         fn state(&self) -> SegmenterState {
             self.fake.lock().state
         }
-        fn error(&self) -> Option<String> {
+        fn error(&self) -> Option<Msg> {
             self.fake.lock().error.clone()
         }
         fn duration_s(&self) -> Option<f64> {
@@ -1536,7 +1541,7 @@ mod tests {
             item: QueueItem,
             start_at_s: f64,
             attempt: u32,
-        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>> {
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
             let mut s = self.lock();
             s.calls.push(Call {
                 item_id: item.id,
@@ -1548,7 +1553,11 @@ mod tests {
             }
             if s.fail_next > 0 {
                 s.fail_next -= 1;
-                return Box::pin(async { Err("nie da się rozpoznać".to_string()) });
+                return Box::pin(async {
+                    Err(Msg::error("process_timeout")
+                        .arg("seconds", 30)
+                        .arg("command", "yt-dlp"))
+                });
             }
             let gate = s.manual.then(|| {
                 let (tx, rx) = oneshot::channel();
@@ -1601,8 +1610,6 @@ mod tests {
             Arc::new(factory.clone()),
             slates(),
         );
-        // The tests read the Polish reasons.
-        o.language = LiveValue::new(Lang::Pl);
         let clock = Arc::clone(now);
         o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
         let removed = Arc::clone(removed);
@@ -1807,7 +1814,12 @@ mod tests {
         assert_eq!(e.key(), "idle");
         let fresh = e.get(item.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
-        assert!(fresh.error.unwrap().contains("Connection reset"));
+        assert!(
+            fresh
+                .error_text(Lang::En)
+                .unwrap()
+                .contains("Connection reset")
+        );
     }
 
     #[tokio::test]
@@ -1824,7 +1836,24 @@ mod tests {
         e.flush().await;
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
-        assert!(fresh.error.unwrap().contains("nie da się rozpoznać"));
+        assert!(
+            fresh
+                .error_text(Lang::En)
+                .unwrap()
+                .contains("Time limit exceeded (30 s): yt-dlp")
+        );
+        assert_eq!(
+            fresh.error_text(Lang::Pl).unwrap(),
+            "Przekroczono limit czasu (30 s): yt-dlp"
+        );
+        // Kept as a message (key and fields), not as the text of one language.
+        let raw = fresh.error.unwrap();
+        assert!(raw.starts_with(crate::i18n::STORED_PREFIX), "{raw:?}");
+        assert!(raw.contains("errors.process_timeout"), "{raw:?}");
+        assert!(
+            !raw.contains("Przekroczono") && !raw.contains("Time limit"),
+            "{raw:?}"
+        );
         assert_eq!(e.factory.last_call_item(), b.id);
     }
 
@@ -1845,7 +1874,7 @@ mod tests {
         let fresh = e.get(item.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
         assert_eq!(
-            fresh.error.as_deref(),
+            fresh.error_text(Lang::Pl).as_deref(),
             Some("Źródło nie dostarczało danych przez 30 s")
         );
         assert!(h.killed());
@@ -1974,7 +2003,13 @@ mod tests {
         e.channel.skip().unwrap();
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert!(fresh.error.unwrap().to_lowercase().contains("pomini"));
+        assert!(
+            fresh
+                .error_text(Lang::En)
+                .unwrap()
+                .to_lowercase()
+                .contains("skipped")
+        );
         assert_eq!(e.key(), "buffering");
         e.flush().await;
         assert_eq!(e.factory.last_call_item(), b.id);
@@ -2081,7 +2116,7 @@ mod tests {
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
         assert_eq!(
-            fresh.error.as_deref(),
+            fresh.error_text(Lang::Pl).as_deref(),
             Some("Przekroczono czas uruchamiania źródła")
         );
     }
@@ -2216,7 +2251,10 @@ mod tests {
             .unwrap();
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
-        assert_eq!(fresh.error.as_deref(), Some("Błąd wewnętrzny"));
+        assert_eq!(
+            fresh.error_text(Lang::En).as_deref(),
+            Some("Internal error")
+        );
         assert!(fresh.finished_at.is_some());
         // A removed item stays removed.
         let b = e.add_item("b");
@@ -2480,7 +2518,10 @@ mod tests {
         e.channel.skip().unwrap();
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
+        assert_eq!(
+            fresh.error_text(Lang::En).as_deref(),
+            Some("Skipped by the owner")
+        );
         assert_eq!(e.key(), "pause");
         e.flush().await;
         assert_eq!(e.get(b.id).status, ItemStatus::Queued);
@@ -2653,7 +2694,7 @@ mod tests {
         e.channel.pause(PauseReason::Tunnel);
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
-        assert!(fresh.error.unwrap().contains("boom"));
+        assert!(fresh.error_text(Lang::En).unwrap().contains("boom"));
         assert_eq!(e.key(), "idle");
         e.channel.resume(PauseReason::Tunnel);
         e.flush().await;
@@ -2879,7 +2920,10 @@ mod tests {
         assert!(h0.disposed());
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
+        assert_eq!(
+            fresh.error_text(Lang::En).as_deref(),
+            Some("Skipped by the owner")
+        );
         assert_eq!(e.key(), "buffering");
         e.flush().await;
         assert_eq!(e.factory.last_call_item(), b.id);
@@ -2907,7 +2951,10 @@ mod tests {
         e.channel.seek_to(99.5);
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
+        assert_eq!(
+            fresh.error_text(Lang::En).as_deref(),
+            Some("Skipped by the owner")
+        );
         assert_eq!(e.key(), "pause");
         e.flush().await;
         assert_eq!(e.starts(), 1);
@@ -3052,7 +3099,10 @@ mod tests {
         e.channel.play_now(c.id).unwrap();
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
+        assert_eq!(
+            fresh.error_text(Lang::En).as_deref(),
+            Some("Skipped by the owner")
+        );
         assert_eq!(e.key(), "buffering");
         e.flush().await;
         assert_eq!(e.factory.last_call_item(), c.id);

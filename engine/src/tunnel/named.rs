@@ -422,12 +422,9 @@ pub async fn login(
     // Dropped on every way out of here: cloudflared dies with it.
     let (mut child, job) = crate::process::spawn_in_own_job(&mut command).map_err(cannot_start)?;
     if let Some(warning) = job.warning() {
-        log(&format!("Stały link: {warning}."));
+        log(Msg::new("log.named_job_warning").arg_msg("warning", warning.clone()));
     }
-    log(&format!(
-        "Stały link: logowanie do Cloudflare (cloudflared, pid {}) — czekam na potwierdzenie w przeglądarce.",
-        child.id().unwrap_or(0)
-    ));
+    log(Msg::new("log.named_login_started").arg("pid", child.id().unwrap_or(0)));
     let (tx, mut lines) = mpsc::channel(64);
     if let Some(pipe) = child.stdout.take() {
         tokio::spawn(forward_lines(pipe, tx.clone()));
@@ -446,16 +443,13 @@ pub async fn login(
             _ = &mut cancel => {
                 kill(&mut child).await;
                 keep_late_cert(paths, &user_cert, existed, log);
-                log("Stały link: logowanie do Cloudflare anulowano.");
+                log(Msg::new("log.named_login_cancelled"));
                 return Err(NamedError::new(ErrorCode::Cancelled, Msg::error("cancelled")));
             }
             _ = &mut deadline => {
                 kill(&mut child).await;
                 keep_late_cert(paths, &user_cert, existed, log);
-                log(&format!(
-                    "Stały link: logowanie do Cloudflare nie zakończyło się w ciągu {}.",
-                    human(timeout)
-                ));
+                log(Msg::new("log.named_login_timeout").arg_msg("duration", human_msg(timeout)));
                 return Err(NamedError::new(
                     ErrorCode::Timeout,
                     Msg::error("login_timeout").arg_msg("duration", human_msg(timeout)),
@@ -484,17 +478,11 @@ pub async fn login(
     }
     let status = status.map_err(|e| failed("login_interrupted", detail(e)))?;
     if !status.success() {
-        log(&format!(
-            "Stały link: logowanie do Cloudflare nie powiodło się: {}",
-            or_none(&last)
-        ));
+        log(Msg::new("log.named_login_failed").arg_msg("reason", reason(&last)));
         return Err(failed("login_failed", reason(&last)));
     }
     if !non_empty(&user_cert) {
-        log(&format!(
-            "Stały link: cloudflared zakończył logowanie bez certyfikatu w {}.",
-            user_cert.display()
-        ));
+        log(Msg::new("log.named_login_no_certificate").arg("path", user_cert.display()));
         return Err(NamedError::new(
             ErrorCode::Failed,
             Msg::error("login_no_certificate"),
@@ -507,24 +495,17 @@ pub async fn login(
         move_file(&user_cert, &target).map(|()| CertSource::Moved)
     }
     .map_err(|e| {
-        log(&format!(
-            "Stały link: nie można zapisać certyfikatu Cloudflare w {}: {e}",
-            target.display()
-        ));
+        log(Msg::new("log.named_cert_save_failed")
+            .arg("path", target.display())
+            .arg("error", &e));
         failed("certificate_save_failed", detail(e))
     })?;
-    log(&match source {
-        CertSource::Moved => format!(
-            "Stały link: połączono z Cloudflare; certyfikat przeniesiony z {} do {}.",
-            user_cert.display(),
-            target.display()
-        ),
-        CertSource::Copied => format!(
-            "Stały link: użyto certyfikatu cloudflared, który już był w {} (skopiowany do {}; plik właściciela został).",
-            user_cert.display(),
-            target.display()
-        ),
-    });
+    log(Msg::new(match source {
+        CertSource::Moved => "log.named_cert_moved",
+        CertSource::Copied => "log.named_cert_copied",
+    })
+    .arg("from", user_cert.display())
+    .arg("to", target.display()));
     Ok(source)
 }
 
@@ -537,16 +518,13 @@ fn keep_late_cert(paths: &NamedPaths, user_cert: &Path, existed: bool, log: &Sha
     }
     let target = paths.cert();
     match move_file(user_cert, &target) {
-        Ok(()) => log(&format!(
-            "Stały link: certyfikat zapisany tuż przed przerwaniem logowania przeniesiony z {} do {}.",
-            user_cert.display(),
-            target.display()
-        )),
-        Err(e) => log(&format!(
-            "Stały link: nie można przenieść certyfikatu z {} do {}: {e}",
-            user_cert.display(),
-            target.display()
-        )),
+        Ok(()) => log(Msg::new("log.named_late_cert_moved")
+            .arg("from", user_cert.display())
+            .arg("to", target.display())),
+        Err(e) => log(Msg::new("log.named_late_cert_failed")
+            .arg("from", user_cert.display())
+            .arg("to", target.display())
+            .arg("error", e)),
     }
 }
 
@@ -599,15 +577,10 @@ pub async fn create(
     .await?;
     if out.code != Some(0) {
         if !tunnel_exists(&out.text) {
-            log(&format!(
-                "Stały link: tworzenie tunelu nie powiodło się: {}",
-                or_none(&out.last)
-            ));
+            log(Msg::new("log.named_create_failed").arg_msg("reason", reason(&out.last)));
             return Err(failed("tunnel_create_failed", reason(&out.last)));
         }
-        log(&format!(
-            "Stały link: tunel {TUNNEL_NAME} już istnieje w Cloudflare — używam go."
-        ));
+        log(Msg::new("log.named_tunnel_exists").arg("tunnel", TUNNEL_NAME));
         on_step(Step::FetchingCredentials);
         let out = run(
             paths,
@@ -624,10 +597,7 @@ pub async fn create(
         )
         .await?;
         if out.code != Some(0) {
-            log(&format!(
-                "Stały link: pobieranie poświadczeń nie powiodło się: {}",
-                or_none(&out.last)
-            ));
+            log(Msg::new("log.named_credentials_failed").arg_msg("reason", reason(&out.last)));
             return Err(failed("credentials_fetch_failed", reason(&out.last)));
         }
     }
@@ -640,10 +610,10 @@ pub async fn create(
     };
     let credentials = paths.credentials(&id);
     replace_file(&new, &credentials).map_err(|e| failed("credentials_save_failed", detail(e)))?;
-    log(&format!(
-        "Stały link: tunel {TUNNEL_NAME} ({id}), poświadczenia w {}.",
-        credentials.display()
-    ));
+    log(Msg::new("log.named_tunnel_ready")
+        .arg("tunnel", TUNNEL_NAME)
+        .arg("id", &id)
+        .arg("path", credentials.display()));
 
     on_step(Step::RoutingDns);
     let mut rest = vec!["route", "dns"];
@@ -653,10 +623,9 @@ pub async fn create(
     rest.extend([id.as_str(), hostname]);
     let out = run(paths, args(Some(&cert), &rest), timeout).await?;
     if out.code != Some(0) {
-        log(&format!(
-            "Stały link: ustawianie {hostname} w DNS nie powiodło się: {}",
-            or_none(&out.last)
-        ));
+        log(Msg::new("log.named_dns_failed")
+            .arg("hostname", hostname)
+            .arg_msg("reason", reason(&out.last)));
         return Err(if dns_taken(&out.text) {
             NamedError::new(
                 ErrorCode::DnsTaken,
@@ -677,19 +646,18 @@ pub async fn create(
     if let Some(record) = routed_record(&out.text)
         && !record.eq_ignore_ascii_case(hostname)
     {
-        log(&format!(
-            "Stały link: {hostname} nie należy do domeny z logowania — Cloudflare ustawił rekord {record}."
-        ));
+        log(Msg::new("log.named_dns_wrong_domain")
+            .arg("hostname", hostname)
+            .arg("record", &record));
         return Err(no_domain(hostname, Some(&record)));
     }
-    log(&format!(
-        "Stały link: {hostname} prowadzi do tunelu {id}{}.",
-        if overwrite {
-            " (poprzedni rekord DNS zastąpiony)"
-        } else {
-            ""
-        }
-    ));
+    log(Msg::new(if overwrite {
+        "log.named_dns_routed_replaced"
+    } else {
+        "log.named_dns_routed"
+    })
+    .arg("hostname", hostname)
+    .arg("id", &id));
     Ok(id)
 }
 
@@ -708,18 +676,11 @@ pub async fn delete(
     )
     .await?;
     if out.code == Some(0) {
-        log(&format!(
-            "Stały link: usunięto tunel {TUNNEL_NAME} w Cloudflare."
-        ));
+        log(Msg::new("log.named_deleted").arg("tunnel", TUNNEL_NAME));
     } else if tunnel_missing(&out.text) {
-        log(&format!(
-            "Stały link: tunelu {TUNNEL_NAME} już nie ma w Cloudflare."
-        ));
+        log(Msg::new("log.named_already_gone").arg("tunnel", TUNNEL_NAME));
     } else {
-        log(&format!(
-            "Stały link: usuwanie tunelu nie powiodło się: {}",
-            or_none(&out.last)
-        ));
+        log(Msg::new("log.named_delete_failed").arg_msg("reason", reason(&out.last)));
         return Err(failed("tunnel_delete_failed", reason(&out.last)));
     }
     Ok(())
@@ -875,25 +836,7 @@ fn remember(last: &mut String, line: &str, no_urls: bool) {
     *last = line.chars().take(MAX_DETAIL).collect();
 }
 
-fn or_none(last: &str) -> &str {
-    if last.is_empty() {
-        "cloudflared nie podał przyczyny"
-    } else {
-        last
-    }
-}
-
-/// `5 min`, `90 s`.
-fn human(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 60 && secs.is_multiple_of(60) {
-        format!("{} min", secs / 60)
-    } else {
-        format!("{secs} s")
-    }
-}
-
-/// [`human`] for a message.
+/// `5 min`, `90 s` as a message.
 fn human_msg(d: Duration) -> Msg {
     let secs = d.as_secs();
     if secs >= 60 && secs.is_multiple_of(60) {

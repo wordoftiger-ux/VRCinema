@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{AppConfig, VideoEncoder};
+use crate::i18n::{Lang, Msg};
 
 pub const CONFIG_FILE: &str = "config.json";
 
@@ -42,6 +43,10 @@ pub struct AppSettings {
     pub pause_on_tunnel_loss: bool,
     /// Pause the channel when nobody fetched a segment for 30 s.
     pub pause_when_no_viewers: bool,
+    /// The language of the window, the remote panel and the tray: `en`, `pl`, `es`, `de`, `fr`
+    /// or `ja`. A file without it (or with an unknown one) gets the language of Windows.
+    #[serde(with = "lang_setting")]
+    pub language: Lang,
 }
 
 /// `tunnelMode` in `config.json`: `"quick"` or `"named"` (anything else reads as quick).
@@ -104,8 +109,41 @@ impl Default for AppSettings {
             named_tunnel_id: None,
             pause_on_tunnel_loss: true,
             pause_when_no_viewers: false,
+            language: Lang::En,
         }
     }
+}
+
+/// `language` in `config.json`: the language's code.
+mod lang_setting {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::i18n::Lang;
+
+    pub fn serialize<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(lang.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Lang, D::Error> {
+        let text = String::deserialize(d)?;
+        Ok(Lang::parse(&text).unwrap_or_default())
+    }
+}
+
+/// The settings of a `config.json` text; a missing or unsupported `language` becomes `system`.
+fn parse(text: &str, system: Lang) -> Result<AppSettings, serde_json::Error> {
+    let mut value: serde_json::Value = serde_json::from_str(text)?;
+    if let Some(object) = value.as_object_mut() {
+        let supported = object
+            .get("language")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Lang::parse)
+            .is_some();
+        if !supported {
+            object.insert("language".into(), system.as_str().into());
+        }
+    }
+    serde_json::from_value(value)
 }
 
 fn random_secret() -> String {
@@ -115,36 +153,64 @@ fn random_secret() -> String {
 }
 
 impl AppSettings {
+    /// The defaults with `language` set.
+    fn default_in(language: Lang) -> Self {
+        Self {
+            language,
+            ..Self::default()
+        }
+    }
+
+    /// The `language` saved in `<home>/config.json`, if there is a supported one. Reads only:
+    /// for the texts shown before the engine is up (nothing is moved or created).
+    pub fn saved_language(home: &Path) -> Option<Lang> {
+        let bytes = std::fs::read(home.join(CONFIG_FILE)).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        let value: serde_json::Value =
+            serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+        Lang::parse(value.get("language")?.as_str()?)
+    }
+
+    /// [`Self::load_with`] with the language of Windows as the default language.
+    pub fn load(home: &Path) -> (Self, Option<Msg>) {
+        Self::load_with(home, crate::i18n::system_lang())
+    }
+
     /// Reads `<home>/config.json`. A missing file gives the defaults; a corrupt one is kept as
-    /// `config.json.bad` and replaced by the defaults, with a Polish warning. An empty
-    /// `sessionSecret` is filled with a random one here, so the first save stores it.
-    pub fn load(home: &Path) -> (Self, Option<String>) {
+    /// `config.json.bad` and replaced by the defaults, with a warning for the log. An empty
+    /// `sessionSecret` is filled with a random one here, so the first save stores it. A file
+    /// without a (supported) `language` gets `system` as its language.
+    pub fn load_with(home: &Path, system: Lang) -> (Self, Option<Msg>) {
         let path = home.join(CONFIG_FILE);
         let (mut settings, warning) = match std::fs::read(&path) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => (Self::default(), None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (Self::default_in(system), None),
             Err(e) => (
-                Self::default(),
-                Some(format!(
-                    "Nie można odczytać {}: {e}. Użyto ustawień domyślnych.",
-                    path.display()
-                )),
+                Self::default_in(system),
+                Some(
+                    Msg::new("log.config_unreadable")
+                        .arg("path", path.display())
+                        .arg("error", e),
+                ),
             ),
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
-                match serde_json::from_str::<Self>(text.trim_start_matches('\u{feff}')) {
+                match parse(text.trim_start_matches('\u{feff}'), system) {
                     Ok(s) => (s, None),
                     Err(e) => {
                         let bad = home.join(format!("{CONFIG_FILE}.bad"));
                         let _ = std::fs::remove_file(&bad);
                         let kept = match std::fs::rename(&path, &bad) {
-                            Ok(()) => format!("Uszkodzony plik zachowano jako {}.", bad.display()),
-                            Err(_) => "Nie udało się zachować uszkodzonego pliku.".to_string(),
+                            Ok(()) => Msg::new("log.config_bad_kept").arg("path", bad.display()),
+                            Err(_) => Msg::new("log.config_bad_not_kept"),
                         };
                         (
-                            Self::default(),
-                            Some(format!(
-                                "Plik {CONFIG_FILE} jest uszkodzony ({e}). {kept} Użyto ustawień domyślnych."
-                            )),
+                            Self::default_in(system),
+                            Some(
+                                Msg::new("log.config_corrupt")
+                                    .arg("file", CONFIG_FILE)
+                                    .arg("error", e)
+                                    .arg_msg("kept", kept),
+                            ),
                         )
                     }
                 }
@@ -221,8 +287,8 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         }),
         segment_seconds: 4,
         window_size: 10,
-        // Polish, like the window's pages, until the app gets its `language` setting.
-        language: crate::i18n::Lang::Pl,
+
+        language: settings.language,
     }
 }
 
@@ -251,7 +317,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // A stage-2 file has none of them.
         std::fs::write(tmp.path().join("config.json"), "{\"port\": 8123}").unwrap();
-        let (mut s, warning) = AppSettings::load(tmp.path());
+        let (mut s, warning) = AppSettings::load_with(tmp.path(), Lang::En);
         assert!(warning.is_none());
         assert!(s.tunnel_enabled && s.pause_on_tunnel_loss && !s.pause_when_no_viewers);
         s.tunnel_enabled = false;
@@ -272,7 +338,7 @@ mod tests {
         ] {
             assert!(text.contains(field), "{field} missing in {text}");
         }
-        assert_eq!(AppSettings::load(tmp.path()).0, s);
+        assert_eq!(AppSettings::load_with(tmp.path(), Lang::En).0, s);
     }
 
     #[test]
@@ -283,7 +349,7 @@ mod tests {
             "{\"port\": 8123, \"tunnelMode\": \"inny\"}",
         )
         .unwrap();
-        let (s, warning) = AppSettings::load(tmp.path());
+        let (s, warning) = AppSettings::load_with(tmp.path(), Lang::En);
         assert!(warning.is_none(), "{warning:?}");
         assert_eq!(s.port, 8123);
         assert_eq!(s.tunnel_mode, TunnelModeSetting::Quick);
@@ -292,23 +358,23 @@ mod tests {
     #[test]
     fn missing_file_gives_defaults_with_random_secret_and_no_warning() {
         let tmp = tempfile::tempdir().unwrap();
-        let (s, warning) = AppSettings::load(tmp.path());
+        let (s, warning) = AppSettings::load_with(tmp.path(), Lang::En);
         assert!(warning.is_none());
         assert_eq!(s.session_secret.len(), 64);
-        let (other, _) = AppSettings::load(tmp.path());
+        let (other, _) = AppSettings::load_with(tmp.path(), Lang::En);
         assert_ne!(s.session_secret, other.session_secret);
     }
 
     #[test]
     fn save_then_load_round_trips_and_keeps_the_secret() {
         let tmp = tempfile::tempdir().unwrap();
-        let (mut s, _) = AppSettings::load(tmp.path());
+        let (mut s, _) = AppSettings::load_with(tmp.path(), Lang::En);
         s.port = 9000;
         s.lan_access = true;
         s.pixeldrain_api_key = Some("k".into());
         s.save(tmp.path()).unwrap();
         assert!(!tmp.path().join("config.json.tmp").exists());
-        let (back, warning) = AppSettings::load(tmp.path());
+        let (back, warning) = AppSettings::load_with(tmp.path(), Lang::En);
         assert!(warning.is_none());
         assert_eq!(back, s);
     }
@@ -321,7 +387,7 @@ mod tests {
             "\u{feff}{\"lanAccess\":true,\"port\":8123,\"nieznane\":1}",
         )
         .unwrap();
-        let (s, warning) = AppSettings::load(tmp.path());
+        let (s, warning) = AppSettings::load_with(tmp.path(), Lang::En);
         assert!(warning.is_none());
         assert!(s.lan_access);
         assert_eq!(s.port, 8123);
@@ -335,14 +401,54 @@ mod tests {
     fn corrupt_file_is_kept_as_bad_and_defaults_are_used_with_a_warning() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("config.json"), "{ nie json").unwrap();
-        let (s, warning) = AppSettings::load(tmp.path());
+        let (s, warning) = AppSettings::load_with(tmp.path(), Lang::En);
         assert_eq!(s.port, 8080);
-        assert!(warning.unwrap().contains("uszkodzony"));
+        assert!(warning.unwrap().to_string().contains("corrupt"));
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("config.json.bad")).unwrap(),
             "{ nie json"
         );
         assert!(!tmp.path().join("config.json").exists());
+    }
+
+    #[test]
+    fn a_new_config_starts_in_the_language_of_windows_and_keeps_a_chosen_one() {
+        use crate::i18n::system_lang_from;
+        let tmp = tempfile::tempdir().unwrap();
+        // No file: the language of Windows (pl-PL, de-AT), anything unsupported (ko-KR) is English.
+        for (id, expected) in [(0x0415, Lang::Pl), (0x0C07, Lang::De), (0x0412, Lang::En)] {
+            let (s, _) = AppSettings::load_with(tmp.path(), system_lang_from(|| Some(id)));
+            assert_eq!(s.language, expected, "{id:#x}");
+        }
+        // A file without a language (or with an unknown one) gets the language of Windows too.
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, "{\"port\": 8123}").unwrap();
+        assert_eq!(
+            AppSettings::load_with(tmp.path(), Lang::Fr).0.language,
+            Lang::Fr
+        );
+        std::fs::write(&path, "{\"language\": \"xx\"}").unwrap();
+        assert_eq!(
+            AppSettings::load_with(tmp.path(), Lang::Fr).0.language,
+            Lang::Fr
+        );
+        // A chosen language stays, whatever Windows says; it is saved as its code.
+        std::fs::write(&path, "{\"language\": \"ja\"}").unwrap();
+        let (s, _) = AppSettings::load_with(tmp.path(), Lang::Pl);
+        assert_eq!(s.language, Lang::Ja);
+        s.save(tmp.path()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["language"], "ja");
+        assert_eq!(AppSettings::saved_language(tmp.path()), Some(Lang::Ja));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(AppSettings::saved_language(tmp.path()), None);
+        // A corrupt file falls back to the language of Windows as well.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert_eq!(
+            AppSettings::load_with(tmp.path(), Lang::De).0.language,
+            Lang::De
+        );
     }
 
     #[test]

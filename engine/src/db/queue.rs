@@ -1,6 +1,7 @@
 //! The channel queue (`queue_items` table).
 
 use super::now_ms;
+use crate::i18n::{Lang, stored_text};
 use rusqlite::types::{Type, Value};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 
@@ -98,6 +99,14 @@ pub struct QueueItem {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+}
+
+impl QueueItem {
+    /// Why the film failed or was skipped, in `lang`. The channel keeps the reason as a message
+    /// (key and fields, see `Msg::to_stored`); an older row holds plain text, shown as it is.
+    pub fn error_text(&self, lang: Lang) -> Option<String> {
+        self.error.as_deref().map(|e| stored_text(e, lang))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

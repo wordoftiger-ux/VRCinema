@@ -22,7 +22,7 @@ use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
 use crate::http::AppState;
 use crate::http::auth::{AdminAuth, DesktopKey};
-use crate::i18n::Msg;
+use crate::i18n::{Msg, error_msg, msg_error};
 use crate::live::LiveSettings;
 use crate::local_files::{AddReport, add_local_files};
 use crate::logging::LogSink;
@@ -117,6 +117,8 @@ pub struct AppOptions {
     /// How often a missing cloudflared (an upgrade from a version without the tunnel) is
     /// downloaded again after a failure (5 min; tests shorten it).
     pub cloudflared_retry: Duration,
+    /// The language a new `config.json` starts with (the real program: the one of Windows).
+    pub system_lang: crate::i18n::Lang,
 }
 
 impl Default for AppOptions {
@@ -131,6 +133,12 @@ impl Default for AppOptions {
             auto_pause_timings: AutoPauseTimings::default(),
             named_tunnel: NamedOptions::default(),
             cloudflared_retry: CLOUDFLARED_RETRY,
+            // Unit tests must not depend on the language of the machine they run on.
+            system_lang: if cfg!(test) {
+                crate::i18n::Lang::En
+            } else {
+                crate::i18n::system_lang()
+            },
         }
     }
 }
@@ -171,6 +179,7 @@ pub(crate) struct ConfigPatch {
     pub tunnel_mode: Option<TunnelModeSetting>,
     pub pause_on_tunnel_loss: Option<bool>,
     pub pause_when_no_viewers: Option<bool>,
+    pub language: Option<crate::i18n::Lang>,
 }
 
 impl ConfigPatch {
@@ -218,6 +227,9 @@ impl ConfigPatch {
         if let Some(v) = self.pause_when_no_viewers {
             s.pause_when_no_viewers = v;
         }
+        if let Some(v) = self.language {
+            s.language = v;
+        }
         let new_password = password_hash.is_some();
         if let Some(hash) = password_hash {
             s.admin_password_hash = Some(hash);
@@ -244,6 +256,11 @@ pub(crate) enum OpError {
 /// `errors.<code>` with `detail` (an error from outside: the system, a server).
 fn failure(code: &'static str, detail: impl std::fmt::Display) -> Msg {
     Msg::error(code).arg("detail", detail)
+}
+
+/// `errors.<code>` with the error and its causes as `detail`, in the reader's language.
+fn failure_of(code: &'static str, e: &anyhow::Error) -> Msg {
+    Msg::error(code).arg_msg("detail", error_msg(e))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -290,7 +307,7 @@ pub(crate) struct AppCore {
     channel_loops: Arc<AtomicUsize>,
     closing: AtomicBool,
     /// Why the channel did not start although ffmpeg and ffprobe are there (for the window).
-    channel_error: Mutex<Option<String>>,
+    channel_error: Mutex<Option<Msg>>,
     tools_job: Mutex<Option<JoinHandle<()>>>,
     update: Mutex<Option<UpdateInfo>>,
     applying_update: tokio::sync::Mutex<()>,
@@ -311,6 +328,8 @@ pub(crate) struct AppCore {
     tunnel_view: watch::Sender<TunnelState>,
     /// The settings the automatic pause follows.
     auto_pause: watch::Sender<AutoPauseSettings>,
+    /// The app's language (the tray follows it).
+    language: watch::Sender<crate::i18n::Lang>,
     /// Segment fetches of every server this engine starts.
     viewers: Arc<ViewerActivity>,
     /// A new channel is on: the automatic pause hands it the active reasons now.
@@ -345,7 +364,7 @@ impl AppCore {
         (reached_rx, release_tx)
     }
 
-    pub(crate) fn log(&self, msg: &str) {
+    pub(crate) fn log(&self, msg: Msg) {
         self.log.log(msg);
     }
 
@@ -379,7 +398,7 @@ impl AppCore {
     }
 
     /// The last start of the channel failed although the tools are there: why.
-    pub(crate) fn channel_error(&self) -> Option<String> {
+    pub(crate) fn channel_error(&self) -> Option<Msg> {
         lock(&self.channel_error).clone()
     }
 
@@ -410,20 +429,19 @@ impl AppCore {
         let mut new = old.clone();
         f(&mut new);
         new.save(&self.home).map_err(|e| {
-            anyhow::Error::new(e).context(format!(
-                "Nie można zapisać ustawień w {}",
-                self.home.join(CONFIG_FILE).display()
-            ))
+            msg_error(
+                Msg::error("settings_save_failed")
+                    .arg("path", self.home.join(CONFIG_FILE).display())
+                    .arg("detail", e),
+            )
         })?;
         *guard = new.clone();
         Ok((old, new))
     }
 
-    /// The message of a failed [`Self::update_settings`] (the cause: the system's error).
+    /// The message of a failed [`Self::update_settings`].
     pub(crate) fn save_failed(&self, e: &anyhow::Error) -> Msg {
-        Msg::error("settings_save_failed")
-            .arg("path", self.home.join(CONFIG_FILE).display())
-            .arg("detail", e.root_cause())
+        error_msg(e)
     }
 
     fn tools_present(config: &AppConfig) -> bool {
@@ -446,10 +464,8 @@ impl AppCore {
                     started
                 }
                 Err(e) => {
-                    let why = format!("{e:#}");
-                    self.log(&format!(
-                        "Kanał nie wystartował: {why}. Serwer działa bez kanału — napraw narzędzia w ustawieniach."
-                    ));
+                    let why = error_msg(&e);
+                    self.log(Msg::new("log.channel_start_failed").arg_msg("reason", why.clone()));
                     *lock(&self.channel_error) = Some(why);
                     self.spawn_server(&config, &settings, false, connecting)
                         .await?
@@ -465,7 +481,7 @@ impl AppCore {
             // The port actually bound (the configured one was taken).
             let port = live.port;
             if let Err(e) = self.update_settings(|s| s.port = port) {
-                self.log(&format!("{e:#}"));
+                self.log(error_msg(&e));
             }
         }
         #[cfg(test)]
@@ -551,7 +567,7 @@ impl AppCore {
                     // server running that nobody can stop.
                     let _ = stop_tx.send(());
                     self.wait_or_abort(&mut join).await;
-                    anyhow::bail!("Serwer nie przekazał swojego stanu.");
+                    return Err(msg_error(Msg::error("server_no_state")));
                 };
                 Ok((
                     Running {
@@ -571,16 +587,15 @@ impl AppCore {
             // run() ended before it started serving: its error says why.
             Ok(Err(_)) => Err(match join.await {
                 Ok(Err(e)) => e,
-                Ok(Ok(())) => anyhow!("Serwer zakończył pracę przed startem."),
-                Err(e) => anyhow!("Serwer przerwał pracę: {e}"),
+                Ok(Ok(())) => msg_error(Msg::error("server_exited_early")),
+                Err(e) => msg_error(failure("server_aborted", e)),
             }),
             Err(_) => {
                 let _ = stop_tx.send(());
                 self.wait_or_abort(&mut join).await;
-                anyhow::bail!(
-                    "Serwer nie wystartował w ciągu {} s.",
-                    START_TIMEOUT.as_secs()
-                )
+                Err(msg_error(
+                    Msg::error("server_start_timeout").arg("seconds", START_TIMEOUT.as_secs()),
+                ))
             }
         }
     }
@@ -591,7 +606,7 @@ impl AppCore {
             .await
             .is_err()
         {
-            self.log("Serwer nie zatrzymał się na czas — przerywam go.");
+            self.log(Msg::new("log.server_stop_timeout"));
             join.abort();
             let _ = join.await;
         }
@@ -618,10 +633,11 @@ impl AppCore {
             let mut join = running.join;
             match tokio::time::timeout(STOP_TIMEOUT, &mut join).await {
                 Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(e))) => self.log(&format!("Serwer zakończył pracę z błędem: {e:#}")),
-                Ok(Err(e)) => self.log(&format!("Serwer przerwał pracę: {e}")),
+                Ok(Ok(Err(e))) => self
+                    .log(Msg::new("log.server_ended_with_error").arg_msg("error", error_msg(&e))),
+                Ok(Err(e)) => self.log(Msg::new("log.server_aborted").arg("error", e)),
                 Err(_) => {
-                    self.log("Serwer nie zatrzymał się na czas — przerywam go.");
+                    self.log(Msg::new("log.server_stop_timeout"));
                     join.abort();
                     let _ = join.await;
                 }
@@ -636,16 +652,16 @@ impl AppCore {
         tokio::spawn(async move {
             let mut slot = core.server.lock().await;
             if core.closing.load(Ordering::SeqCst) {
-                anyhow::bail!("Program jest zamykany.");
+                return Err(msg_error(Msg::error("app_closing")));
             }
-            core.log("Ponowne uruchamianie serwera...");
+            core.log(Msg::new("log.server_restarting"));
             core.stop_server(&mut slot).await;
             let started = core.start_server(&mut slot).await;
             // The program began quitting meanwhile (and gave up waiting for this restart):
             // no server may stay behind.
             if core.closing.load(Ordering::SeqCst) {
                 core.stop_server(&mut slot).await;
-                anyhow::bail!("Program jest zamykany.");
+                return Err(msg_error(Msg::error("app_closing")));
             }
             drop(slot);
             // A new port (or the next free one): the tunnel follows the server.
@@ -653,7 +669,7 @@ impl AppCore {
             started
         })
         .await
-        .map_err(|e| anyhow!("Ponowne uruchamianie serwera zostało przerwane: {e}"))?
+        .map_err(|e| msg_error(failure("restart_interrupted", e)))?
     }
 
     /// Applies a validated change; returns whether the server was restarted for it.
@@ -697,7 +713,7 @@ impl AppCore {
                 .await
                 .map_err(|e| anyhow!("{e}"))
                 .and_then(|r| r)
-                .map_err(|e| OpError::Failed(failure("autostart_failed", format!("{e:#}"))))?;
+                .map_err(|e| OpError::Failed(failure_of("autostart_failed", &e)))?;
         }
         let (old, new) = self
             .update_settings(|s| patch.apply(s, password_hash))
@@ -711,9 +727,7 @@ impl AppCore {
             return Ok(false);
         }
         if let Err(e) = self.restart_server().await {
-            self.log(&format!(
-                "Serwer nie wystartował z nowymi ustawieniami: {e:#}. Przywracam poprzednie."
-            ));
+            self.log(Msg::new("log.restart_failed_reverting").arg_msg("error", error_msg(&e)));
             // Back to what worked (autostart was already changed in Windows: keep it).
             let _ = self.update_settings(|s| {
                 *s = AppSettings {
@@ -722,8 +736,8 @@ impl AppCore {
                 }
             });
             return Err(OpError::Failed(match self.restart_server().await {
-                Ok(()) => failure("restart_reverted", format!("{e:#}")),
-                Err(again) => failure("server_start_failed", format!("{again:#}")),
+                Ok(()) => failure_of("restart_reverted", &e),
+                Err(again) => failure_of("server_start_failed", &again),
             }));
         }
         Ok(true)
@@ -752,6 +766,11 @@ impl AppCore {
             pause_on_tunnel_loss: settings.pause_on_tunnel_loss,
             pause_when_no_viewers: settings.pause_when_no_viewers,
         };
+        self.language.send_if_modified(|current| {
+            let changed = *current != settings.language;
+            *current = settings.language;
+            changed
+        });
         self.auto_pause.send_if_modified(|current| {
             let changed = *current != pause;
             *current = pause;
@@ -784,12 +803,12 @@ impl AppCore {
         let current = || self.slate_address();
         match swapper.swap_to(current, &live.state.engine.commands).await {
             SwapOutcome::Unchanged => {}
-            SwapOutcome::Replaced { generation } => self.log(&format!(
-                "Plansze odświeżone dla nowego adresu publicznego (zestaw {generation})."
-            )),
-            SwapOutcome::Failed(why) => self.log(&format!(
-                "Nie udało się odświeżyć plansz: {why}. Zostają poprzednie plansze."
-            )),
+            SwapOutcome::Replaced { generation } => {
+                self.log(Msg::new("log.slates_refreshed").arg("generation", generation))
+            }
+            SwapOutcome::Failed(why) => {
+                self.log(Msg::new("log.slates_refresh_failed").arg_msg("reason", why))
+            }
         }
     }
 
@@ -825,7 +844,7 @@ impl AppCore {
             return Err(OpError::Conflict(Msg::error("ffmpeg_missing")));
         }
         let found = crate::tools::detect_encoder(&ffmpeg).await;
-        self.log(&format!("Test karty graficznej: {}", found.as_str()));
+        self.log(Msg::new("log.encoder_test").arg("encoder", found.as_str()));
         let _guard = self.settings_change.lock().await;
         self.update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
             .map_err(|e| OpError::Failed(self.save_failed(&e)))?;
@@ -903,22 +922,26 @@ impl AppCore {
             self.sync_tunnel().await;
         }
         let (what, result) = match job {
-            ToolsJob::Install => ("pobieranie", self.tools.install_missing().await),
-            ToolsJob::Update(tool) => ("aktualizacja", self.tools.update(tool).await),
-            ToolsJob::Repair => ("naprawa", self.tools.repair().await),
+            ToolsJob::Install => ("log.tools_job_install", self.tools.install_missing().await),
+            ToolsJob::Update(tool) => ("log.tools_job_update", self.tools.update(tool).await),
+            ToolsJob::Repair => ("log.tools_job_repair", self.tools.repair().await),
         };
         self.tunnel_held.store(false, Ordering::SeqCst);
         self.cloudflared_fetching.store(false, Ordering::SeqCst);
         if let Err(e) = result {
-            self.log(&format!("Narzędzia ({what}): błąd — {e:#}"));
+            self.log(
+                Msg::new("log.tools_job_failed")
+                    .arg_msg("what", Msg::new(what))
+                    .arg_msg("error", error_msg(&e)),
+            );
             // cloudflared may have come before the failure, or was stopped for it.
             self.sync_tunnel().await;
             return;
         }
-        self.log(&format!("Narzędzia ({what}): gotowe."));
+        self.log(Msg::new("log.tools_job_done").arg_msg("what", Msg::new(what)));
         let ok = self.tools.status().missing.is_empty();
         if let Err(e) = self.update_settings(|s| s.tools_installed = ok) {
-            self.log(&format!("{e:#}"));
+            self.log(error_msg(&e));
         }
         // Now the channel can start.
         let config = app_config(&self.settings(), &self.home);
@@ -926,7 +949,7 @@ impl AppCore {
             && Self::tools_present(&config)
             && let Err(e) = self.restart_server().await
         {
-            self.log(&format!("{e:#}"));
+            self.log(error_msg(&e));
         }
         // Now cloudflared is there (a running tunnel is left alone).
         self.sync_tunnel().await;
@@ -944,13 +967,10 @@ impl AppCore {
         )
         .await;
         if let Some(e) = info.error.take() {
-            self.log(&format!("Sprawdzanie aktualizacji nie powiodło się: {e}"));
+            self.log(Msg::new("log.update_check_failed").arg_msg("error", e));
         }
         if let Some(release) = &info.available {
-            self.log(&format!(
-                "Dostępna nowa wersja programu: {}",
-                release.version
-            ));
+            self.log(Msg::new("log.update_available").arg("version", &release.version));
         }
         *lock(&self.update) = Some(info.clone());
         info
@@ -977,15 +997,12 @@ impl AppCore {
             .hooks
             .exe_path()
             .ok_or_else(|| OpError::Conflict(Msg::error("update_unavailable")))?;
-        self.log(&format!("Instalowanie wersji {}...", release.version));
+        self.log(Msg::new("log.update_installing").arg("version", &release.version));
         if let Err(e) = self_update::apply(&release, &exe, &self.http).await {
-            self.log(&format!("Aktualizacja nie powiodła się: {e:#}"));
-            return Err(OpError::Failed(failure("update_failed", format!("{e:#}"))));
+            self.log(Msg::new("log.update_failed").arg_msg("error", error_msg(&e)));
+            return Err(OpError::Failed(failure_of("update_failed", &e)));
         }
-        self.log(&format!(
-            "Zainstalowano wersję {}; ponowne uruchamianie programu.",
-            release.version
-        ));
+        self.log(Msg::new("log.update_installed").arg("version", &release.version));
         let hooks = Arc::clone(&self.hooks);
         tokio::spawn(async move {
             tokio::time::sleep(UPDATE_RESTART_DELAY).await;
@@ -1015,10 +1032,10 @@ impl AppEngine {
     ) -> anyhow::Result<Self> {
         crate::home::ensure_home(&home)?;
         let log = Arc::new(LogSink::open(&home.join("logs")));
-        log.log(&format!("VRCinema {}: start", options.version));
-        let (mut settings, warning) = AppSettings::load(&home);
+        log.log(Msg::new("log.start").arg("version", &options.version));
+        let (mut settings, warning) = AppSettings::load_with(&home, options.system_lang);
         if let Some(warning) = warning {
-            log.log(&warning);
+            log.log(warning);
         }
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -1037,14 +1054,16 @@ impl AppEngine {
             .with_log(log.log_fn()),
         );
         // Backups of programs that were still running at the last swap (nothing uses them now).
-        crate::tools::install::clean_old_backups(tools.tools_dir());
         settings.tools_installed = tools.status().missing.is_empty();
+        crate::tools::install::clean_old_backups(tools.tools_dir());
         settings.save(&home).map_err(|e| {
-            anyhow!(
-                "Nie można zapisać ustawień w {}: {e}",
-                home.join(CONFIG_FILE).display()
+            msg_error(
+                Msg::error("settings_save_failed")
+                    .arg("path", home.join(CONFIG_FILE).display())
+                    .arg("detail", e),
             )
         })?;
+        let language = settings.language;
         let live_settings = LiveSettings::from_config(&app_config(&settings, &home));
         let tunnel = TunnelManager::new()
             .with_timings(options.tunnel_timings.clone())
@@ -1077,6 +1096,7 @@ impl AppEngine {
             tunnel_notes: Mutex::new(TunnelNotes::default()),
             tunnel_view: watch::channel(TunnelState::Off).0,
             auto_pause: watch::channel(AutoPauseSettings::default()).0,
+            language: watch::channel(language).0,
             viewers: Arc::new(ViewerActivity::new()),
             pause_kick: Arc::new(Notify::new()),
             pause_active: Arc::default(),
@@ -1094,7 +1114,7 @@ impl AppEngine {
         {
             let mut slot = core.server.lock().await;
             if let Err(e) = core.start_server(&mut slot).await {
-                core.log(&format!("Serwer nie wystartował: {e:#}"));
+                core.log(Msg::new("log.server_start_failed").arg_msg("error", error_msg(&e)));
                 return Err(e);
             }
         }
@@ -1105,11 +1125,9 @@ impl AppEngine {
         core.sync_tunnel().await;
         // An upgrade from a version without the tunnel: everything is there but cloudflared.
         if core.cloudflared_only_missing() {
-            core.log(
-                "Narzędzia: brak programu cloudflared (nowy w tej wersji) — pobieram go w tle.",
-            );
+            core.log(Msg::new("log.cloudflared_missing"));
             if let Err(e) = core.start_tools_job(ToolsJob::Install) {
-                core.log(&format!("Narzędzia: {e}"));
+                core.log(Msg::new("log.tools_error").arg_msg("error", e));
             }
         }
         let retry = tokio::spawn(cloudflared_retries(
@@ -1140,13 +1158,13 @@ impl AppEngine {
         let live = self
             .core
             .live()
-            .ok_or_else(|| anyhow!("Serwer jest ponownie uruchamiany — spróbuj za chwilę."))?;
+            .ok_or_else(|| msg_error(Msg::error("server_restarting")))?;
         let report = add_local_files(&live.state.db, live.state.resolver.as_ref(), paths).await?;
-        self.core.log(&format!(
-            "Dodano z dysku: {} (pominięto: {})",
-            report.added.len(),
-            report.skipped
-        ));
+        self.core.log(
+            Msg::new("log.files_added")
+                .arg("added", report.added.len())
+                .arg("skipped", report.skipped),
+        );
         if !report.added.is_empty() {
             self.send(&live, Command::QueueChanged);
         }
@@ -1157,7 +1175,7 @@ impl AppEngine {
     pub fn skip(&self) {
         match self.core.live() {
             Some(live) => self.send(&live, Command::Skip),
-            None => self.core.log("Nie można pominąć filmu: serwer nie działa."),
+            None => self.core.log(Msg::new("log.skip_server_down")),
         }
     }
 
@@ -1169,9 +1187,9 @@ impl AppEngine {
             .try_send(command.clone())
             .is_err()
         {
-            self.core.log(&format!(
-                "Kanał nie działa — polecenie {command:?} pominięte."
-            ));
+            self.core.log(
+                Msg::new("log.channel_command_skipped").arg("command", format!("{command:?}")),
+            );
         }
     }
 
@@ -1192,6 +1210,16 @@ impl AppEngine {
         self.core.live_settings.public_url.get()
     }
 
+    /// The app's language now.
+    pub fn language(&self) -> crate::i18n::Lang {
+        self.core.settings().language
+    }
+
+    /// Changes with the `language` setting (the tray rebuilds its menu).
+    pub fn language_changes(&self) -> watch::Receiver<crate::i18n::Lang> {
+        self.core.language.subscribe()
+    }
+
     /// The tunnel's state (tray tooltip).
     pub fn tunnel_state(&self) -> crate::tunnel::TunnelState {
         self.core.tunnel_state()
@@ -1203,7 +1231,7 @@ impl AppEngine {
     }
 
     /// A line in the app's log (never pass passwords or the window key).
-    pub fn log(&self, msg: &str) {
+    pub fn log(&self, msg: Msg) {
         self.core.log(msg);
     }
 
@@ -1219,7 +1247,7 @@ impl AppEngine {
 
     #[cfg(test)]
     pub(crate) fn log_tail(&self) -> Vec<String> {
-        self.core.log.tail()
+        self.core.log.tail(crate::i18n::Lang::En)
     }
 
     /// Stops the server and starts it again with the current settings.
@@ -1256,12 +1284,11 @@ impl AppEngine {
         .await
         .is_ok();
         if stopped {
-            core.log("Program zatrzymany.");
+            core.log(Msg::new("log.program_stopped"));
         } else {
-            core.log(&format!(
-                "Zatrzymywanie trwa za długo (ponad {:.1} s) — kończę bez czekania.",
-                limit.as_secs_f32()
-            ));
+            core.log(
+                Msg::new("log.stop_too_slow").arg("seconds", format!("{:.1}", limit.as_secs_f32())),
+            );
         }
         stopped
     }
@@ -1288,9 +1315,9 @@ async fn cloudflared_retries(core: Weak<AppCore>, interval: Duration) {
             return;
         };
         if c.cloudflared_only_missing() && !c.tools_job_running() {
-            c.log("Narzędzia: ponownie pobieram brakujący program cloudflared.");
+            c.log(Msg::new("log.cloudflared_retry"));
             if let Err(e) = c.start_tools_job(ToolsJob::Install) {
-                c.log(&format!("Narzędzia: {e}"));
+                c.log(Msg::new("log.tools_error").arg_msg("error", e));
             }
         }
     }

@@ -24,6 +24,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::time::Instant;
 
 use crate::engine::Command;
+use crate::i18n::Msg;
 use crate::pipeline::channel::PauseReason;
 use crate::pipeline::clip_factory::SharedLogFn;
 use crate::stats::{ViewerStats, ViewersView};
@@ -235,24 +236,20 @@ impl AutoPause {
     fn log_changes(&self, before: &BTreeSet<PauseReason>, after: &BTreeSet<PauseReason>) {
         for reason in after.difference(before) {
             let message = match reason {
-                PauseReason::Tunnel => format!(
-                    "Automatyczna pauza: tunel nie działa od {} s — filmy czekają na powrót internetu.",
-                    self.timings.tunnel_loss.as_secs()
-                ),
-                PauseReason::NoViewers => format!(
-                    "Automatyczna pauza: nikt nie ogląda od {} s — filmy czekają na widza.",
-                    self.timings.no_viewers.as_secs()
-                ),
+                PauseReason::Tunnel => Msg::new("log.auto_pause_tunnel")
+                    .arg("seconds", self.timings.tunnel_loss.as_secs()),
+                PauseReason::NoViewers => Msg::new("log.auto_pause_no_viewers")
+                    .arg("seconds", self.timings.no_viewers.as_secs()),
                 // Never wanted by the automatic pause (it is the owner's own reason).
-                PauseReason::Manual => "Pauza ręczna.".to_string(),
+                PauseReason::Manual => Msg::new("log.pause_manual"),
             };
-            (self.log)(&message);
+            (self.log)(message);
         }
         for reason in before.difference(after) {
             (self.log)(match reason {
-                PauseReason::Tunnel => "Koniec pauzy z powodu tunelu.",
-                PauseReason::NoViewers => "Koniec pauzy z powodu braku widzów.",
-                PauseReason::Manual => "Koniec pauzy ręcznej.",
+                PauseReason::Tunnel => Msg::new("log.auto_pause_tunnel_end"),
+                PauseReason::NoViewers => Msg::new("log.auto_pause_no_viewers_end"),
+                PauseReason::Manual => Msg::new("log.pause_manual_end"),
             });
         }
     }
@@ -381,7 +378,7 @@ mod tests {
             active: Arc::default(),
             log: {
                 let logs = Arc::clone(&logs);
-                Arc::new(move |m: &str| logs.lock().unwrap().push(m.to_string()))
+                Arc::new(move |m: Msg| logs.lock().unwrap().push(m.to_string()))
             },
         };
         tokio::spawn(controller.run());
@@ -447,7 +444,11 @@ mod tests {
         after_ms(10).await;
         assert_eq!(env.sent(), [Command::Resume(PauseReason::Tunnel)]);
         assert!(
-            env.logs.lock().unwrap().iter().any(|l| l.contains("tunel")),
+            env.logs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("tunnel")),
             "{:?}",
             env.logs.lock().unwrap()
         );

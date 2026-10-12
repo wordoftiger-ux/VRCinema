@@ -368,7 +368,7 @@ fn assert_sequence(seen: &Mutex<Vec<TunnelState>>, expected: &[TunnelState]) {
 fn manager(timings: TunnelTimings) -> TunnelManager {
     TunnelManager::new()
         .with_timings(timings)
-        .with_log(Arc::new(|_: &str| {}))
+        .with_log(Arc::new(|_: vrcinema::i18n::Msg| {}))
 }
 
 async fn wait_for(

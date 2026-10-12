@@ -13,12 +13,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 
 pub use encoder::detect_encoder;
 
+use crate::i18n::{Msg, MsgContext, error_msg, msg_error};
 use crate::process::run_process;
 
 const DOWNLOAD_DIR: &str = ".download";
@@ -153,7 +154,8 @@ pub struct ToolsProgress {
     pub downloaded: u64,
     pub total: Option<u64>,
     /// Set when the operation failed (the tool that failed is in `tool`).
-    pub error: Option<String>,
+    #[serde(skip)]
+    pub error: Option<Msg>,
     /// The whole operation has finished (successfully, or with `error`).
     pub done: bool,
 }
@@ -206,7 +208,7 @@ impl ToolsManager {
             sources,
             progress,
             busy: Mutex::new(()),
-            log: std::sync::Arc::new(|m: &str| eprintln!("{m}")),
+            log: std::sync::Arc::new(|m: Msg| eprintln!("{m}")),
         }
     }
 
@@ -300,7 +302,7 @@ impl ToolsManager {
                 }
             });
             if let Err(e) = self.install_one(tool).await {
-                let message = format!("{e:#}");
+                let message = error_msg(&e);
                 self.set_progress(|p| p.error = Some(message));
                 result = Err(e);
                 break;
@@ -317,13 +319,10 @@ impl ToolsManager {
         let source = self.sources.download(tool);
         let download_dir = self.tools_dir.join(DOWNLOAD_DIR);
         fs::create_dir_all(&download_dir)
-            .with_context(|| format!("Nie można utworzyć folderu {}", download_dir.display()))?;
+            .msg_context(Msg::error("cannot_create_dir").arg("path", download_dir.display()))?;
 
         let unverified = || {
-            (self.log)(&format!(
-                "Narzędzia: wydawca nie udostępnia sum kontrolnych dla {}; instalacja bez weryfikacji.",
-                tool.name()
-            ));
+            (self.log)(Msg::new("log.tools_no_checksums").arg("tool", tool.name()));
             None
         };
         let expected = match &source.sums {
@@ -331,10 +330,9 @@ impl ToolsManager {
                 Ok(Some(text)) => {
                     let sum = download::parse_sums(&text, source.file);
                     if sum.is_none() {
-                        anyhow::bail!(
-                            "Plik sum kontrolnych nie zawiera wpisu dla {}.",
-                            source.file
-                        );
+                        return Err(msg_error(
+                            Msg::error("checksum_entry_missing").arg("file", source.file),
+                        ));
                     }
                     sum
                 }
@@ -377,16 +375,15 @@ impl ToolsManager {
             let _ = fs::remove_file(&part);
             if resumed && fresh_retry {
                 fresh_retry = false;
-                (self.log)(&format!(
-                    "Narzędzia: wznowiony plik {} nie zgadza się z sumą kontrolną (wydawca mógł go podmienić) — pobieram od nowa.",
-                    source.file
-                ));
+                (self.log)(Msg::new("log.tools_resumed_file_mismatch").arg("file", source.file));
                 continue;
             }
-            anyhow::bail!(
-                "Suma kontrolna pliku {} nie zgadza się (oczekiwano {expected}, otrzymano {actual}).",
-                source.file
-            );
+            return Err(msg_error(
+                Msg::error("checksum_mismatch")
+                    .arg("file", source.file)
+                    .arg("expected", expected)
+                    .arg("actual", actual),
+            ));
         }
 
         self.set_progress(|p| p.phase = "install".into());
@@ -562,7 +559,7 @@ mod tests {
         ) -> (ToolsManager, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = lines.clone();
-            let m = self.manager().with_log(std::sync::Arc::new(move |m: &str| {
+            let m = self.manager().with_log(std::sync::Arc::new(move |m: Msg| {
                 sink.lock().unwrap().push(m.to_string());
             }));
             (m, lines)
@@ -717,14 +714,14 @@ mod tests {
         );
         let m = f.manager();
         let err = m.update(Tool::YtDlp).await.unwrap_err();
-        assert!(err.to_string().contains("Suma kontrolna"), "{err}");
+        assert!(err.to_string().contains("checksum"), "{err}");
         assert_eq!(
             fs::read(f.tools.join("yt-dlp.exe")).unwrap(),
             b"OLD-WORKING"
         );
         let p = m.progress().borrow().clone();
         assert!(p.done);
-        assert!(p.error.unwrap().contains("Suma kontrolna"));
+        assert!(p.error.unwrap().to_string().contains("checksum"));
         assert_eq!(fs::read_dir(f.tools.join(".download")).unwrap().count(), 0);
         assert!(!f.tools.join("versions.json").exists());
     }
@@ -768,7 +765,7 @@ mod tests {
         let err = m.update(Tool::YtDlp).await.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Plik sum kontrolnych nie zawiera wpisu dla yt-dlp.exe."
+            "The checksum file has no entry for yt-dlp.exe."
         );
         assert_eq!(
             fs::read(f.tools.join("yt-dlp.exe")).unwrap(),
@@ -932,7 +929,7 @@ mod tests {
         );
         let m = f.manager();
         let err = m.update(Tool::Cloudflared).await.unwrap_err();
-        assert!(err.to_string().contains("Suma kontrolna"), "{err}");
+        assert!(err.to_string().contains("checksum"), "{err}");
         assert_eq!(
             fs::read(f.tools.join("cloudflared.exe")).unwrap(),
             b"OLD-WORKING"
@@ -987,7 +984,7 @@ mod tests {
             let lines = log.lock().unwrap().clone();
             assert_eq!(lines.len(), 1, "{what}: {lines:?}");
             assert!(
-                lines[0].contains("cloudflared") && lines[0].contains("bez weryfikacji"),
+                lines[0].contains("cloudflared") && lines[0].contains("without verification"),
                 "{what}: {lines:?}"
             );
         }
@@ -1004,7 +1001,7 @@ mod tests {
                 ..f.sources()
             },
         )
-        .with_log(std::sync::Arc::new(|_: &str| {}));
+        .with_log(std::sync::Arc::new(|_: Msg| {}));
         m.update(Tool::Cloudflared).await.unwrap();
         assert!(f.tools.join("cloudflared.exe").is_file());
     }

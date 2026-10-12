@@ -14,6 +14,7 @@ use crate::config::AppConfig;
 use crate::db::{MAIN_CHANNEL_ID, SettingsRepo, open_database};
 use crate::engine::{EngineHandle, EngineTask, idle_engine_handle, spawn_engine_paused};
 use crate::http::{AppState, HttpConfig, build_router};
+use crate::i18n::{Lang, Msg, msg_error};
 use crate::library::MediaLibrary;
 use crate::live::LiveSettings;
 use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
@@ -110,46 +111,55 @@ pub fn detect_js_runtime(
     deno.is_file().then(|| format!("deno:{}", deno.display()))
 }
 
-pub fn log(msg: &str) {
-    println!("[{}] {msg}", chrono::Local::now().format("%H:%M:%S"));
+/// Prints `msg` in `lang` with the time (the headless server's log).
+pub fn log(lang: Lang, msg: &Msg) {
+    println!(
+        "[{}] {}",
+        chrono::Local::now().format("%H:%M:%S"),
+        msg.render(lang)
+    );
+}
+
+/// The headless server's log function: prints in `lang`.
+pub fn console_log(lang: Lang) -> SharedLogFn {
+    Arc::new(move |msg: Msg| log(lang, &msg))
 }
 
 /// `builtin_tunnel`: the desktop app's tunnel gives the public address (it logs it itself).
-fn banner(config: &AppConfig, port: u16, builtin_tunnel: bool) -> String {
+/// One message per line; an empty text is a blank line.
+fn banner(config: &AppConfig, port: u16, builtin_tunnel: bool) -> Vec<Msg> {
     let local = format!("http://localhost:{port}");
+    let url = |key: &'static str, url: String| Msg::new(key).arg("url", url);
     let mut lines = vec![
-        String::new(),
-        "  Kanał działa.".to_string(),
-        String::new(),
-        format!("  Panel administratora:  {local}/admin"),
-        format!("  Strona zgłoszeń:       {local}/"),
-        format!("  Link kanału (lokalnie): {local}/live/main.m3u8"),
+        Msg::text(""),
+        Msg::new("log.banner_on"),
+        Msg::text(""),
+        url("log.banner_admin", format!("{local}/admin")),
+        url("log.banner_requests", format!("{local}/")),
+        url("log.banner_local_link", format!("{local}/live/main.m3u8")),
     ];
-    lines.extend(
-        lan_addresses()
-            .into_iter()
-            .map(|ip| format!("  W sieci domowej:        http://{ip}:{port}/live/main.m3u8")),
-    );
+    lines.extend(lan_addresses().into_iter().map(|ip| {
+        url(
+            "log.banner_lan",
+            format!("http://{ip}:{port}/live/main.m3u8"),
+        )
+    }));
     if builtin_tunnel {
-        lines.extend([
-            String::new(),
-            "  Link dla VRChat: przez wbudowany tunel (adres we wpisie „Tunel: w sieci”)."
-                .to_string(),
-        ]);
+        lines.extend([Msg::text(""), Msg::new("log.banner_builtin_tunnel")]);
     } else if config.public_url.is_empty() {
         lines.extend([
-            String::new(),
-            "  Dla VRChat potrzebny jest adres publiczny, np.:".to_string(),
-            format!("    cloudflared tunnel --url {local}"),
+            Msg::text(""),
+            Msg::new("log.banner_public_needed"),
+            Msg::text(format!("    cloudflared tunnel --url {local}")),
         ]);
     } else {
-        lines.push(format!(
-            "  Link dla VRChat:        {}/live/main.m3u8",
-            config.public_url
+        lines.push(url(
+            "log.banner_vrchat_link",
+            format!("{}/live/main.m3u8", config.public_url),
         ));
     }
-    lines.push(String::new());
-    lines.join("\n")
+    lines.push(Msg::text(""));
+    lines
 }
 
 fn lan_addresses() -> Vec<Ipv4Addr> {
@@ -172,10 +182,7 @@ fn build_resolver(
     log: &SharedLogFn,
 ) -> anyhow::Result<Arc<dyn MediaResolver>> {
     if let Some(path) = fake {
-        log(&format!(
-            "Uwaga: aktywny fałszywy resolver ({}) — to tryb testowy.",
-            path.display()
-        ));
+        log(Msg::new("log.fake_resolver").arg("path", path.display()));
         return Ok(Arc::new(FakeResolver::from_file(path)?));
     }
     let ffprobe = config.ffprobe_path.clone();
@@ -234,7 +241,7 @@ fn try_next_port(kind: std::io::ErrorKind) -> bool {
 }
 
 /// Binds `host:port`. With `fallback`, a taken (or refused) port moves on to the next ones (up
-/// to [`PORT_FALLBACK_SPAN`] further); otherwise it fails with the Polish "port in use" error.
+/// to [`PORT_FALLBACK_SPAN`] further); otherwise it fails with the "port in use" error.
 pub async fn bind_listener(
     host: &str,
     port: u16,
@@ -258,7 +265,11 @@ pub async fn bind_listener(
                 } else {
                     format!("{host}:{port}-{candidate}")
                 };
-                return Err(anyhow::anyhow!("Nie można nasłuchiwać na {tried}: {e}"));
+                return Err(msg_error(
+                    Msg::error("cannot_listen")
+                        .arg("address", tried)
+                        .arg("detail", e),
+                ));
             }
         }
     }
@@ -291,7 +302,7 @@ async fn start_channel_loop(
     connecting: bool,
     pause_reasons: Vec<PauseReason>,
 ) -> anyhow::Result<(EngineHandle, EngineTask)> {
-    shared_log("Generowanie plansz...");
+    shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
     let slates = generate_slates(&SlateOptions {
         ffmpeg_path: config.ffmpeg_path.clone(),
@@ -311,7 +322,6 @@ async fn start_channel_loop(
         let config = config.clone();
         let shared_log = Arc::clone(shared_log);
         let encoder = live.encoder.clone();
-        let language = live.language.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -327,7 +337,6 @@ async fn start_channel_loop(
                 db: Arc::clone(&db),
                 channel_id: MAIN_CHANNEL_ID,
                 log: Some(Arc::clone(&shared_log)),
-                language: language.clone(),
             });
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -336,7 +345,6 @@ async fn start_channel_loop(
                 slates.clone(),
             );
             options.log = Some(boxed_log());
-            options.language = language.clone();
             let tags_db = Arc::clone(&db);
             let broadcaster = Broadcaster::new(
                 BroadcasterOptions {
@@ -361,7 +369,7 @@ async fn start_channel_loop(
     let engine_log = Arc::clone(shared_log);
     Ok(spawn_engine_paused(
         build,
-        move |m: &str| engine_log(m),
+        move |m: Msg| engine_log(m),
         pause_reasons,
     ))
 }
@@ -389,7 +397,7 @@ pub async fn run(
     } = opts;
     let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
     let print_banner = custom_log.is_none();
-    let shared_log: SharedLogFn = custom_log.unwrap_or_else(|| Arc::new(log));
+    let shared_log: SharedLogFn = custom_log.unwrap_or_else(|| console_log(config.language));
 
     // Before anything in DATA_DIR is touched: fail fast on a taken port, then make sure no
     // other server uses this data folder. The listener is not served until the first real
@@ -405,10 +413,7 @@ pub async fn run(
     let library = Arc::new(MediaLibrary::new(config.media_dirs.clone()));
     for r in library.roots() {
         if !r.path.exists() {
-            shared_log(&format!(
-                "Uwaga: folder z MEDIA_DIRS nie istnieje: {}",
-                r.path.display()
-            ));
+            shared_log(Msg::new("log.media_dir_missing").arg("path", r.path.display()));
         }
     }
     let resolver = build_resolver(
@@ -437,7 +442,7 @@ pub async fn run(
         .await?;
         (handle, LoopGuard::new(Some(task), channel_loops))
     } else {
-        shared_log("Kanał nie wystartuje: brak narzędzi (ffmpeg). Strony i panel działają.");
+        shared_log(Msg::new("log.channel_not_started"));
         (idle_engine_handle(), LoopGuard::new(None, None))
     };
 
@@ -450,7 +455,7 @@ pub async fn run(
             tokio::select! {
                 r = snapshot.wait_for(|s| !s.playlist.is_empty()) => { r?; }
                 () = &mut shutdown => {
-                    shared_log("Zamykanie...");
+                    shared_log(Msg::new("log.closing"));
                     return Ok(());
                 }
             }
@@ -472,16 +477,22 @@ pub async fn run(
         let router = build_router(state);
 
         let addr = listener.local_addr()?;
-        let text = banner(&config, addr.port(), builtin_tunnel);
         if print_banner {
-            println!("{text}");
+            for line in banner(&config, addr.port(), builtin_tunnel) {
+                println!("{}", line.render(config.language));
+            }
         } else if start_channel {
-            shared_log(&text);
+            for line in banner(&config, addr.port(), builtin_tunnel)
+                .into_iter()
+                .filter(|l| *l != Msg::text(""))
+            {
+                shared_log(line);
+            }
         } else {
-            shared_log(&format!(
-                "Serwer działa bez kanału: http://localhost:{}/admin",
-                addr.port()
-            ));
+            shared_log(
+                Msg::new("log.server_without_channel")
+                    .arg("url", format!("http://localhost:{}/admin", addr.port())),
+            );
         }
         if let Some(ready) = ready {
             let _ = ready.send(addr);
@@ -499,7 +510,7 @@ pub async fn run(
             () = &mut shutdown => Ok(()),
         };
 
-        shared_log("Zamykanie...");
+        shared_log(Msg::new("log.closing"));
         if let Some(updater) = updater {
             updater.abort();
         }
@@ -575,13 +586,14 @@ impl Drop for LoopGuard {
 pub const LOCK_FILE: &str = "vrcinema.lock";
 
 /// Takes an exclusive lock on `<data_dir>/vrcinema.lock` (the OS releases it when the returned
-/// file is closed or the process dies). Fails with a Polish message when another server holds
+/// file is closed or the process dies). Fails with a message when another server holds
 /// it: two servers on one data folder would wipe each other's clips, slates and live segments.
 pub fn lock_data_dir(data_dir: &Path) -> anyhow::Result<std::fs::File> {
     std::fs::create_dir_all(data_dir).map_err(|e| {
-        anyhow::anyhow!(
-            "Nie można utworzyć folderu danych {}: {e}",
-            data_dir.display()
+        msg_error(
+            Msg::error("cannot_create_data_dir")
+                .arg("path", data_dir.display())
+                .arg("detail", e),
         )
     })?;
     let path = data_dir.join(LOCK_FILE);
@@ -591,16 +603,22 @@ pub fn lock_data_dir(data_dir: &Path) -> anyhow::Result<std::fs::File> {
         .create(true)
         .truncate(false)
         .open(&path)
-        .map_err(|e| anyhow::anyhow!("Nie można otworzyć pliku {}: {e}", path.display()))?;
+        .map_err(|e| {
+            msg_error(
+                Msg::error("cannot_open_file")
+                    .arg("path", path.display())
+                    .arg("detail", e),
+            )
+        })?;
     match file.try_lock() {
         Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::anyhow!(
-            "Inny serwer kanału już używa folderu danych: {}",
-            data_dir.display()
+        Err(std::fs::TryLockError::WouldBlock) => Err(msg_error(
+            Msg::error("data_dir_in_use").arg("path", data_dir.display()),
         )),
-        Err(std::fs::TryLockError::Error(e)) => Err(anyhow::anyhow!(
-            "Nie można zablokować pliku {}: {e}",
-            path.display()
+        Err(std::fs::TryLockError::Error(e)) => Err(msg_error(
+            Msg::error("cannot_lock_file")
+                .arg("path", path.display())
+                .arg("detail", e),
         )),
     }
 }
@@ -640,28 +658,37 @@ mod tests {
         (tmp, data, markers)
     }
 
+    /// The banner as the log file shows it (English), one line per entry.
+    fn banner_text(config: &AppConfig, port: u16, builtin_tunnel: bool) -> String {
+        banner(config, port, builtin_tunnel)
+            .iter()
+            .map(Msg::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The desktop app's built-in tunnel gives the public address: the start-up banner must not
     /// tell the owner to run cloudflared himself (Task 8 live run).
     #[test]
     fn banner_with_the_built_in_tunnel_has_no_cloudflared_hint() {
         let (_tmp, data, _) = data_with_markers();
         let config = test_config(&data, 8471);
-        let text = banner(&config, 8471, true);
+        let text = banner_text(&config, 8471, true);
         assert!(!text.contains("cloudflared tunnel"), "{text}");
-        assert!(text.contains("wbudowany tunel"), "{text}");
+        assert!(text.contains("built-in tunnel"), "{text}");
         // A manual address saved in the settings does not apply while the tunnel is on.
         let manual = AppConfig {
             public_url: "https://reczny.example.com".into(),
             ..config
         };
-        assert!(!banner(&manual, 8471, true).contains("reczny.example.com"));
+        assert!(!banner_text(&manual, 8471, true).contains("reczny.example.com"));
     }
 
     #[test]
     fn banner_without_the_built_in_tunnel_is_unchanged() {
         let (_tmp, data, _) = data_with_markers();
         let config = test_config(&data, 8471);
-        let text = banner(&config, 8471, false);
+        let text = banner_text(&config, 8471, false);
         assert!(
             text.contains("    cloudflared tunnel --url http://localhost:8471"),
             "{text}"
@@ -671,8 +698,8 @@ mod tests {
             ..config
         };
         assert!(
-            banner(&public, 8471, false)
-                .contains("  Link dla VRChat:        https://kanal.example.com/live/main.m3u8")
+            banner_text(&public, 8471, false)
+                .contains("  VRChat link:            https://kanal.example.com/live/main.m3u8")
         );
     }
 
@@ -719,7 +746,7 @@ mod tests {
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = Arc::clone(&lines);
         (
-            Arc::new(move |m: &str| sink.lock().unwrap().push(m.to_string())),
+            Arc::new(move |m: Msg| sink.lock().unwrap().push(m.to_string())),
             lines,
         )
     }
@@ -770,10 +797,10 @@ mod tests {
         server.await.unwrap().unwrap();
         let lines = lines.lock().unwrap().clone();
         assert!(
-            lines.iter().any(|l| l.contains("Zamykanie")),
+            lines.iter().any(|l| l.contains("Shutting down")),
             "the injected log is used: {lines:?}"
         );
-        assert!(!lines.iter().any(|l| l.contains("Generowanie plansz")));
+        assert!(!lines.iter().any(|l| l.contains("Generating the slates")));
     }
 
     #[tokio::test]
@@ -861,7 +888,7 @@ mod tests {
         assert_eq!(loops.load(std::sync::atomic::Ordering::SeqCst), 0);
         let lines = lines.lock().unwrap().clone();
         assert!(
-            lines.iter().any(|l| l.contains("Generowanie plansz")),
+            lines.iter().any(|l| l.contains("Generating the slates")),
             "{lines:?}"
         );
     }
@@ -913,10 +940,7 @@ mod tests {
         let taken = bind_listener("127.0.0.1", 0, false).await.unwrap();
         let port = taken.local_addr().unwrap().port();
         let err = bind_listener("127.0.0.1", port, false).await.unwrap_err();
-        assert!(
-            err.to_string().contains("Nie można nasłuchiwać na"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("Cannot listen on"), "{err}");
     }
 
     #[tokio::test]
@@ -954,10 +978,7 @@ mod tests {
             }
         }
         let err = bind_listener("127.0.0.1", base, true).await.unwrap_err();
-        assert!(
-            err.to_string().contains("Nie można nasłuchiwać na"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("Cannot listen on"), "{err}");
     }
 
     /// Runs the server and stops it right after it starts serving.
@@ -988,6 +1009,14 @@ mod tests {
             .expect_err("a second server must not start");
         assert_eq!(
             format!("{err:#}"),
+            format!(
+                "Another channel server is already using the data folder: {}",
+                data.display()
+            )
+        );
+        // The same error told to a Polish reader (the app shows start-up failures this way).
+        assert_eq!(
+            crate::i18n::error_msg(&err).render(Lang::Pl),
             format!(
                 "Inny serwer kanału już używa folderu danych: {}",
                 data.display()

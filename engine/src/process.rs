@@ -13,6 +13,8 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
+use crate::i18n::Msg;
+
 /// Upper bound for collected output (stdout and stderr together); anything beyond is dropped.
 const MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
@@ -25,10 +27,22 @@ pub struct ProcessOutput {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
-    #[error("Przekroczono limit czasu ({secs} s): {cmd}")]
+    #[error("Time limit exceeded ({secs} s): {cmd}")]
     Timeout { secs: u64, cmd: String },
     #[error("{0}")]
     Io(#[from] io::Error),
+}
+
+impl ProcessError {
+    /// Why, for a person.
+    pub fn message(&self) -> Msg {
+        match self {
+            ProcessError::Timeout { secs, cmd } => Msg::error("process_timeout")
+                .arg("seconds", secs)
+                .arg("command", cmd),
+            ProcessError::Io(e) => Msg::error("source_message").arg("detail", e),
+        }
+    }
 }
 
 /// Builds a command: no console window on Windows and `kill_on_drop(true)` (the child is killed
@@ -81,14 +95,14 @@ pub fn contain_this_process() -> io::Result<()> {
 pub struct OwnJob {
     #[cfg(windows)]
     handle: usize,
-    warning: Option<String>,
+    warning: Option<Msg>,
 }
 
 impl OwnJob {
-    /// What did not go as planned (Polish, for the app's log): the process could not leave
+    /// What did not go as planned (a log message): the process could not leave
     /// the program-wide job, or got no job of its own (it still dies with its handle).
-    pub fn warning(&self) -> Option<&str> {
-        self.warning.as_deref()
+    pub fn warning(&self) -> Option<&Msg> {
+        self.warning.as_ref()
     }
 }
 
@@ -136,6 +150,8 @@ mod job {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::process::{Child, Command};
+
+    use crate::i18n::Msg;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
@@ -162,9 +178,7 @@ mod job {
         }
         let job = job();
         if job == 0 {
-            return Err(Error::other(
-                "nie można utworzyć obiektu zadania (job object)",
-            ));
+            return Err(Error::other("cannot create a job object"));
         }
         // SAFETY: `job` is a valid job handle; GetCurrentProcess returns a pseudo-handle that
         // needs no closing.
@@ -211,7 +225,7 @@ mod job {
     }
 
     /// See [`super::spawn_in_own_job`]. What did not go as planned is in
-    /// [`super::OwnJob::warning`] (Polish, for the app's log).
+    /// [`super::OwnJob::warning`] (a log message).
     pub fn spawn_own(cmd: &mut Command) -> std::io::Result<(Child, super::OwnJob)> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -224,10 +238,7 @@ mod job {
             Ok(child) => child,
             // This process sits in a job (not ours) that allows no breakaway: start it inside.
             Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
-                warnings.push(
-                    "program działa w obiekcie zadania Windows, który nie pozwala wydzielić procesu — przeglądarka otwarta przez cloudflared może zostać zamknięta razem z programem"
-                        .to_string(),
-                );
+                warnings.push(Msg::new("log.job_no_breakaway"));
                 cmd.creation_flags(CREATE_NO_WINDOW);
                 cmd.spawn()?
             }
@@ -239,9 +250,7 @@ mod job {
         ) {
             Ok(handle) => handle,
             Err(e) => {
-                warnings.push(format!(
-                    "nie można utworzyć osobnego obiektu zadania Windows dla cloudflared ({e}) — zatrzyma się przy anulowaniu, ale może przetrwać nagłe zamknięcie programu"
-                ));
+                warnings.push(Msg::new("log.job_create_failed").arg("detail", e));
                 0
             }
         };
@@ -250,14 +259,16 @@ mod job {
         {
             // SAFETY: both handles are valid for the duration of the call.
             if unsafe { AssignProcessToJobObject(handle as HANDLE, process as HANDLE) } == 0 {
-                warnings.push(format!(
-                    "nie można przypisać cloudflared do jego obiektu zadania Windows ({}) — zatrzyma się przy anulowaniu, ale może przetrwać nagłe zamknięcie programu",
-                    Error::last_os_error()
-                ));
+                warnings
+                    .push(Msg::new("log.job_assign_failed").arg("detail", Error::last_os_error()));
             }
         }
         // Without its own job it still dies with its handle (`kill_on_drop`).
-        let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+        let warning = match warnings.len() {
+            0 => None,
+            1 => warnings.pop(),
+            _ => Some(Msg::chain(warnings)),
+        };
         Ok((child, super::OwnJob { handle, warning }))
     }
 
@@ -489,10 +500,7 @@ mod tests {
         );
         assert!(matches!(err, ProcessError::Timeout { .. }), "{err:?}");
         let text = err.to_string();
-        assert!(
-            text.starts_with("Przekroczono limit czasu (1 s): "),
-            "{text}"
-        );
+        assert!(text.starts_with("Time limit exceeded (1 s): "), "{text}");
         assert!(text.ends_with(&cmd.display().to_string()), "{text}");
     }
 
@@ -557,6 +565,6 @@ mod tests {
             secs: 2,
             cmd: "x".into(),
         };
-        assert_eq!(err.to_string(), "Przekroczono limit czasu (2 s): x");
+        assert_eq!(err.to_string(), "Time limit exceeded (2 s): x");
     }
 }

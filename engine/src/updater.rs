@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
+use crate::i18n::Msg;
 use crate::process::run_process;
 
-pub type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
+pub type LogFn = Arc<dyn Fn(Msg) + Send + Sync>;
 
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(120);
 const INTERVAL: Duration = Duration::from_secs(24 * 3600);
@@ -26,8 +27,10 @@ pub fn last_line(stdout: &str, stderr: &str) -> String {
 /// One update attempt; logs the outcome.
 pub async fn update_ytdlp(path: &Path, log: &LogFn) {
     match run_process(path, &["-U".into()], UPDATE_TIMEOUT).await {
-        Ok(out) => log(&format!("yt-dlp: {}", last_line(&out.stdout, &out.stderr))),
-        Err(e) => log(&format!("Nie udało się zaktualizować yt-dlp: {e}")),
+        Ok(out) => {
+            log(Msg::new("log.ytdlp_update").arg("line", last_line(&out.stdout, &out.stderr)))
+        }
+        Err(e) => log(Msg::new("log.ytdlp_update_failed").arg("error", e)),
     }
 }
 

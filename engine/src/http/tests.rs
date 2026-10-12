@@ -29,7 +29,7 @@ use crate::db::{
     SettingsRepo, open_database,
 };
 use crate::engine::{Command, EngineHandle, Snapshot};
-use crate::i18n::Lang;
+use crate::i18n::{Lang, Msg};
 use crate::library::MediaLibrary;
 use crate::pipeline::channel::{
     ChannelState, ChannelStatus, ControlState, NowPlaying, PauseReason,
@@ -276,7 +276,7 @@ impl Harness {
         .with_library(Some(Arc::new(MediaLibrary::new(vec![
             media_dir.path().to_path_buf(),
         ]))))
-        .with_log(Arc::new(move |m: &str| {
+        .with_log(Arc::new(move |m: Msg| {
             sink.lock().unwrap().push(m.to_string())
         }));
         let state = tweak(state);
@@ -558,7 +558,7 @@ async fn adds_a_film_to_the_end_of_the_queue_with_a_nickname() {
     assert_eq!(item.added_by, AddedBy::Public);
     assert_eq!(
         h.logs(),
-        vec!["Zgłoszenie od 1.1.1.1: \"A\" (queued)".to_string()]
+        vec!["Request from 1.1.1.1: \"A\" (queued)".to_string()]
     );
 }
 
@@ -794,7 +794,7 @@ async fn limit_of_active_films_per_person_is_429() {
     assert!(res.error().contains("w kolejce"));
     assert_eq!(
         res.error(),
-        "Masz już 1 filmów w kolejce. Poczekaj, aż się odtworzą."
+        "Masz już 1 film w kolejce. Poczekaj, aż się odtworzy."
     );
 }
 
@@ -1085,6 +1085,70 @@ async fn login_sets_an_httponly_cookie_that_opens_the_panel() {
         assert_eq!(body[key], json!([]), "{key}");
     }
     assert_eq!(body["channelUrl"], "http://localhost/live/main.m3u8");
+}
+
+/// The reason a film failed or was skipped is kept as a message and told in the language of
+/// the request; a plain text kept by an older version stays as it is.
+#[tokio::test]
+async fn history_reasons_are_told_in_the_language_of_the_request() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let skipped = h.add("Skipped", ItemStatus::Queued);
+    let failed = h.add("Failed", ItemStatus::Queued);
+    let old = h.add("Old", ItemStatus::Queued);
+    h.with_db(|c| {
+        let q = QueueRepo::new(c);
+        let reason = Msg::new("item_errors.skipped").to_stored();
+        q.finish(skipped.id, ItemStatus::Played, Some(&reason))
+            .unwrap();
+        let reason = Msg::error("fetch_failed")
+            .arg_msg(
+                "reason",
+                Msg::error("source_message").arg("detail", "Video unavailable"),
+            )
+            .to_stored();
+        q.finish(failed.id, ItemStatus::Failed, Some(&reason))
+            .unwrap();
+        q.finish(
+            old.id,
+            ItemStatus::Failed,
+            Some("Pominięty przez właściciela"),
+        )
+        .unwrap();
+    });
+    let errors = |lang: &str| {
+        let req = get("/api/admin/channels/main")
+            .cookie(&cookie)
+            .header("x-vrcinema-lang", lang);
+        let h = &h;
+        async move {
+            let body = h.send(req).await.json();
+            body["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| (i["title"].as_str().unwrap().to_string(), i["error"].clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        }
+    };
+    let pl = errors("pl").await;
+    let en = errors("en").await;
+    assert_eq!(pl["Skipped"], "Pominięty przez właściciela");
+    assert_eq!(en["Skipped"], "Skipped by the owner");
+    assert_eq!(
+        pl["Failed"],
+        "Nie udało się odczytać filmu: Video unavailable"
+    );
+    assert_eq!(en["Failed"], "Could not read the video: Video unavailable");
+    // Plain text from before stays readable as it is, in any language.
+    assert_eq!(pl["Old"], "Pominięty przez właściciela");
+    assert_eq!(en["Old"], "Pominięty przez właściciela");
+    // What is in the database is the message, not a text of one language.
+    let raw = h.item(skipped.id).error.unwrap();
+    assert!(
+        !raw.contains("Skipped by the owner") && !raw.contains("Pominięty"),
+        "{raw:?}"
+    );
 }
 
 #[tokio::test]

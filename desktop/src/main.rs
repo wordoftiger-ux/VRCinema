@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use vrcinema::app::{AppEngine, AppOptions};
+use vrcinema::app_settings::AppSettings;
+use vrcinema::i18n::{Lang, Msg, error_msg, system_lang, t};
 use semver::Version;
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_autostart::ManagerExt;
@@ -87,7 +89,7 @@ impl Shell {
     }
 
     /// A line in the app's log (dropped while quitting).
-    pub fn log(&self, msg: &str) {
+    pub fn log(&self, msg: Msg) {
         self.with_engine(|e| e.log(msg));
     }
 
@@ -137,7 +139,7 @@ pub fn quit(app: &AppHandle, relaunch: Option<PathBuf>) {
         .await;
         if !stopped {
             // The log is closed with the engine (or the engine is still busy): stderr only.
-            eprintln!("VRCinema: zatrzymywanie trwało za długo — kończę bez czekania.");
+            eprintln!("{}", t(startup_lang(&shell.home), "app.stop_too_slow", &[]));
         }
         match relaunch {
             Some(exe) => {
@@ -201,18 +203,18 @@ fn message_box(text: &str, buttons: rfd::MessageButtons) -> rfd::MessageDialogRe
         .set_buttons(buttons)
         .show()
 }
+/// The language for texts shown before the engine is up (or after it stopped): the saved one,
+/// else the language of Windows.
+fn startup_lang(home: &std::path::Path) -> Lang {
+    AppSettings::saved_language(home).unwrap_or_else(system_lang)
+}
 
 fn error_box(text: &str) {
     message_box(text, rfd::MessageButtons::Ok);
 }
 
-fn webview2_missing() {
-    let text = format!(
-        "VRCinema potrzebuje składnika Microsoft Edge WebView2 Runtime, \
-         którego nie ma na tym komputerze.\n\n\
-         Pobierz go (wersja „Evergreen”) ze strony:\n{WEBVIEW2_URL}\n\n\
-         Otworzyć teraz stronę pobierania?"
-    );
+fn webview2_missing(lang: Lang) {
+    let text = t(lang, "app.webview2_missing", &[("url", WEBVIEW2_URL)]);
     if message_box(&text, rfd::MessageButtons::YesNo) == rfd::MessageDialogResult::Yes {
         open_in_browser(WEBVIEW2_URL);
     }
@@ -300,34 +302,38 @@ fn start(
     )) {
         Ok(engine) => engine,
         Err(e) => {
-            error_box(&format!(
-                "Nie udało się uruchomić VRCinema:\n{e:#}\n\nDziennik: {}",
-                home.join("logs").display()
+            let lang = startup_lang(&home);
+            error_box(&t(
+                lang,
+                "app.start_failed",
+                &[
+                    ("error", &error_msg(&e).render(lang)),
+                    ("path", &home.join("logs").display().to_string()),
+                ],
             ));
             std::process::exit(1);
         }
     };
     if let Some(e) = contain {
-        engine.log(&format!(
-            "Nie udało się objąć procesów potomnych obiektem zadania: {e}"
-        ));
+        engine.log(Msg::new("log.job_containment_failed").arg("error", e));
     }
     if args.after_update {
-        engine.log("Uruchomiono po aktualizacji.");
+        engine.log(Msg::new("log.started_after_update"));
     }
     // Keeps the autostart entry pointing at this file (the program may have been moved).
     if engine.settings().autostart
         && let Err(e) = app.autolaunch().enable()
     {
-        engine.log(&format!("Nie udało się odświeżyć autostartu: {e}"));
+        engine.log(Msg::new("log.autostart_refresh_failed").arg("error", e));
     }
     let shell = app.state::<Shell>();
     // Setup runs on the main thread, outside the async runtime: blocking is allowed here.
     *shell.engine.blocking_write() = Some(engine);
-    if let Err(e) = tray::create(app) {
-        shell.log(&format!("Nie udało się utworzyć ikony w zasobniku: {e}"));
+    let lang = shell.with_engine(|e| e.language()).unwrap_or_default();
+    if let Err(e) = tray::create(app, lang) {
+        shell.log(Msg::new("log.tray_create_failed").arg("error", e));
     }
-    tray::spawn_tooltip_refresh(app.clone());
+    tray::spawn_tooltip_refresh(app.clone(), lang);
     window::spawn_port_follow(app.clone());
     if !args.autostart {
         window::open_panel(app);
@@ -343,20 +349,23 @@ fn main() {
         spawn_update_cleanup(exe.clone());
     }
     if tauri::webview_version().is_err() {
-        webview2_missing();
+        webview2_missing(system_lang());
         std::process::exit(1);
     }
     let home = match vrcinema::home::app_home() {
         Ok(home) => home,
         Err(e) => {
-            error_box(&format!(
-                "VRCinema nie może zapisywać swoich danych:\n{e:#}\n\n\
-                 Sprawdź uprawnienia do tego folderu lub ustaw inny w zmiennej VRCINEMA_HOME."
+            let lang = system_lang();
+            error_box(&t(
+                lang,
+                "app.home_unwritable",
+                &[("error", &error_msg(&e).render(lang))],
             ));
             std::process::exit(1);
         }
     };
     // Every process started from now on (ffmpeg, yt-dlp, WebView2) ends with this program.
+    let lang = startup_lang(&home);
     let contain = vrcinema::process::contain_this_process()
         .err()
         .map(|e| e.to_string());
@@ -382,12 +391,12 @@ fn main() {
     let app = match app {
         Ok(app) => app,
         Err(e) => {
-            error_box(&format!("Nie udało się uruchomić okna VRCinema:\n{e}"));
+            error_box(&t(lang, "app.window_failed", &[("error", &e.to_string())]));
             std::process::exit(1);
         }
     };
     app.run(|app, event| {
-        // Only "Zakończ" (or an update) ends the program; closing the window hides it.
+        // Only "Quit" (or an update) ends the program; closing the window hides it.
         if let RunEvent::ExitRequested { api, .. } = event
             && !app.state::<Shell>().quitting()
         {

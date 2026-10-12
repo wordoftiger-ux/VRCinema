@@ -20,6 +20,7 @@ use super::{
     public_item, state_map,
 };
 use crate::db::{AddedBy, ItemStatus, NewItem, QueueRepo};
+use crate::i18n::Msg;
 use crate::rules::{is_allowed_domain, parse_source_url, validate_meta};
 
 pub(super) fn router() -> Router<AppState> {
@@ -161,11 +162,12 @@ async fn post_request(
             requester_ip: Some(ip.clone()),
         })
     })?;
-    (state.log)(&format!(
-        "Zgłoszenie od {ip}: \"{}\" ({})",
-        item.title,
-        item.status.as_str()
-    ));
+    (state.log)(
+        Msg::new("log.request_received")
+            .arg("ip", &ip)
+            .arg("title", &item.title)
+            .arg("status", item.status.as_str()),
+    );
     Ok(json_response(
         StatusCode::CREATED,
         &json!({ "status": item.status.as_str(), "item": public_item(&item) }),

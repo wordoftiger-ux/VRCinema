@@ -10,6 +10,8 @@ use tauri::{
     AppHandle, DragDropEvent, Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
+use vrcinema::i18n::{Msg, error_msg, t};
+
 use crate::Shell;
 
 pub const MAIN: &str = "main";
@@ -17,8 +19,6 @@ pub const MAIN: &str = "main";
 const WEBVIEW_DIR: &str = "webview";
 const PORT_CHECK: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
-const HIDDEN_TITLE: &str = "VRCinema";
-const HIDDEN_TEXT: &str = "VRCinema działa w tle — kanał nadal nadaje.";
 
 /// Where an address opened from the panel goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +141,7 @@ pub fn open_panel(app: &AppHandle) {
     match window {
         Some(w) => {
             if let Err(e) = w.navigate(url) {
-                shell.log(&format!("Nie udało się otworzyć panelu: {e}"));
+                shell.log(Msg::new("log.panel_open_failed").arg("error", e));
             }
             let _ = w.show();
             let _ = w.unminimize();
@@ -149,7 +149,7 @@ pub fn open_panel(app: &AppHandle) {
         }
         None => {
             if let Err(e) = create(app, url) {
-                shell.log(&format!("Nie udało się utworzyć okna: {e}"));
+                shell.log(Msg::new("log.window_create_failed").arg("error", e));
             }
         }
     }
@@ -189,7 +189,11 @@ fn on_event(app: &AppHandle, event: &WindowEvent) {
             }
             let shell = app.state::<Shell>();
             if !shell.quitting() && !shell.hidden_notice_shown.swap(true, Ordering::SeqCst) {
-                crate::tray::show_balloon(HIDDEN_TITLE, HIDDEN_TEXT);
+                let lang = shell.with_engine(|e| e.language()).unwrap_or_default();
+                crate::tray::show_balloon(
+                    &t(lang, "tray.hidden_title", &[]),
+                    &t(lang, "tray.hidden_text", &[]),
+                );
             }
         }
         WindowEvent::DragDrop(DragDropEvent::Enter { .. }) => eval(app, drag_script(true)),
@@ -217,9 +221,9 @@ fn add_dropped(app: AppHandle, paths: Vec<PathBuf>) {
             match engine.add_files(paths).await {
                 Ok(report) => Ok((report.added.len(), report.skipped)),
                 Err(e) => {
-                    let msg = format!("{e:#}");
-                    engine.log(&format!("Nie udało się dodać plików: {msg}"));
-                    Err(msg)
+                    let error = error_msg(&e);
+                    engine.log(Msg::new("log.files_add_failed").arg_msg("error", error.clone()));
+                    Err(error.render(engine.language()))
                 }
             }
         };
@@ -262,12 +266,10 @@ pub fn spawn_port_follow(app: AppHandle) {
             let Some(key) = shell.with_engine(|e| e.new_desktop_key()) else {
                 continue;
             };
-            shell.log(&format!(
-                "Serwer działa na porcie {port} — przełączam okno."
-            ));
+            shell.log(Msg::new("log.window_follows_port").arg("port", port));
             *shell.window_port() = Some(port);
             if let Err(e) = window.navigate(login_url(port, &key)) {
-                shell.log(&format!("Nie udało się przełączyć okna: {e}"));
+                shell.log(Msg::new("log.window_switch_failed").arg("error", e));
             }
         }
     });

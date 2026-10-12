@@ -76,6 +76,8 @@ fn test_options(tmp: &Path) -> AppOptions {
             user_dir: Some(tmp.join("user").join(".cloudflared")),
             ..NamedOptions::default()
         },
+        // The tests read the Polish texts.
+        system_lang: crate::i18n::Lang::Pl,
         ..AppOptions::default()
     }
 }
@@ -307,7 +309,12 @@ async fn without_tools_the_server_starts_and_the_settings_are_saved_at_once() {
     let page = app.http.get(app.url("/")).send().await.unwrap();
     assert_eq!(page.status(), StatusCode::OK);
     assert!(app.home.join("logs").join("vrcinema.log").is_file());
-    assert!(app.log_text().contains("bez kanału"), "{}", app.log_text());
+    assert!(
+        app.log_text()
+            .contains("The server runs without the channel"),
+        "{}",
+        app.log_text()
+    );
     app.stop().await;
 }
 
@@ -709,7 +716,7 @@ async fn the_log_route_returns_the_tail_without_the_window_key() {
         .await
         .unwrap();
     let cookie = cookie_of(&res);
-    app.engine().log("Wpis z powłoki");
+    app.engine().log(crate::i18n::Msg::text("Wpis z powłoki"));
     let log = app.get("/api/desktop/log", &cookie).await;
     let lines: Vec<&str> = log["lines"]
         .as_array()
@@ -1009,10 +1016,9 @@ async fn installing_tools_from_the_local_server_updates_status_and_settings() {
     // The window shows why (the tools are there, but the channel failed to start).
     let why = info["channelError"].as_str().unwrap_or_default();
     assert!(!why.is_empty(), "{info}");
-    assert!(app.log_text().contains(why), "{why}");
     assert_eq!(info["restarting"], false);
     assert!(
-        app.log_text().contains("Kanał nie wystartował"),
+        app.log_text().contains("The channel did not start"),
         "{}",
         app.log_text()
     );
@@ -1096,7 +1102,7 @@ async fn an_unreachable_or_private_release_is_quiet() {
     assert_eq!(update["available"], Value::Null);
     assert!(update.get("error").is_none_or(Value::is_null), "{update}");
     assert!(
-        app.log_text().contains("Sprawdzanie aktualizacji"),
+        app.log_text().contains("Checking for updates failed"),
         "{}",
         app.log_text()
     );
@@ -1416,7 +1422,7 @@ async fn shutdown_gives_up_waiting_for_a_stuck_restart() {
     .expect("the shutdown waited for the stuck restart");
     assert!(!clean);
     let log = std::fs::read_to_string(app.home.join("logs").join("vrcinema.log")).unwrap();
-    assert!(log.contains("Zatrzymywanie trwa za długo"), "{log}");
+    assert!(log.contains("Stopping takes too long"), "{log}");
     // The restart that finishes after the shutdown gave up does not leave a server behind.
     release.send(()).unwrap();
     let _ = restart.await.unwrap();
@@ -1460,5 +1466,6 @@ async fn a_remote_switch_during_a_restart_reaches_the_new_server() {
     app.stop().await;
 }
 
+mod language;
 mod named;
 mod tunnel;

@@ -189,7 +189,7 @@ impl TunnelManager {
     pub fn new() -> Self {
         Self {
             timings: TunnelTimings::default(),
-            log: Arc::new(|m: &str| eprintln!("{m}")),
+            log: Arc::new(|m: Msg| eprintln!("{m}")),
             state: Arc::new(watch::channel(TunnelState::Off).0),
             lost: LostSince::default(),
             runs_ended: Arc::default(),
@@ -284,7 +284,7 @@ impl TunnelManager {
                 }
                 Op::Stop => {
                     if slot.run.is_some() {
-                        (supervisor.log)("Tunel: zatrzymano cloudflared.");
+                        (supervisor.log)(Msg::new("log.tunnel_stopped"));
                     }
                     stop_run(&mut slot).await;
                     *lock_lost(&supervisor.lost) = None;
@@ -394,7 +394,7 @@ impl StopSignal {
 /// Why a cloudflared run ended without being asked to.
 struct Failure {
     /// For the log.
-    reason: String,
+    reason: Msg,
     /// Shown as `TunnelState::Error` during the wait.
     error: Option<Msg>,
     rate_limited: bool,
@@ -404,7 +404,7 @@ struct Failure {
 }
 
 impl Failure {
-    fn new(reason: String) -> Self {
+    fn new(reason: Msg) -> Self {
         Self {
             reason,
             error: None,
@@ -470,10 +470,11 @@ impl Supervisor {
                 wait = wait.max(self.timings.rate_limit_wait);
             }
             let seconds = wait.as_secs_f64().ceil() as u64;
-            (self.log)(&format!(
-                "Tunel: {}; ponowna próba za {seconds} s.",
-                failure.reason
-            ));
+            (self.log)(
+                Msg::new("log.tunnel_retry")
+                    .arg_msg("reason", failure.reason.clone())
+                    .arg("seconds", seconds),
+            );
             let shown = if failure.rate_limited {
                 TunnelState::Error {
                     message: Msg::new("tunnel.rate_limited").arg("seconds", seconds),
@@ -502,16 +503,17 @@ impl Supervisor {
             Ok(process) => process,
             Err(e) => {
                 let message = Msg::error("cloudflared_start").arg("detail", &e);
-                let mut failure = Failure::new(format!("Nie można uruchomić cloudflared: {e}"));
+                let mut failure =
+                    Failure::new(Msg::new("log.tunnel_reason_start_failed").arg("detail", &e));
                 failure.error = Some(message);
                 return Outcome::Failed(failure);
             }
         };
-        (self.log)(&format!(
-            "Tunel: uruchomiono cloudflared (pid {}, {}).",
-            cloudflared.pid().unwrap_or(0),
-            describe(config)
-        ));
+        (self.log)(
+            Msg::new("log.tunnel_started")
+                .arg("pid", cloudflared.pid().unwrap_or(0))
+                .arg_msg("config", describe(config)),
+        );
 
         let metrics_port = cloudflared.metrics_port;
         let poll = self.timings.poll_interval;
@@ -564,9 +566,8 @@ impl Supervisor {
                     if address.is_none() {
                         if quick && process::is_rate_limited(&line) {
                             cloudflared.kill().await;
-                            let mut failure = Failure::new(
-                                "Cloudflare odmówił szybkiego tunelu (429 Too Many Requests)".into(),
-                            );
+                            let mut failure =
+                                Failure::new(Msg::new("log.tunnel_reason_rate_limited"));
                             failure.rate_limited = true;
                             return Outcome::Failed(failure);
                         }
@@ -600,15 +601,19 @@ impl Supervisor {
                         last_line = line;
                     }
                     let code = match status {
-                        Ok(status) => status
-                            .code()
-                            .map_or_else(|| "bez kodu".to_string(), |c| format!("kod {c}")),
-                        Err(e) => e.to_string(),
+                        Ok(status) => status.code().map_or_else(
+                            || Msg::new("log.tunnel_exit_no_code"),
+                            |c| Msg::new("log.tunnel_exit_code").arg("code", c),
+                        ),
+                        Err(e) => Msg::text(e),
                     };
-                    let mut reason = format!("cloudflared zakończył działanie ({code})");
-                    if !last_line.is_empty() {
-                        reason.push_str(&format!(": {last_line}"));
-                    }
+                    let reason = if last_line.is_empty() {
+                        Msg::new("log.tunnel_reason_exited").arg_msg("code", code)
+                    } else {
+                        Msg::new("log.tunnel_reason_exited_with_output")
+                            .arg_msg("code", code)
+                            .arg("output", &last_line)
+                    };
                     let mut failure = Failure::new(reason);
                     failure.rate_limited = rate_limited;
                     failure.online_for = online_since
@@ -660,17 +665,15 @@ impl Supervisor {
                                 online_since = None;
                                 lock_counters(&self.counters).online_since = None;
                                 lock_lost(&self.lost).get_or_insert(since);
-                                (self.log)(
-                                    "Tunel: cloudflared stracił połączenie z Cloudflare; czekam, aż je odzyska.",
-                                );
+                                (self.log)(Msg::new("log.tunnel_connection_lost"));
                                 self.state.send_replace(TunnelState::Reconnecting);
                             }
                             if since.elapsed() >= self.timings.reconnect_limit {
                                 cloudflared.kill().await;
-                                let mut failure = Failure::new(format!(
-                                    "brak połączenia z Cloudflare od {} s mimo działającego cloudflared",
-                                    since.elapsed().as_secs()
-                                ));
+                                let mut failure = Failure::new(
+                                    Msg::new("log.tunnel_reason_no_connection")
+                                        .arg("seconds", since.elapsed().as_secs()),
+                                );
                                 failure.online_for = online_since
                                     .map_or(longest_online, |t| longest_online.max(t.elapsed()));
                                 return Outcome::Failed(failure);
@@ -682,10 +685,12 @@ impl Supervisor {
                 }
                 _ = &mut deadline, if address.is_none() => {
                     cloudflared.kill().await;
-                    return Outcome::Failed(Failure::new(format!(
-                        "brak adresu tunelu po {} s",
-                        self.timings.address_timeout.as_secs_f64().ceil() as u64
-                    )));
+                    return Outcome::Failed(Failure::new(
+                        Msg::new("log.tunnel_reason_no_address").arg(
+                            "seconds",
+                            self.timings.address_timeout.as_secs_f64().ceil() as u64,
+                        ),
+                    ));
                 }
             }
         }
@@ -693,7 +698,7 @@ impl Supervisor {
 
     fn online(&self, url: &str) -> Instant {
         *lock_lost(&self.lost) = None;
-        (self.log)(&format!("Tunel: w sieci — {url}"));
+        (self.log)(Msg::new("log.tunnel_online").arg("url", url));
         let now = Instant::now();
         lock_counters(&self.counters).online_since = Some(now);
         self.state
@@ -733,14 +738,13 @@ async fn health_probe(
 }
 
 /// The configuration for the log: paths only, never file contents.
-fn describe(config: &TunnelConfig) -> String {
+fn describe(config: &TunnelConfig) -> Msg {
     let local = format!("http://127.0.0.1:{}", config.port);
     match &config.mode {
-        TunnelMode::Quick => format!("szybki tunel do {local}"),
-        TunnelMode::Named(named) => format!(
-            "stały tunel {} do {local}, poświadczenia {}",
-            named.hostname,
-            named.credentials_file.display()
-        ),
+        TunnelMode::Quick => Msg::new("log.tunnel_describe_quick").arg("local", local),
+        TunnelMode::Named(named) => Msg::new("log.tunnel_describe_named")
+            .arg("hostname", &named.hostname)
+            .arg("local", local)
+            .arg("credentials", named.credentials_file.display()),
     }
 }

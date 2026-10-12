@@ -6,9 +6,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TsError {
-    #[error("Utracono synchronizację MPEG-TS na bajcie {0}")]
+    #[error("MPEG-TS sync lost at byte {0}")]
     SyncLost(usize),
-    #[error("Niepełny pakiet MPEG-TS na bajcie {0}")]
+    #[error("Incomplete MPEG-TS packet at byte {0}")]
     Truncated(usize),
 }
 
@@ -586,7 +586,7 @@ mod tests {
         let bad = vec![0u8; 188];
         let err = TsRewriter::new().rewrite(&bad, 0).unwrap_err();
         assert_eq!(err, TsError::SyncLost(0));
-        assert!(err.to_string().contains("synchroniz"));
+        assert!(err.to_string().contains("sync lost"));
     }
 
     #[test]
@@ -596,10 +596,7 @@ mod tests {
         seg[188] = 0;
         let err = rw.rewrite(&seg, 0).unwrap_err();
         assert_eq!(err, TsError::SyncLost(188));
-        assert_eq!(
-            err.to_string(),
-            "Utracono synchronizację MPEG-TS na bajcie 188"
-        );
+        assert_eq!(err.to_string(), "MPEG-TS sync lost at byte 188");
         // the failed call did not consume continuity counters
         let ok = rw.rewrite(&packet(pid(0x100)), 0).unwrap();
         assert_eq!(ok[3] & 0xf, 0);

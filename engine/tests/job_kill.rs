@@ -154,7 +154,10 @@ fn job_helper_contained_login() {
         process::spawn_in_own_job(&mut cmd).expect("start the login")
     });
     let login_pid = login.id().expect("login pid");
-    println!("WARNING={}", job.warning().unwrap_or(""));
+    println!(
+        "WARNING={}",
+        job.warning().map(ToString::to_string).unwrap_or_default()
+    );
     println!(
         "LOGIN_IN_PROGRAM_JOB={:?}",
         process::in_program_job(login_pid)

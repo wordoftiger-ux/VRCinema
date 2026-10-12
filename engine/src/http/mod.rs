@@ -40,7 +40,7 @@ const LOGIN_FAILURES: u32 = 5;
 const LOGIN_WINDOW: Duration = Duration::from_secs(15 * 60);
 const BODY_LIMIT: usize = 16 * 1024;
 
-pub type LogFn = Arc<dyn Fn(&str) + Send + Sync>;
+pub type LogFn = Arc<dyn Fn(Msg) + Send + Sync>;
 
 /// The part of the configuration HTTP needs.
 #[derive(Debug, Clone)]
@@ -251,9 +251,11 @@ impl AppState {
         match self.engine.commands.try_send(command.clone()) {
             Ok(()) => true,
             Err(e) => {
-                (self.log)(&format!(
-                    "Nie można przekazać polecenia {command:?} do kanału: {e}"
-                ));
+                (self.log)(
+                    Msg::new("log.command_not_sent")
+                        .arg("command", format!("{command:?}"))
+                        .arg("error", e),
+                );
                 false
             }
         }
@@ -522,7 +524,7 @@ async fn log_internal_errors(
 ) -> Response {
     let mut res = next.run(req).await;
     if let Some(InternalError(message)) = res.extensions_mut().remove::<InternalError>() {
-        (state.log)(&format!("Błąd serwera: {message}"));
+        (state.log)(Msg::new("log.server_error").arg("error", message));
     }
     res
 }
@@ -725,14 +727,14 @@ pub(crate) fn public_item(i: &QueueItem) -> Value {
     })
 }
 
-pub(crate) fn admin_item(i: &QueueItem) -> Value {
+pub(crate) fn admin_item(i: &QueueItem, lang: Lang) -> Value {
     let mut item = public_item(i);
     if let Value::Object(map) = &mut item {
         map.insert("sourceUrl".into(), json!(i.source_url));
         map.insert("status".into(), json!(i.status.as_str()));
         map.insert("addedBy".into(), json!(i.added_by.as_str()));
         map.insert("requesterIp".into(), json!(i.requester_ip));
-        map.insert("error".into(), json!(i.error));
+        map.insert("error".into(), json!(i.error_text(lang)));
         map.insert("createdAt".into(), json!(i.created_at));
         map.insert("finishedAt".into(), json!(i.finished_at));
     }
@@ -819,8 +821,8 @@ pub fn build_router(state: AppState) -> Router {
                     .downcast_ref::<&str>()
                     .map(|s| (*s).to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "nieznana panika".to_string());
-                log(&format!("Błąd serwera: {message}"));
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                log(Msg::new("log.server_error").arg("error", message));
                 ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "internal", &[]).into_response()
             },
         ))

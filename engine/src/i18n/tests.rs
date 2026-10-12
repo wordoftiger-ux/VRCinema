@@ -143,10 +143,22 @@ fn t_and_tn_use_the_built_in_dictionaries() {
         tn(Lang::En, "errors.too_many_active", 3, &[]),
         "You already have 3 videos in the queue. Wait until they have played."
     );
-    assert_eq!(
-        tn(Lang::Pl, "errors.too_many_active", 3, &[]),
-        "Masz już 3 filmów w kolejce. Poczekaj, aż się odtworzą."
-    );
+    for (n, text) in [
+        (1, "Masz już 1 film w kolejce. Poczekaj, aż się odtworzy."),
+        (2, "Masz już 2 filmy w kolejce. Poczekaj, aż się odtworzą."),
+        (3, "Masz już 3 filmy w kolejce. Poczekaj, aż się odtworzą."),
+        (5, "Masz już 5 filmów w kolejce. Poczekaj, aż się odtworzą."),
+        (
+            12,
+            "Masz już 12 filmów w kolejce. Poczekaj, aż się odtworzą.",
+        ),
+        (
+            22,
+            "Masz już 22 filmy w kolejce. Poczekaj, aż się odtworzą.",
+        ),
+    ] {
+        assert_eq!(tn(Lang::Pl, "errors.too_many_active", n, &[]), text);
+    }
 }
 
 #[test]
@@ -170,6 +182,96 @@ fn messages_render_nested_fields_in_the_readers_language() {
         Msg::error("too_many_active").count(2).render(Lang::En),
         "You already have 2 videos in the queue. Wait until they have played."
     );
+}
+
+#[test]
+fn a_message_survives_its_stored_form_with_nested_fields_and_a_count() {
+    let msg = Msg::error("fetch_failed")
+        .arg_msg(
+            "reason",
+            Msg::error("source_message").arg("detail", "a \"b\" ł"),
+        )
+        .count(3);
+    let stored = msg.to_stored();
+    assert!(stored.starts_with(STORED_PREFIX), "{stored}");
+    let back = Msg::from_stored(&stored).unwrap();
+    assert_eq!(back, msg);
+    assert_eq!(back.render(Lang::Pl), msg.render(Lang::Pl));
+    // Text that was stored before messages had a stored form stays readable as it is.
+    assert_eq!(Msg::from_stored("Pominięty przez właściciela"), None);
+    assert_eq!(
+        stored_text("Pominięty przez właściciela", Lang::En),
+        "Pominięty przez właściciela"
+    );
+    assert_eq!(
+        stored_text(&Msg::error("busy").to_stored(), Lang::Pl),
+        Msg::error("busy").render(Lang::Pl)
+    );
+    // Broken stored forms are shown as they are, never a panic.
+    let broken = format!("{STORED_PREFIX}{{oops");
+    assert_eq!(stored_text(&broken, Lang::En), broken);
+}
+
+#[test]
+fn plain_text_and_chains_render_without_a_key() {
+    let msg = Msg::chain(vec![Msg::error("busy"), Msg::text("os error 5")]);
+    assert_eq!(
+        msg.render(Lang::En),
+        format!("{}: os error 5", Msg::error("busy").render(Lang::En))
+    );
+    assert_eq!(Msg::from_stored(&msg.to_stored()).unwrap(), msg);
+    assert_eq!(Msg::text("x {y}").arg("y", "1").render(Lang::Pl), "x {y}");
+}
+
+#[test]
+fn an_error_chain_becomes_a_message_in_the_readers_language() {
+    let result: anyhow::Result<()> = Err(anyhow::anyhow!("os error 5"));
+    let e = result
+        .msg_context(Msg::error("busy"))
+        .msg_context(Msg::error("cancelled"))
+        .unwrap_err();
+    let pl = |k| Msg::error(k).render(Lang::Pl);
+    assert_eq!(
+        error_msg(&e).render(Lang::Pl),
+        format!("{}: {}: os error 5", pl("cancelled"), pl("busy"))
+    );
+    // `{e:#}` (the English text) is what tests and the log file see.
+    assert_eq!(
+        format!("{e:#}"),
+        format!(
+            "{}: {}: os error 5",
+            Msg::error("cancelled"),
+            Msg::error("busy")
+        )
+    );
+    // A plain anyhow error is only its text.
+    let plain = anyhow::anyhow!("x").context("y");
+    assert_eq!(error_msg(&plain).render(Lang::Pl), "y: x");
+}
+
+#[test]
+fn the_default_language_follows_the_windows_ui_language() {
+    // Language ids: pl-PL 0x0415, de-AT 0x0C07, es-MX 0x080A, fr-CA 0x0C0C, ja-JP 0x0411,
+    // en-GB 0x0809, ko-KR 0x0412.
+    let from = |id: u16| system_lang_from(|| Some(id));
+    assert_eq!(from(0x0415), Lang::Pl);
+    assert_eq!(from(0x0C07), Lang::De);
+    assert_eq!(from(0x080A), Lang::Es);
+    assert_eq!(from(0x0C0C), Lang::Fr);
+    assert_eq!(from(0x0411), Lang::Ja);
+    assert_eq!(from(0x0809), Lang::En);
+    assert_eq!(from(0x0412), Lang::En);
+    assert_eq!(system_lang_from(|| None), Lang::En);
+}
+
+#[cfg(windows)]
+#[test]
+fn the_real_windows_ui_language_is_a_supported_language_or_english() {
+    // Calls GetUserDefaultUILanguage for real: whatever it says maps to one of the six.
+    let id = user_ui_language().expect("Windows knows its UI language");
+    assert_ne!(id, 0);
+    assert!(Lang::ALL.contains(&system_lang()));
+    assert_eq!(system_lang(), system_lang_from(|| Some(id)));
 }
 
 // ---------- Completeness (strict for en and pl; es, de, fr, ja from task 17) ----------
@@ -308,9 +410,10 @@ fn rust_sources(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
 }
 
 /// Namespaces of the dictionaries' keys: a literal `"<namespace>.…"` in the code is a key.
-const NAMESPACES: [&str; 6] = [
+const NAMESPACES: [&str; 7] = [
     "errors",
     "item_errors",
+    "log",
     "named",
     "slates",
     "tunnel",

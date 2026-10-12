@@ -4,9 +4,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 
 use super::Tool;
+use crate::i18n::{Msg, MsgContext, msg_error};
 use crate::setup::{extract_zip, find_file};
 
 const STAGE_PREFIX: &str = ".install-";
@@ -27,6 +28,11 @@ pub fn install_downloaded(tool: Tool, file: &Path, tools_dir: &Path) -> Result<(
     result
 }
 
+/// The downloaded archive does not hold `file`.
+fn archive_lacks(file: &str) -> anyhow::Error {
+    msg_error(Msg::error("archive_lacks_file").arg("file", file))
+}
+
 /// Prepares `(staged file, destination)` pairs; fails if the download is not what we expect.
 fn stage_files(
     tool: Tool,
@@ -43,18 +49,17 @@ fn stage_files(
             Ok(vec![(staged, tools_dir.join(exe))])
         }
         Tool::Deno => {
-            extract_zip(file, stage).context("Rozpakowanie Deno nie powiodło się")?;
-            let exe =
-                find_file(stage, "deno.exe").ok_or_else(|| anyhow!("W archiwum brak deno.exe"))?;
+            extract_zip(file, stage).msg_context(Msg::error("deno_unpack_failed"))?;
+            let exe = find_file(stage, "deno.exe").ok_or_else(|| archive_lacks("deno.exe"))?;
             Ok(vec![(exe, tools_dir.join("deno.exe"))])
         }
         Tool::Ffmpeg => {
-            extract_zip(file, stage).context("Rozpakowanie ffmpeg nie powiodło się")?;
-            let ffmpeg = find_file(stage, "ffmpeg.exe")
-                .ok_or_else(|| anyhow!("W archiwum brak ffmpeg.exe"))?;
+            extract_zip(file, stage).msg_context(Msg::error("ffmpeg_unpack_failed"))?;
+            let ffmpeg =
+                find_file(stage, "ffmpeg.exe").ok_or_else(|| archive_lacks("ffmpeg.exe"))?;
             let bin = ffmpeg.parent().expect("file has a parent");
             if !bin.join("ffprobe.exe").is_file() {
-                bail!("W archiwum brak ffprobe.exe");
+                return Err(archive_lacks("ffprobe.exe"));
             }
             // The shared build needs its DLLs next to the exes: take the whole `bin` folder.
             let mut items = Vec::new();
@@ -97,14 +102,13 @@ fn new_backup_dir(tools_dir: &Path) -> Result<PathBuf> {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 return Err(e)
-                    .with_context(|| format!("Nie można utworzyć folderu {}", dir.display()));
+                    .msg_context(Msg::error("cannot_create_dir").arg("path", dir.display()));
             }
         }
     }
-    bail!(
-        "Nie można utworzyć folderu kopii zapasowej w {}",
-        tools_dir.display()
-    )
+    Err(msg_error(
+        Msg::error("backup_dir_failed").arg("path", tools_dir.display()),
+    ))
 }
 
 /// Moves every staged file over its destination. Existing destinations are first moved to a
@@ -119,9 +123,8 @@ fn swap_in(items: &[(PathBuf, PathBuf)], tools_dir: &Path) -> Result<()> {
         for (src, dest) in items {
             let old = if dest.exists() {
                 let kept = backup.join(dest.file_name().expect("file name"));
-                fs::rename(dest, &kept).with_context(|| {
-                    format!("Nie można zastąpić pliku {} (używany?)", dest.display())
-                })?;
+                fs::rename(dest, &kept)
+                    .msg_context(Msg::error("cannot_replace_file").arg("path", dest.display()))?;
                 Some(kept)
             } else {
                 None
@@ -130,7 +133,8 @@ fn swap_in(items: &[(PathBuf, PathBuf)], tools_dir: &Path) -> Result<()> {
                 if let Some(kept) = &old {
                     let _ = fs::rename(kept, dest);
                 }
-                return Err(e).with_context(|| format!("Nie można zapisać {}", dest.display()));
+                return Err(e)
+                    .msg_context(Msg::error("cannot_write_file").arg("path", dest.display()));
             }
             done.push((dest.clone(), old));
         }
@@ -256,7 +260,10 @@ mod tests {
         let no_probe = tmp.path().join("noprobe.zip");
         fs::write(&no_probe, build_zip(&[("x/bin/ffmpeg.exe", b"NEW")])).unwrap();
         let err = install_downloaded(Tool::Ffmpeg, &no_probe, &tools).unwrap_err();
-        assert_eq!(err.to_string(), "W archiwum brak ffprobe.exe");
+        assert_eq!(
+            err.to_string(),
+            "The downloaded archive has no ffprobe.exe."
+        );
 
         assert_eq!(fs::read(tools.join("ffmpeg.exe")).unwrap(), b"OLD-FFMPEG");
         assert_eq!(fs::read(tools.join("ffprobe.exe")).unwrap(), b"OLD-FFPROBE");

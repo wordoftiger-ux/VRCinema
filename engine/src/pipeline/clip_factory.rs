@@ -10,8 +10,7 @@ use rusqlite::Connection;
 
 use crate::config::VideoEncoder;
 use crate::db::{QueueItem, SettingsRepo};
-use crate::i18n::Lang;
-use crate::live::LiveValue;
+use crate::i18n::Msg;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode, decide_video_mode, probe_video};
@@ -26,7 +25,7 @@ const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(200);
 /// Source read rate: 1.5× real time leaves headroom without downloading the whole film.
 pub const READRATE: f64 = 1.5;
 
-pub type SharedLogFn = Arc<dyn Fn(&str) + Send + Sync>;
+pub type SharedLogFn = Arc<dyn Fn(Msg) + Send + Sync>;
 
 pub struct ClipFactoryDeps {
     pub resolver: Arc<dyn MediaResolver>,
@@ -39,36 +38,39 @@ pub struct ClipFactoryDeps {
     pub db: Arc<Mutex<Connection>>,
     pub channel_id: i64,
     pub log: Option<SharedLogFn>,
-    /// Language of the reasons a film failed (kept with the film in the history).
-    pub language: LiveValue<Lang>,
 }
 
-/// Log line written when a clip starts.
+/// Log entry written when a clip starts.
 pub fn clip_start_line(
     item: &QueueItem,
     mode: VideoMode,
     info: &VideoInfo,
     start_at_s: f64,
-) -> String {
+) -> Msg {
     let action = match mode {
-        VideoMode::Copy => "przepakowanie",
-        VideoMode::Transcode => "konwersja",
+        VideoMode::Copy => Msg::new("log.clip_action_copy"),
+        VideoMode::Transcode => Msg::new("log.clip_action_transcode"),
     };
     let silent = if info.has_audio {
-        ""
+        Msg::text("")
     } else {
-        ", bez dźwięku"
+        Msg::new("log.clip_no_audio")
     };
     let resume = if start_at_s > 0.0 {
         // Math.round
-        format!(", wznowienie od {} s", (start_at_s + 0.5).floor() as i64)
+        Msg::new("log.clip_resume").arg("seconds", (start_at_s + 0.5).floor() as i64)
     } else {
-        String::new()
+        Msg::text("")
     };
-    format!(
-        "Film #{} \"{}\": {action} ({} {}p {} kl./s{silent}){resume}",
-        item.id, item.title, info.codec, info.height, info.fps
-    )
+    Msg::new("log.clip_start")
+        .arg("id", item.id)
+        .arg("title", &item.title)
+        .arg_msg("action", action)
+        .arg("codec", &info.codec)
+        .arg("height", info.height)
+        .arg("fps", info.fps)
+        .arg_msg("silent", silent)
+        .arg_msg("resume", resume)
 }
 
 /// Removes a clip directory, best effort with a few retries. A leftover directory is cleared at
@@ -96,8 +98,6 @@ struct RealClipHandle {
     mode: StreamMode,
     /// `None` when the video is copied.
     encoder: Option<VideoEncoder>,
-    /// Language of the reason it failed.
-    language: LiveValue<Lang>,
     disposed: bool,
 }
 
@@ -106,8 +106,8 @@ impl ClipHandle for RealClipHandle {
         self.seg.state()
     }
 
-    fn error(&self) -> Option<String> {
-        self.seg.error().map(|e| e.render(self.language.get()))
+    fn error(&self) -> Option<Msg> {
+        self.seg.error()
     }
 
     fn duration_s(&self) -> Option<f64> {
@@ -186,20 +186,20 @@ async fn start_clip(
     item: QueueItem,
     start_at_s: f64,
     attempt: u32,
-) -> Result<Box<dyn ClipHandle>, String> {
+) -> Result<Box<dyn ClipHandle>, Msg> {
     let stream = d
         .resolver
         .resolve(&item.source_url)
         .await
-        .map_err(|e| e.0.render(d.language.get()))?;
+        .map_err(|e| e.0)?;
     let info = probe_video(&d.ffprobe_path, &stream.inputs)
         .await
-        .map_err(|e| e.message().render(d.language.get()))?;
+        .map_err(|e| e.message())?;
     let force_transcode = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
             .get(d.channel_id)
-            .map_err(|e| e.to_string())?
+            .map_err(Msg::text)?
             .force_transcode
     };
     let mode = decide_video_mode(&info, force_transcode);
@@ -207,7 +207,7 @@ async fn start_clip(
     let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
     let out_dir = d.clips_dir.join(format!("{}-{attempt}-{n}", item.id));
     if let Some(log) = &d.log {
-        log(&clip_start_line(&item, mode, &info, start_at_s));
+        log(clip_start_line(&item, mode, &info, start_at_s));
     }
     let encoder = d.encoder.get();
     let args = build_clip_args(&ClipArgsOptions {
@@ -240,7 +240,6 @@ async fn start_clip(
             VideoMode::Transcode => StreamMode::Transcode,
         },
         encoder: (mode == VideoMode::Transcode).then_some(encoder),
-        language: d.language.clone(),
         disposed: false,
     }))
 }
@@ -251,7 +250,7 @@ impl ClipFactory for RealClipFactory {
         item: QueueItem,
         start_at_s: f64,
         attempt: u32,
-    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, String>> {
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
         Box::pin(start_clip(
             Arc::clone(&self.deps),
             Arc::clone(&self.counter),
@@ -311,8 +310,9 @@ mod tests {
                 VideoMode::Copy,
                 &video("h264", 720, 25.0, true),
                 0.0
-            ),
-            "Film #7 \"Kot\": przepakowanie (h264 720p 25 kl./s)"
+            )
+            .to_string(),
+            "Video #7 \"Kot\": repackaging (h264 720p 25 fps)"
         );
     }
 
@@ -324,8 +324,9 @@ mod tests {
                 VideoMode::Transcode,
                 &video("vp9", 1080, 29.97, false),
                 12.5
-            ),
-            "Film #3 \"Pies\": konwersja (vp9 1080p 29.97 kl./s, bez dźwięku), wznowienie od 13 s"
+            )
+            .to_string(),
+            "Video #3 \"Pies\": transcoding (vp9 1080p 29.97 fps, no audio), resuming from 13 s"
         );
     }
 
@@ -347,7 +348,7 @@ mod tests {
         }
         async fn resolve(&self, _url: &str) -> Result<ResolvedStream, ResolveError> {
             let Some(file) = &self.0 else {
-                return Err(ResolveError::new("Nie udało się rozpoznać źródła."));
+                return Err(ResolveError::new("Could not recognise the source."));
             };
             Ok(ResolvedStream {
                 inputs: vec![StreamInput {
@@ -401,10 +402,9 @@ mod tests {
             clips_dir: clips.clone(),
             db: Arc::new(Mutex::new(conn)),
             channel_id: MAIN_CHANNEL_ID,
-            log: Some(Arc::new(move |l: &str| {
+            log: Some(Arc::new(move |l: Msg| {
                 sink.lock().unwrap().push(l.to_string())
             })),
-            language: crate::live::LiveValue::new(Lang::En),
         });
         Fixture {
             _dir: dir,
@@ -425,7 +425,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err, "Nie udało się rozpoznać źródła.");
+        assert_eq!(err.to_string(), "Could not recognise the source.");
     }
 
     async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(
             *f.lines.lock().unwrap(),
             [format!(
-                "Film #{} \"Test\": przepakowanie (h264 240p 25 kl./s, bez dźwięku)",
+                "Video #{} \"Test\": repackaging (h264 240p 25 fps, no audio)",
                 f.item.id
             )]
         );
@@ -526,7 +526,7 @@ mod tests {
         let mut handle = f.factory.create(f.item.clone(), 4.0, 1).await.unwrap();
         let out_dir = f.clips.join(format!("{}-1-2", f.item.id));
         assert!(out_dir.exists(), "{out_dir:?}");
-        assert!(f.lines.lock().unwrap()[1].ends_with(", wznowienie od 4 s"));
+        assert!(f.lines.lock().unwrap()[1].ends_with(", resuming from 4 s"));
         // readrate 1.5 on a 40 s source: still running after a moment.
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(handle.state(), SegmenterState::Running);

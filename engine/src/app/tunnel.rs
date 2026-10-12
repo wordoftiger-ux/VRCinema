@@ -182,7 +182,7 @@ impl AppCore {
         if let Some(warning) = &notes.warning
             && lock(&self.tunnel_notes).warning.as_ref() != Some(warning)
         {
-            self.log(&format!("Tunel: {warning}"));
+            self.log(Msg::new("log.tunnel_warning").arg_msg("warning", warning.clone()));
         }
         match (running.take(), wanted.clone()) {
             (None, None) => {}
@@ -418,19 +418,17 @@ impl AppCore {
             .await?;
             // The named cloudflared has exited by now: its files can go.
             if let Err(e) = named::remove_files(&paths.dir) {
-                core.log(&format!(
-                    "Stały link: nie udało się usunąć plików z {}: {e}",
-                    paths.dir.display()
-                ));
+                core.log(
+                    Msg::new("log.named_remove_files_failed")
+                        .arg("path", paths.dir.display())
+                        .arg("error", &e),
+                );
                 return Err(NamedError::new(
                     ErrorCode::Failed,
                     Msg::error("named_files_left").arg("detail", e),
                 ));
             }
-            core.log(&format!(
-                "Stały link: usunięto certyfikat i poświadczenia z {}.",
-                paths.dir.display()
-            ));
+            core.log(Msg::new("log.named_files_removed").arg("path", paths.dir.display()));
             Ok(match host {
                 Some(host) => Msg::new("named.deleted").arg("hostname", host),
                 None => Msg::new("named.deleted_no_host"),

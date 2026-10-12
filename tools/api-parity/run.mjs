@@ -313,6 +313,21 @@ class Client {
       }
       if (bodyShape && typeof bodyShape === 'object') delete bodyShape.code;
     }
+    // Znana różnica (etap 4, zadanie 4): serwer TS pisze „N filmów” dla każdej liczby, Rust używa
+    // poprawnych form (1 film, 2-4 filmy, 5+ filmów) w polskim słowniku. Dotyczy wyłącznie komunikatu
+    // `too_many_active`: po sprawdzeniu poprawności formy po stronie Rust oba komunikaty sprowadzamy
+    // do postaci serwera TS. Żaden inny tekst nie jest zmieniany.
+    if (bodyShape && typeof bodyShape === 'object' && typeof bodyShape.error === 'string') {
+      const m = /^Masz już (\d+) (film|filmy|filmów|filmu) w kolejce\. Poczekaj, aż się (odtworzy|odtworzą)\.$/.exec(bodyShape.error);
+      if (m) {
+        if (this.srv.name === 'rust') {
+          const n = Number(m[1]);
+          const form = n === 1 ? 'film' : n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14) ? 'filmy' : 'filmów';
+          if (m[2] !== form) throw new Error(`rust: "${name}": "${m[2]}" dla ${n}, oczekiwano "${form}"`);
+        }
+        bodyShape = { ...bodyShape, error: `Masz już ${m[1]} filmów w kolejce. Poczekaj, aż się odtworzą.` };
+      }
+    }
     const normalized = JSON.stringify(bodyShape).replaceAll(`:${this.srv.port}`, ':PORT');
     this.records.push({
       name,

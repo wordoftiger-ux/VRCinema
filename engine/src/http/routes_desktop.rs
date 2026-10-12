@@ -17,7 +17,7 @@ use super::{
 };
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
 use crate::app_settings::TunnelModeSetting;
-use crate::i18n::{Lang, Msg};
+use crate::i18n::{Lang, Msg, error_msg};
 use crate::pipeline::slates::request_url;
 use crate::tools::Tool;
 use crate::tunnel::TunnelState;
@@ -86,6 +86,7 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
         "namedTunnelHostname": s.named_tunnel_hostname,
         "pauseOnTunnelLoss": s.pause_on_tunnel_loss,
         "pauseWhenNoViewers": s.pause_when_no_viewers,
+        "language": s.language.as_str(),
     });
     match view {
         Value::Object(map) => map,
@@ -138,7 +139,7 @@ async fn info(
         "missingTools": missing.iter().map(|t| t.name()).collect::<Vec<_>>(),
         "toolsRunning": core.tools_job_running(),
         "channelRunning": core.channel_running(),
-        "channelError": core.channel_error(),
+        "channelError": core.channel_error().map(|m| m.render(lang)),
         "restarting": core.restarting(),
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
@@ -147,6 +148,7 @@ async fn info(
         "tunnelEnabled": s.tunnel_enabled,
         "paused": paused,
         "pauseReasons": reasons,
+        "language": s.language.as_str(),
     })))
 }
 
@@ -253,6 +255,14 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
                 .ok_or_else(|| ApiError::bad_request("invalid_tunnel_mode"))?,
         ),
     };
+    let language = match map.get("language") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(Lang::parse)
+                .ok_or_else(|| ApiError::bad_request("invalid_language"))?,
+        ),
+    };
     Ok(ConfigPatch {
         port,
         lan_access: flag(map, "lanAccess")?,
@@ -269,6 +279,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         tunnel_mode,
         pause_on_tunnel_loss: flag(map, "pauseOnTunnelLoss")?,
         pause_when_no_viewers: flag(map, "pauseWhenNoViewers")?,
+        language,
     })
 }
 
@@ -366,7 +377,11 @@ async fn tools_update(
     start_job(&state, ToolsJob::Update(tool))
 }
 
-async fn tools_progress(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn tools_progress(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
     let p = core.tools.progress().borrow().clone();
     Ok(json_ok(&json!({
@@ -374,7 +389,7 @@ async fn tools_progress(_: DesktopSession, State(state): State<AppState>) -> Api
         "tool": p.tool,
         "downloaded": p.downloaded,
         "total": p.total,
-        "error": p.error,
+        "error": p.error.map(|e| e.render(lang)),
         "done": p.done,
         "running": core.tools_job_running(),
     })))
@@ -402,9 +417,13 @@ async fn pick_cookies(_: DesktopSession, State(state): State<AppState>) -> ApiRe
     })))
 }
 
-async fn log(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn log(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
-    Ok(json_ok(&json!({ "lines": core.log.tail() })))
+    Ok(json_ok(&json!({ "lines": core.log.tail(lang) })))
 }
 
 /// Checks GitHub now. A failure (no network, private repository) only goes to the log.
@@ -439,11 +458,8 @@ async fn wizard_complete(_: DesktopSession, State(state): State<AppState>) -> Ap
 async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     core.restart_server().await.map_err(|e| {
-        ApiError::coded(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "restart_failed",
-            &[("detail", &format!("{e:#}"))],
-        )
+        ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "restart_failed", &[])
+            .with_msg_arg("detail", error_msg(&e))
     })?;
     Ok(json_ok(&json!({ "ok": true, "port": core.port() })))
 }
@@ -472,11 +488,8 @@ async fn tunnel_qr(_: DesktopSession, State(state): State<AppState>) -> ApiResul
         ));
     }
     let png = crate::pipeline::slates::qr_png(&request_url(&address)).map_err(|e| {
-        ApiError::coded(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "qr_failed",
-            &[("detail", &e.to_string())],
-        )
+        ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "qr_failed", &[])
+            .with_msg_arg("detail", e.message())
     })?;
     Ok((
         [(CONTENT_TYPE, "image/png"), (CACHE_CONTROL, "no-store")],
