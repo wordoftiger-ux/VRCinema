@@ -661,7 +661,10 @@ async fn stats(State(state): State<AppState>) -> ApiResult {
 }
 
 async fn get_settings(State(state): State<AppState>) -> ApiResult {
-    Ok(json_ok(&json!(state.settings()?)))
+    let mut body = json!(state.settings()?);
+    // What the "add popular sites" button of the settings puts in a list.
+    body["popularDomains"] = json!(crate::rules::POPULAR_DOMAINS);
+    Ok(json_ok(&body))
 }
 
 async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {

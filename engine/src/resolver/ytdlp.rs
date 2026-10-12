@@ -146,7 +146,12 @@ pub fn parse_ytdlp_resolve(j: &Value) -> Result<ResolvedStream, ResolveError> {
 pub fn ytdlp_error_message(stderr: &str) -> ResolveError {
     let last_error = stderr.lines().rfind(|l| l.starts_with("ERROR:"));
     if let Some(line) = last_error {
-        return ResolveError::new(line["ERROR:".len()..].trim());
+        let reason = line["ERROR:".len()..].trim();
+        // A site yt-dlp has no extractor for (its generic one found no video either).
+        if reason.starts_with("Unsupported URL") {
+            return ResolveError::coded("site_not_supported");
+        }
+        return ResolveError::new(reason);
     }
     match stderr.trim().lines().next_back() {
         Some(line) if !line.is_empty() => ResolveError::new(line),
@@ -501,7 +506,12 @@ mod tests {
             stderr: "ERROR: Unsupported URL: https://x".into(),
         }));
         let e = r.fetch_meta("https://x").await.unwrap_err();
-        assert_eq!(e.0.render(Lang::Pl), "Unsupported URL: https://x");
+        assert_eq!(e.0.render(Lang::Pl), "Ta strona nie jest obsługiwana.");
+        assert_eq!(e.0.render(Lang::En), "This site is not supported.");
+        assert_eq!(e.0.code(), Some("site_not_supported"));
+        // Other messages of yt-dlp stay as they are.
+        let e = ytdlp_error_message("ERROR: Video unavailable");
+        assert_eq!(e.0.render(Lang::Pl), "Video unavailable");
     }
 
     #[tokio::test]

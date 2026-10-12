@@ -370,6 +370,47 @@ class Client {
         }
       }
     }
+    // Etap 4, zadanie 8: tryby linków. Ustawienia mają `linkMode` i `blockedDomains` (oraz
+    // `popularDomains` w odpowiedzi `GET .../settings`), a reguły w stanie publicznym `linkMode`
+    // — serwer TS ich nie ma. Po stronie Rust sprawdzamy wartości (brak
+    // zablokowanych, 16 popularnych serwisów; tryb: `allowlist`, ustawiony przez `useAllowlist`), potem pola są pomijane w porównaniu.
+    if (this.srv.name === 'rust' && bodyShape && typeof bodyShape === 'object') {
+      const linkModeFields = (holder, label, withPopular) => {
+        if (holder.linkMode !== 'allowlist') {
+          throw new Error(`rust: "${name}": ${label}linkMode = ${JSON.stringify(holder.linkMode)}, oczekiwano "allowlist"`);
+        }
+        delete holder.linkMode;
+        if (label === 'rules.') return;
+        if (JSON.stringify(holder.blockedDomains) !== '[]') {
+          throw new Error(`rust: "${name}": blockedDomains = ${JSON.stringify(holder.blockedDomains)}, oczekiwano []`);
+        }
+        delete holder.blockedDomains;
+        // Lista popularnych serwisów jest tylko w `GET .../settings`.
+        const expectPopular = withPopular && name.startsWith('GET admin settings');
+        if (expectPopular || 'popularDomains' in holder) {
+          if (!expectPopular || !Array.isArray(holder.popularDomains) || holder.popularDomains.length !== 16) {
+            throw new Error(`rust: "${name}": popularDomains = ${JSON.stringify(holder.popularDomains)}, oczekiwano 16 serwisów tylko w GET /settings`);
+          }
+          delete holder.popularDomains;
+        }
+      };
+      if ('discontinuityTags' in bodyShape) linkModeFields(bodyShape, '', true);
+      if (bodyShape.settings && typeof bodyShape.settings === 'object' && 'discontinuityTags' in bodyShape.settings) {
+        linkModeFields(bodyShape.settings, '', false);
+      }
+      if (bodyShape.rules && typeof bodyShape.rules === 'object' && 'linkMode' in bodyShape.rules) {
+        linkModeFields(bodyShape.rules, 'rules.', false);
+      }
+    }
+    // Etap 4, zadanie 8: link inny niż http(s) (`ftp:`) serwer Rust odrzuca kodem `bad_scheme`
+    // (komunikat „Dozwolone są tylko linki http i https.”), serwer TS jako `invalid_link`. Po
+    // sprawdzeniu po stronie Rust sprowadzamy odpowiedź do postaci serwera TS.
+    if (this.srv.name === 'rust' && name === 'request: ftp') {
+      if (parsed?.code !== 'bad_scheme' || bodyShape?.error !== 'Dozwolone są tylko linki http i https.') {
+        throw new Error(`rust: "${name}": ${JSON.stringify(parsed)}, oczekiwano bad_scheme`);
+      }
+      bodyShape = { error: 'To nie wygląda na poprawny link (http/https).' };
+    }
     // Znana różnica (etap 4, zadanie 4): serwer TS pisze „N filmów” dla każdej liczby, Rust używa
     // poprawnych form (1 film, 2-4 filmy, 5+ filmów) w polskim słowniku. Dotyczy wyłącznie komunikatu
     // `too_many_active`: po sprawdzeniu poprawności formy po stronie Rust oba komunikaty sprowadzamy
@@ -604,6 +645,25 @@ function compare(tsRecs, rustRecs) {
   return diffs;
 }
 
+// Etap 4, zadanie 8: nowa baza Rust przyjmuje każdy serwis (`linkMode: all`), serwer TS ma tylko
+// białą listę. Scenariusz sprawdza białą listę, więc serwer Rust dostaje ją poza scenariuszem
+// (nie jest to zapisane wśród żądań; logowanie udane nie liczy się do blokady).
+async function useAllowlist(srv) {
+  const login = await fetch(`${srv.base}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: PASSWORD }),
+  });
+  const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
+  if (login.status !== 200 || !cookie) throw new Error(`rust: logowanie przed scenariuszem -> ${login.status}`);
+  const put = await fetch(`${srv.base}/api/admin/channels/main/settings`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ linkMode: 'allowlist' }),
+  });
+  if (put.status !== 200) throw new Error(`rust: linkMode allowlist -> ${put.status}`);
+}
+
 // ---------- main ----------
 
 async function main() {
@@ -613,6 +673,7 @@ async function main() {
   // Etap 4: serwer Rust domyślnie mówi po angielsku; serwer TS zna tylko polski.
   const rust = startServer('rust', 8192, rustBin, [], fx, { LANGUAGE: 'pl' });
   await Promise.all([waitReady(ts), waitReady(rust)]);
+  await useAllowlist(rust);
   console.log('Oba serwery gotowe, odtwarzam scenariusz...');
   const [tsRes, rustRes] = await Promise.allSettled([scenario(ts), scenario(rust)]);
   if (tsRes.status === 'rejected' || rustRes.status === 'rejected') {

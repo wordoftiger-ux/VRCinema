@@ -359,6 +359,7 @@ async fn start_channel_loop(
                 log: Some(Arc::clone(&shared_log)),
                 font_file: config.font_file.clone(),
                 public_url: public_url.clone(),
+                host_resolver: Arc::new(crate::rules::SystemHostResolver),
             });
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,

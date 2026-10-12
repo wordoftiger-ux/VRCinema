@@ -9,10 +9,37 @@ use crate::pipeline::ticker::{
     INTERVALS_S, MAX_MESSAGE_CHARS, MAX_MESSAGES, TickerMode, TickerQr, TickerSettings, TickerSpeed,
 };
 
+/// Which links viewers may send (the owner's links are never limited).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkMode {
+    /// Any site (the protection of the home network still applies).
+    All,
+    /// Only the sites of `allowedDomains`.
+    Allowlist,
+    /// Every site but those of `blockedDomains`.
+    Blocklist,
+}
+
+impl LinkMode {
+    pub const ALL: [LinkMode; 3] = [Self::All, Self::Allowlist, Self::Blocklist];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Allowlist => "allowlist",
+            Self::Blocklist => "blocklist",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSettings {
+    pub link_mode: LinkMode,
     pub allowed_domains: Vec<String>,
+    /// Always kept, used in the `blocklist` mode.
+    pub blocked_domains: Vec<String>,
     #[serde(serialize_with = "serialize_number")]
     pub max_duration_s: f64,
     pub request_limit_count: u32,
@@ -36,9 +63,11 @@ fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
 impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
+            link_mode: LinkMode::All,
             allowed_domains: ["youtube.com", "youtu.be", "pixeldrain.com", "cda.pl"]
                 .map(String::from)
                 .to_vec(),
+            blocked_domains: Vec::new(),
             max_duration_s: 7200.0,
             request_limit_count: 3,
             request_limit_window_s: 600,
@@ -68,7 +97,9 @@ fn whole_number(v: f64) -> Option<i64> {
 /// A validated, normalised partial update of [`ChannelSettings`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SettingsPatch {
+    pub link_mode: Option<LinkMode>,
     pub allowed_domains: Option<Vec<String>>,
+    pub blocked_domains: Option<Vec<String>>,
     pub max_duration_s: Option<f64>,
     pub request_limit_count: Option<u32>,
     pub request_limit_window_s: Option<u64>,
@@ -211,7 +242,11 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
     let mut out = SettingsPatch::default();
     for (key, value) in obj {
         match key.as_str() {
+            "linkMode" => {
+                out.link_mode = Some(one_of(key, value, &LinkMode::ALL, LinkMode::as_str)?);
+            }
             "allowedDomains" => out.allowed_domains = Some(expect_list(key, value)?),
+            "blockedDomains" => out.blocked_domains = Some(expect_list(key, value)?),
             "maxDurationS" => out.max_duration_s = Some(expect_number(key, value)?),
             // `as` casts from f64 are saturating and truncating.
             "requestLimitCount" => {
@@ -287,9 +322,18 @@ impl<'a> SettingsRepo<'a> {
             };
             let num = value.as_f64().filter(|n| n.is_finite() && *n >= 0.0);
             match key.as_str() {
+                "linkMode" => {
+                    s.link_mode = one_of(&key, &value, &LinkMode::ALL, LinkMode::as_str)
+                        .unwrap_or(s.link_mode);
+                }
                 "allowedDomains" => {
                     if let Ok(list) = serde_json::from_value::<Vec<String>>(value) {
                         s.allowed_domains = list;
+                    }
+                }
+                "blockedDomains" => {
+                    if let Ok(list) = serde_json::from_value::<Vec<String>>(value) {
+                        s.blocked_domains = list;
                     }
                 }
                 "maxDurationS" => s.max_duration_s = num.unwrap_or(s.max_duration_s),
@@ -357,10 +401,15 @@ impl<'a> SettingsRepo<'a> {
         patch: &SettingsPatch,
     ) -> rusqlite::Result<ChannelSettings> {
         let quoted = |name: &str| format!("\"{name}\"");
-        let entries: [(&str, Option<String>); 18] = [
+        let entries: [(&str, Option<String>); 20] = [
+            ("linkMode", patch.link_mode.map(|m| quoted(m.as_str()))),
             (
                 "allowedDomains",
                 patch.allowed_domains.as_deref().map(list_json),
+            ),
+            (
+                "blockedDomains",
+                patch.blocked_domains.as_deref().map(list_json),
             ),
             ("maxDurationS", patch.max_duration_s.map(number_json)),
             (

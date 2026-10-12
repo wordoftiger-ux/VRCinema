@@ -403,7 +403,9 @@ fn settings_serialize_with_camel_case_keys() {
     assert_eq!(
         v,
         json!({
+            "linkMode": "all",
             "allowedDomains": ["youtube.com", "youtu.be", "pixeldrain.com", "cda.pl"],
+            "blockedDomains": [],
             "maxDurationS": 7200,
             "requestLimitCount": 3,
             "requestLimitWindowS": 600,
@@ -428,7 +430,9 @@ fn settings_serialize_with_camel_case_keys() {
     assert_eq!(
         keys,
         [
+            "linkMode",
             "allowedDomains",
+            "blockedDomains",
             "maxDurationS",
             "requestLimitCount",
             "requestLimitWindowS",
@@ -1051,4 +1055,119 @@ fn migration_keeps_every_item_of_a_stage_3_database() {
             .unwrap();
         assert_eq!(n, 0);
     }
+}
+
+// ---------- link modes ----------
+
+fn link_mode_of(conn: &Connection) -> super::settings::LinkMode {
+    SettingsRepo::new(conn)
+        .get(MAIN_CHANNEL_ID)
+        .unwrap()
+        .link_mode
+}
+
+#[test]
+fn a_new_database_lets_viewers_send_any_site() {
+    let conn = mem();
+    let s = SettingsRepo::new(&conn).get(MAIN_CHANNEL_ID).unwrap();
+    assert_eq!(s.link_mode, super::settings::LinkMode::All);
+    assert!(s.blocked_domains.is_empty());
+}
+
+#[test]
+fn a_database_from_before_the_link_modes_becomes_an_allowlist_with_its_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+    {
+        // What an older version left: the channel and its allowed sites, no `linkMode`.
+        let old = open_database(&path).unwrap();
+        old.execute("DELETE FROM settings WHERE key = 'linkMode'", [])
+            .unwrap();
+        old.execute(
+            "INSERT INTO settings (channel_id, key, value) VALUES (1, 'allowedDomains', ?)",
+            [r#"["example.com","cda.pl"]"#],
+        )
+        .unwrap();
+    }
+    let conn = open_database(&path).unwrap();
+    let s = SettingsRepo::new(&conn).get(MAIN_CHANNEL_ID).unwrap();
+    assert_eq!(s.link_mode, super::settings::LinkMode::Allowlist);
+    assert_eq!(s.allowed_domains, ["example.com", "cda.pl"]);
+    assert!(s.blocked_domains.is_empty());
+}
+
+#[test]
+fn an_old_database_without_a_stored_list_keeps_the_default_list_as_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.sqlite");
+    {
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE channels (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+               name TEXT NOT NULL, created_at INTEGER NOT NULL);
+             INSERT INTO channels VALUES (1, 'main', 'Kanał główny', 0);",
+        )
+        .unwrap();
+    }
+    let conn = open_database(&path).unwrap();
+    let s = SettingsRepo::new(&conn).get(MAIN_CHANNEL_ID).unwrap();
+    assert_eq!(s.link_mode, super::settings::LinkMode::Allowlist);
+    assert_eq!(
+        s.allowed_domains,
+        ChannelSettings::default().allowed_domains
+    );
+}
+
+#[test]
+fn the_link_mode_is_decided_once_and_the_owners_choice_survives_a_restart() {
+    use super::settings::LinkMode;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new.sqlite");
+    assert_eq!(link_mode_of(&open_database(&path).unwrap()), LinkMode::All);
+    // A second start of a database made now is not "old": it stays `all`.
+    let conn = open_database(&path).unwrap();
+    assert_eq!(link_mode_of(&conn), LinkMode::All);
+    let patch = sanitize_settings_patch(&json!({"linkMode": "blocklist"})).unwrap();
+    SettingsRepo::new(&conn)
+        .update(MAIN_CHANNEL_ID, &patch)
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        link_mode_of(&open_database(&path).unwrap()),
+        LinkMode::Blocklist
+    );
+}
+
+#[test]
+fn link_mode_and_blocked_domains_are_validated_normalised_and_stored() {
+    use super::settings::LinkMode;
+    let conn = mem();
+    let patch = sanitize_settings_patch(&json!({
+        "linkMode": "blocklist",
+        "blockedDomains": [" HTTPS://www.Bad.Example/x ", "", "tiktok.com"],
+    }))
+    .unwrap();
+    let got = SettingsRepo::new(&conn)
+        .update(MAIN_CHANNEL_ID, &patch)
+        .unwrap();
+    assert_eq!(got.link_mode, LinkMode::Blocklist);
+    assert_eq!(got.blocked_domains, ["bad.example", "tiktok.com"]);
+    // Both lists are always kept.
+    assert_eq!(
+        got.allowed_domains,
+        ChannelSettings::default().allowed_domains
+    );
+    let err = |v| {
+        sanitize_settings_patch(&v)
+            .unwrap_err()
+            .render(crate::i18n::Lang::Pl)
+    };
+    assert_eq!(
+        err(json!({"linkMode": "everything"})),
+        "linkMode: oczekiwano jednego z: all, allowlist, blocklist"
+    );
+    assert_eq!(
+        err(json!({"blockedDomains": "a.com"})),
+        "blockedDomains: oczekiwano listy"
+    );
 }

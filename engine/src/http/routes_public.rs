@@ -19,10 +19,14 @@ use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, asset_response, json_ok, json_response, num_json,
     public_item, state_map,
 };
-use crate::db::{AddedBy, ItemStatus, NewItem, QueueRepo};
+use crate::db::{AddedBy, ItemStatus, LinkMode, NewItem, QueueRepo};
 use crate::i18n::Msg;
 use crate::nicks::{NICK_MAX_CHARS, NickError, NickStore, hash_device_key, skeleton};
-use crate::rules::{is_allowed_domain, parse_source_url, validate_meta};
+use crate::rules::{
+    LinkError, check_host_resolves_public, check_viewer_link_offline, parse_source_url,
+    validate_meta,
+};
+use url::Url;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -67,6 +71,7 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
     body.insert(
         "rules".into(),
         json!({
+            "linkMode": settings.link_mode.as_str(),
             "allowedDomains": settings.allowed_domains,
             "maxDurationS": num_json(settings.max_duration_s),
             "moderation": settings.moderation,
@@ -159,24 +164,45 @@ fn claim_viewer(state: &AppState, viewer: &Viewer) -> Result<(), ApiError> {
         .map_err(nick_error)
 }
 
+/// The address a viewer sent. What is no address at all (or the internal `local:` kind) is an
+/// invalid link; another scheme (`file:`, `ftp:`, ...) is refused as such.
+fn viewer_link(raw: Option<&str>) -> Result<Url, ApiError> {
+    let invalid = || ApiError::bad_request("invalid_link");
+    let text = raw.ok_or_else(invalid)?;
+    if let Some(url) = parse_source_url(text) {
+        return Ok(url);
+    }
+    match Url::parse(text.trim()) {
+        Ok(url) if url.scheme() != "local" => {
+            Err(ApiError::bad_request(LinkError::BadScheme.code()))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn link_error(e: LinkError, settings: &crate::db::ChannelSettings) -> ApiError {
+    let bad_request = |code| ApiError::coded(StatusCode::BAD_REQUEST, code, &[]);
+    match e {
+        LinkError::DomainNotAllowed if settings.link_mode == LinkMode::Blocklist => {
+            bad_request("domain_blocked").with_code("domain_not_allowed")
+        }
+        LinkError::DomainNotAllowed => ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "domain_not_allowed",
+            &[("domains", &settings.allowed_domains.join(", "))],
+        ),
+        other => bad_request(other.code()),
+    }
+}
+
 async fn post_request(
     State(state): State<AppState>,
     ctx: Ctx,
     JsonBody(body): JsonBody,
 ) -> ApiResult {
     let settings = state.settings()?;
-    let url = body
-        .get("url")
-        .and_then(Value::as_str)
-        .and_then(parse_source_url)
-        .ok_or_else(|| ApiError::bad_request("invalid_link"))?;
-    if !is_allowed_domain(&url, &settings.allowed_domains) {
-        return Err(ApiError::coded(
-            StatusCode::BAD_REQUEST,
-            "domain_not_allowed",
-            &[("domains", &settings.allowed_domains.join(", "))],
-        ));
-    }
+    let url = viewer_link(body.get("url").and_then(Value::as_str))?;
+    check_viewer_link_offline(&url, &settings).map_err(|e| link_error(e, &settings))?;
     let viewer = check_viewer(&state, &body)?;
     let ip = ctx.ip;
     let active = state.with_db(|c| QueueRepo::new(c).count_active_by_ip(state.channel_id, &ip))?;
@@ -204,6 +230,10 @@ async fn post_request(
             &[],
         ));
     }
+    // The name lookup comes after the limiter and before the resolver touches the address.
+    check_host_resolves_public(&url, state.host_resolver.as_ref())
+        .await
+        .map_err(|e| link_error(e, &settings))?;
     let meta = state
         .resolver
         .fetch_meta(url.as_str())

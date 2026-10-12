@@ -31,7 +31,7 @@ use crate::library::MediaLibrary;
 use crate::live::{LiveSettings, LiveValue};
 use crate::pipeline::channel::ChannelState;
 use crate::resolver::MediaResolver;
-use crate::rules::{RateLimiter, system_clock};
+use crate::rules::{HostResolver, RateLimiter, SystemHostResolver, system_clock};
 
 use auth::{AdminAuth, DesktopKey, SESSION_COOKIE, SessionKind, parse_cookies, session_kind};
 use client_ip::{Trust, get_client_ip, is_https};
@@ -73,6 +73,8 @@ pub struct AppState {
     pub channel_id: i64,
     pub db: Arc<Mutex<Connection>>,
     pub resolver: Arc<dyn MediaResolver>,
+    /// Looks up the host of a viewer's link (the home-network protection).
+    pub host_resolver: Arc<dyn HostResolver>,
     pub engine: EngineHandle,
     pub library: Option<Arc<MediaLibrary>>,
     pub request_limiter: Arc<Mutex<RateLimiter>>,
@@ -147,6 +149,7 @@ impl AppState {
             channel_id,
             db,
             resolver,
+            host_resolver: Arc::new(SystemHostResolver),
             engine,
             library: None,
             viewers: Arc::new(ViewerActivity::new()),
@@ -156,6 +159,12 @@ impl AppState {
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
         })
+    }
+
+    /// Replaces the system's name lookup (tests use a table).
+    pub fn with_host_resolver(mut self, host_resolver: Arc<dyn HostResolver>) -> Self {
+        self.host_resolver = host_resolver;
+        self
     }
 
     pub fn with_library(mut self, library: Option<Arc<MediaLibrary>>) -> Self {

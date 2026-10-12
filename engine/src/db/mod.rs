@@ -12,7 +12,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use queue::{ACTIVE_STATUSES, AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo};
-pub use settings::{ChannelSettings, SettingsPatch, SettingsRepo, sanitize_settings_patch};
+pub use settings::{
+    ChannelSettings, LinkMode, SettingsPatch, SettingsRepo, sanitize_settings_patch,
+};
 
 pub const MAIN_CHANNEL_ID: i64 = 1;
 pub const MAIN_CHANNEL_SLUG: &str = "main";
@@ -76,6 +78,14 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "blocked_devices", "nick", "TEXT")
 }
 
+fn has_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+        [name],
+        |r| r.get(0),
+    )
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -114,6 +124,7 @@ pub fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     }
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    let existed = has_table(&conn, "channels")?;
     conn.execute_batch(SCHEMA)?;
     migrate(&conn)?;
     conn.execute(
@@ -124,6 +135,13 @@ pub fn open_database(path: &Path) -> rusqlite::Result<Connection> {
             MAIN_CHANNEL_NAME,
             now_ms()
         ],
+    )?;
+    // A database from before the link modes keeps the rule it had (its allowed sites); a new
+    // one lets viewers send any public site. Stored either way, so the next start leaves it.
+    let mode = if existed { "allowlist" } else { "all" };
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (channel_id, key, value) VALUES (?, 'linkMode', ?)",
+        params![MAIN_CHANNEL_ID, format!("\"{mode}\"")],
     )?;
     Ok(conn)
 }

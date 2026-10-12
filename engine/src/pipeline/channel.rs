@@ -1394,7 +1394,9 @@ impl Channel {
         if let Some(mut handle) = c.handle.take() {
             handle.dispose();
         }
-        if c.attempt == 0 {
+        // A refused address (the home network, not http) would be refused again.
+        let refused = matches!(error.code(), Some("local_address" | "bad_scheme"));
+        if c.attempt == 0 && !refused {
             // One retry from where it stopped (resolved anew, the old address may have expired).
             let resume_at = if c.item.is_live { 0.0 } else { c.position_s() };
             let mut retry = self.launch(c.item, resume_at, 1);
@@ -1638,6 +1640,8 @@ mod tests {
         handles: Vec<Fake>,
         calls: Vec<Call>,
         fail_next: u32,
+        /// The error of those failing starts (a timeout when unset).
+        fail_with: Option<Msg>,
         /// When set, every create() waits until its gate is released.
         manual: bool,
         gates: Vec<oneshot::Sender<()>>,
@@ -1693,11 +1697,12 @@ mod tests {
             }
             if s.fail_next > 0 {
                 s.fail_next -= 1;
-                return Box::pin(async {
-                    Err(Msg::error("process_timeout")
+                let error = s.fail_with.clone().unwrap_or_else(|| {
+                    Msg::error("process_timeout")
                         .arg("seconds", 30)
-                        .arg("command", "yt-dlp"))
+                        .arg("command", "yt-dlp")
                 });
+                return Box::pin(async { Err(error) });
             }
             let gate = s.manual.then(|| {
                 let (tx, rx) = oneshot::channel();
@@ -1970,6 +1975,37 @@ mod tests {
                 .unwrap()
                 .contains("Connection reset")
         );
+    }
+
+    /// The address of a viewer's film is on the home network: it fails at once, no second try.
+    #[tokio::test]
+    async fn a_refused_address_fails_the_film_without_a_retry() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        {
+            let mut f = e.factory.lock();
+            f.fail_next = 1;
+            f.fail_with = Some(Msg::error("local_address"));
+        }
+        e.next();
+        e.flush().await;
+        e.next();
+        e.flush().await;
+        let fresh = e.get(a.id);
+        assert_eq!(fresh.status, ItemStatus::Failed);
+        assert_eq!(
+            fresh.error_text(Lang::Pl).unwrap(),
+            "Linki do sieci lokalnej lub do tego komputera są niedozwolone."
+        );
+        let attempts_of_a = e
+            .factory
+            .calls()
+            .iter()
+            .filter(|c| c.item_id == a.id)
+            .count();
+        assert_eq!(attempts_of_a, 1, "no retry");
+        assert!(e.factory.calls().iter().any(|c| c.item_id == b.id));
     }
 
     #[tokio::test]

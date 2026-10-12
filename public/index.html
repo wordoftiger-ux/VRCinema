@@ -92,7 +92,10 @@
       if (document.activeElement !== channelUrl) channelUrl.value = s.channelUrl;
       const hours = s.rules.maxDurationS / 3600;
       const limit = hours >= 1 ? `${+hours.toFixed(1)} h` : `${Math.round(s.rules.maxDurationS / 60)} min`;
-      rules.textContent = `Działają linki z: ${s.rules.allowedDomains.join(', ')}. Film może trwać do ${limit}.` +
+      const sites = s.rules.linkMode === 'allowlist'
+        ? `Działają linki z: ${s.rules.allowedDomains.join(', ')}.`
+        : 'Wklej link do filmu.';
+      rules.textContent = `${sites} Film może trwać do ${limit}.` +
         (s.rules.moderation ? ' Zgłoszenia zatwierdza właściciel kanału.' : '');
     } catch {
       // Chwilowy brak połączenia: spróbujemy przy następnym odświeżeniu.

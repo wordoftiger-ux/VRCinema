@@ -25,7 +25,7 @@ use super::auth::{
 use super::client_ip::{Trust, get_client_ip, is_https};
 use super::{AppState, DesktopSession, HttpConfig, build_router, request_lang};
 use crate::db::{
-    AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueItem, QueueRepo, SettingsPatch,
+    AddedBy, ItemStatus, LinkMode, MAIN_CHANNEL_ID, NewItem, QueueItem, QueueRepo, SettingsPatch,
     SettingsRepo, open_database,
 };
 use crate::engine::{Command, EngineHandle, Snapshot};
@@ -73,6 +73,20 @@ impl MediaResolver for TestResolver {
     async fn resolve(&self, _url: &str) -> Result<ResolvedStream, ResolveError> {
         Err(ResolveError::new("nie w testach"))
     }
+}
+
+/// What the names of the tests resolve to (never the real DNS).
+fn host_table() -> crate::rules::TableHostResolver {
+    crate::rules::TableHostResolver::new(&[
+        ("youtu.be", &["142.250.1.1"]),
+        ("youtube.com", &["142.250.1.2"]),
+        ("vimeo.com", &["151.101.1.1"]),
+        ("cdn.example", &["93.184.216.34"]),
+        ("bad.example", &["93.184.216.35"]),
+        ("evil.example", &["192.168.0.10"]),
+        ("mixed.example", &["93.184.216.34", "10.0.0.7"]),
+        ("v6.example", &["fd00::5"]),
+    ])
 }
 
 fn config() -> HttpConfig {
@@ -279,7 +293,7 @@ impl Harness {
         .with_log(Arc::new(move |m: Msg| {
             sink.lock().unwrap().push(m.to_string())
         }));
-        let state = tweak(state);
+        let state = tweak(state.with_host_resolver(Arc::new(host_table())));
         Self {
             router: build_router(state),
             db,
@@ -652,6 +666,10 @@ async fn nickname_is_cleaned_and_shortened_to_24_characters() {
 #[tokio::test]
 async fn disallowed_domain_is_400_without_asking_the_resolver() {
     let h = Harness::new();
+    h.update_settings(SettingsPatch {
+        link_mode: Some(LinkMode::Allowlist),
+        ..Default::default()
+    });
     let res = h.request_default("https://vimeo.com/1").await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
     assert!(res.error().to_lowercase().contains("serwis"));
@@ -900,6 +918,7 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
     assert_eq!(
         body["rules"],
         json!({
+            "linkMode": "all",
             "allowedDomains": ["youtube.com", "youtu.be", "pixeldrain.com", "cda.pl"],
             "maxDurationS": 7200,
             "moderation": false
@@ -3616,4 +3635,236 @@ async fn a_database_failure_is_a_500_not_a_taken_nick() {
         .await;
     assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(res.json()["code"], "internal");
+}
+
+// ---------- link modes and the protection of the home network ----------
+
+fn set_links(h: &Harness, mode: LinkMode) {
+    h.update_settings(SettingsPatch {
+        link_mode: Some(mode),
+        allowed_domains: Some(
+            [
+                "youtube.com",
+                "youtu.be",
+                "evil.example",
+                "mixed.example",
+                "v6.example",
+            ]
+            .map(String::from)
+            .to_vec(),
+        ),
+        blocked_domains: Some(vec!["bad.example".into()]),
+        ..Default::default()
+    });
+}
+
+async fn refused(h: &Harness, url: &str, ip: &str) -> (String, String) {
+    let res = h.request(url, ip, None).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{url}: {}", res.text());
+    let body = res.json();
+    (
+        body["code"].as_str().unwrap().to_string(),
+        body["error"].as_str().unwrap().to_string(),
+    )
+}
+
+#[tokio::test]
+async fn the_all_mode_takes_any_public_site() {
+    let h = Harness::new();
+    h.metas
+        .lock()
+        .unwrap()
+        .insert("https://vimeo.com/1".into(), Ok(video("Vimeo", 100.0)));
+    let res = h.request_default("https://vimeo.com/1").await;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.text());
+}
+
+#[tokio::test]
+async fn the_allowlist_refuses_other_sites_with_the_list_in_the_answer() {
+    let h = Harness::new();
+    set_links(&h, LinkMode::Allowlist);
+    let (code, error) = refused(&h, "https://vimeo.com/1", "1.1.1.1").await;
+    assert_eq!(code, "domain_not_allowed");
+    assert!(error.starts_with("Ten serwis nie jest dozwolony. Dozwolone: youtube.com"));
+}
+
+#[tokio::test]
+async fn the_blocklist_refuses_its_sites_and_subdomains_and_takes_the_rest() {
+    let h = Harness::new();
+    set_links(&h, LinkMode::Blocklist);
+    for url in ["https://bad.example/x", "https://CDN.Bad.Example./x"] {
+        let (code, error) = refused(&h, url, "1.1.1.1").await;
+        assert_eq!(code, "domain_not_allowed", "{url}");
+        assert_eq!(error, "Ten serwis jest zablokowany na tym kanale.", "{url}");
+    }
+    h.metas
+        .lock()
+        .unwrap()
+        .insert("https://vimeo.com/1".into(), Ok(video("Vimeo", 100.0)));
+    let res = h.request_default("https://vimeo.com/1").await;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.text());
+}
+
+#[tokio::test]
+async fn the_home_network_is_refused_in_every_mode_without_asking_the_resolver() {
+    for mode in LinkMode::ALL {
+        let h = Harness::new();
+        set_links(&h, mode);
+        // The resolver knows all of these: any answer but the refusal would mean it was asked.
+        for (n, url) in [
+            "http://192.168.1.1/x",
+            "http://127.0.0.1:8080/x",
+            "http://[::1]/x",
+            "http://[::ffff:192.168.1.1]/x",
+            "http://localhost/x",
+            "http://router.local/x",
+            "http://nas.lan/x",
+            "http://x.home.arpa/x",
+            "http://user@127.0.0.1/x",
+            "http://evil.example/x",
+            "http://mixed.example/x",
+            "http://v6.example/x",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            h.metas
+                .lock()
+                .unwrap()
+                .insert(url.into(), Ok(video("Domowy", 10.0)));
+            let (code, error) = refused(&h, url, &format!("9.9.9.{n}")).await;
+            assert_eq!(code, "local_address", "{url} {mode:?}");
+            assert_eq!(
+                error, "Linki do sieci lokalnej lub do tego komputera są niedozwolone.",
+                "{url}"
+            );
+        }
+        assert!(h.list(ItemStatus::Queued).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn other_schemes_are_refused_but_the_internal_kind_stays_an_invalid_link() {
+    let h = Harness::new();
+    for url in [
+        "file:///C:/Windows/win.ini",
+        "ftp://youtu.be/x",
+        "javascript:alert(1)",
+    ] {
+        let (code, error) = refused(&h, url, "1.1.1.1").await;
+        assert_eq!(code, "bad_scheme", "{url}");
+        assert_eq!(error, "Dozwolone są tylko linki http i https.");
+    }
+    for url in ["local:0/movie.mp4", "to nie link", ""] {
+        let (code, _) = refused(&h, url, "1.1.1.1").await;
+        assert_eq!(code, "invalid_link", "{url:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_refusals_speak_the_language_of_the_request() {
+    let h = Harness::new();
+    set_links(&h, LinkMode::Blocklist);
+    let ask = |url: &str, lang: &str| {
+        h.send(
+            call("POST", "/api/channels/main/requests")
+                .header("x-vrcinema-lang", lang)
+                .json(json!({"url": url})),
+        )
+    };
+    for (url, en, pl) in [
+        (
+            "http://192.168.0.1/",
+            "Links to a local network or to this computer are not allowed.",
+            "Linki do sieci lokalnej lub do tego komputera są niedozwolone.",
+        ),
+        (
+            "ftp://x.example/",
+            "Only http and https links are allowed.",
+            "Dozwolone są tylko linki http i https.",
+        ),
+        (
+            "https://bad.example/",
+            "This site is blocked on this channel.",
+            "Ten serwis jest zablokowany na tym kanale.",
+        ),
+    ] {
+        assert_eq!(ask(url, "en").await.error(), en);
+        assert_eq!(ask(url, "pl").await.error(), pl);
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_of_the_address_does_not_use_up_the_limit() {
+    let h = Harness::new();
+    // Five refusals from one address; the limit is three requests.
+    for _ in 0..5 {
+        let (code, _) = refused(&h, "http://192.168.1.1/", "5.5.5.5").await;
+        assert_eq!(code, "local_address");
+    }
+    h.metas
+        .lock()
+        .unwrap()
+        .insert("https://youtu.be/ok".into(), Ok(video("Ok", 10.0)));
+    let res = h
+        .request("https://youtu.be/ok", "5.5.5.5", Some("Ola"))
+        .await;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.text());
+}
+
+#[tokio::test]
+async fn the_owner_adds_links_to_the_local_network_in_every_mode() {
+    for mode in LinkMode::ALL {
+        let h = Harness::new();
+        set_links(&h, mode);
+        let cookie = h.login().await;
+        h.metas
+            .lock()
+            .unwrap()
+            .insert("http://192.168.0.5/v.mp4".into(), Ok(video("Domowy", 10.0)));
+        let res = h
+            .send(
+                call("POST", "/api/admin/channels/main/items")
+                    .cookie(&cookie)
+                    .json(json!({"url": "http://192.168.0.5/v.mp4"})),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::CREATED, "{mode:?}: {}", res.text());
+    }
+}
+
+#[tokio::test]
+async fn the_settings_carry_the_modes_the_lists_and_the_popular_sites() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let get_settings = || h.send(get("/api/admin/channels/main/settings").cookie(&cookie));
+    let body = get_settings().await.json();
+    assert_eq!(body["linkMode"], "all");
+    assert_eq!(body["blockedDomains"], json!([]));
+    let popular = body["popularDomains"].as_array().unwrap();
+    assert_eq!(popular.len(), 16);
+    assert_eq!(popular[0], "youtube.com");
+    let r = h
+        .send(
+            call("PUT", "/api/admin/channels/main/settings")
+                .cookie(&cookie)
+                .json(json!({"linkMode": "blocklist", "blockedDomains": ["Bad.Example"]})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let body = get_settings().await.json();
+    assert_eq!(body["linkMode"], "blocklist");
+    assert_eq!(body["blockedDomains"], json!(["bad.example"]));
+    assert_eq!(body["allowedDomains"][0], "youtube.com");
+    // The public page learns the mode (to list the supported sites in the allow list mode).
+    let state = h.send(get("/api/channels/main/state")).await.json();
+    assert_eq!(state["rules"]["linkMode"], "blocklist");
+    let r = h
+        .send(
+            call("PUT", "/api/admin/channels/main/settings")
+                .cookie(&cookie)
+                .json(json!({"linkMode": "nothing"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }

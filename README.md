@@ -151,6 +151,14 @@ The admin panel gets a **"Pliki z dysku"** (Files from disk) section. Browse the
 
 The owner can add anything yt-dlp supports, live streams, YouTube playlists and pixeldrain lists. These limits don't apply to the owner.
 
+### Links from viewers and your home network
+
+The link mode (`linkMode` in the channel settings) is `all` (any site; the default for a new database), `allowlist` (only the listed sites and their subdomains; what an existing database becomes, with the list it had) or `blocklist` (every site except the listed ones). Both lists are always kept.
+
+In every mode, a link from a viewer must be `http` or `https` and must not point into your own network: `localhost`, `*.local`, `*.lan`, `*.home.arpa` and `*.internal` names are refused, and so is any name that resolves to a loopback, private (RFC 1918, `fc00::/7`), link-local, CGNAT (`100.64.0.0/10`), multicast or otherwise reserved address (also an IPv4 address written inside an IPv6 one). The address of the video that yt-dlp finds for the link is checked the same way before ffmpeg gets it. Links added by the owner are never limited.
+
+Known limit: the name is looked up when the link arrives and again for the final video address, but yt-dlp's own redirects in between, and a name that changes its answer between the checks, are not checked.
+
 `.env` options are documented in [.env.example](.env.example). They cover the GPU encoder (`VIDEO_ENCODER=h264_nvenc`), YouTube cookies (`YTDLP_COOKIES`), a pixeldrain API key, and paths.
 
 ## First transition test in VRChat

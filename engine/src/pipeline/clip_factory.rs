@@ -10,7 +10,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 use crate::config::VideoEncoder;
-use crate::db::{ChannelSettings, ItemStatus, QueueItem, QueueRepo, SettingsRepo};
+use crate::db::{AddedBy, ChannelSettings, ItemStatus, QueueItem, QueueRepo, SettingsRepo};
 use crate::i18n::{Lang, Msg};
 use crate::live::LiveValue;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
@@ -24,6 +24,7 @@ use crate::pipeline::ticker::{
     prepare_after_s, window_budget_px,
 };
 use crate::resolver::MediaResolver;
+use crate::rules::{HostResolver, check_media_url};
 use crate::stats::{ClipStats, ProbeSummary, StreamMode};
 
 /// Retries when removing a clip directory (Windows may hold a file lock for a moment).
@@ -58,6 +59,8 @@ pub struct ClipFactoryDeps {
     /// The public address (the request page in the ticker and its QR code); read while the
     /// ticker runs.
     pub public_url: LiveValue<String>,
+    /// Looks up the host of the media a viewer's link led to (the home-network protection).
+    pub host_resolver: Arc<dyn HostResolver>,
 }
 
 /// Log entry written when a clip starts.
@@ -677,6 +680,15 @@ async fn start_clip(
         .resolve(&item.source_url)
         .await
         .map_err(|e| e.0)?;
+    // What a viewer's link led to must not be the owner's network; checked before ffprobe or
+    // ffmpeg touch it. The owner's own films are not limited.
+    if item.added_by == AddedBy::Public {
+        for input in &stream.inputs {
+            check_media_url(&input.url, d.host_resolver.as_ref())
+                .await
+                .map_err(|e| Msg::error(e.code()))?;
+        }
+    }
     let info = probe_video(&d.ffprobe_path, &stream.inputs)
         .await
         .map_err(|e| e.message())?;
@@ -1004,6 +1016,7 @@ mod tests {
             })),
             font_file,
             public_url: crate::live::LiveValue::new("https://kanal.example.com".to_string()),
+            host_resolver: Arc::new(crate::rules::TableHostResolver::new(&[])),
         });
         Fixture {
             _dir: dir,
@@ -1026,6 +1039,112 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.to_string(), "Could not recognise the source.");
+    }
+
+    /// Resolves every URL to the given address(es), as yt-dlp would.
+    struct UrlResolver(Vec<&'static str>);
+
+    #[async_trait]
+    impl MediaResolver for UrlResolver {
+        async fn fetch_meta(&self, _url: &str) -> Result<MediaMeta, ResolveError> {
+            Err(ResolveError::new("nieużywane"))
+        }
+        async fn resolve(&self, _url: &str) -> Result<ResolvedStream, ResolveError> {
+            Ok(ResolvedStream {
+                inputs: self
+                    .0
+                    .iter()
+                    .map(|url| StreamInput {
+                        url: (*url).to_string(),
+                        headers: vec![],
+                    })
+                    .collect(),
+                title: "film".into(),
+                duration_s: Some(6.0),
+                is_live: false,
+            })
+        }
+    }
+
+    /// A factory whose tools do not exist: it can only get as far as the checks.
+    fn factory_for_media(urls: Vec<&'static str>) -> RealClipFactory {
+        let hosts = crate::rules::TableHostResolver::new(&[
+            ("cdn.example", &["93.184.216.34"]),
+            ("evil.example", &["192.168.0.10"]),
+        ]);
+        create_clip_factory(ClipFactoryDeps {
+            resolver: Arc::new(UrlResolver(urls)),
+            ffmpeg_path: "no-such-ffmpeg".into(),
+            ffprobe_path: "no-such-ffprobe".into(),
+            encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
+            segment_seconds: 4,
+            clips_dir: std::env::temp_dir().join("vrcinema-never-made"),
+            db: Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap())),
+            channel_id: MAIN_CHANNEL_ID,
+            log: None,
+            font_file: default_font(),
+            public_url: crate::live::LiveValue::new(String::new()),
+            host_resolver: Arc::new(hosts),
+        })
+    }
+
+    async fn start_error(factory: &RealClipFactory, added_by: AddedBy) -> Msg {
+        let item = QueueItem {
+            added_by,
+            ..item(1, "Test")
+        };
+        factory
+            .create(item, 0.0, 0)
+            .await
+            .err()
+            .expect("the start must fail")
+    }
+
+    #[tokio::test]
+    async fn the_media_of_a_viewers_link_must_not_be_on_the_home_network() {
+        for url in [
+            "http://192.168.0.5/v.mp4",
+            "https://evil.example/v.m3u8",
+            "file:///C:/secret.mp4",
+        ] {
+            let factory = factory_for_media(vec![url]);
+            let err = start_error(&factory, AddedBy::Public).await;
+            assert!(
+                matches!(err.code(), Some("local_address" | "bad_scheme")),
+                "{url}: {err:?}"
+            );
+        }
+        let err = start_error(
+            &factory_for_media(vec![
+                "https://cdn.example/v.mp4",
+                "http://192.168.0.5/audio.m4a",
+            ]),
+            AddedBy::Public,
+        )
+        .await;
+        assert_eq!(err.code(), Some("local_address"), "every input is checked");
+        assert_eq!(
+            err.render(Lang::Pl),
+            "Linki do sieci lokalnej lub do tego komputera są niedozwolone."
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_address_is_fine_for_the_owners_film_and_a_public_one_goes_on() {
+        // The owner's film gets past the check (and fails later, on the missing ffprobe).
+        let err = start_error(
+            &factory_for_media(vec!["http://192.168.0.5/v.mp4"]),
+            AddedBy::Admin,
+        )
+        .await;
+        assert_ne!(err.code(), Some("local_address"), "{err:?}");
+        // A public address passes the check as well.
+        let err = start_error(
+            &factory_for_media(vec!["https://cdn.example/v.mp4"]),
+            AddedBy::Public,
+        )
+        .await;
+        assert_ne!(err.code(), Some("local_address"), "{err:?}");
     }
 
     async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
