@@ -21,6 +21,7 @@ use crate::db::{
 use crate::engine::Command;
 use crate::i18n::Lang;
 use crate::library::LibraryError;
+use crate::nicks::{NickStore, badge};
 use crate::pipeline::channel::{ControlState, PauseReason};
 use crate::rules::parse_source_url;
 use crate::stats::process_usage;
@@ -36,6 +37,9 @@ pub(super) fn router() -> Router<AppState> {
             patch(patch_item).delete(delete_item),
         )
         .route("/api/admin/library", get(library))
+        .route("/api/admin/nicks", get(list_nicks))
+        .route("/api/admin/nicks/{skeleton}/release", post(release_nick))
+        .route("/api/admin/devices/block", post(block_device))
         .route("/api/admin/channels/main/local", post(add_local))
         .route("/api/admin/channels/main/skip", post(skip))
         .route("/api/admin/channels/main/pause", post(pause))
@@ -128,6 +132,7 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             added_by: AddedBy::Admin,
             requester_name: None,
             requester_ip: None,
+            requester_key_hash: None,
         };
     let added = if meta.is_playlist {
         // Only http(s) entries: `file:` (and `local:`) items are never created through HTTP,
@@ -265,6 +270,56 @@ async fn delete_item(State(state): State<AppState>, Path(id): Path<String>) -> A
     Ok(ok())
 }
 
+// ---------- Nicki widzów ----------
+
+fn no_such_nick() -> ApiError {
+    ApiError::coded(StatusCode::NOT_FOUND, "nick_not_found", &[])
+}
+
+/// Held nicks with their icon and last use; never the key or its hash.
+async fn list_nicks(State(state): State<AppState>) -> ApiResult {
+    let entries = state.with_db(|c| NickStore::new(c).list())?;
+    let nicks: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            let b = badge(&e.key_hash);
+            json!({
+                "skeleton": e.skeleton,
+                "nick": e.display,
+                "badge": { "hue": b.hue, "shape": b.shape },
+                "lastUsedAt": e.last_used_at,
+                "blocked": e.blocked,
+            })
+        })
+        .collect();
+    Ok(json_ok(&json!({ "nicks": nicks })))
+}
+
+async fn release_nick(State(state): State<AppState>, Path(skeleton): Path<String>) -> ApiResult {
+    if state.with_db(|c| NickStore::new(c).release(&skeleton))? {
+        Ok(ok())
+    } else {
+        Err(no_such_nick())
+    }
+}
+
+/// Blocks the device that holds the nick: its requests are refused from now on.
+async fn block_device(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let skeleton = body
+        .get("skeleton")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("bad_request"))?;
+    state.with_db(|c| {
+        let store = NickStore::new(c);
+        let Some(key_hash) = store.key_hash_of(skeleton)? else {
+            return Ok(Err(no_such_nick()));
+        };
+        store.block_device(&key_hash)?;
+        Ok(Ok(()))
+    })??;
+    Ok(ok())
+}
+
 // ---------- Pliki z dysku ----------
 
 fn library_error(e: LibraryError) -> ApiError {
@@ -394,6 +449,7 @@ async fn add_local(State(state): State<AppState>, JsonBody(body): JsonBody) -> A
                 added_by: AddedBy::Admin,
                 requester_name: None,
                 requester_ip: None,
+                requester_key_hash: None,
             })
         })?;
         titles.push(meta.title);

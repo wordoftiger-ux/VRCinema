@@ -862,6 +862,7 @@ impl Channel {
                         requester_name: item.requester_name.clone(),
                         // The owner's choice: it does not count towards the viewer's limit.
                         requester_ip: None,
+                        requester_key_hash: None,
                     })
                 })?;
                 again.id
@@ -1792,6 +1793,7 @@ mod tests {
                     added_by: AddedBy::Admin,
                     requester_name: Some("Ola".into()),
                     requester_ip: None,
+                    requester_key_hash: None,
                 })
                 .unwrap()
         }

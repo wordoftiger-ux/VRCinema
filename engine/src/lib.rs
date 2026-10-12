@@ -12,6 +12,7 @@ pub mod library;
 pub mod live;
 pub mod local_files;
 pub mod logging;
+pub mod nicks;
 pub mod pipeline;
 pub mod process;
 pub mod resolver;

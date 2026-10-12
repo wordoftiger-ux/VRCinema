@@ -15,6 +15,7 @@ fn item(title: &str) -> NewItem {
         added_by: AddedBy::Admin,
         requester_name: None,
         requester_ip: None,
+        requester_key_hash: None,
     }
 }
 
@@ -629,9 +630,11 @@ fn schema_dump(conn: &Connection) -> Vec<(String, String)> {
 }
 
 #[test]
+/// The shared schema plus the additive migrations (the old server ignores the extras).
 fn schema_is_identical_to_typescript_schema() {
     let ts = Connection::open_in_memory().unwrap();
     ts.execute_batch(TS_SCHEMA).unwrap();
+    super::migrate(&ts).unwrap();
     assert_eq!(schema_dump(&mem()), schema_dump(&ts));
 }
 
@@ -1001,5 +1004,51 @@ fn only_layout_changes_of_the_ticker_restart_the_film() {
         let mut other = base.clone();
         change(&mut other);
         assert!(!base.same_layout(&other), "{other:?}");
+    }
+}
+
+#[test]
+fn migration_keeps_every_item_of_a_stage_3_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vrcinema.db");
+    {
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(TS_SCHEMA).unwrap();
+        old.execute(
+            "INSERT INTO channels (id, slug, name, created_at) VALUES (1, 'main', 'Kanał główny', 1)",
+            [],
+        )
+        .unwrap();
+        for (pos, title) in [(1, "Pierwszy"), (2, "Drugi")] {
+            old.execute(
+                "INSERT INTO queue_items (channel_id, position, source_url, title, is_live, status,
+                   added_by, requester_name, requester_ip, created_at)
+                 VALUES (1, ?, 'https://youtu.be/x', ?, 0, 'queued', 'public', 'Ola', '1.2.3.4', 5)",
+                params![pos, title],
+            )
+            .unwrap();
+        }
+    }
+    for _ in 0..2 {
+        // Opening again changes nothing.
+        let conn = open_database(&path).unwrap();
+        let items = QueueRepo::new(&conn)
+            .list_by_status(MAIN_CHANNEL_ID, &[ItemStatus::Queued])
+            .unwrap();
+        assert_eq!(titles(items.clone()), ["Pierwszy", "Drugi"]);
+        assert!(items.iter().all(|i| i.requester_key_hash.is_none()));
+        assert_eq!(items[0].requester_ip.as_deref(), Some("1.2.3.4"));
+    }
+    let conn = open_database(&path).unwrap();
+    let mut with_key = item("z");
+    with_key.requester_key_hash = Some("ab".repeat(32));
+    let added = QueueRepo::new(&conn).add(&with_key).unwrap();
+    assert_eq!(added.position, 3);
+    assert_eq!(added.requester_key_hash.as_deref(), Some(&*"ab".repeat(32)));
+    for table in ["viewer_nicks", "blocked_devices"] {
+        let n: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

@@ -442,7 +442,6 @@
     const parts = [];
     if (i.requesterName) parts.push(`Dodane przez ${i.requesterName}`);
     else if (i.addedBy === 'admin') parts.push('Dodane przez Ciebie');
-    if (i.requesterIp) parts.push(`IP ${i.requesterIp}`);
     return parts.join(', ');
   }
 

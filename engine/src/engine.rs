@@ -1351,6 +1351,7 @@ mod tests {
                     added_by: AddedBy::Admin,
                     requester_name: None,
                     requester_ip: None,
+                    requester_key_hash: None,
                 })
                 .unwrap()
         };
@@ -1451,6 +1452,7 @@ mod tests {
                     added_by: AddedBy::Admin,
                     requester_name: None,
                     requester_ip: None,
+                    requester_key_hash: None,
                 })
                 .unwrap()
         };

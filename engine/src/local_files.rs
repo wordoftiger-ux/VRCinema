@@ -90,6 +90,7 @@ pub async fn add_local_files(
                 added_by: AddedBy::Admin,
                 requester_name: None,
                 requester_ip: None,
+                requester_key_hash: None,
             }),
             Err(_) => skipped += 1,
         }

@@ -108,6 +108,7 @@ pub struct QueueItem {
     pub added_by: AddedBy,
     pub requester_name: Option<String>,
     pub requester_ip: Option<String>,
+    pub requester_key_hash: Option<String>,
     pub error: Option<String>,
     pub created_at: i64,
     pub started_at: Option<i64>,
@@ -133,6 +134,7 @@ pub struct NewItem {
     pub added_by: AddedBy,
     pub requester_name: Option<String>,
     pub requester_ip: Option<String>,
+    pub requester_key_hash: Option<String>,
 }
 
 fn bad_value(idx: usize, what: &str, got: &str) -> rusqlite::Error {
@@ -170,6 +172,7 @@ fn to_item(r: &Row<'_>) -> rusqlite::Result<QueueItem> {
         })?,
         requester_name: r.get("requester_name")?,
         requester_ip: r.get("requester_ip")?,
+        requester_key_hash: r.get("requester_key_hash")?,
         error: r.get("error")?,
         created_at: r.get("created_at")?,
         started_at: r.get("started_at")?,
@@ -200,8 +203,8 @@ impl<'a> QueueRepo<'a> {
         )?;
         tx.execute(
             "INSERT INTO queue_items (channel_id, position, source_url, title, duration_s, is_live, status,
-               added_by, requester_name, requester_ip, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               added_by, requester_name, requester_ip, requester_key_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 item.channel_id,
                 max + 1,
@@ -213,6 +216,7 @@ impl<'a> QueueRepo<'a> {
                 item.added_by.as_str(),
                 item.requester_name,
                 item.requester_ip,
+                item.requester_key_hash,
                 now_ms(),
             ],
         )?;
@@ -227,8 +231,8 @@ impl<'a> QueueRepo<'a> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO queue_items (channel_id, position, source_url, title, duration_s, is_live, status,
-               added_by, requester_name, requester_ip, created_at)
-             VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               added_by, requester_name, requester_ip, requester_key_hash, created_at)
+             VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 item.channel_id,
                 item.source_url,
@@ -239,6 +243,7 @@ impl<'a> QueueRepo<'a> {
                 item.added_by.as_str(),
                 item.requester_name,
                 item.requester_ip,
+                item.requester_key_hash,
                 now_ms(),
             ],
         )?;

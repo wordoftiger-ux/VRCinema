@@ -21,6 +21,7 @@ use super::{
 };
 use crate::db::{AddedBy, ItemStatus, NewItem, QueueRepo};
 use crate::i18n::Msg;
+use crate::nicks::{NICK_MAX_CHARS, NickError, NickStore, hash_device_key, skeleton};
 use crate::rules::{is_allowed_domain, parse_source_url, validate_meta};
 
 pub(super) fn router() -> Router<AppState> {
@@ -93,6 +94,48 @@ fn clean_name(raw: Option<&Value>) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// The viewer's nick and device-key hash from a request. A malformed key is refused and a
+/// blocked device gets 403. A nick that is reserved for the owner or held by another device is
+/// refused in the viewer's language. With a key a free nick is reserved for the device; without
+/// one it is shown as typed, with no icon and no reservation.
+fn resolve_nick(
+    state: &AppState,
+    body: &Value,
+) -> Result<(Option<String>, Option<String>), ApiError> {
+    let key_hash = match body.get("deviceKey") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(key)) => {
+            Some(hash_device_key(key).ok_or_else(|| ApiError::bad_request("invalid_device_key"))?)
+        }
+        Some(_) => return Err(ApiError::bad_request("invalid_device_key")),
+    };
+    let nick = clean_name(body.get("name"))
+        .map(|n| n.chars().take(NICK_MAX_CHARS).collect::<String>())
+        .filter(|n| !skeleton(n).is_empty());
+    let now = crate::db::now_ms();
+    let outcome = state.with_db(|c| {
+        let store = NickStore::new(c);
+        Ok(match (&nick, &key_hash) {
+            (Some(nick), Some(key)) => store.claim(nick, key, now),
+            (Some(nick), None) => store.check(nick, None, now),
+            (None, Some(key)) if store.is_blocked(key) => Err(NickError::Blocked),
+            (None, _) => Ok(()),
+        })
+    })?;
+    match outcome {
+        Ok(()) => Ok((nick, key_hash)),
+        Err(NickError::Taken) => Err(ApiError::coded(StatusCode::CONFLICT, "nick_taken", &[])),
+        Err(NickError::Reserved) => {
+            Err(ApiError::coded(StatusCode::CONFLICT, "nick_reserved", &[]))
+        }
+        Err(NickError::Blocked) => Err(ApiError::coded(
+            StatusCode::FORBIDDEN,
+            "device_blocked",
+            &[],
+        )),
+    }
+}
+
 async fn post_request(
     State(state): State<AppState>,
     ctx: Ctx,
@@ -111,6 +154,7 @@ async fn post_request(
             &[("domains", &settings.allowed_domains.join(", "))],
         ));
     }
+    let (name, key_hash) = resolve_nick(&state, &body)?;
     let ip = ctx.ip;
     let active = state.with_db(|c| QueueRepo::new(c).count_active_by_ip(state.channel_id, &ip))?;
     if active >= i64::from(settings.max_active_per_requester) {
@@ -158,8 +202,9 @@ async fn post_request(
                 ItemStatus::Queued
             },
             added_by: AddedBy::Public,
-            requester_name: clean_name(body.get("name")),
+            requester_name: name.clone(),
             requester_ip: Some(ip.clone()),
+            requester_key_hash: key_hash.clone(),
         })
     })?;
     (state.log)(

@@ -106,6 +106,15 @@ function stripTiming(v, topLevelChannel) {
     const out = {};
     for (const [k, val] of Object.entries(v)) {
       if (TIMING_FIELDS.has(k)) continue;
+      // Etap 4, zadanie 7: `requesterBadge` (nowe) i `requesterIp` (usunięte z odpowiedzi — adresy
+      // widzów nigdy nie wychodzą z serwera) — wartości sprawdzane po stronie Rust w call().
+      if (k === 'requesterBadge' || k === 'requesterIp') continue;
+      // Etap 4, zadanie 7: nick ma najwyżej 24 znaki (TS: 32) — po sprawdzeniu po stronie Rust
+      // oba sprowadzamy do 24.
+      if (k === 'requesterName' && typeof val === 'string') {
+        out[k] = [...val].slice(0, 24).join('');
+        continue;
+      }
       if (topLevelChannel && (k === 'status' || k === 'current')) continue;
       // Etap 3: pola dodane przez pauzę (wartości sprawdzane osobno po stronie Rust w call()).
       if (topLevelChannel && (k === 'paused' || k === 'pauseReasons')) continue;
@@ -116,6 +125,20 @@ function stripTiming(v, topLevelChannel) {
     return out;
   }
   return v;
+}
+
+/** Etap 4, zadanie 7: każda pozycja kolejki/historii w odpowiedzi Rust ma `requesterBadge` ("host", {hue, shape} albo null) i nie ma `requesterIp`. */
+function checkRequesterFields(name, v) {
+  if (Array.isArray(v)) return v.forEach((x) => checkRequesterFields(name, x));
+  if (!v || typeof v !== 'object') return;
+  if ('requesterName' in v && 'id' in v) {
+    const b = v.requesterBadge;
+    const ok = b === null || b === 'host' || (typeof b === 'object' && Number.isInteger(b.hue) && Number.isInteger(b.shape));
+    if (!ok) throw new Error(`rust: "${name}": requesterBadge = ${JSON.stringify(b)}`);
+    if (typeof v.requesterName === 'string' && [...v.requesterName].length > 24) throw new Error(`rust: "${name}": nick dłuższy niż 24 znaki`);
+    if ('requesterIp' in v) throw new Error(`rust: "${name}": odpowiedź zawiera requesterIp`);
+  }
+  Object.values(v).forEach((x) => checkRequesterFields(name, x));
 }
 
 /** Pełna lista atrybutów z wartościami; normalizowana tylko wartość tokenu i data Expires. */
@@ -304,6 +327,7 @@ class Client {
         throw new Error(`rust: "${name}": pauseReasons = ${JSON.stringify(parsed.pauseReasons)}, oczekiwano []`);
       }
     }
+    if (parsed && this.srv.name === 'rust') checkRequesterFields(name, parsed);
     const apiError = parsed && typeof parsed === 'object' && 'error' in parsed && !('statusCode' in parsed);
     if (apiError && this.srv.name === 'rust') {
       // Etap 4: każdy błąd API (nie 404 trasy w stylu Fastify) ma stały `code` (serwer TS go nie ma)

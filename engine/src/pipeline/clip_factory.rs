@@ -859,6 +859,7 @@ mod tests {
             added_by: AddedBy::Admin,
             requester_name: None,
             requester_ip: None,
+            requester_key_hash: None,
             error: None,
             created_at: 0,
             started_at: None,
@@ -982,6 +983,7 @@ mod tests {
                 added_by: AddedBy::Admin,
                 requester_name: None,
                 requester_ip: None,
+                requester_key_hash: None,
             })
             .unwrap();
         let clips = dir.path().join("clips");
@@ -1225,6 +1227,7 @@ mod tests {
                     added_by: AddedBy::Public,
                     requester_name: Some("Kasia".into()),
                     requester_ip: None,
+                    requester_key_hash: None,
                 })
                 .unwrap();
         }

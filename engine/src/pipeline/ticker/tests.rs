@@ -123,6 +123,7 @@ fn the_requester_comes_from_the_queue_item() {
         added_by: AddedBy::Admin,
         requester_name: Some("Kasia".into()),
         requester_ip: None,
+        requester_key_hash: None,
         error: None,
         created_at: 0,
         started_at: None,

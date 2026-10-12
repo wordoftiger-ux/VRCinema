@@ -833,7 +833,20 @@ pub(crate) fn public_item(i: &QueueItem) -> Value {
         "title": i.title,
         "durationS": opt_num_json(i.duration_s),
         "requesterName": i.requester_name,
+        "requesterBadge": requester_badge(i),
         "isLive": i.is_live,
+    })
+}
+
+/// The icon of whoever added the item: `"host"` for the owner, `{hue, shape}` for a viewer
+/// with a device key, `null` for an anonymous one. Never the key or its hash.
+fn requester_badge(i: &QueueItem) -> Value {
+    if i.added_by == crate::db::AddedBy::Admin {
+        return json!("host");
+    }
+    i.requester_key_hash.as_deref().map_or(Value::Null, |hash| {
+        let b = crate::nicks::badge(hash);
+        json!({ "hue": b.hue, "shape": b.shape })
     })
 }
 
@@ -843,7 +856,6 @@ pub(crate) fn admin_item(i: &QueueItem, lang: Lang) -> Value {
         map.insert("sourceUrl".into(), json!(i.source_url));
         map.insert("status".into(), json!(i.status.as_str()));
         map.insert("addedBy".into(), json!(i.added_by.as_str()));
-        map.insert("requesterIp".into(), json!(i.requester_ip));
         map.insert("error".into(), json!(i.error_text(lang)));
         map.insert("createdAt".into(), json!(i.created_at));
         map.insert("finishedAt".into(), json!(i.finished_at));

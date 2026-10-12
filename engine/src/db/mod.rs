@@ -51,6 +51,40 @@ CREATE TABLE IF NOT EXISTS queue_items (
 CREATE INDEX IF NOT EXISTS queue_items_channel_status ON queue_items(channel_id, status, position);
 ";
 
+/// Additive changes made after the schema was shared with the TypeScript version.
+const MIGRATIONS: &str = "
+CREATE TABLE IF NOT EXISTS viewer_nicks (
+  skeleton TEXT PRIMARY KEY,
+  display TEXT NOT NULL,
+  key_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS viewer_nicks_key ON viewer_nicks(key_hash);
+CREATE TABLE IF NOT EXISTS blocked_devices (
+  key_hash TEXT PRIMARY KEY,
+  blocked_at INTEGER NOT NULL
+);
+";
+
+/// Brings an opened database up to the current schema: new tables and columns only, so no
+/// row is lost and the old server can still read the file.
+pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let has_key_hash = {
+        let mut stmt = conn.prepare("PRAGMA table_info(queue_items)")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        let mut found = false;
+        for name in names {
+            found |= name? == "requester_key_hash";
+        }
+        found
+    };
+    if !has_key_hash {
+        conn.execute_batch("ALTER TABLE queue_items ADD COLUMN requester_key_hash TEXT")?;
+    }
+    conn.execute_batch(MIGRATIONS)
+}
+
 /// Current time as Unix milliseconds (like JS `Date.now()`).
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -71,6 +105,7 @@ pub fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(SCHEMA)?;
+    migrate(&conn)?;
     conn.execute(
         "INSERT OR IGNORE INTO channels (id, slug, name, created_at) VALUES (?, ?, ?, ?)",
         params![

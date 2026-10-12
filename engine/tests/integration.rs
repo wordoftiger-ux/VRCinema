@@ -146,6 +146,7 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
                     added_by: AddedBy::Admin,
                     requester_name: None,
                     requester_ip: None,
+                    requester_key_hash: None,
                 })
                 .unwrap();
         }
@@ -376,6 +377,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
                 added_by: AddedBy::Admin,
                 requester_name: None,
                 requester_ip: None,
+                requester_key_hash: None,
             })
             .unwrap()
     };
@@ -700,6 +702,7 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
                 added_by: AddedBy::Admin,
                 requester_name: None,
                 requester_ip: None,
+                requester_key_hash: None,
             })
             .unwrap();
     }
@@ -992,6 +995,7 @@ async fn a_new_ticker_look_starts_the_film_again_once_from_where_it_is() {
                 added_by: AddedBy::Admin,
                 requester_name: None,
                 requester_ip: None,
+                requester_key_hash: None,
             })
             .unwrap();
     }

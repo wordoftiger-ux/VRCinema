@@ -325,6 +325,7 @@ impl Harness {
                     added_by: AddedBy::Admin,
                     requester_name: None,
                     requester_ip: None,
+                    requester_key_hash: None,
                 })
                 .unwrap()
         })
@@ -547,7 +548,7 @@ async fn adds_a_film_to_the_end_of_the_queue_with_a_nickname() {
     assert_eq!(res.json()["status"], "queued");
     assert_eq!(
         res.json()["item"],
-        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "isLive": false})
+        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false})
     );
     let items = h.list(ItemStatus::Queued);
     assert_eq!(items.len(), 1);
@@ -628,7 +629,7 @@ async fn the_log_has_a_tag_of_the_viewer_never_the_address() {
 }
 
 #[tokio::test]
-async fn nickname_is_cleaned_and_shortened() {
+async fn nickname_is_cleaned_and_shortened_to_24_characters() {
     let h = Harness::new();
     h.request("https://youtu.be/a", "1.1.1.1", Some("\u{1}O\u{7f}la\n"))
         .await;
@@ -644,7 +645,7 @@ async fn nickname_is_cleaned_and_shortened() {
         .collect();
     assert_eq!(
         names,
-        vec![Some("Ola".to_string()), None, Some("x".repeat(32))]
+        vec![Some("Ola".to_string()), None, Some("x".repeat(24))]
     );
 }
 
@@ -889,7 +890,7 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
     assert_eq!(body["queue"].as_array().unwrap().len(), 1);
     assert_eq!(
         body["queue"][0],
-        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "isLive": false})
+        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false})
     );
     assert!(!res.text().contains("1.1.1.1"));
     assert_eq!(body["channelUrl"], "http://tv.local:8080/live/main.m3u8");
@@ -3180,4 +3181,245 @@ async fn the_stats_route_works_with_a_remote_password_session_too() {
     let remote = cookie_of(&remote_login(&a, "sekret").await);
     let res = a.h.send(get(STATS_ROUTE).cookie(&remote)).await;
     assert_eq!(res.status, StatusCode::OK);
+}
+
+// ---------- nicki widzów ----------
+
+const KEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const KEY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+impl Harness {
+    /// A request with a nick and/or a device key, from its own address.
+    async fn request_as(
+        &self,
+        ip: &str,
+        name: Option<&str>,
+        key: Option<&str>,
+        lang: Option<&str>,
+    ) -> Resp {
+        let mut body = json!({"url": "https://youtu.be/a"});
+        if let Some(n) = name {
+            body["name"] = json!(n);
+        }
+        if let Some(k) = key {
+            body["deviceKey"] = json!(k);
+        }
+        let mut c = call("POST", "/api/channels/main/requests")
+            .ip(ip)
+            .json(body);
+        if let Some(l) = lang {
+            c = c.header("x-vrcinema-lang", l);
+        }
+        self.send(c).await
+    }
+}
+
+#[tokio::test]
+async fn a_nick_with_a_device_key_gets_an_icon_and_is_reserved() {
+    let h = Harness::new();
+    let res = h
+        .request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    assert_eq!(res.status, StatusCode::CREATED);
+    let badge = res.json()["item"]["requesterBadge"].clone();
+    assert!(badge["hue"].as_u64().unwrap() < 360);
+    assert!((1..=12).contains(&badge["shape"].as_u64().unwrap()));
+    // The same device keeps its nick and icon.
+    let again = h
+        .request_as("1.1.1.1", Some("kásia"), Some(KEY_A), None)
+        .await;
+    assert_eq!(again.status, StatusCode::CREATED);
+    assert_eq!(again.json()["item"]["requesterBadge"], badge);
+    // Another device cannot take a look-alike spelling.
+    let taken = h
+        .request_as("2.2.2.2", Some("Ka5ia"), Some(KEY_B), None)
+        .await;
+    assert_eq!(taken.status, StatusCode::CONFLICT);
+    assert_eq!(taken.json()["code"], "nick_taken");
+    assert_eq!(h.list(ItemStatus::Queued).len(), 2);
+    // The queue shown to viewers carries the icon, never the key, its hash or an address.
+    let state = h.send(get("/api/channels/main/state")).await;
+    assert_eq!(state.json()["queue"][0]["requesterBadge"], badge);
+    let hash = crate::nicks::hash_device_key(KEY_A).unwrap();
+    for text in [res.text(), again.text(), taken.text(), state.text()] {
+        assert!(!text.contains(&hash) && !text.contains(KEY_A), "{text}");
+        assert!(
+            !text.contains("1.1.1.1") && !text.contains("2.2.2.2"),
+            "{text}"
+        );
+    }
+}
+
+/// Review focus 4: a viewer without a device key (private mode, cleared data).
+#[tokio::test]
+async fn a_taken_nick_without_a_key_is_refused_in_the_viewers_language() {
+    let h = Harness::new();
+    h.request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    let en = h
+        .request_as("3.3.3.3", Some("KASIA"), None, Some("en"))
+        .await;
+    let pl = h
+        .request_as("3.3.3.3", Some("KASIA"), None, Some("pl"))
+        .await;
+    assert_eq!(en.status, StatusCode::CONFLICT);
+    assert_eq!(pl.status, StatusCode::CONFLICT);
+    assert_eq!(en.json()["code"], "nick_taken");
+    assert_eq!(
+        en.error(),
+        "This nick is already taken by someone else. Pick another one."
+    );
+    assert_eq!(
+        pl.error(),
+        "Ten nick jest już zajęty przez kogoś innego. Wybierz inny."
+    );
+    assert_eq!(h.list(ItemStatus::Queued).len(), 1);
+    // The same viewer without a nick goes through as an anonymous one.
+    let anon = h.request_as("3.3.3.3", None, None, Some("pl")).await;
+    assert_eq!(anon.status, StatusCode::CREATED);
+    assert_eq!(anon.json()["item"]["requesterName"], Value::Null);
+    assert_eq!(anon.json()["item"]["requesterBadge"], Value::Null);
+}
+
+#[tokio::test]
+async fn words_for_host_are_reserved_and_a_bad_key_is_refused() {
+    let h = Harness::new();
+    for (i, w) in [
+        "Gospodarz",
+        "Host",
+        "Anfitrión",
+        "Gastgeber",
+        "Hôte",
+        "ホスト",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let res = h
+            .request_as(&format!("4.4.4.{i}"), Some(w), Some(KEY_A), Some("en"))
+            .await;
+        assert_eq!(res.status, StatusCode::CONFLICT, "{w}");
+        assert_eq!(res.json()["code"], "nick_reserved", "{w}");
+    }
+    let keyless = h.request_as("5.5.5.5", Some("Host"), None, None).await;
+    assert_eq!(keyless.json()["code"], "nick_reserved");
+    for key in ["short", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"] {
+        let res = h.request_as("6.6.6.6", Some("Ola"), Some(key), None).await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST);
+        assert_eq!(res.json()["code"], "invalid_device_key");
+    }
+    assert!(h.list(ItemStatus::Queued).is_empty());
+}
+
+#[tokio::test]
+async fn owner_manages_nicks_and_blocks_devices() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    h.request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    h.request_as("2.2.2.2", Some("Basia"), Some(KEY_B), None)
+        .await;
+    let list = h.send(get("/api/admin/nicks").cookie(&cookie)).await;
+    assert_eq!(list.status, StatusCode::OK);
+    let nicks = list.json()["nicks"].clone();
+    assert_eq!(nicks.as_array().unwrap().len(), 2);
+    let kasia = nicks
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["nick"] == "Kasia")
+        .unwrap()
+        .clone();
+    assert_eq!(kasia["skeleton"], crate::nicks::skeleton("Kasia"));
+    assert!(kasia["badge"]["hue"].is_number() && kasia["lastUsedAt"].is_number());
+    assert_eq!(kasia["blocked"], false);
+    let hash = crate::nicks::hash_device_key(KEY_A).unwrap();
+    assert!(!list.text().contains(&hash));
+    // Needs the owner.
+    assert_eq!(
+        h.send(get("/api/admin/nicks")).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Blocking: the device's requests are refused with 403 from now on.
+    let block = h
+        .send(
+            call("POST", "/api/admin/devices/block")
+                .cookie(&cookie)
+                .json(json!({"skeleton": kasia["skeleton"]})),
+        )
+        .await;
+    assert_eq!(block.status, StatusCode::OK);
+    let refused = h
+        .request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), Some("en"))
+        .await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
+    assert_eq!(refused.json()["code"], "device_blocked");
+    assert_eq!(refused.error(), "You cannot add videos from this device.");
+    let no_nick = h.request_as("1.1.1.1", None, Some(KEY_A), None).await;
+    assert_eq!(no_nick.status, StatusCode::FORBIDDEN);
+    let list = h.send(get("/api/admin/nicks").cookie(&cookie)).await.json();
+    let blocked: Vec<_> = list["nicks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            (
+                n["nick"].as_str().unwrap().to_string(),
+                n["blocked"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(blocked.contains(&("Kasia".to_string(), true)));
+    assert!(blocked.contains(&("Basia".to_string(), false)));
+
+    // Releasing frees the nick for another device.
+    let url = format!(
+        "/api/admin/nicks/{}/release",
+        kasia["skeleton"].as_str().unwrap()
+    );
+    assert_eq!(
+        h.send(call("POST", &url).cookie(&cookie)).await.status,
+        StatusCode::OK
+    );
+    let gone = h.send(call("POST", &url).cookie(&cookie)).await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+    assert_eq!(gone.json()["code"], "nick_not_found");
+    let ok = h
+        .request_as("2.2.2.2", Some("Kasia"), Some(KEY_B), None)
+        .await;
+    assert_eq!(ok.status, StatusCode::CREATED);
+    let unknown = h
+        .send(
+            call("POST", "/api/admin/devices/block")
+                .cookie(&cookie)
+                .json(json!({"skeleton": "nobody"})),
+        )
+        .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn panel_items_have_badges_and_never_an_address() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    h.add("Mine", ItemStatus::Queued);
+    h.request_as("9.9.9.9", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    h.request_as("8.8.8.8", None, None, None).await;
+    let panel = h
+        .send(get("/api/admin/channels/main").cookie(&cookie))
+        .await;
+    let text = panel.text();
+    assert!(!text.contains("requesterIp"), "{text}");
+    assert!(
+        !text.contains("9.9.9.9") && !text.contains("8.8.8.8"),
+        "{text}"
+    );
+    let queue = panel.json()["queue"].clone();
+    assert_eq!(queue[0]["requesterBadge"], "host");
+    assert!(queue[1]["requesterBadge"]["hue"].is_number());
+    assert_eq!(queue[2]["requesterBadge"], Value::Null);
+    // The per-viewer limit still counts by address in the database.
+    assert_eq!(h.item(2).requester_ip.as_deref(), Some("9.9.9.9"));
 }
