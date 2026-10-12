@@ -159,6 +159,7 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
         connecting: false,
         segment_seconds: 4,
         generation: 0,
+        lang: vrcinema::i18n::Lang::En,
     })
     .await
     .unwrap();
@@ -174,6 +175,7 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
         db: Arc::clone(&db),
         channel_id: MAIN_CHANNEL_ID,
         log: None,
+        language: vrcinema::live::LiveValue::new(vrcinema::i18n::Lang::En),
     });
     let mut channel = Channel::new(ChannelOptions::new(
         MAIN_CHANNEL_ID,
@@ -383,6 +385,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
         connecting: false,
         segment_seconds: 4,
         generation: 0,
+        lang: vrcinema::i18n::Lang::En,
     })
     .await
     .unwrap();
@@ -397,6 +400,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
         db: Arc::clone(&db),
         channel_id: MAIN_CHANNEL_ID,
         log: None,
+        language: vrcinema::live::LiveValue::new(vrcinema::i18n::Lang::En),
     });
     let mut channel = Channel::new(ChannelOptions::new(
         MAIN_CHANNEL_ID,
@@ -703,6 +707,7 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
         connecting: false,
         segment_seconds: 4,
         generation: 0,
+        lang: vrcinema::i18n::Lang::En,
     })
     .await
     .unwrap();
@@ -717,6 +722,7 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
         db: Arc::clone(&db),
         channel_id: MAIN_CHANNEL_ID,
         log: None,
+        language: vrcinema::live::LiveValue::new(vrcinema::i18n::Lang::En),
     });
     let mut channel = Channel::new(ChannelOptions::new(
         MAIN_CHANNEL_ID,

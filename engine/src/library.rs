@@ -12,6 +12,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::i18n::Msg;
+
 pub const VIDEO_EXTENSIONS: [&str; 11] = [
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "wmv", "flv", "mpg", "mpeg",
 ];
@@ -19,13 +21,19 @@ pub const VIDEO_EXTENSIONS: [&str; 11] = [
 /// Paths compare case-insensitively on Windows and macOS.
 const CASE_INSENSITIVE: bool = cfg!(any(windows, target_os = "macos"));
 
-/// Library error with a user-facing (Polish) message.
+/// Library error: the message for the person (an `errors.` one, shown in their language).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct LibraryError(pub String);
+pub struct LibraryError(pub Msg);
 
-fn err(msg: impl Into<String>) -> LibraryError {
-    LibraryError(msg.into())
+impl LibraryError {
+    pub fn no_such_root() -> Self {
+        err("no_such_root")
+    }
+}
+
+fn err(code: &'static str) -> LibraryError {
+    LibraryError(Msg::error(code))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -227,26 +235,23 @@ impl MediaLibrary {
 
     /// Absolute path of an existing file or folder inside the root folder.
     pub fn resolve(&self, root: usize, rel: &str) -> Result<PathBuf, LibraryError> {
-        let base = self
-            .dirs
-            .get(root)
-            .ok_or_else(|| err("Nie ma takiego folderu głównego."))?;
+        let base = self.dirs.get(root).ok_or_else(LibraryError::no_such_root)?;
         let mut chars = rel.chars();
         let drive_like =
             matches!((chars.next(), chars.next()), (Some(a), Some(':')) if a.is_ascii_alphabetic());
         if rel.contains('\0') || drive_like || Path::new(rel).has_root() {
-            return Err(err("Niepoprawna ścieżka."));
+            return Err(err("invalid_path"));
         }
         let full = normalize(&base.join(rel));
         if !is_inside(&full, base) {
-            return Err(err("Ścieżka wychodzi poza folder z filmami."));
+            return Err(err("path_outside_library"));
         }
         let missing = || {
             let name = full.file_name().map_or_else(
                 || full.to_string_lossy().into_owned(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            err(format!("Plik nie istnieje: {name}"))
+            LibraryError(Msg::error("file_missing").arg("name", name))
         };
         if !full.exists() {
             return Err(missing());
@@ -256,7 +261,7 @@ impl MediaLibrary {
             _ => return Err(missing()),
         };
         if !is_inside(&real_full, &real_base) {
-            return Err(err("Ścieżka wychodzi poza folder z filmami."));
+            return Err(err("path_outside_library"));
         }
         Ok(full)
     }
@@ -264,18 +269,18 @@ impl MediaLibrary {
     pub fn list(&self, root: usize, rel: &str) -> Result<LibraryListing, LibraryError> {
         let dir = self.resolve(root, rel)?;
         if !fs::metadata(&dir).is_ok_and(|m| m.is_dir()) {
-            return Err(err("To nie jest folder."));
+            return Err(err("not_a_folder"));
         }
         let base = &self.dirs[root];
-        let real_base = fs::canonicalize(base).map_err(|_| err("Nie można odczytać folderu."))?;
+        let real_base = fs::canonicalize(base).map_err(|_| err("folder_unreadable"))?;
         let rel_norm = dir
             .components()
             .skip(base.components().count())
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join("/");
-        let read =
-            fs::read_dir(&dir).map_err(|e| err(format!("Nie można odczytać folderu: {e}")))?;
+        let read = fs::read_dir(&dir)
+            .map_err(|e| LibraryError(Msg::error("folder_unreadable_detail").arg("detail", e)))?;
         let mut entries = Vec::new();
         for item in read.flatten() {
             let file_name = item.file_name();
@@ -407,6 +412,7 @@ pub fn parse_source_url(url: &str) -> Option<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
 
     struct Fixture {
         _tmp: tempfile::TempDir,
@@ -645,7 +651,7 @@ mod tests {
         let f = fixture();
         let lib = MediaLibrary::new(vec![f.films.clone()]);
         let outside_file = f.outside.join("tajne.mp4");
-        let err = |r: Result<PathBuf, LibraryError>| r.unwrap_err().0;
+        let err = |r: Result<PathBuf, LibraryError>| r.unwrap_err().0.render(Lang::Pl);
         assert_eq!(
             err(lib.resolve(0, "../Prywatne/tajne.mp4")),
             "Ścieżka wychodzi poza folder z filmami."
@@ -679,7 +685,10 @@ mod tests {
         let f = fixture();
         let lib = MediaLibrary::new(vec![f.films.clone()]);
         assert_eq!(
-            lib.resolve(0, "skrot/tajne.mp4").unwrap_err().0,
+            lib.resolve(0, "skrot/tajne.mp4")
+                .unwrap_err()
+                .0
+                .render(Lang::Pl),
             "Ścieżka wychodzi poza folder z filmami."
         );
         assert!(lib.list(0, "skrot").is_err());
@@ -719,7 +728,7 @@ mod tests {
         let f = fixture();
         let lib = MediaLibrary::new(vec![f.films.clone()]);
         assert_eq!(
-            lib.resolve(0, "Nie ma.mp4").unwrap_err().0,
+            lib.resolve(0, "Nie ma.mp4").unwrap_err().0.render(Lang::Pl),
             "Plik nie istnieje: Nie ma.mp4"
         );
     }
@@ -729,7 +738,7 @@ mod tests {
         let f = fixture();
         let lib = MediaLibrary::new(vec![f.films.clone()]);
         assert_eq!(
-            lib.list(0, "Film A.mp4").unwrap_err().0,
+            lib.list(0, "Film A.mp4").unwrap_err().0.render(Lang::Pl),
             "To nie jest folder."
         );
     }

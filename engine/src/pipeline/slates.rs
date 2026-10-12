@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
+use crate::i18n::{self, Lang};
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
@@ -75,12 +76,14 @@ pub struct SlateOptions {
     /// Address of the request page shown (as text and as a QR code) on the idle slate; empty:
     /// no address, no code.
     pub request_url: String,
-    /// Without an address: the tunnel is connecting, the idle slate says "Łączenie z
-    /// internetem…" instead of the usual hint.
+    /// Without an address: the tunnel is connecting, the idle slate says so ("Connecting to
+    /// the internet…") instead of the usual hint.
     pub connecting: bool,
     pub segment_seconds: u32,
     /// Number of the set being made (see [`Slates::generation`]).
     pub generation: u32,
+    /// Language of the texts.
+    pub lang: Lang,
 }
 
 /// What the idle slate is made for: the public address (QR code and text of the request page)
@@ -126,24 +129,24 @@ pub fn request_url(public_url: &str) -> String {
     }
 }
 
-fn texts(kind: SlateKind, request_url: &str, connecting: bool) -> (String, String) {
+fn texts(lang: Lang, kind: SlateKind, request_url: &str, connecting: bool) -> (String, String) {
     match kind {
         SlateKind::Idle => (
-            "Brak filmów w kolejce".to_string(),
+            i18n::t(lang, "slates.idle_title", &[]),
             if !request_url.is_empty() {
                 // Under the QR code: just the address.
                 request_url.to_string()
             } else if connecting {
-                "Łączenie z internetem…".to_string()
+                i18n::t(lang, "slates.connecting", &[])
             } else {
-                "Dodaj film na stronie zgłoszeń".to_string()
+                i18n::t(lang, "slates.idle_hint", &[])
             },
         ),
         SlateKind::Buffering => (
-            "Buforowanie…".to_string(),
-            "Film zaraz się zacznie".to_string(),
+            i18n::t(lang, "slates.buffering_title", &[]),
+            i18n::t(lang, "slates.buffering_subtitle", &[]),
         ),
-        SlateKind::Pause => ("Pauza — wracamy za chwilę".to_string(), String::new()),
+        SlateKind::Pause => (i18n::t(lang, "slates.pause_title", &[]), String::new()),
     }
 }
 
@@ -228,7 +231,7 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
     let mut with_text = false;
     if Path::new(&o.font_file).exists() {
         std::fs::copy(&o.font_file, dir.join("font.ttf"))?;
-        let (title, subtitle) = texts(kind, &o.request_url, o.connecting);
+        let (title, subtitle) = texts(o.lang, kind, &o.request_url, o.connecting);
         std::fs::write(dir.join("title.txt"), title)?;
         std::fs::write(dir.join("subtitle.txt"), subtitle)?;
         with_text = true;
@@ -270,7 +273,7 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
     if seg.wait().await != SegmenterState::Done {
         return Err(SlateError::Failed {
             kind: kind.as_str(),
-            message: seg.error().unwrap_or_default(),
+            message: seg.error().map(|e| e.to_string()).unwrap_or_default(),
         });
     }
     let segments = seg.poll();
@@ -343,6 +346,7 @@ pub struct SlateSwapper {
     font_file: PathBuf,
     root: PathBuf,
     segment_seconds: u32,
+    lang: Lang,
     /// How long the old set's folder is kept after the swap.
     hold: Duration,
     state: tokio::sync::Mutex<SwapState>,
@@ -377,6 +381,7 @@ impl SlateSwapper {
             ffmpeg_path: options.ffmpeg_path.clone(),
             font_file: options.font_file.clone(),
             segment_seconds: options.segment_seconds,
+            lang: options.lang,
             state: tokio::sync::Mutex::new(SwapState {
                 address: initial,
                 generation: options.generation,
@@ -404,6 +409,7 @@ impl SlateSwapper {
             connecting,
             segment_seconds: config.segment_seconds,
             generation: 0,
+            lang: config.language,
         };
         let initial = SlateAddress {
             public_url: config.public_url.clone(),
@@ -443,6 +449,7 @@ impl SlateSwapper {
             connecting: address.connecting,
             segment_seconds: self.segment_seconds,
             generation,
+            lang: self.lang,
         })
         .await;
         let slates = match made {
@@ -502,6 +509,7 @@ mod tests {
             connecting: false,
             segment_seconds: 4,
             generation,
+            lang: Lang::Pl,
         }
     }
 
@@ -572,18 +580,18 @@ mod tests {
     #[test]
     fn slate_texts_match_the_original() {
         assert_eq!(
-            texts(SlateKind::Idle, "https://tv.example.com/", false),
+            texts(Lang::Pl, SlateKind::Idle, "https://tv.example.com/", false),
             (
                 "Brak filmów w kolejce".to_string(),
                 "https://tv.example.com/".to_string()
             )
         );
         assert_eq!(
-            texts(SlateKind::Idle, "", false).1,
+            texts(Lang::Pl, SlateKind::Idle, "", false).1,
             "Dodaj film na stronie zgłoszeń"
         );
         assert_eq!(
-            texts(SlateKind::Buffering, "x", false),
+            texts(Lang::Pl, SlateKind::Buffering, "x", false),
             (
                 "Buforowanie…".to_string(),
                 "Film zaraz się zacznie".to_string()
@@ -592,9 +600,35 @@ mod tests {
     }
 
     #[test]
+    fn slate_texts_follow_the_language() {
+        assert_eq!(
+            texts(Lang::En, SlateKind::Idle, "", false),
+            (
+                "No videos in the queue".to_string(),
+                "Add a video on the request page".to_string()
+            )
+        );
+        assert_eq!(
+            texts(Lang::En, SlateKind::Idle, "", true).1,
+            "Connecting to the internet…"
+        );
+        assert_eq!(
+            texts(Lang::En, SlateKind::Buffering, "", false),
+            (
+                "Buffering…".to_string(),
+                "The video is about to start".to_string()
+            )
+        );
+        assert_eq!(
+            texts(Lang::En, SlateKind::Pause, "https://tv.example.com/", false),
+            ("Paused — back in a moment".to_string(), String::new())
+        );
+    }
+
+    #[test]
     fn pause_slate_text_is_polish_with_an_empty_subtitle() {
         assert_eq!(
-            texts(SlateKind::Pause, "https://tv.example.com/", false),
+            texts(Lang::Pl, SlateKind::Pause, "https://tv.example.com/", false),
             ("Pauza — wracamy za chwilę".to_string(), String::new())
         );
         assert_eq!(SlateKind::Pause.as_str(), "pause");
@@ -604,7 +638,7 @@ mod tests {
     #[test]
     fn while_the_tunnel_connects_the_idle_slate_says_so() {
         assert_eq!(
-            texts(SlateKind::Idle, "", true),
+            texts(Lang::Pl, SlateKind::Idle, "", true),
             (
                 "Brak filmów w kolejce".to_string(),
                 "Łączenie z internetem…".to_string()
@@ -612,11 +646,11 @@ mod tests {
         );
         // An address always wins.
         assert_eq!(
-            texts(SlateKind::Idle, "https://tv.example.com/", true).1,
+            texts(Lang::Pl, SlateKind::Idle, "https://tv.example.com/", true).1,
             "https://tv.example.com/"
         );
         assert_eq!(
-            texts(SlateKind::Pause, "", true),
+            texts(Lang::Pl, SlateKind::Pause, "", true),
             ("Pauza — wracamy za chwilę".to_string(), String::new())
         );
     }

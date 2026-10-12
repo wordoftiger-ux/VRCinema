@@ -47,7 +47,7 @@ function prepareFixtures() {
 
 // ---------- Serwery ----------
 
-function startServer(name, port, command, args, fx) {
+function startServer(name, port, command, args, fx, extraEnv = {}) {
   const dataDir = path.join(tmp, `data-${name}`);
   fs.mkdirSync(dataDir, { recursive: true });
   const logFile = path.join(tmp, `${name}.log`);
@@ -66,6 +66,7 @@ function startServer(name, port, command, args, fx) {
       PUBLIC_URL: '',
       TRUST_CLOUDFLARE: 'false',
       TRUST_PROXY: 'false',
+      ...extraEnv,
     },
   });
   children.push(child);
@@ -303,6 +304,15 @@ class Client {
         throw new Error(`rust: "${name}": pauseReasons = ${JSON.stringify(parsed.pauseReasons)}, oczekiwano []`);
       }
     }
+    const apiError = parsed && typeof parsed === 'object' && 'error' in parsed && !('statusCode' in parsed);
+    if (apiError && this.srv.name === 'rust') {
+      // Etap 4: każdy błąd API (nie 404 trasy w stylu Fastify) ma stały `code` (serwer TS go nie ma)
+      // — sprawdzany tu, pomijany w porównaniu.
+      if (typeof parsed.code !== 'string' || !/^[a-z_]+$/.test(parsed.code)) {
+        throw new Error(`rust: "${name}": code = ${JSON.stringify(parsed.code)}, oczekiwano kodu błędu`);
+      }
+      if (bodyShape && typeof bodyShape === 'object') delete bodyShape.code;
+    }
     const normalized = JSON.stringify(bodyShape).replaceAll(`:${this.srv.port}`, ':PORT');
     this.records.push({
       name,
@@ -528,7 +538,8 @@ async function main() {
   if (!fs.existsSync(rustBin)) throw new Error(`Brak ${rustBin} — uruchom najpierw: cargo build (w engine/)`);
   const fx = prepareFixtures();
   const ts = startServer('ts', 8191, process.execPath, ['--disable-warning=ExperimentalWarning', 'src/server.ts'], fx);
-  const rust = startServer('rust', 8192, rustBin, [], fx);
+  // Etap 4: serwer Rust domyślnie mówi po angielsku; serwer TS zna tylko polski.
+  const rust = startServer('rust', 8192, rustBin, [], fx, { LANGUAGE: 'pl' });
   await Promise.all([waitReady(ts), waitReady(rust)]);
   console.log('Oba serwery gotowe, odtwarzam scenariusz...');
   const [tsRes, rustRes] = await Promise.allSettled([scenario(ts), scenario(rust)]);

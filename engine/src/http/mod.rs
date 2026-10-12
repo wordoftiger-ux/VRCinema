@@ -26,6 +26,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use crate::auto_pause::ViewerActivity;
 use crate::db::{QueueItem, SettingsRepo};
 use crate::engine::{Command, EngineHandle, Snapshot};
+use crate::i18n::{Lang, Msg};
 use crate::library::MediaLibrary;
 use crate::live::{LiveSettings, LiveValue};
 use crate::pipeline::channel::ChannelState;
@@ -49,6 +50,8 @@ pub struct HttpConfig {
     pub public_url: String,
     pub trust_cloudflare: bool,
     pub trust_proxy: bool,
+    /// The app's language: of answers to requests that name none they can be read in.
+    pub language: Lang,
 }
 
 impl From<&crate::config::AppConfig> for HttpConfig {
@@ -59,6 +62,7 @@ impl From<&crate::config::AppConfig> for HttpConfig {
             public_url: c.public_url.clone(),
             trust_cloudflare: c.trust_cloudflare,
             trust_proxy: c.trust_proxy,
+            language: c.language,
         }
     }
 }
@@ -131,6 +135,7 @@ impl AppState {
                 encoder: LiveValue::new(crate::config::VideoEncoder::Libx264),
                 ytdlp_cookies: LiveValue::new(None),
                 pixeldrain_api_key: LiveValue::new(None),
+                language: LiveValue::new(config.language),
             },
             config: Arc::new(config),
             channel_id,
@@ -211,9 +216,12 @@ impl AppState {
         self.desktop
             .as_ref()
             .and_then(Weak::upgrade)
-            .ok_or_else(|| {
-                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "Aplikacja jest zamykana.")
-            })
+            .ok_or_else(|| ApiError::coded(StatusCode::SERVICE_UNAVAILABLE, "app_closing", &[]))
+    }
+
+    /// The app's language (the desktop app changes it at runtime).
+    pub(crate) fn language(&self) -> Lang {
+        self.live.language.get()
     }
 
     pub fn desktop_key(&self) -> &Arc<DesktopKey> {
@@ -322,12 +330,43 @@ impl FromRequestParts<AppState> for DesktopSession {
     ) -> Result<Self, Self::Rejection> {
         match state.session(&parts.headers) {
             Some(SessionKind::Desktop) => Ok(Self),
-            Some(SessionKind::Remote) => Err(ApiError::new(
-                StatusCode::FORBIDDEN,
-                "Ta funkcja jest dostępna tylko w oknie aplikacji.",
+            Some(SessionKind::Remote) => {
+                Err(ApiError::coded(StatusCode::FORBIDDEN, "window_only", &[]))
+            }
+            None => Err(ApiError::coded(
+                StatusCode::UNAUTHORIZED,
+                "login_required",
+                &[],
             )),
-            None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "Zaloguj się.")),
         }
+    }
+}
+
+// ---------- Language of the request ----------
+
+/// Header the panel and the request page send with the language shown (spec section 6).
+pub(crate) const LANG_HEADER: &str = "x-vrcinema-lang";
+
+/// The language to answer in: [`LANG_HEADER`], else `Accept-Language`, else the app's.
+pub(crate) fn request_lang(headers: &HeaderMap, app: Lang) -> Lang {
+    let header = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    header(LANG_HEADER)
+        .and_then(Lang::parse)
+        .or_else(|| header("accept-language").and_then(Lang::from_accept_language))
+        .unwrap_or(app)
+}
+
+/// Extractor of [`request_lang`].
+pub(crate) struct ReqLang(pub Lang);
+
+impl FromRequestParts<AppState> for ReqLang {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(request_lang(&parts.headers, state.language())))
     }
 }
 
@@ -339,29 +378,88 @@ pub(crate) type ApiResult<T = Response> = Result<T, ApiError>;
 #[derive(Clone)]
 struct InternalError(String);
 
+/// The code and message of an error answer, put into the request's language by
+/// [`localize_errors`].
+#[derive(Clone)]
+struct ErrorMessage(Option<&'static str>, Msg);
+
+/// An error answer: JSON `{"error": <text in the request's language>, "code": <code>}`. The
+/// text is the key `errors.<code>` of the dictionaries, unless [`ApiError::with_code`] gave the
+/// answer a broader code (whose key `errors.<code>` then holds a generic text).
 pub(crate) enum ApiError {
-    Http(StatusCode, String),
-    /// With a machine-readable `code` next to the message.
-    Coded(StatusCode, &'static str, String),
+    Coded {
+        status: StatusCode,
+        /// `None`: the message's own code.
+        code: Option<&'static str>,
+        msg: Msg,
+    },
+    /// 500 `internal`; the cause is only logged.
     Internal(String),
 }
 
 impl ApiError {
-    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self::Http(status, message.into())
-    }
-
-    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, message)
-    }
-
-    /// JSON `{"error": message, "code": code}`.
-    pub(crate) fn with_code(
+    pub(crate) fn coded(
         status: StatusCode,
         code: &'static str,
-        message: impl Into<String>,
+        args: &[(&'static str, &str)],
     ) -> Self {
-        Self::Coded(status, code, message.into())
+        let msg = args
+            .iter()
+            .fold(Msg::error(code), |msg, (name, value)| msg.arg(name, value));
+        Self::from_msg(status, msg)
+    }
+
+    pub(crate) fn bad_request(code: &'static str) -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, code, &[])
+    }
+
+    /// An error message (`Msg::error`) of another part of the program as the answer.
+    pub(crate) fn from_msg(status: StatusCode, msg: Msg) -> Self {
+        debug_assert!(
+            msg.code().is_some(),
+            "{} is not an error message",
+            msg.key()
+        );
+        Self::Coded {
+            status,
+            code: None,
+            msg,
+        }
+    }
+
+    /// The answer's `code` is `code` — one a route promised before its messages got codes of
+    /// their own (`bad_request` of the controls, `invalid` of the permanent-link wizard); the
+    /// text stays the message's.
+    pub(crate) fn with_code(self, code: &'static str) -> Self {
+        match self {
+            Self::Coded { status, msg, .. } => Self::Coded {
+                status,
+                code: Some(code),
+                msg,
+            },
+            other => other,
+        }
+    }
+
+    /// A field filled with a message in the same language.
+    pub(crate) fn with_msg_arg(self, name: &'static str, value: Msg) -> Self {
+        self.map_msg(|msg| msg.arg_msg(name, value))
+    }
+
+    /// The number that picks the plural form of the message.
+    pub(crate) fn with_count(self, n: i64) -> Self {
+        self.map_msg(|msg| msg.count(n))
+    }
+
+    fn map_msg(self, f: impl FnOnce(Msg) -> Msg) -> Self {
+        match self {
+            Self::Coded { status, code, msg } => Self::Coded {
+                status,
+                code,
+                msg: f(msg),
+            },
+            other => other,
+        }
     }
 }
 
@@ -371,23 +469,50 @@ impl From<rusqlite::Error> for ApiError {
     }
 }
 
+fn error_body(code: Option<&'static str>, msg: &Msg, lang: Lang) -> Value {
+    json!({ "error": msg.render(lang), "code": code.or(msg.code()) })
+}
+
+/// The answer with the message in English; [`localize_errors`] puts it into the request's
+/// language.
+fn error_response(status: StatusCode, code: Option<&'static str>, msg: Msg) -> Response {
+    let mut res = json_response(status, &error_body(code, &msg, Lang::En));
+    res.extensions_mut().insert(ErrorMessage(code, msg));
+    res
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
-            Self::Http(status, message) => json_response(status, &json!({ "error": message })),
-            Self::Coded(status, code, message) => {
-                json_response(status, &json!({ "error": message, "code": code }))
-            }
+            Self::Coded { status, code, msg } => error_response(status, code, msg),
             Self::Internal(message) => {
-                let mut res = json_response(
+                let mut res = error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &json!({ "error": "Błąd serwera" }),
+                    None,
+                    Msg::error("internal"),
                 );
                 res.extensions_mut().insert(InternalError(message));
                 res
             }
         }
     }
+}
+
+/// Error answers in the language of the request (see [`request_lang`]).
+async fn localize_errors(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let lang = request_lang(req.headers(), state.language());
+    let mut res = next.run(req).await;
+    if let Some(ErrorMessage(code, msg)) = res.extensions_mut().remove::<ErrorMessage>() {
+        let bytes =
+            serde_json::to_vec(&error_body(code, &msg, lang)).unwrap_or_else(|_| b"null".to_vec());
+        res.headers_mut().remove(axum::http::header::CONTENT_LENGTH);
+        *res.body_mut() = Body::from(bytes);
+    }
+    res
 }
 
 async fn log_internal_errors(
@@ -477,17 +602,15 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|v| v.trim().to_ascii_lowercase());
-        let bytes = to_bytes(body, BODY_LIMIT).await.map_err(|_| {
-            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "Request body is too large")
-        })?;
+        let bytes = to_bytes(body, BODY_LIMIT)
+            .await
+            .map_err(|_| ApiError::coded(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large", &[]))?;
         let is_json = content_type
             .as_deref()
             .is_some_and(|c| c == "application/json" || c.starts_with("application/json;"));
         if bytes.is_empty() {
             return if is_json {
-                Err(ApiError::bad_request(
-                    "Body cannot be empty when content-type is set to 'application/json'",
-                ))
+                Err(ApiError::bad_request("empty_json_body"))
             } else {
                 Ok(Self(Value::Null))
             };
@@ -502,17 +625,16 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
                     String::from_utf8_lossy(&bytes).into_owned(),
                 )))
             } else {
-                Err(ApiError::new(
+                Err(ApiError::coded(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "Unsupported Media Type",
+                    "unsupported_media_type",
+                    &[],
                 ))
             };
         }
-        serde_json::from_slice(&bytes).map(Self).map_err(|_| {
-            ApiError::bad_request(
-                "Body is not valid JSON but content-type is set to 'application/json'",
-            )
-        })
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|_| ApiError::bad_request("invalid_json"))
     }
 }
 
@@ -699,11 +821,13 @@ pub fn build_router(state: AppState) -> Router {
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "nieznana panika".to_string());
                 log(&format!("Błąd serwera: {message}"));
-                json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &json!({ "error": "Błąd serwera" }),
-                )
+                ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "internal", &[]).into_response()
             },
+        ))
+        // Outermost: also the answer of a panic is put into the request's language.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            localize_errors,
         ))
         .with_state(state)
 }

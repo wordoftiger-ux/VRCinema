@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::i18n::Msg;
+
 /// State of the tunnel as shown to the rest of the app (spec section 7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TunnelState {
@@ -15,8 +17,8 @@ pub enum TunnelState {
     /// it is running but has had no connection to Cloudflare for longer than the grace period
     /// (`/ready` not 200); it then reconnects on its own and the state returns to `Online`.
     Reconnecting,
-    /// A failure worth a readable (Polish) explanation; a new start follows after a wait.
-    Error { message: String },
+    /// A failure worth a readable explanation; a new start follows after a wait.
+    Error { message: Msg },
 }
 
 impl TunnelState {

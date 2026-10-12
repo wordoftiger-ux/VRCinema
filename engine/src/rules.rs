@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 use crate::db::ChannelSettings;
+use crate::i18n::Msg;
 use crate::resolver::types::MediaMeta;
 
 /// Returns the URL only for valid http(s) addresses.
@@ -32,37 +33,32 @@ pub fn is_allowed_domain(url: &Url, domains: &[String]) -> bool {
     })
 }
 
-fn format_duration(s: f64) -> String {
+fn format_duration(s: f64) -> Msg {
     // `as` saturates and maps NaN to 0, which is what we want for display.
     let h = (s / 3600.0).floor() as u64;
     let m = ((s % 3600.0) / 60.0).floor() as u64;
     if h > 0 {
-        format!("{h} h {m} min")
+        Msg::new("units.hours_minutes").arg("h", h).arg("m", m)
     } else {
-        format!("{m} min")
+        Msg::new("units.minutes").arg("m", m)
     }
 }
 
 /// Returns the rejection reason, or `None` when the video may be queued.
-pub fn validate_meta(
-    meta: &MediaMeta,
-    settings: &ChannelSettings,
-    is_admin: bool,
-) -> Option<String> {
+pub fn validate_meta(meta: &MediaMeta, settings: &ChannelSettings, is_admin: bool) -> Option<Msg> {
     if is_admin {
         return None;
     }
     if meta.is_playlist {
-        return Some("Playlisty może dodawać tylko właściciel kanału.".to_string());
+        return Some(Msg::error("playlist_owner_only"));
     }
     if meta.is_live {
-        return Some("Transmisje na żywo może dodawać tylko właściciel kanału.".to_string());
+        return Some(Msg::error("live_owner_only"));
     }
     match meta.duration_s {
-        Some(d) if d > settings.max_duration_s => Some(format!(
-            "Film jest za długi (limit: {}).",
-            format_duration(settings.max_duration_s)
-        )),
+        Some(d) if d > settings.max_duration_s => {
+            Some(Msg::error("too_long").arg_msg("limit", format_duration(settings.max_duration_s)))
+        }
         _ => None,
     }
 }
@@ -233,7 +229,7 @@ mod tests {
         };
         let s = ChannelSettings::default();
         assert_eq!(
-            validate_meta(&long, &s, false).as_deref(),
+            polish(validate_meta(&long, &s, false)).as_deref(),
             Some("Film jest za długi (limit: 2 h 0 min).")
         );
         assert_eq!(validate_meta(&long, &s, true), None);
@@ -250,7 +246,7 @@ mod tests {
             ..meta()
         };
         assert_eq!(
-            validate_meta(&long, &s, false).as_deref(),
+            polish(validate_meta(&long, &s, false)).as_deref(),
             Some("Film jest za długi (limit: 50 min).")
         );
         let s = ChannelSettings {
@@ -258,7 +254,7 @@ mod tests {
             ..ChannelSettings::default()
         };
         assert_eq!(
-            validate_meta(&long, &s, false).as_deref(),
+            polish(validate_meta(&long, &s, false)).as_deref(),
             None,
             "3001 s is under 5400 s"
         );
@@ -267,7 +263,7 @@ mod tests {
             ..meta()
         };
         assert_eq!(
-            validate_meta(&very_long, &s, false).as_deref(),
+            polish(validate_meta(&very_long, &s, false)).as_deref(),
             Some("Film jest za długi (limit: 1 h 30 min).")
         );
     }
@@ -294,11 +290,11 @@ mod tests {
             ..meta()
         };
         assert_eq!(
-            validate_meta(&live, &s, false).as_deref(),
+            polish(validate_meta(&live, &s, false)).as_deref(),
             Some("Transmisje na żywo może dodawać tylko właściciel kanału.")
         );
         assert_eq!(
-            validate_meta(&playlist, &s, false).as_deref(),
+            polish(validate_meta(&playlist, &s, false)).as_deref(),
             Some("Playlisty może dodawać tylko właściciel kanału.")
         );
         assert_eq!(validate_meta(&live, &s, true), None);
@@ -313,9 +309,13 @@ mod tests {
             ..meta()
         };
         assert_eq!(
-            validate_meta(&both, &ChannelSettings::default(), false).as_deref(),
+            polish(validate_meta(&both, &ChannelSettings::default(), false)).as_deref(),
             Some("Playlisty może dodawać tylko właściciel kanału.")
         );
+    }
+
+    fn polish(reason: Option<Msg>) -> Option<String> {
+        reason.map(|m| m.render(crate::i18n::Lang::Pl))
     }
 
     fn fake_clock() -> (Arc<AtomicU64>, Clock) {

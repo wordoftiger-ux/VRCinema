@@ -221,6 +221,8 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         }),
         segment_seconds: 4,
         window_size: 10,
+        // Polish, like the window's pages, until the app gets its `language` setting.
+        language: crate::i18n::Lang::Pl,
     }
 }
 

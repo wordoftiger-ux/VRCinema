@@ -36,7 +36,7 @@ pub(super) fn router() -> Router<AppState> {
 
 fn page(file: &str) -> Response {
     asset_response(file).unwrap_or_else(|| {
-        ApiError::new(StatusCode::NOT_FOUND, "Nie znaleziono strony").into_response()
+        ApiError::coded(StatusCode::NOT_FOUND, "page_not_found", &[]).into_response()
     })
 }
 
@@ -102,23 +102,21 @@ async fn post_request(
         .get("url")
         .and_then(Value::as_str)
         .and_then(parse_source_url)
-        .ok_or_else(|| ApiError::bad_request("To nie wygląda na poprawny link (http/https)."))?;
+        .ok_or_else(|| ApiError::bad_request("invalid_link"))?;
     if !is_allowed_domain(&url, &settings.allowed_domains) {
-        return Err(ApiError::bad_request(format!(
-            "Ten serwis nie jest dozwolony. Dozwolone: {}.",
-            settings.allowed_domains.join(", ")
-        )));
+        return Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "domain_not_allowed",
+            &[("domains", &settings.allowed_domains.join(", "))],
+        ));
     }
     let ip = ctx.ip;
     let active = state.with_db(|c| QueueRepo::new(c).count_active_by_ip(state.channel_id, &ip))?;
     if active >= i64::from(settings.max_active_per_requester) {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Masz już {} filmów w kolejce. Poczekaj, aż się odtworzą.",
-                settings.max_active_per_requester
-            ),
-        ));
+        return Err(
+            ApiError::coded(StatusCode::TOO_MANY_REQUESTS, "too_many_active", &[])
+                .with_count(i64::from(settings.max_active_per_requester)),
+        );
     }
     let allowed = {
         let mut limiter = state
@@ -132,18 +130,19 @@ async fn post_request(
         limiter.hit(&ip)
     };
     if !allowed {
-        return Err(ApiError::new(
+        return Err(ApiError::coded(
             StatusCode::TOO_MANY_REQUESTS,
-            "Za dużo zgłoszeń w krótkim czasie. Spróbuj za kilka minut.",
+            "too_many_requests",
+            &[],
         ));
     }
     let meta = state
         .resolver
         .fetch_meta(url.as_str())
         .await
-        .map_err(|e| ApiError::bad_request(format!("Nie udało się odczytać filmu: {e}")))?;
+        .map_err(|e| ApiError::bad_request("fetch_failed").with_msg_arg("reason", e.0))?;
     if let Some(reason) = validate_meta(&meta, &settings, false) {
-        return Err(ApiError::bad_request(reason));
+        return Err(ApiError::from_msg(StatusCode::BAD_REQUEST, reason));
     }
     let item = state.with_db(|c| {
         QueueRepo::new(c).add(&NewItem {
@@ -185,9 +184,10 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
     } = &auth
         && (!remote_enabled || password_hash.is_none())
     {
-        return Err(ApiError::new(
+        return Err(ApiError::coded(
             StatusCode::FORBIDDEN,
-            "Panel zdalny jest wyłączony.",
+            "remote_panel_off",
+            &[],
         ));
     }
     {
@@ -196,9 +196,10 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
         // so it can be held across the blocking Argon2 verification without stalling workers.
         let mut limiter = state.login_limiter.lock().await;
         if limiter.peek(&ctx.ip) >= super::LOGIN_FAILURES as usize {
-            return Err(ApiError::new(
+            return Err(ApiError::coded(
                 StatusCode::TOO_MANY_REQUESTS,
-                "Za dużo nieudanych prób logowania. Spróbuj za 15 minut.",
+                "too_many_logins",
+                &[],
             ));
         }
         let ok = match &auth {
@@ -215,7 +216,11 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
         };
         if !ok {
             limiter.hit(&ctx.ip);
-            return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Złe hasło."));
+            return Err(ApiError::coded(
+                StatusCode::UNAUTHORIZED,
+                "wrong_password",
+                &[],
+            ));
         }
     }
     let now = crate::db::now_ms().max(0) as u64;
@@ -238,7 +243,7 @@ async fn desktop_login(
     });
     if !key.is_some_and(|k| state.desktop_key().redeem(&k)) {
         let mut res =
-            ApiError::new(StatusCode::UNAUTHORIZED, "Nieprawidłowy klucz okna.").into_response();
+            ApiError::coded(StatusCode::UNAUTHORIZED, "invalid_window_key", &[]).into_response();
         res.headers_mut()
             .insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
         return res;

@@ -830,6 +830,51 @@ async fn the_address_is_validated_and_needs_the_login_first() {
     app.stop().await;
 }
 
+#[tokio::test]
+async fn the_wizard_answers_in_the_language_of_the_request() {
+    let app = start(Setup::default()).await.unwrap();
+    let cookie = app.window_cookie().await;
+    let create_in = |lang: Option<&'static str>, body: Value| {
+        let mut req = app
+            .http
+            .post(app.url(CREATE))
+            .header("cookie", cookie.as_str())
+            .json(&body);
+        if let Some(lang) = lang {
+            req = req.header("x-vrcinema-lang", lang);
+        }
+        async move {
+            let res = req.send().await.unwrap();
+            (res.status(), res.json::<Value>().await.unwrap())
+        }
+    };
+    // A failure of the wizard (its own answer, with `helpUrl`).
+    let (status, answer) = create_in(Some("en"), json!({"hostname": NAMED_HOST})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["code"], "not_logged_in");
+    assert_eq!(
+        answer["error"],
+        "Connect to Cloudflare first (step “Connect to Cloudflare”)."
+    );
+    // Without a language of its own: the app's (Polish until the app gets its setting).
+    let (_, answer) = create_in(None, json!({"hostname": NAMED_HOST})).await;
+    assert_eq!(
+        answer["error"],
+        "Najpierw połącz się z Cloudflare (krok „Połącz z Cloudflare”)."
+    );
+    // A bad request keeps the wizard's code `invalid`, its text in the request's language.
+    let (status, answer) = create_in(Some("en"), json!({"hostname": "kanal"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(
+        answer,
+        json!({
+            "error": "Invalid host name for the permanent link (e.g. channel.example.com).",
+            "code": "invalid",
+        })
+    );
+    app.stop().await;
+}
+
 // ---------- Back to quick, delete ----------
 
 fn named_setup(commands: Value) -> Setup {

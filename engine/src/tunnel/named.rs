@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
 use super::process::forward_lines;
+use crate::i18n::Msg;
 use crate::pipeline::clip_factory::SharedLogFn;
 use crate::process::{ProcessError, run_process};
 
@@ -23,8 +24,6 @@ use crate::process::{ProcessError, run_process};
 pub const TUNNEL_NAME: &str = "vrcinema";
 /// The origin certificate `tunnel login` produces.
 pub const CERT_FILE: &str = "cert.pem";
-/// Spec section 9: an account without a domain.
-pub const NO_DOMAIN: &str = "Dodaj domenę do Cloudflare, zanim ustawisz stały link.";
 /// How to add a domain to Cloudflare (shown with [`ErrorCode::NoDomain`]).
 pub const ADD_DOMAIN_HELP: &str =
     "https://developers.cloudflare.com/fundamentals/manage-domains/add-site/";
@@ -102,7 +101,7 @@ pub fn is_tunnel_id(s: &str) -> bool {
             .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// Why an operation failed, for the window (`code`) and the owner (`message`, Polish).
+/// Why an operation failed, for the window (`code`) and the owner (`message`, in their language).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     /// Another operation of the permanent link is running.
@@ -124,6 +123,17 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    pub const ALL: [ErrorCode; 8] = [
+        Self::Busy,
+        Self::NoCloudflared,
+        Self::NotLoggedIn,
+        Self::Timeout,
+        Self::Cancelled,
+        Self::DnsTaken,
+        Self::NoDomain,
+        Self::Failed,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Busy => "busy",
@@ -141,15 +151,12 @@ impl ErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedError {
     pub code: ErrorCode,
-    pub message: String,
+    pub message: Msg,
 }
 
 impl NamedError {
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
+    pub fn new(code: ErrorCode, message: Msg) -> Self {
+        Self { code, message }
     }
 }
 
@@ -232,8 +239,8 @@ pub struct Progress {
     pub operation: Option<Operation>,
     pub phase: Phase,
     pub step: Option<Step>,
-    /// What is happening, what went wrong or what came out (Polish).
-    pub message: Option<String>,
+    /// What is happening, what went wrong or what came out.
+    pub message: Option<Msg>,
     pub code: Option<ErrorCode>,
     /// The Cloudflare login page while the login waits for the owner (the window opens it).
     pub login_url: Option<String>,
@@ -277,9 +284,9 @@ impl NamedSetup {
     pub fn begin(&self, operation: Operation) -> Result<Busy, NamedError> {
         let guard = Arc::clone(&self.busy).try_lock_owned().map_err(|_| {
             let why = if self.tools.load(Ordering::SeqCst) {
-                TOOLS_BUSY
+                Msg::error("tools_busy")
             } else {
-                BUSY
+                Msg::error("busy")
             };
             NamedError::new(ErrorCode::Busy, why)
         })?;
@@ -299,10 +306,10 @@ impl NamedSetup {
     }
 
     /// The running operation reached `step`.
-    pub fn step(&self, step: Step, message: impl Into<String>) {
+    pub fn step(&self, step: Step, message: Msg) {
         let mut progress = lock(&self.progress);
         progress.step = Some(step);
-        progress.message = Some(message.into());
+        progress.message = Some(message);
     }
 
     pub fn set_browser_opened(&self, opened: bool) {
@@ -337,7 +344,7 @@ impl NamedSetup {
     }
 
     /// The operation ended: done with `message`, or failed/cancelled. The login page goes.
-    pub fn finish(&self, result: &Result<String, NamedError>) {
+    pub fn finish(&self, result: &Result<Msg, NamedError>) {
         lock(&self.cancel).take();
         let mut progress = lock(&self.progress);
         progress.step = None;
@@ -440,7 +447,7 @@ pub async fn login(
                 kill(&mut child).await;
                 keep_late_cert(paths, &user_cert, existed, log);
                 log("Stały link: logowanie do Cloudflare anulowano.");
-                return Err(NamedError::new(ErrorCode::Cancelled, "Logowanie do Cloudflare anulowano."));
+                return Err(NamedError::new(ErrorCode::Cancelled, Msg::error("cancelled")));
             }
             _ = &mut deadline => {
                 kill(&mut child).await;
@@ -451,10 +458,7 @@ pub async fn login(
                 ));
                 return Err(NamedError::new(
                     ErrorCode::Timeout,
-                    format!(
-                        "Logowanie do Cloudflare nie zostało ukończone w ciągu {}. Spróbuj ponownie. Jeśli na koncie Cloudflare nie ma jeszcze domeny, najpierw ją dodaj — bez niej logowanie się nie zakończy.",
-                        human(timeout)
-                    ),
+                    Msg::error("login_timeout").arg_msg("duration", human_msg(timeout)),
                 ));
             }
             line = lines.recv(), if open => match line {
@@ -478,24 +482,22 @@ pub async fn login(
     while let Ok(Some(line)) = tokio::time::timeout_at(late, lines.recv()).await {
         remember(&mut last, &line, true);
     }
-    let status = status.map_err(|e| failed(format!("Logowanie do Cloudflare przerwane: {e}")))?;
+    let status = status.map_err(|e| failed("login_interrupted", detail(e)))?;
     if !status.success() {
         log(&format!(
             "Stały link: logowanie do Cloudflare nie powiodło się: {}",
             or_none(&last)
         ));
-        return Err(failed(format!(
-            "Logowanie do Cloudflare nie powiodło się: {}",
-            or_none(&last)
-        )));
+        return Err(failed("login_failed", reason(&last)));
     }
     if !non_empty(&user_cert) {
         log(&format!(
             "Stały link: cloudflared zakończył logowanie bez certyfikatu w {}.",
             user_cert.display()
         ));
-        return Err(failed(
-            "Logowanie do Cloudflare nie powiodło się: cloudflared nie zapisał certyfikatu. Spróbuj ponownie.",
+        return Err(NamedError::new(
+            ErrorCode::Failed,
+            Msg::error("login_no_certificate"),
         ));
     }
     let target = paths.cert();
@@ -509,9 +511,7 @@ pub async fn login(
             "Stały link: nie można zapisać certyfikatu Cloudflare w {}: {e}",
             target.display()
         ));
-        failed(format!(
-            "Nie można zapisać certyfikatu Cloudflare w folderze programu: {e}"
-        ))
+        failed("certificate_save_failed", detail(e))
     })?;
     log(&match source {
         CertSource::Moved => format!(
@@ -578,8 +578,7 @@ pub async fn create(
 ) -> Result<String, NamedError> {
     check_cloudflared(paths)?;
     let cert = check_cert(paths)?;
-    std::fs::create_dir_all(&paths.dir)
-        .map_err(|e| failed(format!("Nie można utworzyć folderu tunelu: {e}")))?;
+    std::fs::create_dir_all(&paths.dir).map_err(|e| failed("tunnel_folder_failed", detail(e)))?;
     let new = paths.dir.join(NEW_CREDENTIALS);
     let _ = remove_file(&new);
 
@@ -602,12 +601,9 @@ pub async fn create(
         if !tunnel_exists(&out.text) {
             log(&format!(
                 "Stały link: tworzenie tunelu nie powiodło się: {}",
-                out.last
+                or_none(&out.last)
             ));
-            return Err(failed(format!(
-                "Nie udało się utworzyć tunelu {TUNNEL_NAME} w Cloudflare: {}",
-                out.last
-            )));
+            return Err(failed("tunnel_create_failed", reason(&out.last)));
         }
         log(&format!(
             "Stały link: tunel {TUNNEL_NAME} już istnieje w Cloudflare — używam go."
@@ -630,26 +626,20 @@ pub async fn create(
         if out.code != Some(0) {
             log(&format!(
                 "Stały link: pobieranie poświadczeń nie powiodło się: {}",
-                out.last
+                or_none(&out.last)
             ));
-            return Err(failed(format!(
-                "Nie udało się pobrać poświadczeń tunelu {TUNNEL_NAME}: {}",
-                out.last
-            )));
+            return Err(failed("credentials_fetch_failed", reason(&out.last)));
         }
     }
     let Some(id) = credentials_id(&new) else {
         let _ = remove_file(&new);
-        return Err(failed(
-            "cloudflared nie zapisał poprawnych poświadczeń tunelu. Spróbuj ponownie.",
+        return Err(NamedError::new(
+            ErrorCode::Failed,
+            Msg::error("credentials_invalid"),
         ));
     };
     let credentials = paths.credentials(&id);
-    replace_file(&new, &credentials).map_err(|e| {
-        failed(format!(
-            "Nie można zapisać poświadczeń tunelu w folderze programu: {e}"
-        ))
-    })?;
+    replace_file(&new, &credentials).map_err(|e| failed("credentials_save_failed", detail(e)))?;
     log(&format!(
         "Stały link: tunel {TUNNEL_NAME} ({id}), poświadczenia w {}.",
         credentials.display()
@@ -665,22 +655,22 @@ pub async fn create(
     if out.code != Some(0) {
         log(&format!(
             "Stały link: ustawianie {hostname} w DNS nie powiodło się: {}",
-            out.last
+            or_none(&out.last)
         ));
         return Err(if dns_taken(&out.text) {
             NamedError::new(
                 ErrorCode::DnsTaken,
-                format!(
-                    "Adres {hostname} jest już zajęty w DNS Cloudflare (ma go inny rekord). Wybierz inną nazwę albo zastąp istniejący rekord."
-                ),
+                Msg::error("dns_taken").arg("hostname", hostname),
             )
         } else if zone_missing(&out.text) {
             no_domain(hostname, None)
         } else {
-            failed(format!(
-                "Nie udało się ustawić adresu {hostname} w DNS Cloudflare: {}",
-                out.last
-            ))
+            NamedError::new(
+                ErrorCode::Failed,
+                Msg::error("dns_route_failed")
+                    .arg("hostname", hostname)
+                    .arg_msg("reason", reason(&out.last)),
+            )
         });
     }
     // A name outside the certificate's domain gets that domain appended by Cloudflare.
@@ -728,12 +718,9 @@ pub async fn delete(
     } else {
         log(&format!(
             "Stały link: usuwanie tunelu nie powiodło się: {}",
-            out.last
+            or_none(&out.last)
         ));
-        return Err(failed(format!(
-            "Nie udało się usunąć tunelu {TUNNEL_NAME} w Cloudflare: {}",
-            out.last
-        )));
+        return Err(failed("tunnel_delete_failed", reason(&out.last)));
     }
     Ok(())
 }
@@ -756,55 +743,70 @@ pub fn remove_files(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-const BUSY: &str = "Trwa już inna operacja stałego linku — poczekaj, aż się skończy.";
-const TOOLS_BUSY: &str =
-    "Trwa aktualizacja lub naprawa programu cloudflared — spróbuj ponownie, gdy się skończy.";
 /// Credentials of a tunnel whose id is not known yet.
 const NEW_CREDENTIALS: &str = "vrcinema-new.json";
 /// The longest part of cloudflared's output put into a message.
 const MAX_DETAIL: usize = 300;
 
 /// No cloudflared in the tools (the same words as the tunnel's own error).
-pub const NO_CLOUDFLARED: &str =
-    "Brak programu cloudflared — pobierz brakujące narzędzia w ustawieniach (Narzędzia).";
+pub fn no_cloudflared() -> Msg {
+    Msg::error("no_cloudflared")
+}
 
 impl Step {
     /// What the window says during `step` (`hostname`: the address being set up).
-    pub fn message(self, hostname: &str) -> String {
-        match self {
-            Self::Starting => "Uruchamianie logowania do Cloudflare…".into(),
-            Self::WaitingForBrowser => {
-                "Zaloguj się do Cloudflare w przeglądarce i wybierz domenę dla stałego linku."
-                    .into()
-            }
-            Self::CreatingTunnel => format!("Tworzenie tunelu {TUNNEL_NAME} w Cloudflare…"),
-            Self::FetchingCredentials => {
-                format!("Tunel {TUNNEL_NAME} już istnieje — pobieranie jego poświadczeń…")
-            }
-            Self::RoutingDns => format!("Ustawianie adresu {hostname} w DNS Cloudflare…"),
-            Self::Switching => "Przełączanie tunelu…".into(),
-            Self::Deleting => format!("Usuwanie tunelu {TUNNEL_NAME} w Cloudflare…"),
-        }
+    pub fn message(self, hostname: &str) -> Msg {
+        let msg = match self {
+            Self::Starting => Msg::new("named.step.starting"),
+            Self::WaitingForBrowser => Msg::new("named.step.waiting_for_browser"),
+            Self::CreatingTunnel => Msg::new("named.step.creating_tunnel"),
+            Self::FetchingCredentials => Msg::new("named.step.fetching_credentials"),
+            Self::RoutingDns => Msg::new("named.step.routing_dns"),
+            Self::Switching => Msg::new("named.step.switching"),
+            Self::Deleting => Msg::new("named.step.deleting"),
+        };
+        msg.arg("tunnel", TUNNEL_NAME).arg("hostname", hostname)
     }
 }
 
-fn failed(message: impl Into<String>) -> NamedError {
-    NamedError::new(ErrorCode::Failed, message)
+/// The failure `errors.<code>` (fields `tunnel`: the tunnel's name, `reason`).
+fn failed(code: &'static str, reason: Msg) -> NamedError {
+    NamedError::new(
+        ErrorCode::Failed,
+        Msg::error(code)
+            .arg("tunnel", TUNNEL_NAME)
+            .arg_msg("reason", reason),
+    )
+}
+
+/// An error of the system as a reason.
+fn detail(e: impl std::fmt::Display) -> Msg {
+    Msg::error("source_message").arg("detail", e)
+}
+
+/// cloudflared's last words as a reason, or that it gave none.
+fn reason(last: &str) -> Msg {
+    if last.is_empty() {
+        Msg::new("named.no_reason")
+    } else {
+        detail(last)
+    }
 }
 
 fn cannot_start(e: std::io::Error) -> NamedError {
-    failed(format!("Nie można uruchomić cloudflared: {e}"))
+    NamedError::new(
+        ErrorCode::Failed,
+        Msg::error("cloudflared_start").arg("detail", e),
+    )
 }
 
 fn no_domain(hostname: &str, record: Option<&str>) -> NamedError {
-    let mut message = format!(
-        "{NO_DOMAIN} Adres {hostname} musi należeć do domeny wybranej przy logowaniu do Cloudflare."
-    );
-    if let Some(record) = record {
-        message.push_str(&format!(
-            " Cloudflare ustawił zamiast niego rekord {record} — usuń go w panelu Cloudflare (DNS)."
-        ));
-    }
+    let message = match record {
+        None => Msg::error("no_domain").arg("hostname", hostname),
+        Some(record) => Msg::error("no_domain_record")
+            .arg("hostname", hostname)
+            .arg("record", record),
+    };
     NamedError::new(ErrorCode::NoDomain, message)
 }
 
@@ -812,7 +814,7 @@ fn check_cloudflared(paths: &NamedPaths) -> Result<(), NamedError> {
     if paths.cloudflared.is_file() {
         Ok(())
     } else {
-        Err(NamedError::new(ErrorCode::NoCloudflared, NO_CLOUDFLARED))
+        Err(NamedError::new(ErrorCode::NoCloudflared, no_cloudflared()))
     }
 }
 
@@ -823,7 +825,7 @@ fn check_cert(paths: &NamedPaths) -> Result<PathBuf, NamedError> {
     } else {
         Err(NamedError::new(
             ErrorCode::NotLoggedIn,
-            "Najpierw połącz się z Cloudflare (krok „Połącz z Cloudflare”).",
+            Msg::error("not_logged_in"),
         ))
     }
 }
@@ -833,7 +835,7 @@ struct Output {
     code: Option<i32>,
     /// stdout and stderr.
     text: String,
-    /// Its last line, for a message.
+    /// Its last line, for a message (empty: none).
     last: String,
 }
 
@@ -851,15 +853,13 @@ async fn run(
             }
             Ok(Output {
                 code: out.code,
-                last: or_none(&last).to_string(),
+                last,
                 text,
             })
         }
         Err(ProcessError::Timeout { secs, .. }) => Err(NamedError::new(
             ErrorCode::Timeout,
-            format!(
-                "cloudflared nie odpowiedział w ciągu {secs} s. Sprawdź połączenie z internetem i spróbuj ponownie."
-            ),
+            Msg::error("timeout").arg("seconds", secs),
         )),
         Err(ProcessError::Io(e)) => Err(cannot_start(e)),
     }
@@ -890,6 +890,16 @@ fn human(d: Duration) -> String {
         format!("{} min", secs / 60)
     } else {
         format!("{secs} s")
+    }
+}
+
+/// [`human`] for a message.
+fn human_msg(d: Duration) -> Msg {
+    let secs = d.as_secs();
+    if secs >= 60 && secs.is_multiple_of(60) {
+        Msg::new("units.minutes").arg("m", secs / 60)
+    } else {
+        Msg::new("units.seconds").arg("s", secs)
     }
 }
 
@@ -1277,7 +1287,7 @@ mod tests {
         let refused = setup.begin(Operation::Create).err().unwrap();
         assert_eq!(refused.code, ErrorCode::Busy);
         setup.set_login_url("https://dash.cloudflare.com/x".into());
-        setup.step(Step::WaitingForBrowser, "Zaloguj się");
+        setup.step(Step::WaitingForBrowser, Step::WaitingForBrowser.message(""));
         let p = setup.progress();
         assert_eq!(
             (p.operation, p.phase, p.step),
@@ -1299,7 +1309,10 @@ mod tests {
         setup.set_cancel(tx);
         assert!(setup.cancel_login());
         assert!(rx.try_recv().is_ok());
-        setup.finish(&Err(NamedError::new(ErrorCode::Cancelled, "Anulowano")));
+        setup.finish(&Err(NamedError::new(
+            ErrorCode::Cancelled,
+            Msg::error("cancelled"),
+        )));
         drop(busy);
         let p = setup.progress();
         assert_eq!(
@@ -1321,8 +1334,8 @@ mod tests {
         let refused = setup.begin(Operation::Login).err().unwrap();
         assert_eq!(refused.code, ErrorCode::Busy);
         assert!(
-            refused.message.contains("cloudflared"),
-            "{}",
+            refused.message == Msg::error("tools_busy"),
+            "{:?}",
             refused.message
         );
         assert_eq!(setup.progress().phase, Phase::Idle, "nothing started");

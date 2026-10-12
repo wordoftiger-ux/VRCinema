@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use crate::i18n::Msg;
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
 use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
 use crate::pipeline::slates::Slates;
@@ -96,7 +97,7 @@ pub trait ChannelControl: SegmentSource + Send {
     /// The queue item being aired right now (not the one viewers see, which lags behind).
     fn current_item_id(&self) -> Option<i64>;
     /// Marks the item failed with `error` (unless the owner removed it meanwhile).
-    fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()>;
+    fn fail_item(&mut self, id: i64, error: &Msg) -> anyhow::Result<()>;
 }
 
 impl ChannelControl for Channel {
@@ -145,7 +146,7 @@ impl ChannelControl for Channel {
     fn current_item_id(&self) -> Option<i64> {
         Channel::current_item_id(self)
     }
-    fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()> {
+    fn fail_item(&mut self, id: i64, error: &Msg) -> anyhow::Result<()> {
         Channel::fail_item(self, id, error)
     }
 }
@@ -159,7 +160,9 @@ const HEALTHY_RUN: Duration = Duration::from_secs(60);
 /// Consecutive crashes with the same queue item current after which that item is failed.
 const CRASHES_BEFORE_FAILING_ITEM: u32 = 3;
 /// Error stored on an item that kept crashing the loop.
-const INTERNAL_ERROR: &str = "Błąd wewnętrzny";
+fn internal_error() -> Msg {
+    Msg::new("item_errors.internal")
+}
 const COMMAND_CAPACITY: usize = 64;
 
 /// The supervisor task, for an explicit shutdown.
@@ -329,7 +332,7 @@ where
 {
     /// Restarts a failed run with exponential backoff (1 s, 2 s, 4 s … 30 s; back to 1 s after a
     /// run of at least 60 s). A film current in 3 crashed runs in a row is marked failed
-    /// ("Błąd wewnętrzny"): `Channel::start` would otherwise put it back at the head forever.
+    /// ("Internal error"): `Channel::start` would otherwise put it back at the head forever.
     async fn run(mut self) {
         let mut delay = RESTART_DELAY;
         let mut streak = CrashStreak::default();
@@ -390,9 +393,10 @@ where
         streak.clear();
         (self.log)(&format!(
             "Film #{id} przerwał pętlę kanału {CRASHES_BEFORE_FAILING_ITEM} razy z rzędu — \
-             oznaczam go jako nieudany: {INTERNAL_ERROR}"
+             oznaczam go jako nieudany: {}",
+            internal_error()
         ));
-        match guarded(|| channel.fail_item(id, INTERNAL_ERROR)) {
+        match guarded(|| channel.fail_item(id, &internal_error())) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => (self.log)(&format!(
                 "Nie udało się oznaczyć filmu #{id} jako nieudanego: {e}"
@@ -575,6 +579,7 @@ async fn stop_requested(stop: &mut watch::Receiver<bool>) {
 mod tests {
     use super::*;
     use crate::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueItem, QueueRepo};
+    use crate::i18n::Lang;
     use crate::pipeline::broadcaster::{BroadcasterOptions, PublishedSegment, SourceSegment};
     use crate::pipeline::channel::{BoxFuture, ChannelOptions, ClipFactory, ClipHandle};
     use crate::pipeline::segmenter::SegmentInfo;
@@ -712,13 +717,10 @@ mod tests {
         fn current_item_id(&self) -> Option<i64> {
             self.current
         }
-        fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()> {
+        fn fail_item(&mut self, id: i64, error: &Msg) -> anyhow::Result<()> {
+            let error = error.render(Lang::Pl);
             self.probe.event(format!("fail {id}: {error}"));
-            self.probe
-                .failed
-                .lock()
-                .unwrap()
-                .push((id, error.to_string()));
+            self.probe.failed.lock().unwrap().push((id, error));
             Ok(())
         }
         fn skip(&mut self) -> anyhow::Result<()> {
@@ -1200,7 +1202,7 @@ mod tests {
         let logs = env.logs();
         assert!(
             logs.iter()
-                .any(|l| l.contains("Film #7") && l.contains("Błąd wewnętrzny")),
+                .any(|l| l.contains("Film #7") && l.contains("Internal error")),
             "{logs:?}"
         );
         assert_eq!(start_gaps(&env.probe), vec![1, 2, 4]);
@@ -1369,7 +1371,7 @@ mod tests {
         .await;
         let failed = status(&db);
         assert_eq!(failed.status, ItemStatus::Failed);
-        assert_eq!(failed.error.as_deref(), Some("Błąd wewnętrzny"));
+        assert_eq!(failed.error.as_deref(), Some("Internal error"));
         // The rebuilt channel stays up on the idle slate; no further crashes.
         tokio::time::sleep(Duration::from_secs(60)).await;
         assert_eq!(builds.load(Ordering::SeqCst), 4);
@@ -1383,7 +1385,7 @@ mod tests {
         assert_eq!(crashes, 3, "{logs:?}");
         assert!(
             logs.iter()
-                .any(|l| l.contains(&format!("Film #{}", bad.id)) && l.contains("Błąd wewnętrzny")),
+                .any(|l| l.contains(&format!("Film #{}", bad.id)) && l.contains("Internal error")),
             "{logs:?}"
         );
     }
@@ -1460,10 +1462,7 @@ mod tests {
         next_snapshot(&mut handle.snapshot).await;
         let skipped = status(&db);
         assert_eq!(skipped.status, ItemStatus::Played);
-        assert_eq!(
-            skipped.error.as_deref(),
-            Some("Pominięty przez właściciela")
-        );
+        assert_eq!(skipped.error.as_deref(), Some("Skipped by the owner"));
     }
 
     #[tokio::test(start_paused = true)]

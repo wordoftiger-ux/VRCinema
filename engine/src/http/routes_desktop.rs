@@ -12,10 +12,12 @@ use axum::routing::{get, post};
 use serde_json::{Map, Value, json};
 
 use super::{
-    ApiError, ApiResult, AppState, DesktopSession, JsonBody, asset_response, json_ok, json_response,
+    ApiError, ApiResult, AppState, DesktopSession, JsonBody, ReqLang, asset_response, json_ok,
+    json_response,
 };
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
 use crate::app_settings::TunnelModeSetting;
+use crate::i18n::{Lang, Msg};
 use crate::pipeline::slates::request_url;
 use crate::tools::Tool;
 use crate::tunnel::TunnelState;
@@ -54,9 +56,9 @@ pub(super) fn router() -> Router<AppState> {
 impl From<OpError> for ApiError {
     fn from(e: OpError) -> Self {
         match e {
-            OpError::Invalid(m) => ApiError::bad_request(m),
-            OpError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, m),
-            OpError::Failed(m) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, m),
+            OpError::Invalid(m) => ApiError::from_msg(StatusCode::BAD_REQUEST, m),
+            OpError::Conflict(m) => ApiError::from_msg(StatusCode::CONFLICT, m),
+            OpError::Failed(m) => ApiError::from_msg(StatusCode::INTERNAL_SERVER_ERROR, m),
         }
     }
 }
@@ -91,16 +93,16 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
     }
 }
 
-/// The tunnel for the window: state, address, mode, host name, warning. Never the paths or
-/// contents of the named tunnel's files.
-fn tunnel_view(core: &AppCore) -> Value {
+/// The tunnel for the window: state, address, mode, host name, warning (texts in `lang`).
+/// Never the paths or contents of the named tunnel's files.
+fn tunnel_view(core: &AppCore, lang: Lang) -> Value {
     let info = core.tunnel_info();
     let (state, url, message) = match info.state {
         TunnelState::Off => ("off", None, None),
         TunnelState::Connecting => ("connecting", None, None),
         TunnelState::Online { url } => ("online", Some(url), None),
         TunnelState::Reconnecting => ("reconnecting", None, None),
-        TunnelState::Error { message } => ("error", None, Some(message)),
+        TunnelState::Error { message } => ("error", None, Some(message.render(lang))),
     };
     json!({
         "state": state,
@@ -108,11 +110,15 @@ fn tunnel_view(core: &AppCore) -> Value {
         "message": message,
         "mode": info.mode.as_str(),
         "hostname": info.hostname,
-        "warning": info.warning,
+        "warning": info.warning.map(|w| w.render(lang)),
     })
 }
 
-async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn info(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
     let s = core.settings();
     let update = core
@@ -137,7 +143,7 @@ async fn info(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
         "update": update,
-        "tunnel": tunnel_view(&core),
+        "tunnel": tunnel_view(&core, lang),
         "tunnelEnabled": s.tunnel_enabled,
         "paused": paused,
         "pauseReasons": reasons,
@@ -150,16 +156,18 @@ async fn get_config(_: DesktopSession, State(state): State<AppState>) -> ApiResu
 }
 
 fn type_error(key: &str) -> ApiError {
-    ApiError::bad_request(format!("Pole {key} musi być tekstem."))
+    ApiError::coded(StatusCode::BAD_REQUEST, "field_not_text", &[("field", key)])
 }
 
 fn flag(map: &Map<String, Value>, key: &str) -> Result<Option<bool>, ApiError> {
     match map.get(key) {
         None => Ok(None),
         Some(Value::Bool(b)) => Ok(Some(*b)),
-        Some(_) => Err(ApiError::bad_request(format!(
-            "Pole {key} musi mieć wartość true albo false."
-        ))),
+        Some(_) => Err(ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "field_not_boolean",
+            &[("field", key)],
+        )),
     }
 }
 
@@ -180,7 +188,7 @@ fn optional_text(map: &Map<String, Value>, key: &str) -> Result<Option<Option<St
 /// `namedTunnelHostname`: the permanent-link wizard sets it together with the tunnel's id).
 fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
     let Value::Object(map) = body else {
-        return Err(ApiError::bad_request("Niepoprawne ustawienia."));
+        return Err(ApiError::bad_request("invalid_settings"));
     };
     let port = match map.get("port") {
         None => None,
@@ -188,7 +196,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
             v.as_u64()
                 .filter(|p| (1024..=65535).contains(p))
                 .and_then(|p| u16::try_from(p).ok())
-                .ok_or_else(|| ApiError::bad_request("Port musi być liczbą od 1024 do 65535."))?,
+                .ok_or_else(|| ApiError::bad_request("invalid_port"))?,
         ),
     };
     let public_url = match map.get("publicUrl") {
@@ -199,9 +207,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
                 || url::Url::parse(s)
                     .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
             if !valid {
-                return Err(ApiError::bad_request(
-                    "Adres publiczny musi zaczynać się od http:// lub https://.",
-                ));
+                return Err(ApiError::bad_request("invalid_public_url"));
             }
             Some(s.to_string())
         }
@@ -211,9 +217,11 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         None | Some(Value::Null) => None,
         Some(Value::String(p)) if p.chars().count() >= MIN_PASSWORD_CHARS => Some(p.clone()),
         Some(Value::String(_)) => {
-            return Err(ApiError::bad_request(format!(
-                "Hasło musi mieć co najmniej {MIN_PASSWORD_CHARS} znaków."
-            )));
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "password_too_short",
+                &[("min", &MIN_PASSWORD_CHARS.to_string())],
+            ));
         }
         Some(_) => return Err(type_error("password")),
     };
@@ -221,7 +229,11 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         None => None,
         Some(Value::String(e)) if ENCODERS.contains(&e.as_str()) => Some(e.clone()),
         Some(Value::String(e)) => {
-            return Err(ApiError::bad_request(format!("Nieznany enkoder: {e}.")));
+            return Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "unknown_encoder",
+                &[("encoder", e)],
+            ));
         }
         Some(_) => return Err(type_error("videoEncoder")),
     };
@@ -230,9 +242,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         None => None,
         Some(Value::Null) => Some(None),
         Some(_) => {
-            return Err(ApiError::bad_request(
-                "Plik cookies wybierz w oknie wyboru pliku.",
-            ));
+            return Err(ApiError::bad_request("cookies_by_picker"));
         }
     };
     let tunnel_mode = match map.get("tunnelMode") {
@@ -240,9 +250,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         Some(v) => Some(
             v.as_str()
                 .and_then(TunnelModeSetting::parse)
-                .ok_or_else(|| {
-                    ApiError::bad_request("Tryb tunelu musi mieć wartość quick albo named.")
-                })?,
+                .ok_or_else(|| ApiError::bad_request("invalid_tunnel_mode"))?,
         ),
     };
     Ok(ConfigPatch {
@@ -327,7 +335,7 @@ async fn tools_status(_: DesktopSession, State(state): State<AppState>) -> ApiRe
 fn start_job(state: &AppState, job: ToolsJob) -> ApiResult {
     let core = state.desktop()?;
     core.start_tools_job(job)
-        .map_err(|why| ApiError::new(StatusCode::CONFLICT, why))?;
+        .map_err(|why| ApiError::from_msg(StatusCode::CONFLICT, why))?;
     Ok(json_response(
         StatusCode::ACCEPTED,
         &json!({ "started": true }),
@@ -352,7 +360,9 @@ async fn tools_update(
     let tool = Tool::ALL
         .into_iter()
         .find(|t| t.name() == name)
-        .ok_or_else(|| ApiError::bad_request(format!("Nieznane narzędzie: {name}.")))?;
+        .ok_or_else(|| {
+            ApiError::coded(StatusCode::BAD_REQUEST, "unknown_tool", &[("tool", name)])
+        })?;
     start_job(&state, ToolsJob::Update(tool))
 }
 
@@ -429,9 +439,10 @@ async fn wizard_complete(_: DesktopSession, State(state): State<AppState>) -> Ap
 async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     core.restart_server().await.map_err(|e| {
-        ApiError::new(
+        ApiError::coded(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Nie udało się uruchomić serwera ponownie: {e:#}"),
+            "restart_failed",
+            &[("detail", &format!("{e:#}"))],
         )
     })?;
     Ok(json_ok(&json!({ "ok": true, "port": core.port() })))
@@ -439,9 +450,13 @@ async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult 
 
 /// The tunnel's state, address, mode and host name (`warning`: the named mode fell back to
 /// quick).
-async fn tunnel(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn tunnel(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
-    Ok(json_ok(&tunnel_view(&core)))
+    Ok(json_ok(&tunnel_view(&core, lang)))
 }
 
 /// The QR code (PNG) of the request page at the public address in effect, for the wizard; 404
@@ -450,15 +465,17 @@ async fn tunnel_qr(_: DesktopSession, State(state): State<AppState>) -> ApiResul
     let core = state.desktop()?;
     let address = core.live_settings.public_url.get();
     if address.is_empty() {
-        return Err(ApiError::new(
+        return Err(ApiError::coded(
             StatusCode::NOT_FOUND,
-            "Kanał nie ma jeszcze adresu publicznego.",
+            "no_public_address",
+            &[],
         ));
     }
     let png = crate::pipeline::slates::qr_png(&request_url(&address)).map_err(|e| {
-        ApiError::new(
+        ApiError::coded(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Nie udało się narysować kodu QR: {e}"),
+            "qr_failed",
+            &[("detail", &e.to_string())],
         )
     })?;
     Ok((
@@ -469,24 +486,26 @@ async fn tunnel_qr(_: DesktopSession, State(state): State<AppState>) -> ApiResul
 }
 
 /// A new cloudflared (a quick tunnel gets a new address); 409 while the tunnel is off.
-async fn tunnel_restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn tunnel_restart(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
     if !core.restart_tunnel().await {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "Tunel jest wyłączony — włącz go w ustawieniach.",
-        ));
+        return Err(ApiError::coded(StatusCode::CONFLICT, "tunnel_off", &[]));
     }
-    Ok(json_ok(&tunnel_view(&core)))
+    Ok(json_ok(&tunnel_view(&core, lang)))
 }
 
 // ---------- The permanent link (spec section 9) ----------
 //
-// Answers of the wizard's routes: a failure is `{"error": <Polish text>, "code": <ErrorCode>}`
-// (plus `helpUrl` for `no_domain`); the progress is `named_progress_view`. Neither ever holds
-// the certificate or the credentials, nor their paths.
+// Answers of the wizard's routes: a failure is `{"error": <text>, "code": <ErrorCode>}` (plus
+// `helpUrl` for `no_domain`), a bad request one with the code `invalid`; the progress is
+// `named_progress_view`. Texts are in the request's language. Neither ever holds the
+// certificate or the credentials, nor their paths.
 
-fn named_error(e: &NamedError) -> Response {
+fn named_error(e: &NamedError, lang: Lang) -> Response {
     let status = match e.code {
         ErrorCode::Busy
         | ErrorCode::NoCloudflared
@@ -500,22 +519,21 @@ fn named_error(e: &NamedError) -> Response {
     json_response(
         status,
         &json!({
-            "error": e.message,
+            "error": e.message.render(lang),
             "code": e.code.as_str(),
             "helpUrl": help_url(Some(e.code)),
         }),
     )
 }
 
-fn help_url(code: Option<ErrorCode>) -> Option<&'static str> {
-    (code == Some(ErrorCode::NoDomain)).then_some(ADD_DOMAIN_HELP)
+/// A bad request to the wizard: code `invalid` (as the wizard always answered), the text
+/// says what is wrong.
+fn invalid(e: ApiError) -> ApiError {
+    e.with_code("invalid")
 }
 
-fn invalid(message: &str) -> Response {
-    json_response(
-        StatusCode::BAD_REQUEST,
-        &json!({ "error": message, "code": "invalid" }),
-    )
+fn help_url(code: Option<ErrorCode>) -> Option<&'static str> {
+    (code == Some(ErrorCode::NoDomain)).then_some(ADD_DOMAIN_HELP)
 }
 
 /// `state`: idle | running | done | failed | cancelled; `step` while running; `code` after a
@@ -523,14 +541,14 @@ fn invalid(message: &str) -> Response {
 /// whether cloudflared opened it in the browser itself (`false`: the window opens it, `null`:
 /// not known yet); `loggedIn`: the
 /// certificate is there (the next step can start).
-fn named_progress_view(core: &AppCore) -> Value {
+fn named_progress_view(core: &AppCore, lang: Lang) -> Value {
     let (p, logged_in) = core.named_progress();
     json!({
         "operation": p.operation.map(|o| o.as_str()),
         "state": p.phase.as_str(),
         "running": p.phase == Phase::Running,
         "step": p.step.map(|s| s.as_str()),
-        "message": p.message,
+        "message": p.message.map(|m| m.render(lang)),
         "code": p.code.map(|c| c.as_str()),
         "helpUrl": help_url(p.code),
         "loginUrl": p.login_url,
@@ -546,44 +564,46 @@ fn named_progress_view(core: &AppCore) -> Value {
 async fn named_login(
     _: DesktopSession,
     State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
     JsonBody(body): JsonBody,
 ) -> ApiResult {
     let core = state.desktop()?;
     let cancel = match &body {
         Value::Null => false,
-        Value::Object(map) => match flag(map, "cancel") {
-            Ok(cancel) => cancel.unwrap_or(false),
-            Err(_) => return Ok(invalid("Pole cancel musi mieć wartość true albo false.")),
-        },
-        _ => return Ok(invalid("Niepoprawne żądanie.")),
+        Value::Object(map) => flag(map, "cancel").map_err(invalid)?.unwrap_or(false),
+        _ => return Err(ApiError::bad_request("invalid")),
     };
     if cancel {
         core.cancel_named_login();
-        return Ok(json_ok(&named_progress_view(&core)));
+        return Ok(json_ok(&named_progress_view(&core, lang)));
     }
     match core.start_named_login() {
         Ok(()) => Ok(json_response(
             StatusCode::ACCEPTED,
-            &named_progress_view(&core),
+            &named_progress_view(&core, lang),
         )),
-        Err(e) => Ok(named_error(&e)),
+        Err(e) => Ok(named_error(&e, lang)),
     }
 }
 
-async fn named_progress(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn named_progress(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
-    Ok(json_ok(&named_progress_view(&core)))
+    Ok(json_ok(&named_progress_view(&core, lang)))
 }
 
 /// What a finished operation answers: its message and the tunnel as `GET tunnel` shows it.
-fn named_done(core: &AppCore, result: Result<String, NamedError>) -> ApiResult {
+fn named_done(core: &AppCore, result: Result<Msg, NamedError>, lang: Lang) -> ApiResult {
     Ok(match result {
         Ok(message) => json_ok(&json!({
             "ok": true,
-            "message": message,
-            "tunnel": tunnel_view(core),
+            "message": message.render(lang),
+            "tunnel": tunnel_view(core, lang),
         })),
-        Err(e) => named_error(&e),
+        Err(e) => named_error(&e, lang),
     })
 }
 
@@ -593,53 +613,53 @@ fn named_done(core: &AppCore, result: Result<String, NamedError>) -> ApiResult {
 async fn named_create(
     _: DesktopSession,
     State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
     JsonBody(body): JsonBody,
 ) -> ApiResult {
     let core = state.desktop()?;
+    let required = || invalid(ApiError::bad_request("hostname_required"));
     let Value::Object(map) = &body else {
-        return Ok(invalid(
-            "Podaj adres stałego linku (np. kanal.example.com).",
-        ));
+        return Err(required());
     };
     let hostname = match map.get("hostname") {
         Some(Value::String(h)) => h.trim().to_ascii_lowercase(),
-        _ => {
-            return Ok(invalid(
-                "Podaj adres stałego linku (np. kanal.example.com).",
-            ));
-        }
+        _ => return Err(required()),
     };
     if !is_hostname(&hostname) {
-        return Ok(invalid(
-            "Niepoprawna nazwa hosta stałego linku (np. kanal.example.com).",
-        ));
+        return Err(invalid(ApiError::bad_request("hostname_invalid")));
     }
-    let Ok(overwrite) = flag(map, "overwrite") else {
-        return Ok(invalid("Pole overwrite musi mieć wartość true albo false."));
-    };
+    let overwrite = flag(map, "overwrite").map_err(invalid)?;
     let result = core
         .create_named(hostname, overwrite.unwrap_or(false))
         .await;
-    named_done(&core, result)
+    named_done(&core, result, lang)
 }
 
 /// "Wróć do szybkiego tunelu": the permanent link's files stay.
-async fn named_quick(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn named_quick(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
     let result = core.named_to_quick().await;
-    named_done(&core, result)
+    named_done(&core, result, lang)
 }
 
 /// "Usuń stały link": the tunnel in Cloudflare, then its files here; the quick tunnel runs.
-async fn named_delete(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn named_delete(
+    _: DesktopSession,
+    State(state): State<AppState>,
+    ReqLang(lang): ReqLang,
+) -> ApiResult {
     let core = state.desktop()?;
     let result = core.delete_named().await;
-    named_done(&core, result)
+    named_done(&core, result, lang)
 }
 
 /// The first-run wizard page (`public/wizard.html`); like the API it needs the window session.
 async fn wizard_page(_: DesktopSession) -> Response {
     asset_response("wizard.html").unwrap_or_else(|| {
-        ApiError::new(StatusCode::NOT_FOUND, "Nie znaleziono strony").into_response()
+        ApiError::coded(StatusCode::NOT_FOUND, "page_not_found", &[]).into_response()
     })
 }

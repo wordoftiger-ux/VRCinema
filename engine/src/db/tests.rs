@@ -434,7 +434,12 @@ fn sanitize_normalises_domains() {
 
 #[test]
 fn sanitize_rejects_bad_input() {
-    let err = |v: serde_json::Value| sanitize_settings_patch(&v).err().unwrap();
+    let err = |v: serde_json::Value| {
+        sanitize_settings_patch(&v)
+            .err()
+            .unwrap()
+            .render(crate::i18n::Lang::Pl)
+    };
     assert_eq!(err(json!({"nope": 1})), "Nieznane ustawienie: nope");
     assert_eq!(
         err(json!({"allowedDomains": "a.com"})),

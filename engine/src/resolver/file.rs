@@ -9,6 +9,7 @@ use async_trait::async_trait;
 
 use super::local::FileDurationProbe;
 use super::{MediaMeta, MediaResolver, ResolveError, ResolvedStream, StreamInput};
+use crate::i18n::Msg;
 use crate::library::is_video_path;
 
 /// `file:` URL of an absolute path (percent-encoded; drive letters and UNC paths included).
@@ -50,12 +51,12 @@ impl FileResolver {
 
     fn file(&self, url: &str) -> Result<PathBuf, ResolveError> {
         let path = parse_file_source_url(url)
-            .ok_or_else(|| ResolveError::new("Niepoprawny adres pliku z dysku."))?;
+            .ok_or_else(|| ResolveError::coded("invalid_disk_file_url"))?;
         let name = name_of(&path);
         match std::fs::metadata(&path) {
-            Err(_) => Err(ResolveError::new(format!("Plik nie istnieje: {name}"))),
+            Err(_) => Err(Msg::error("file_missing").arg("name", name).into()),
             Ok(m) if m.is_file() && is_video_path(&path) => Ok(path),
-            Ok(_) => Err(ResolveError::new(format!("To nie jest plik wideo: {name}"))),
+            Ok(_) => Err(Msg::error("not_a_video_file").arg("name", name).into()),
         }
     }
 }
@@ -176,7 +177,10 @@ mod tests {
             resolver().resolve(&url).await.unwrap_err(),
             resolver().fetch_meta(&url).await.unwrap_err(),
         ] {
-            assert_eq!(e.to_string(), "Plik nie istnieje: Usunięty.mkv");
+            assert_eq!(
+                e.0.render(crate::i18n::Lang::Pl),
+                "Plik nie istnieje: Usunięty.mkv"
+            );
         }
     }
 
@@ -190,13 +194,19 @@ mod tests {
         for (p, name) in [(dir, "Sezon 1.mkv"), (txt, "notatki.txt")] {
             let url = file_source_url(&p).unwrap();
             let e = resolver().resolve(&url).await.unwrap_err();
-            assert_eq!(e.to_string(), format!("To nie jest plik wideo: {name}"));
+            assert_eq!(
+                e.0.render(crate::i18n::Lang::Pl),
+                format!("To nie jest plik wideo: {name}")
+            );
         }
     }
 
     #[tokio::test]
     async fn malformed_url_is_an_error() {
         let e = resolver().resolve("file:relative.mkv").await.unwrap_err();
-        assert_eq!(e.to_string(), "Niepoprawny adres pliku z dysku.");
+        assert_eq!(
+            e.0.render(crate::i18n::Lang::Pl),
+            "Niepoprawny adres pliku z dysku."
+        );
     }
 }

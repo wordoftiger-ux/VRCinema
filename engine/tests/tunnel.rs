@@ -947,6 +947,7 @@ async fn a_rate_limited_quick_tunnel_is_an_error_with_a_long_wait() {
     let TunnelState::Error { message } = error else {
         unreachable!()
     };
+    let message = message.render(vrcinema::i18n::Lang::Pl);
     assert!(message.contains("Cloudflare"), "{message}");
     assert!(message.contains("zbyt wiele"), "{message}");
     assert!(
@@ -1149,6 +1150,7 @@ async fn a_missing_program_is_an_error_and_stop_ends_the_retries() {
     let TunnelState::Error { message } = error else {
         unreachable!()
     };
+    let message = message.render(vrcinema::i18n::Lang::Pl);
     assert!(message.contains("cloudflared"), "{message}");
     tunnel.stop().await;
     assert_eq!(*rx.borrow(), TunnelState::Off);

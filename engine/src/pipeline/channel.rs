@@ -14,6 +14,8 @@ use rusqlite::Connection;
 use tokio::sync::mpsc;
 
 use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
+use crate::i18n::{self, Lang, Msg};
+use crate::live::LiveValue;
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{SlateKind, Slates};
@@ -159,6 +161,8 @@ pub struct ChannelOptions {
     pub prefetch_s: Option<f64>,
     /// How many segments viewers lag behind the newest published one (for "now playing").
     pub viewer_lag_segments: Option<usize>,
+    /// Language of the reasons kept with failed and skipped films.
+    pub language: LiveValue<Lang>,
 }
 
 impl ChannelOptions {
@@ -181,6 +185,7 @@ impl ChannelOptions {
             start_timeout_s: None,
             prefetch_s: None,
             viewer_lag_segments: None,
+            language: LiveValue::new(Lang::En),
         }
     }
 }
@@ -198,11 +203,13 @@ const SEEK_QUIET_MS: u64 = 700;
 /// A seek target this close to the end ends the film (like a skip).
 const SEEK_END_MARGIN_S: f64 = 1.0;
 
-const STALL_ERROR: &str = "Źródło nie dostarczało danych przez 30 s";
-const START_TIMEOUT_ERROR: &str = "Przekroczono czas uruchamiania źródła";
-const SKIPPED: &str = "Pominięty przez właściciela";
-const FFMPEG_STOPPED: &str = "ffmpeg przerwał pracę";
-const UNKNOWN_ERROR: &str = "Nieznany błąd";
+// Why a film ended without playing to the end (kept with it in the history, in the channel's
+// language).
+const STALL_ERROR: &str = "item_errors.stalled";
+const START_TIMEOUT_ERROR: &str = "item_errors.start_timeout";
+const SKIPPED: &str = "item_errors.skipped";
+const FFMPEG_STOPPED: &str = "item_errors.ffmpeg_stopped";
+const UNKNOWN_ERROR: &str = "item_errors.unknown";
 
 /// A film being started or aired.
 struct ActiveClip {
@@ -308,7 +315,7 @@ impl ActiveClip {
     }
 
     /// The start or the process failed (and `next()` has not dealt with it yet).
-    fn failure(&self) -> Option<String> {
+    fn failure(&self, lang: Lang) -> Option<String> {
         if let Some(error) = &self.start_error {
             return Some(error.clone());
         }
@@ -317,7 +324,11 @@ impl ActiveClip {
             handle.state(),
             SegmenterState::Failed | SegmenterState::Killed
         )
-        .then(|| handle.error().unwrap_or_else(|| FFMPEG_STOPPED.to_string()))
+        .then(|| {
+            handle
+                .error()
+                .unwrap_or_else(|| i18n::t(lang, FFMPEG_STOPPED, &[]))
+        })
     }
 }
 
@@ -482,13 +493,19 @@ impl Channel {
     }
 
     pub fn skip(&mut self) -> anyhow::Result<()> {
+        let skipped = self.text(SKIPPED);
         if let Some(p) = self.parked.take() {
             // Paused film: its clip is already gone. The channel stays paused for the next one.
             return self
-                .queue(|q| q.finish(p.item.id, ItemStatus::Played, Some(SKIPPED)))
+                .queue(|q| q.finish(p.item.id, ItemStatus::Played, Some(&skipped)))
                 .map(|_| ());
         }
-        self.finish_current(ItemStatus::Played, Some(SKIPPED))
+        self.finish_current(ItemStatus::Played, Some(&skipped))
+    }
+
+    /// A reason kept with a film, in the channel's language.
+    fn text(&self, key: &str) -> String {
+        i18n::t(self.o.language.get(), key, &[])
     }
 
     /// Airs `slates` from now on (a new address was drawn on them). Films are not touched; the
@@ -707,11 +724,12 @@ impl Channel {
                 "Skok na koniec filmu #{} \"{}\" — film pominięty",
                 c.item.id, c.item.title
             ));
-            return self.finish(c, ItemStatus::Played, Some(SKIPPED));
+            let skipped = self.text(SKIPPED);
+            return self.finish(c, ItemStatus::Played, Some(&skipped));
         }
         // The prefetched film may now be far from its turn; it is prefetched again near the end.
         self.drop_prefetched();
-        if let Some(error) = c.failure() {
+        if let Some(error) = c.failure(self.o.language.get()) {
             // The process had already failed: the usual retry accounting, from the target.
             c.base_s = seek.target_s;
             c.emitted_s = 0.0;
@@ -806,7 +824,8 @@ impl Channel {
         if let Some(target) = target
             && ends_film(target, c.duration_s())
         {
-            if let Err(e) = self.finish(c, ItemStatus::Played, Some(SKIPPED)) {
+            let skipped = self.text(SKIPPED);
+            if let Err(e) = self.finish(c, ItemStatus::Played, Some(&skipped)) {
                 self.log(&format!("Błąd kanału przy pauzie: {e}"));
             }
             return;
@@ -829,6 +848,7 @@ impl Channel {
     /// (played), a failure goes through the normal retry accounting.
     fn settle_before_parking(&mut self) {
         self.poll_launches();
+        let stopped = self.text(FFMPEG_STOPPED);
         let Some(c) = self.current.as_mut() else {
             return;
         };
@@ -843,7 +863,7 @@ impl Channel {
                 match (handle.state(), handle.error()) {
                     (SegmenterState::Done, _) => done = true,
                     (SegmenterState::Failed | SegmenterState::Killed, error) => {
-                        failure = Some(error.unwrap_or_else(|| FFMPEG_STOPPED.to_string()));
+                        failure = Some(error.unwrap_or_else(|| stopped.clone()));
                     }
                     _ => {}
                 }
@@ -920,7 +940,7 @@ impl Channel {
         };
         let next = self.prefetched.as_ref().map(|c| NextInfo {
             title: c.item.title.clone(),
-            state: if c.failure().is_some() {
+            state: if c.failure(Lang::En).is_some() {
                 NextState::Failed
             } else if c.is_starting() {
                 NextState::Preparing
@@ -958,14 +978,16 @@ impl Channel {
 
     /// Marks `id` failed with `error` (the supervisor's verdict on a film that keeps crashing
     /// the loop). An owner's removal is not overwritten. The clips are disposed by `stop()`.
-    pub fn fail_item(&mut self, id: i64, error: &str) -> anyhow::Result<()> {
-        self.queue(|q| q.finish(id, ItemStatus::Failed, Some(error)))
+    pub fn fail_item(&mut self, id: i64, error: &Msg) -> anyhow::Result<()> {
+        let error = error.render(self.o.language.get());
+        self.queue(|q| q.finish(id, ItemStatus::Failed, Some(&error)))
             .map(|_| ())
     }
 
     /// Hands finished clip starts to their clips; a start whose clip was dropped meanwhile is
     /// disposed.
     pub fn poll_launches(&mut self) {
+        let lang = self.o.language.get();
         while let Ok(launch) = self.launch_rx.try_recv() {
             let target = [self.current.as_mut(), self.prefetched.as_mut()]
                 .into_iter()
@@ -975,7 +997,7 @@ impl Channel {
                 (Some(clip), Ok(handle)) => clip.handle = Some(handle),
                 (Some(clip), Err(e)) => {
                     clip.start_error = Some(if e.is_empty() {
-                        UNKNOWN_ERROR.to_string()
+                        i18n::t(lang, UNKNOWN_ERROR, &[])
                     } else {
                         e
                     });
@@ -1047,13 +1069,14 @@ impl Channel {
                     continue;
                 }
                 Some((SegmenterState::Failed | SegmenterState::Killed, error)) => {
-                    self.handle_failure(error.unwrap_or_else(|| FFMPEG_STOPPED.to_string()))?;
+                    let stopped = self.text(FFMPEG_STOPPED);
+                    self.handle_failure(error.unwrap_or(stopped))?;
                     continue;
                 }
                 Some(_) => {}
                 None => {
                     if now.saturating_sub(c.started_at) > start_timeout_ms {
-                        self.handle_failure(START_TIMEOUT_ERROR.to_string())?;
+                        self.handle_failure(self.text(START_TIMEOUT_ERROR))?;
                         continue;
                     }
                     return self.slate(SlateKind::Buffering);
@@ -1064,7 +1087,8 @@ impl Channel {
                 if let Some(handle) = c.handle.as_mut() {
                     handle.kill();
                 }
-                self.finish_current(ItemStatus::Failed, Some(STALL_ERROR))?;
+                let stalled = self.text(STALL_ERROR);
+                self.finish_current(ItemStatus::Failed, Some(&stalled))?;
                 continue;
             }
             return self.slate(SlateKind::Buffering);
@@ -1577,6 +1601,8 @@ mod tests {
             Arc::new(factory.clone()),
             slates(),
         );
+        // The tests read the Polish reasons.
+        o.language = LiveValue::new(Lang::Pl);
         let clock = Arc::clone(now);
         o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
         let removed = Arc::clone(removed);
@@ -2185,7 +2211,9 @@ mod tests {
         let a = e.add_item("a");
         e.next();
         assert_eq!(e.channel.current_item_id(), Some(a.id));
-        e.channel.fail_item(a.id, "Błąd wewnętrzny").unwrap();
+        e.channel
+            .fail_item(a.id, &Msg::new("item_errors.internal"))
+            .unwrap();
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Failed);
         assert_eq!(fresh.error.as_deref(), Some("Błąd wewnętrzny"));
@@ -2193,7 +2221,9 @@ mod tests {
         // A removed item stays removed.
         let b = e.add_item("b");
         e.set_status(b.id, ItemStatus::Removed);
-        e.channel.fail_item(b.id, "Błąd wewnętrzny").unwrap();
+        e.channel
+            .fail_item(b.id, &Msg::new("item_errors.internal"))
+            .unwrap();
         assert_eq!(e.get(b.id).status, ItemStatus::Removed);
     }
 
@@ -2849,7 +2879,7 @@ mod tests {
         assert!(h0.disposed());
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some(SKIPPED));
+        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
         assert_eq!(e.key(), "buffering");
         e.flush().await;
         assert_eq!(e.factory.last_call_item(), b.id);
@@ -2877,7 +2907,7 @@ mod tests {
         e.channel.seek_to(99.5);
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some(SKIPPED));
+        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
         assert_eq!(e.key(), "pause");
         e.flush().await;
         assert_eq!(e.starts(), 1);
@@ -3022,7 +3052,7 @@ mod tests {
         e.channel.play_now(c.id).unwrap();
         let fresh = e.get(a.id);
         assert_eq!(fresh.status, ItemStatus::Played);
-        assert_eq!(fresh.error.as_deref(), Some(SKIPPED));
+        assert_eq!(fresh.error.as_deref(), Some("Pominięty przez właściciela"));
         assert_eq!(e.key(), "buffering");
         e.flush().await;
         assert_eq!(e.factory.last_call_item(), c.id);

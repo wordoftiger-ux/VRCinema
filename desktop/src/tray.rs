@@ -422,7 +422,7 @@ mod tests {
             url: "https://a.trycloudflare.com".into(),
         };
         let error = TunnelState::Error {
-            message: "brak cloudflared".into(),
+            message: vrcinema::i18n::Msg::error("no_cloudflared"),
         };
         assert_eq!(net_status(true, &online, ""), Some(Net::Online));
         assert_eq!(

@@ -1021,7 +1021,7 @@ async fn an_upgrade_whose_download_fails_runs_on_and_shows_cloudflared_missing()
     assert_eq!(tunnel["state"], "error", "{tunnel}");
     assert_eq!(
         tunnel["message"],
-        crate::tunnel::named::NO_CLOUDFLARED,
+        crate::i18n::t(crate::i18n::Lang::Pl, "errors.no_cloudflared", &[]),
         "{tunnel}"
     );
     let page = app.http.get(app.url("/")).send().await.unwrap();
@@ -1070,7 +1070,7 @@ async fn before_the_first_run_wizard_nothing_is_downloaded_by_itself() {
     let tunnel = tunnel_view(&app, &cookie).await;
     assert_eq!(
         tunnel["message"],
-        crate::tunnel::named::NO_CLOUDFLARED,
+        crate::i18n::t(crate::i18n::Lang::Pl, "errors.no_cloudflared", &[]),
         "{tunnel}"
     );
     app.stop().await;

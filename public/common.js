@@ -24,10 +24,15 @@ export function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+// Język tych stron: komunikaty błędów serwera mają być w tym samym języku.
+const PAGE_LANG = 'pl';
+
 export async function api(method, url, body) {
+  const headers = { 'x-vrcinema-lang': PAGE_LANG };
+  if (body) headers['content-type'] = 'application/json';
   const res = await fetch(url, {
     method,
-    headers: body ? { 'content-type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
   });

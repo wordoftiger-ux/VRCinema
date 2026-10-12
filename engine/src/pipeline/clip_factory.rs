@@ -10,6 +10,8 @@ use rusqlite::Connection;
 
 use crate::config::VideoEncoder;
 use crate::db::{QueueItem, SettingsRepo};
+use crate::i18n::Lang;
+use crate::live::LiveValue;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode, decide_video_mode, probe_video};
@@ -37,6 +39,8 @@ pub struct ClipFactoryDeps {
     pub db: Arc<Mutex<Connection>>,
     pub channel_id: i64,
     pub log: Option<SharedLogFn>,
+    /// Language of the reasons a film failed (kept with the film in the history).
+    pub language: LiveValue<Lang>,
 }
 
 /// Log line written when a clip starts.
@@ -92,6 +96,8 @@ struct RealClipHandle {
     mode: StreamMode,
     /// `None` when the video is copied.
     encoder: Option<VideoEncoder>,
+    /// Language of the reason it failed.
+    language: LiveValue<Lang>,
     disposed: bool,
 }
 
@@ -101,7 +107,7 @@ impl ClipHandle for RealClipHandle {
     }
 
     fn error(&self) -> Option<String> {
-        self.seg.error()
+        self.seg.error().map(|e| e.render(self.language.get()))
     }
 
     fn duration_s(&self) -> Option<f64> {
@@ -185,10 +191,10 @@ async fn start_clip(
         .resolver
         .resolve(&item.source_url)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.0.render(d.language.get()))?;
     let info = probe_video(&d.ffprobe_path, &stream.inputs)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.message().render(d.language.get()))?;
     let force_transcode = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
@@ -234,6 +240,7 @@ async fn start_clip(
             VideoMode::Transcode => StreamMode::Transcode,
         },
         encoder: (mode == VideoMode::Transcode).then_some(encoder),
+        language: d.language.clone(),
         disposed: false,
     }))
 }
@@ -397,6 +404,7 @@ mod tests {
             log: Some(Arc::new(move |l: &str| {
                 sink.lock().unwrap().push(l.to_string())
             })),
+            language: crate::live::LiveValue::new(Lang::En),
         });
         Fixture {
             _dir: dir,

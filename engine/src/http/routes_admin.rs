@@ -56,9 +56,10 @@ pub(super) async fn require_admin(
     next: Next,
 ) -> Response {
     if !state.is_admin(req.headers()) {
-        return axum::response::IntoResponse::into_response(ApiError::new(
+        return axum::response::IntoResponse::into_response(ApiError::coded(
             StatusCode::UNAUTHORIZED,
-            "Zaloguj się.",
+            "login_required",
+            &[],
         ));
     }
     next.run(req).await
@@ -109,12 +110,12 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
         .get("url")
         .and_then(Value::as_str)
         .and_then(parse_source_url)
-        .ok_or_else(|| ApiError::bad_request("To nie wygląda na poprawny link (http/https)."))?;
+        .ok_or_else(|| ApiError::bad_request("invalid_link"))?;
     let meta = state
         .resolver
         .fetch_meta(url.as_str())
         .await
-        .map_err(|e| ApiError::bad_request(format!("Nie udało się odczytać: {e}")))?;
+        .map_err(|e| ApiError::bad_request("read_failed").with_msg_arg("reason", e.0))?;
     let new_item =
         |source_url: String, title: String, duration_s: Option<f64>, is_live: bool| NewItem {
             channel_id: state.channel_id,
@@ -139,7 +140,7 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             .take(MAX_PLAYLIST_ITEMS)
             .collect();
         if entries.is_empty() {
-            return Err(ApiError::bad_request("Playlista jest pusta."));
+            return Err(ApiError::bad_request("empty_playlist"));
         }
         state.with_db(|c| {
             let q = QueueRepo::new(c);
@@ -180,7 +181,7 @@ fn parse_id(raw: &str) -> Option<i64> {
 }
 
 fn no_such_item() -> ApiError {
-    ApiError::new(StatusCode::NOT_FOUND, "Nie ma takiej pozycji.")
+    ApiError::coded(StatusCode::NOT_FOUND, "no_such_item", &[])
 }
 
 /// A non-negative whole number (JS `Number.isInteger(x) && x >= 0`).
@@ -206,9 +207,10 @@ async fn patch_item(
         match (action, position) {
             (Some(action @ ("approve" | "reject")), _) => {
                 if item.status != ItemStatus::PendingApproval {
-                    return Ok(Err(ApiError::new(
+                    return Ok(Err(ApiError::coded(
                         StatusCode::CONFLICT,
-                        "Ta pozycja nie czeka na akceptację.",
+                        "not_pending",
+                        &[],
                     )));
                 }
                 let status = if action == "approve" {
@@ -220,17 +222,16 @@ async fn patch_item(
             }
             (_, Some(position)) => {
                 if item.status != ItemStatus::Queued {
-                    return Ok(Err(ApiError::new(
+                    return Ok(Err(ApiError::coded(
                         StatusCode::CONFLICT,
-                        "Przesuwać można tylko pozycje w kolejce.",
+                        "move_only_queued",
+                        &[],
                     )));
                 }
                 q.move_item(item.id, position)?;
             }
             _ => {
-                return Ok(Err(ApiError::bad_request(
-                    "Podaj action (approve/reject) albo position.",
-                )));
+                return Ok(Err(ApiError::bad_request("action_or_position")));
             }
         }
         Ok(Ok(()))
@@ -250,9 +251,10 @@ async fn delete_item(State(state): State<AppState>, Path(id): Path<String>) -> A
             item.status,
             ItemStatus::Queued | ItemStatus::PendingApproval | ItemStatus::Playing
         ) {
-            return Ok(Err(ApiError::new(
+            return Ok(Err(ApiError::coded(
                 StatusCode::CONFLICT,
-                "Ta pozycja już się zakończyła.",
+                "item_finished",
+                &[],
             )));
         }
         q.set_status(item.id, ItemStatus::Removed, None)?;
@@ -265,7 +267,7 @@ async fn delete_item(State(state): State<AppState>, Path(id): Path<String>) -> A
 // ---------- Pliki z dysku ----------
 
 fn library_error(e: LibraryError) -> ApiError {
-    ApiError::bad_request(e.0)
+    ApiError::from_msg(StatusCode::BAD_REQUEST, e.0)
 }
 
 /// `Number(x)` used as a folder index: `None` when it is not a non-negative whole number.
@@ -312,7 +314,7 @@ async fn library(
     let path = param("path").unwrap_or_default();
     let listing = tokio::task::spawn_blocking(move || {
         let Some(root) = root.as_deref().map_or(Some(0), index_of_str) else {
-            return Err(LibraryError("Nie ma takiego folderu głównego.".to_string()));
+            return Err(LibraryError::no_such_root());
         };
         lib.list(root, &path).map(|listing| (lib.roots(), listing))
     })
@@ -338,9 +340,7 @@ async fn library(
 
 async fn add_local(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
     let Some(lib) = state.library.clone().filter(|l| l.enabled()) else {
-        return Err(ApiError::bad_request(
-            "Pliki z dysku są wyłączone. Ustaw MEDIA_DIRS w pliku .env.",
-        ));
+        return Err(ApiError::bad_request("library_disabled"));
     };
     let rel = body
         .get("path")
@@ -352,9 +352,7 @@ async fn add_local(State(state): State<AppState>, JsonBody(body): JsonBody) -> A
         let lib = lib.clone();
         let rel = rel.clone();
         tokio::task::spawn_blocking(move || -> ApiResult<(usize, Vec<String>)> {
-            let root = root.ok_or_else(|| {
-                library_error(LibraryError("Nie ma takiego folderu głównego.".to_string()))
-            })?;
+            let root = root.ok_or_else(|| library_error(LibraryError::no_such_root()))?;
             let full = lib.resolve(root, &rel).map_err(library_error)?;
             let is_dir = std::fs::metadata(&full)
                 .map_err(|e| ApiError::Internal(e.to_string()))?
@@ -374,7 +372,7 @@ async fn add_local(State(state): State<AppState>, JsonBody(body): JsonBody) -> A
         .map_err(|e| ApiError::Internal(e.to_string()))??
     };
     if files.is_empty() {
-        return Err(ApiError::bad_request("W tym folderze nie ma plików wideo."));
+        return Err(ApiError::bad_request("no_videos_in_folder"));
     }
     let mut titles = Vec::new();
     for file in files.iter().take(MAX_PLAYLIST_ITEMS) {
@@ -383,7 +381,7 @@ async fn add_local(State(state): State<AppState>, JsonBody(body): JsonBody) -> A
             .resolver
             .fetch_meta(&source_url)
             .await
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            .map_err(|e| ApiError::from_msg(StatusCode::BAD_REQUEST, e.0))?;
         state.with_db(|c| {
             QueueRepo::new(c).add(&NewItem {
                 channel_id: state.channel_id,
@@ -425,26 +423,24 @@ async fn skip(State(state): State<AppState>) -> Response {
 /// How long a control route waits for the engine loop to apply its command.
 const CONTROL_WAIT: Duration = Duration::from_secs(1);
 
-fn control_bad_request(message: &str) -> ApiError {
-    ApiError::with_code(StatusCode::BAD_REQUEST, "bad_request", message)
+/// A refused control request: 400 with `code` `bad_request` (as the controls always answered)
+/// and the text of `errors.<message>`.
+fn control_bad_request(message: &'static str) -> ApiError {
+    ApiError::bad_request(message).with_code("bad_request")
 }
 
 /// The film the controls act on, when it can be paused and seeked; otherwise 409.
 fn controllable_film(state: &AppState) -> ApiResult<ControlState> {
     let control = state.snapshot().state.control.clone();
     if control.item_id.is_none() {
-        return Err(ApiError::with_code(
+        return Err(ApiError::coded(
             StatusCode::CONFLICT,
             "nothing_playing",
-            "Teraz nic nie leci.",
+            &[],
         ));
     }
     if control.is_live {
-        return Err(ApiError::with_code(
-            StatusCode::CONFLICT,
-            "live_item",
-            "Transmisji na żywo nie można wstrzymać ani przewinąć.",
-        ));
+        return Err(ApiError::coded(StatusCode::CONFLICT, "live_item", &[]));
     }
     Ok(control)
 }
@@ -457,10 +453,10 @@ async fn apply_control(state: &AppState, command: Command) -> ApiResult {
     let mut snapshots = state.engine.snapshot.clone();
     snapshots.borrow_and_update();
     if !state.send_command(command) {
-        return Err(ApiError::with_code(
+        return Err(ApiError::coded(
             StatusCode::SERVICE_UNAVAILABLE,
             "engine_unavailable",
-            "Kanał nie przyjmuje teraz poleceń. Spróbuj za chwilę.",
+            &[],
         ));
     }
     let _ = tokio::time::timeout(CONTROL_WAIT, async {
@@ -497,13 +493,13 @@ async fn seek(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiRes
         body.get(key).map(|v| {
             v.as_f64()
                 .filter(|n| n.abs() <= max)
-                .ok_or_else(|| control_bad_request("Podaj liczbę sekund."))
+                .ok_or_else(|| control_bad_request("seek_seconds"))
         })
     };
     let command = match (number("toS", MAX_SEEK_TO_S), number("byS", MAX_SEEK_BY_S)) {
         (Some(to), None) => Command::Seek { to_s: to? },
         (None, Some(by)) => Command::SeekBy { delta_s: by? },
-        _ => return Err(control_bad_request("Podaj toS albo byS (sekundy).")),
+        _ => return Err(control_bad_request("seek_target")),
     };
     let control = controllable_film(&state)?;
     // Like the engine: without a known length only forward, or back to the start.
@@ -513,9 +509,7 @@ async fn seek(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiRes
         _ => false,
     };
     if control.duration_s.is_none() && !allowed {
-        return Err(control_bad_request(
-            "Długość tego filmu nie jest znana: można go tylko przewinąć do przodu.",
-        ));
+        return Err(control_bad_request("seek_unknown_length"));
     }
     apply_control(&state, command).await
 }
@@ -530,7 +524,7 @@ async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
     let id = body
         .get("itemId")
         .and_then(Value::as_i64)
-        .ok_or_else(|| control_bad_request("Podaj itemId."))?;
+        .ok_or_else(|| control_bad_request("item_id_required"))?;
     let item = state
         .with_db(|c| QueueRepo::new(c).get(id))?
         .filter(|i| i.channel_id == state.channel_id)
@@ -539,9 +533,7 @@ async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
         item.status,
         ItemStatus::Queued | ItemStatus::Played | ItemStatus::Failed
     ) {
-        return Err(control_bad_request(
-            "Odtworzyć teraz można tylko film z kolejki albo z historii.",
-        ));
+        return Err(control_bad_request("not_playable_now"));
     }
     apply_control(&state, Command::PlayNow { item_id: item.id }).await
 }
@@ -578,7 +570,8 @@ async fn get_settings(State(state): State<AppState>) -> ApiResult {
 
 async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
     let body = if body.is_null() { json!({}) } else { body };
-    let patch = sanitize_settings_patch(&body).map_err(ApiError::bad_request)?;
+    let patch = sanitize_settings_patch(&body)
+        .map_err(|e| ApiError::from_msg(StatusCode::BAD_REQUEST, e))?;
     let updated = state.with_db(|c| SettingsRepo::new(c).update(state.channel_id, &patch))?;
     state
         .request_limiter

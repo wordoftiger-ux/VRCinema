@@ -12,25 +12,18 @@ use tokio::sync::oneshot;
 use super::{AppCore, lock};
 use crate::app_settings::{AppSettings, TunnelModeSetting, app_config};
 use crate::config::AppConfig;
+use crate::i18n::Msg;
 use crate::live::{PublicAccess, apply_tunnel, tunnel_address};
 use crate::pipeline::slates::SlateAddress;
 use crate::tools::Tool;
 use crate::tunnel::named::{
-    self, CERT_FILE, CertSource, ErrorCode, LoginEvent, NO_CLOUDFLARED, NamedError, NamedPaths,
-    Operation, Progress, Step, default_user_dir, is_tunnel_id,
+    self, CERT_FILE, CertSource, ErrorCode, LoginEvent, NamedError, NamedPaths, Operation,
+    Progress, Step, default_user_dir, is_tunnel_id, no_cloudflared,
 };
 use crate::tunnel::{NamedTunnel, TunnelConfig, TunnelMode, TunnelState};
 
 /// Folder of the named tunnel's files (`cert.pem`, `<id>.json`) in the app's home.
 pub(crate) const TUNNEL_DIR: &str = "tunnel";
-
-const MISSING: &str = NO_CLOUDFLARED;
-const LOGGED_IN: &str = "Połączono z Cloudflare. Teraz wpisz adres stałego linku.";
-const LOGGED_IN_BEFORE: &str = "Połączono z Cloudflare przez wcześniejsze logowanie programu cloudflared na tym komputerze: obowiązują konto i domena wybrane wtedy. Teraz wpisz adres stałego linku w tej domenie. (Aby użyć innego konta, usuń certyfikat z folderu .cloudflared w swoim profilu i połącz się ponownie.)";
-const BACK_TO_QUICK: &str = "Działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Pliki stałego linku zostały — możesz do niego wrócić.";
-const FETCHING: &str = "Pobieranie programu cloudflared — tunel połączy się sam po pobraniu.";
-const UPDATING: &str = "Trwa aktualizacja programu cloudflared — tunel wróci za chwilę.";
-const NAMED_FALLBACK: &str = "Brak plików stałego linku — działa szybki tunel (jego adres zmienia się po każdym uruchomieniu). Ustaw stały link ponownie.";
 
 /// The tunnel's public address in effect and the cloudflared run that learnt it.
 #[derive(Debug, Clone)]
@@ -45,9 +38,9 @@ pub(crate) struct KeptAddress {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TunnelNotes {
     /// Why the enabled tunnel cannot run (shown as its error).
-    blocked: Option<String>,
+    blocked: Option<Msg>,
     /// Shown next to a running tunnel (the named mode fell back to quick).
-    warning: Option<String>,
+    warning: Option<Msg>,
     /// Mode of the cloudflared asked to run.
     mode: Option<TunnelModeSetting>,
 }
@@ -59,17 +52,17 @@ pub(crate) struct TunnelInfo {
     /// Mode in use (the setting while nothing runs).
     pub mode: TunnelModeSetting,
     pub hostname: Option<String>,
-    pub warning: Option<String>,
+    pub warning: Option<Msg>,
 }
 
 /// What the settings ask for.
 enum Plan {
     Off,
     /// Enabled, but it cannot run (why).
-    Blocked(String),
+    Blocked(Msg),
     Run {
         config: TunnelConfig,
-        warning: Option<String>,
+        warning: Option<Msg>,
     },
 }
 
@@ -110,15 +103,15 @@ impl AppCore {
             return Plan::Off;
         }
         if self.tunnel_held.load(Ordering::SeqCst) {
-            return Plan::Blocked(UPDATING.to_string());
+            return Plan::Blocked(Msg::new("tunnel.updating"));
         }
         let cloudflared = self.tools.tools_dir().join(Tool::Cloudflared.exe());
         if !cloudflared.is_file() {
             // Not `tools_job_running()`: that is still true in the job's own final sync.
             if self.cloudflared_fetching.load(Ordering::SeqCst) {
-                return Plan::Blocked(FETCHING.to_string());
+                return Plan::Blocked(Msg::new("tunnel.fetching"));
             }
-            return Plan::Blocked(MISSING.to_string());
+            return Plan::Blocked(no_cloudflared());
         }
         let (mode, warning) = match settings.tunnel_mode {
             TunnelModeSetting::Quick => (TunnelMode::Quick, None),
@@ -129,7 +122,7 @@ impl AppCore {
                     settings.named_tunnel_id.as_deref(),
                 ) {
                     Some(named) => (TunnelMode::Named(named), None),
-                    None => (TunnelMode::Quick, Some(NAMED_FALLBACK.to_string())),
+                    None => (TunnelMode::Quick, Some(Msg::new("tunnel.named_fallback"))),
                 }
             }
         };
@@ -333,7 +326,7 @@ impl AppCore {
         let busy = self.named.begin(Operation::Login)?;
         let paths = self.named_paths();
         if !paths.cloudflared.is_file() {
-            let error = NamedError::new(ErrorCode::NoCloudflared, NO_CLOUDFLARED);
+            let error = NamedError::new(ErrorCode::NoCloudflared, no_cloudflared());
             self.named.finish(&Err(error.clone()));
             return Err(error);
         }
@@ -355,8 +348,8 @@ impl AppCore {
             let result = named::login(&paths, timeout, cancelled, on_event, &log)
                 .await
                 .map(|source| match source {
-                    CertSource::Moved => LOGGED_IN.to_string(),
-                    CertSource::Copied => LOGGED_IN_BEFORE.to_string(),
+                    CertSource::Moved => Msg::new("named.logged_in"),
+                    CertSource::Copied => Msg::new("named.logged_in_before"),
                 });
             named.finish(&result);
             drop(busy);
@@ -378,7 +371,7 @@ impl AppCore {
         self: &Arc<Self>,
         hostname: String,
         overwrite: bool,
-    ) -> Result<String, NamedError> {
+    ) -> Result<Msg, NamedError> {
         self.named_operation(Operation::Create, move |core| async move {
             let paths = core.named_paths();
             let log = core.log.log_fn();
@@ -392,31 +385,28 @@ impl AppCore {
                 s.named_tunnel_id = Some(id);
             })
             .await?;
-            Ok(format!(
-                "Stały link {url} jest gotowy — tunel łączy się z Cloudflare."
-            ))
+            Ok(Msg::new("named.ready").arg("url", url))
         })
         .await
     }
 
     /// Back to the quick tunnel; the permanent link's files stay.
-    pub(crate) async fn named_to_quick(self: &Arc<Self>) -> Result<String, NamedError> {
+    pub(crate) async fn named_to_quick(self: &Arc<Self>) -> Result<Msg, NamedError> {
         self.named_operation(Operation::Quick, |core| async move {
             core.switch_tunnel_mode(|s| s.tunnel_mode = TunnelModeSetting::Quick)
                 .await?;
-            Ok(BACK_TO_QUICK.to_string())
+            Ok(Msg::new("named.back_to_quick"))
         })
         .await
     }
 
     /// Deletes the tunnel in Cloudflare, then (the quick tunnel running) its files here.
-    pub(crate) async fn delete_named(self: &Arc<Self>) -> Result<String, NamedError> {
+    pub(crate) async fn delete_named(self: &Arc<Self>) -> Result<Msg, NamedError> {
         self.named_operation(Operation::Delete, |core| async move {
             let paths = core.named_paths();
             let log = core.log.log_fn();
             let host = core.settings().named_tunnel_hostname;
-            core.named
-                .step(Step::Deleting, Step::Deleting.message(""));
+            core.named.step(Step::Deleting, Step::Deleting.message(""));
             named::delete(&paths, core.options.named_tunnel.command_timeout, &log).await?;
             // The tunnel is gone in Cloudflare: from here on the quick tunnel is the only
             // way out, whatever else fails.
@@ -434,22 +424,17 @@ impl AppCore {
                 ));
                 return Err(NamedError::new(
                     ErrorCode::Failed,
-                    format!(
-                        "Tunel usunięto w Cloudflare i działa szybki tunel, ale nie udało się usunąć plików stałego linku: {e}"
-                    ),
+                    Msg::error("named_files_left").arg("detail", e),
                 ));
             }
             core.log(&format!(
                 "Stały link: usunięto certyfikat i poświadczenia z {}.",
                 paths.dir.display()
             ));
-            let record = host.map_or_else(
-                || "stałego linku".to_string(),
-                |host| host.to_string(),
-            );
-            Ok(format!(
-                "Stały link usunięty — działa szybki tunel. Rekord DNS {record} mógł zostać w Cloudflare: usuń go w panelu Cloudflare (DNS), jeśli nie jest już potrzebny."
-            ))
+            Ok(match host {
+                Some(host) => Msg::new("named.deleted").arg("hostname", host),
+                None => Msg::new("named.deleted_no_host"),
+            })
         })
         .await
     }
@@ -461,10 +446,10 @@ impl AppCore {
         self: &Arc<Self>,
         operation: Operation,
         work: F,
-    ) -> Result<String, NamedError>
+    ) -> Result<Msg, NamedError>
     where
         F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<String, NamedError>> + Send + 'static,
+        Fut: Future<Output = Result<Msg, NamedError>> + Send + 'static,
     {
         let busy = self.named.begin(operation)?;
         let core = Arc::clone(self);
@@ -478,7 +463,7 @@ impl AppCore {
         .unwrap_or_else(|e| {
             Err(NamedError::new(
                 ErrorCode::Failed,
-                format!("Operacja stałego linku została przerwana: {e}"),
+                Msg::error("failed").arg("detail", e),
             ))
         })
     }
@@ -493,7 +478,7 @@ impl AppCore {
             .step(Step::Switching, Step::Switching.message(""));
         let _guard = self.settings_change.lock().await;
         self.update_settings(change)
-            .map_err(|e| NamedError::new(ErrorCode::Failed, format!("{e:#}")))?;
+            .map_err(|e| NamedError::new(ErrorCode::Failed, self.save_failed(&e)))?;
         self.apply_live();
         self.sync_tunnel().await;
         self.refresh_slates();

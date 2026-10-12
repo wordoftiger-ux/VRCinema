@@ -421,7 +421,7 @@ mod tests {
         env.tunnel.send_replace(TunnelState::Reconnecting);
         after_ms(9_000).await;
         env.tunnel.send_replace(TunnelState::Error {
-            message: "x".into(),
+            message: crate::i18n::Msg::new("x"),
         });
         after_ms(900).await;
         env.tunnel.send_replace(online());

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::config::{AppConfig, VideoEncoder};
+use crate::i18n::Lang;
 use crate::tunnel::TunnelState;
 
 /// A shared value: every clone sees the latest `set`.
@@ -50,6 +51,8 @@ pub struct LiveSettings {
     pub encoder: LiveValue<VideoEncoder>,
     pub ytdlp_cookies: LiveValue<Option<PathBuf>>,
     pub pixeldrain_api_key: LiveValue<Option<String>>,
+    /// The app's language (answers to requests that name none they can read).
+    pub language: LiveValue<Lang>,
 }
 
 impl LiveSettings {
@@ -61,6 +64,7 @@ impl LiveSettings {
             encoder: LiveValue::new(config.video_encoder),
             ytdlp_cookies: LiveValue::new(config.ytdlp_cookies.clone()),
             pixeldrain_api_key: LiveValue::new(config.pixeldrain_api_key.clone()),
+            language: LiveValue::new(config.language),
         }
     }
 
@@ -72,6 +76,7 @@ impl LiveSettings {
         self.ytdlp_cookies.set(config.ytdlp_cookies.clone());
         self.pixeldrain_api_key
             .set(config.pixeldrain_api_key.clone());
+        self.language.set(config.language);
     }
 }
 
@@ -188,7 +193,7 @@ mod tests {
             TunnelState::Connecting,
             TunnelState::Off,
             TunnelState::Error {
-                message: "x".into(),
+                message: crate::i18n::Msg::new("x"),
             },
         ] {
             assert_eq!(tunnel_address(Some(URL), &state, true), None, "{state:?}");

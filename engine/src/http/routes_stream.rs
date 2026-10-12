@@ -35,7 +35,7 @@ fn is_segment_name(name: &str) -> bool {
 }
 
 async fn segment(State(state): State<AppState>, ctx: Ctx, Path(name): Path<String>) -> Response {
-    let missing = || ApiError::new(StatusCode::NOT_FOUND, "Brak fragmentu").into_response();
+    let missing = || ApiError::coded(StatusCode::NOT_FOUND, "no_segment", &[]).into_response();
     let snapshot = state.snapshot();
     if !is_segment_name(&name) || !snapshot.segments.contains(&name) {
         return missing();

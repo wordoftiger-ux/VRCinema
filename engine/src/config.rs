@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::i18n::Lang;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEncoder {
     Libx264,
@@ -53,6 +55,8 @@ pub struct AppConfig {
     pub font_file: PathBuf,
     pub segment_seconds: u32,
     pub window_size: usize,
+    /// The app's language (`LANGUAGE` of the headless server, default English).
+    pub language: Lang,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +120,17 @@ pub fn load_config(
         ))
     })?;
 
+    let language = match trimmed(env, "LANGUAGE") {
+        None => Lang::En,
+        Some(raw) => Lang::parse(raw).ok_or_else(|| {
+            let allowed: Vec<&str> = Lang::ALL.iter().map(|l| l.as_str()).collect();
+            ConfigError::Invalid(format!(
+                "Nieznany LANGUAGE \"{raw}\". Dozwolone: {}",
+                allowed.join(", ")
+            ))
+        })?,
+    };
+
     let exe = if windows { ".exe" } else { "" };
     let bin_dir = root.join("bin");
 
@@ -171,6 +186,7 @@ pub fn load_config(
         font_file: PathBuf::from(trimmed(env, "FONT_FILE").unwrap_or(default_font(windows))),
         segment_seconds: 4,
         window_size: 10,
+        language,
     })
 }
 
@@ -383,6 +399,32 @@ mod tests {
             e,
             "ADMIN_PASSWORD musi mieć co najmniej 8 znaków i nie może być przykładowym \"zmien-mnie\"."
         );
+    }
+
+    #[test]
+    fn language_is_english_unless_language_says_otherwise() {
+        let c = load_config(&env(&[("ADMIN_PASSWORD", "haslo123")]), &root(), true).unwrap();
+        assert_eq!(c.language, Lang::En);
+        for (raw, lang) in [
+            ("pl", Lang::Pl),
+            (" DE ", Lang::De),
+            ("ja", Lang::Ja),
+            ("", Lang::En),
+        ] {
+            let c = load_config(
+                &env(&[("ADMIN_PASSWORD", "haslo123"), ("LANGUAGE", raw)]),
+                &root(),
+                true,
+            )
+            .unwrap();
+            assert_eq!(c.language, lang, "{raw:?}");
+        }
+        let e = err_text(load_config(
+            &env(&[("ADMIN_PASSWORD", "haslo123"), ("LANGUAGE", "klingon")]),
+            &root(),
+            true,
+        ));
+        assert!(e.contains("LANGUAGE"), "{e}");
     }
 
     #[test]

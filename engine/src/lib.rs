@@ -7,6 +7,7 @@ pub mod db;
 pub mod engine;
 pub mod home;
 pub mod http;
+pub mod i18n;
 pub mod library;
 pub mod live;
 pub mod local_files;

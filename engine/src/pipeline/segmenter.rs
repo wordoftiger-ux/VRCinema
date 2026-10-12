@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::sync::{Notify, watch};
 
+use crate::i18n::Msg;
 use crate::process;
 use crate::stats::parse_speed;
 
@@ -71,7 +72,8 @@ pub fn parse_segment_csv(text: &str) -> Vec<(String, f64)> {
 #[derive(Debug, Clone)]
 struct Snapshot {
     state: SegmenterState,
-    error: Option<String>,
+    /// Why it failed: ffmpeg's last words, else its exit code.
+    error: Option<Msg>,
     /// Set once the child has really exited and been reaped (or never started).
     exited: bool,
 }
@@ -115,7 +117,7 @@ impl ClipSegmenter {
             speed: Arc::new(AtomicU64::new(NO_SPEED)),
         };
         if let Err(e) = std::fs::create_dir_all(&segmenter.out_dir) {
-            segmenter.finish(SegmenterState::Failed, Some(e.to_string()));
+            segmenter.finish(SegmenterState::Failed, Some(output(e)));
             return segmenter;
         }
 
@@ -133,7 +135,7 @@ impl ClipSegmenter {
         let mut child = match process::spawn(&mut command) {
             Ok(child) => child,
             Err(e) => {
-                segmenter.finish(SegmenterState::Failed, Some(e.to_string()));
+                segmenter.finish(SegmenterState::Failed, Some(output(e)));
                 return segmenter;
             }
         };
@@ -158,13 +160,16 @@ impl ClipSegmenter {
             let (state, error) = match exit {
                 Ok(code) if code.success() => (SegmenterState::Done, None),
                 Ok(code) => {
-                    let error = tail.back().cloned().unwrap_or_else(|| {
-                        let code = code.code().map_or_else(|| "?".into(), |c| c.to_string());
-                        format!("ffmpeg zakończył się kodem {code}")
-                    });
+                    let error = tail.back().map_or_else(
+                        || {
+                            let code = code.code().map_or_else(|| "?".into(), |c| c.to_string());
+                            Msg::new("item_errors.ffmpeg_exit").arg("code", code)
+                        },
+                        output,
+                    );
                     (SegmenterState::Failed, Some(error))
                 }
-                Err(e) => (SegmenterState::Failed, Some(e.to_string())),
+                Err(e) => (SegmenterState::Failed, Some(output(e))),
             };
             // A kill() that already moved the state to Killed wins over the exit status.
             status.send_modify(|s| {
@@ -179,7 +184,7 @@ impl ClipSegmenter {
     }
 
     /// Failure before any child exists: terminal state and exit signal at once.
-    fn finish(&self, state: SegmenterState, error: Option<String>) {
+    fn finish(&self, state: SegmenterState, error: Option<Msg>) {
         self.status.send_modify(|s| {
             s.state = state;
             s.error = error;
@@ -207,7 +212,8 @@ impl ClipSegmenter {
         self.status.borrow().state
     }
 
-    pub fn error(&self) -> Option<String> {
+    /// Why ffmpeg failed (for the person: in their language).
+    pub fn error(&self) -> Option<Msg> {
         self.status.borrow().error.clone()
     }
 
@@ -299,6 +305,11 @@ async fn read_progress<R: AsyncRead + Unpin>(progress: R, speed: Arc<AtomicU64>)
 }
 
 /// Keeps the last [`STDERR_TAIL_LINES`] non-empty trimmed stderr lines until EOF.
+/// Words of ffmpeg or the system, shown as they are.
+fn output(text: impl std::fmt::Display) -> Msg {
+    Msg::error("source_message").arg("detail", text)
+}
+
 async fn read_stderr_tail<R: AsyncRead + Unpin>(stderr: Option<R>) -> VecDeque<String> {
     let mut tail = VecDeque::new();
     let Some(stderr) = stderr else {
@@ -399,8 +410,30 @@ mod tests {
             None,
         );
         assert_eq!(seg.state(), SegmenterState::Failed);
-        assert!(seg.error().is_some_and(|e| !e.is_empty()));
+        assert!(seg.error().is_some_and(|e| !e.to_string().is_empty()));
         assert_eq!(seg.wait().await, SegmenterState::Failed);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_silent_failure_names_the_exit_code_in_the_readers_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = std::env::var_os("ComSpec").map_or_else(
+            || PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+            PathBuf::from,
+        );
+        let args = ["/c", "exit 3"].map(OsString::from).to_vec();
+        let seg = ClipSegmenter::start(&cmd, args, dir.path().to_path_buf(), None);
+        assert_eq!(seg.wait().await, SegmenterState::Failed);
+        let error = seg.error().expect("a reason");
+        assert_eq!(
+            error.render(crate::i18n::Lang::Pl),
+            "ffmpeg zakończył się kodem 3"
+        );
+        assert_eq!(
+            error.render(crate::i18n::Lang::En),
+            "ffmpeg ended with code 3"
+        );
     }
 
     #[tokio::test]
@@ -651,7 +684,7 @@ mod tests {
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, dir.path().to_path_buf(), None);
         assert_eq!(seg.wait().await, SegmenterState::Failed);
-        assert!(seg.error().is_some_and(|e| !e.is_empty()));
+        assert!(seg.error().is_some_and(|e| !e.to_string().is_empty()));
     }
 
     /// Review Focus 1: a non-ASCII file name inside a directory whose name contains a space.

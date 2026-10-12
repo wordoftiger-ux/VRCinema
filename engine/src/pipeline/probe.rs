@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::i18n::Msg;
 use crate::pipeline::ffmpeg_args::input_options;
 use crate::process::{ProcessError, run_process};
 use crate::resolver::types::StreamInput;
@@ -26,16 +27,50 @@ pub enum VideoMode {
     Transcode,
 }
 
+/// Why a source could not be analysed; [`ProbeError::message`] says it to a person (`Display`:
+/// in English).
 #[derive(Debug, thiserror::Error)]
 pub enum ProbeError {
-    #[error("Źródło nie zawiera ścieżki wideo.")]
+    #[error("{}", Msg::new(NO_VIDEO))]
     NoVideoStream,
-    #[error("ffprobe: {0}")]
+    /// ffprobe's last words (empty: it said nothing).
+    #[error("{}", failed(.0))]
     Failed(String),
-    #[error("{0}")]
+    #[error("{}", process_failed(.0))]
     Process(#[from] ProcessError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+}
+
+const NO_VIDEO: &str = "item_errors.no_video";
+
+fn failed(reason: &str) -> Msg {
+    if reason.is_empty() {
+        Msg::new("item_errors.probe_failed")
+    } else {
+        Msg::error("source_message").arg("detail", format!("ffprobe: {reason}"))
+    }
+}
+
+fn process_failed(e: &ProcessError) -> Msg {
+    match e {
+        ProcessError::Timeout { secs, cmd } => Msg::error("process_timeout")
+            .arg("seconds", secs)
+            .arg("command", cmd),
+        ProcessError::Io(e) => Msg::error("source_message").arg("detail", e),
+    }
+}
+
+impl ProbeError {
+    /// Why, for a person (kept with a film that failed).
+    pub fn message(&self) -> Msg {
+        match self {
+            Self::NoVideoStream => Msg::new(NO_VIDEO),
+            Self::Failed(reason) => failed(reason),
+            Self::Process(e) => process_failed(e),
+            Self::Json(e) => Msg::error("source_message").arg("detail", e),
+        }
+    }
 }
 
 const COPYABLE_PIX_FMTS: [&str; 2] = ["yuv420p", "yuvj420p"];
@@ -155,7 +190,7 @@ async fn probe_with_timeout(
 ) -> Result<VideoInfo, ProbeError> {
     let video = inputs
         .first()
-        .ok_or_else(|| ProbeError::Failed("brak wejścia".into()))?;
+        .ok_or_else(|| ProbeError::Failed(String::new()))?;
     let mut args: Vec<OsString> = [
         "-v",
         "error",
@@ -179,7 +214,7 @@ async fn probe_with_timeout(
             .lines()
             .next_back()
             .filter(|l| !l.is_empty())
-            .unwrap_or("nie udało się odczytać źródła");
+            .unwrap_or_default();
         return Err(ProbeError::Failed(last.to_string()));
     }
     let info = parse_probe_output(&serde_json::from_str(&res.stdout)?)?;
@@ -286,8 +321,36 @@ mod tests {
     fn errors_when_there_is_no_video() {
         let err = parse_probe_output(&json!({"streams": [{"codec_type": "audio"}], "format": {}}))
             .unwrap_err();
-        assert!(err.to_string().contains("wideo"), "{err}");
-        assert_eq!(err.to_string(), "Źródło nie zawiera ścieżki wideo.");
+        assert_eq!(
+            err.message().render(crate::i18n::Lang::Pl),
+            "Źródło nie zawiera ścieżki wideo."
+        );
+        assert_eq!(err.to_string(), "The source has no video track.");
+    }
+
+    #[test]
+    fn failures_say_why_in_the_readers_language() {
+        use crate::i18n::Lang;
+        let silent = ProbeError::Failed(String::new());
+        assert_eq!(
+            silent.message().render(Lang::Pl),
+            "ffprobe: nie udało się odczytać źródła"
+        );
+        assert_eq!(silent.to_string(), "ffprobe: could not read the source");
+        let said = ProbeError::Failed("Invalid data found when processing input".into());
+        assert_eq!(
+            said.message().render(Lang::Pl),
+            "ffprobe: Invalid data found when processing input"
+        );
+        let slow = ProbeError::Process(ProcessError::Timeout {
+            secs: 45,
+            cmd: "ffprobe".into(),
+        });
+        assert_eq!(
+            slow.message().render(Lang::Pl),
+            "Przekroczono limit czasu (45 s): ffprobe"
+        );
+        assert_eq!(slow.to_string(), "Time limit exceeded (45 s): ffprobe");
     }
 
     #[test]

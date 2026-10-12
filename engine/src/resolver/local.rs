@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{MediaMeta, MediaResolver, ProbeFuture, ResolveError, ResolvedStream, StreamInput};
+use crate::i18n::Msg;
 use crate::library::{MediaLibrary, parse_source_url};
 
 /// Duration probe for a local file.
@@ -32,17 +33,15 @@ impl LocalResolver {
     }
 
     fn file(&self, url: &str) -> Result<PathBuf, ResolveError> {
-        let (root, rel) = parse_source_url(url)
-            .ok_or_else(|| ResolveError::new("Niepoprawny adres pliku z dysku."))?;
+        let (root, rel) =
+            parse_source_url(url).ok_or_else(|| ResolveError::coded("invalid_disk_file_url"))?;
         let full = self.library.resolve(root, &rel)?;
         if !std::fs::metadata(&full).is_ok_and(|m| m.is_file()) {
             let name = full
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            return Err(ResolveError::new(format!(
-                "To nie jest plikiem wideo: {name}"
-            )));
+            return Err(Msg::error("local_not_a_video").arg("name", name).into());
         }
         Ok(full)
     }
@@ -150,7 +149,10 @@ mod tests {
         let f = fixture();
         let url = f.lib.to_source_url(0, "Sezon 1/Usunięty.mkv");
         let e = resolver(&f).resolve(&url).await.unwrap_err();
-        assert_eq!(e.to_string(), "Plik nie istnieje: Usunięty.mkv");
+        assert_eq!(
+            e.0.render(crate::i18n::Lang::Pl),
+            "Plik nie istnieje: Usunięty.mkv"
+        );
     }
 
     #[tokio::test]
@@ -158,7 +160,10 @@ mod tests {
         let f = fixture();
         let url = f.lib.to_source_url(0, "Sezon 1");
         let e = resolver(&f).resolve(&url).await.unwrap_err();
-        assert_eq!(e.to_string(), "To nie jest plikiem wideo: Sezon 1");
+        assert_eq!(
+            e.0.render(crate::i18n::Lang::Pl),
+            "To nie jest plikiem wideo: Sezon 1"
+        );
         assert!(resolver(&f).fetch_meta(&url).await.is_err());
     }
 
@@ -166,6 +171,9 @@ mod tests {
     async fn malformed_source_url_is_an_error() {
         let f = fixture();
         let e = resolver(&f).resolve("local:x/abc").await.unwrap_err();
-        assert_eq!(e.to_string(), "Niepoprawny adres pliku z dysku.");
+        assert_eq!(
+            e.0.render(crate::i18n::Lang::Pl),
+            "Niepoprawny adres pliku z dysku."
+        );
     }
 }

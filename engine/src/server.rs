@@ -301,6 +301,7 @@ async fn start_channel_loop(
         connecting,
         segment_seconds: config.segment_seconds,
         generation: 0,
+        lang: config.language,
     })
     .await?;
 
@@ -310,6 +311,7 @@ async fn start_channel_loop(
         let config = config.clone();
         let shared_log = Arc::clone(shared_log);
         let encoder = live.encoder.clone();
+        let language = live.language.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -325,6 +327,7 @@ async fn start_channel_loop(
                 db: Arc::clone(&db),
                 channel_id: MAIN_CHANNEL_ID,
                 log: Some(Arc::clone(&shared_log)),
+                language: language.clone(),
             });
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -333,6 +336,7 @@ async fn start_channel_loop(
                 slates.clone(),
             );
             options.log = Some(boxed_log());
+            options.language = language.clone();
             let tags_db = Arc::clone(&db);
             let broadcaster = Broadcaster::new(
                 BroadcasterOptions {
@@ -673,11 +677,17 @@ mod tests {
     }
 
     fn test_config(data: &Path, port: u16) -> AppConfig {
+        test_config_with(data, port, &[])
+    }
+
+    /// [`test_config`] with more `.env` entries.
+    fn test_config_with(data: &Path, port: u16, more: &[(&str, &str)]) -> AppConfig {
         let env: std::collections::HashMap<String, String> = [
             ("ADMIN_PASSWORD", "haslo-testowe-123"),
             ("DATA_DIR", data.to_str().unwrap()),
         ]
         .into_iter()
+        .chain(more.iter().copied())
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
         let mut config = crate::config::load_config(&env, &repo_root(), cfg!(windows)).unwrap();
@@ -764,6 +774,53 @@ mod tests {
             "the injected log is used: {lines:?}"
         );
         assert!(!lines.iter().any(|l| l.contains("Generowanie plansz")));
+    }
+
+    #[tokio::test]
+    async fn a_headless_server_answers_in_english_unless_language_says_otherwise() {
+        for (more, expected) in [
+            (
+                &[][..],
+                "That does not look like a valid link (http/https).",
+            ),
+            (
+                &[("LANGUAGE", "pl")][..],
+                "To nie wygląda na poprawny link (http/https).",
+            ),
+        ] {
+            let (tmp, data, _markers) = data_with_markers();
+            let config = test_config_with(&data, 0, more);
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            let opts = RunOptions {
+                ready: Some(ready_tx),
+                log: Some(capture_log().0),
+                start_channel: false,
+                ..test_opts(tmp.path())
+            };
+            let server = tokio::spawn(run(config, opts, async {
+                let _ = stop_rx.await;
+            }));
+            let addr = tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx)
+                .await
+                .expect("server did not start in 10 s")
+                .unwrap();
+            let res = reqwest::Client::new()
+                .post(format!("http://{addr}/api/channels/main/requests"))
+                .json(&serde_json::json!({"url": "nie link"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status().as_u16(), 400);
+            let body: serde_json::Value = res.json().await.unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"error": expected, "code": "invalid_link"}),
+                "{more:?}"
+            );
+            stop_tx.send(()).unwrap();
+            server.await.unwrap().unwrap();
+        }
     }
 
     #[tokio::test]

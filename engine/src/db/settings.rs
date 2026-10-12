@@ -4,6 +4,8 @@ use rusqlite::{Connection, params};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::i18n::Msg;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSettings {
@@ -72,8 +74,8 @@ fn normalize_domain(v: &str) -> String {
     s.to_string()
 }
 
-fn expect_list(key: &str, value: &Value) -> Result<Vec<String>, String> {
-    let err = || format!("{key}: oczekiwano listy");
+fn expect_list(key: &str, value: &Value) -> Result<Vec<String>, Msg> {
+    let err = || Msg::error("setting_not_list").arg("key", key);
     let arr = value.as_array().ok_or_else(err)?;
     let mut out = Vec::new();
     for v in arr {
@@ -86,30 +88,30 @@ fn expect_list(key: &str, value: &Value) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-fn expect_number(key: &str, value: &Value) -> Result<f64, String> {
+fn expect_number(key: &str, value: &Value) -> Result<f64, Msg> {
     value
         .as_f64()
         .filter(|n| n.is_finite() && *n >= 0.0)
-        .ok_or_else(|| format!("{key}: oczekiwano liczby ≥ 0"))
+        .ok_or_else(|| Msg::error("setting_not_number").arg("key", key))
 }
 
-fn expect_bool(key: &str, value: &Value) -> Result<bool, String> {
+fn expect_bool(key: &str, value: &Value) -> Result<bool, Msg> {
     value
         .as_bool()
-        .ok_or_else(|| format!("{key}: oczekiwano true/false"))
+        .ok_or_else(|| Msg::error("setting_not_boolean").arg("key", key))
 }
 
 /// Validates and normalises a partial settings object (e.g. from the admin
-/// panel). Mirrors the TS `sanitizeSettingsPatch`; errors are the Polish
-/// messages shown to the admin. Keys are processed in input order, so the first
+/// panel). Mirrors the TS `sanitizeSettingsPatch`; errors are the messages
+/// shown to the admin. Keys are processed in input order, so the first
 /// invalid one is reported.
 ///
 /// Count/window settings are stored as integers (`u32`/`u64`); a fractional
 /// value is truncated toward zero.
-pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, String> {
+pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
     let obj = patch
         .as_object()
-        .ok_or_else(|| "oczekiwano obiektu z ustawieniami".to_string())?;
+        .ok_or_else(|| Msg::error("settings_not_object"))?;
     let mut out = SettingsPatch::default();
     for (key, value) in obj {
         match key.as_str() {
@@ -128,7 +130,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, String> {
             "moderation" => out.moderation = Some(expect_bool(key, value)?),
             "forceTranscode" => out.force_transcode = Some(expect_bool(key, value)?),
             "discontinuityTags" => out.discontinuity_tags = Some(expect_bool(key, value)?),
-            _ => return Err(format!("Nieznane ustawienie: {key}")),
+            _ => return Err(Msg::error("unknown_setting").arg("key", key)),
         }
     }
     Ok(out)

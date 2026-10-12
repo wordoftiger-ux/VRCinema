@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream, StreamInput};
+use crate::i18n::Msg;
 use crate::live::LiveValue;
 use crate::process::{ProcessError, ProcessOutput, run_process};
 
@@ -109,7 +110,7 @@ pub fn parse_ytdlp_meta(j: &Value) -> MediaMeta {
 }
 
 pub fn parse_ytdlp_resolve(j: &Value) -> Result<ResolvedStream, ResolveError> {
-    let no_url = || ResolveError::new("yt-dlp nie zwrócił adresu strumienia.");
+    let no_url = || ResolveError::coded("ytdlp_no_stream");
     let formats = j
         .get("requested_formats")
         .and_then(Value::as_array)
@@ -141,15 +142,26 @@ pub fn parse_ytdlp_resolve(j: &Value) -> Result<ResolvedStream, ResolveError> {
     })
 }
 
-/// Extracts the last `ERROR:` line from yt-dlp's output.
-pub fn ytdlp_error_message(stderr: &str) -> String {
+/// The last `ERROR:` line of yt-dlp's output (else its last line) as the reason.
+pub fn ytdlp_error_message(stderr: &str) -> ResolveError {
     let last_error = stderr.lines().rfind(|l| l.starts_with("ERROR:"));
     if let Some(line) = last_error {
-        return line["ERROR:".len()..].trim().to_string();
+        return ResolveError::new(line["ERROR:".len()..].trim());
     }
     match stderr.trim().lines().next_back() {
-        Some(line) if !line.is_empty() => line.to_string(),
-        _ => "Nieznany błąd yt-dlp".to_string(),
+        Some(line) if !line.is_empty() => ResolveError::new(line),
+        _ => ResolveError::coded("ytdlp_unknown"),
+    }
+}
+
+/// Why yt-dlp could not run (or ran too long).
+fn process_error(e: ProcessError) -> ResolveError {
+    match e {
+        ProcessError::Timeout { secs, cmd } => Msg::error("process_timeout")
+            .arg("seconds", secs)
+            .arg("command", cmd)
+            .into(),
+        ProcessError::Io(e) => ResolveError::new(e.to_string()),
     }
 }
 
@@ -211,12 +223,11 @@ impl YtDlpResolver {
             .runner
             .run(&self.path, &args, self.timeout)
             .await
-            .map_err(|e| ResolveError::new(e.to_string()))?;
+            .map_err(process_error)?;
         if out.code != Some(0) {
-            return Err(ResolveError::new(ytdlp_error_message(&out.stderr)));
+            return Err(ytdlp_error_message(&out.stderr));
         }
-        serde_json::from_str(&out.stdout)
-            .map_err(|_| ResolveError::new("yt-dlp zwrócił niepoprawne dane."))
+        serde_json::from_str(&out.stdout).map_err(|_| ResolveError::coded("ytdlp_bad_data"))
     }
 }
 
@@ -239,6 +250,7 @@ impl MediaResolver for YtDlpResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -344,20 +356,24 @@ mod tests {
     #[test]
     fn resolve_without_url_is_an_error() {
         let e = parse_ytdlp_resolve(&json!({"title": "x"})).unwrap_err();
-        assert_eq!(e.to_string(), "yt-dlp nie zwrócił adresu strumienia.");
+        assert_eq!(
+            e.0.render(Lang::Pl),
+            "yt-dlp nie zwrócił adresu strumienia."
+        );
         let e = parse_ytdlp_resolve(&json!({"requested_formats": [{"format_id": "1"}]}));
         assert!(e.is_err());
     }
 
     #[test]
     fn error_message_extraction() {
+        let polish = |stderr: &str| ytdlp_error_message(stderr).0.render(Lang::Pl);
         assert_eq!(
-            ytdlp_error_message("WARNING: a\nERROR: [youtube] abc: Video unavailable\n"),
+            polish("WARNING: a\nERROR: [youtube] abc: Video unavailable\n"),
             "[youtube] abc: Video unavailable"
         );
-        assert_eq!(ytdlp_error_message("cos innego"), "cos innego");
-        assert_eq!(ytdlp_error_message(""), "Nieznany błąd yt-dlp");
-        assert_eq!(ytdlp_error_message("ERROR: one\r\nERROR: two\r\n"), "two");
+        assert_eq!(polish("cos innego"), "cos innego");
+        assert_eq!(polish(""), "Nieznany błąd yt-dlp");
+        assert_eq!(polish("ERROR: one\r\nERROR: two\r\n"), "two");
     }
 
     type Calls = Arc<Mutex<Vec<(PathBuf, Vec<String>, Duration)>>>;
@@ -485,21 +501,24 @@ mod tests {
             stderr: "ERROR: Unsupported URL: https://x".into(),
         }));
         let e = r.fetch_meta("https://x").await.unwrap_err();
-        assert_eq!(e.to_string(), "Unsupported URL: https://x");
+        assert_eq!(e.0.render(Lang::Pl), "Unsupported URL: https://x");
     }
 
     #[tokio::test]
     async fn invalid_json_and_timeout_are_errors() {
         let (r, _) = resolver(ok("nie json".into()));
         let e = r.fetch_meta("https://x").await.unwrap_err();
-        assert_eq!(e.to_string(), "yt-dlp zwrócił niepoprawne dane.");
+        assert_eq!(e.0.render(Lang::Pl), "yt-dlp zwrócił niepoprawne dane.");
 
         let (r, _) = resolver(Err(ProcessError::Timeout {
             secs: 60,
             cmd: "yt-dlp".into(),
         }));
         let e = r.resolve("https://x").await.unwrap_err();
-        assert_eq!(e.to_string(), "Przekroczono limit czasu (60 s): yt-dlp");
+        assert_eq!(
+            e.0.render(Lang::Pl),
+            "Przekroczono limit czasu (60 s): yt-dlp"
+        );
     }
 
     #[test]

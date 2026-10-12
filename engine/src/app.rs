@@ -22,6 +22,7 @@ use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
 use crate::http::AppState;
 use crate::http::auth::{AdminAuth, DesktopKey};
+use crate::i18n::Msg;
 use crate::live::LiveSettings;
 use crate::local_files::{AddReport, add_local_files};
 use crate::logging::LogSink;
@@ -232,12 +233,17 @@ impl ConfigPatch {
 /// What failed in a desktop operation, for the HTTP answer.
 #[derive(Debug)]
 pub(crate) enum OpError {
-    /// 400 with this message.
-    Invalid(String),
+    /// 400 with this message (an `errors.` one).
+    Invalid(Msg),
     /// 409 with this message.
-    Conflict(String),
+    Conflict(Msg),
     /// 500 with this message (shown to the owner in the window).
-    Failed(String),
+    Failed(Msg),
+}
+
+/// `errors.<code>` with `detail` (an error from outside: the system, a server).
+fn failure(code: &'static str, detail: impl std::fmt::Display) -> Msg {
+    Msg::error(code).arg("detail", detail)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -404,13 +410,20 @@ impl AppCore {
         let mut new = old.clone();
         f(&mut new);
         new.save(&self.home).map_err(|e| {
-            anyhow!(
-                "Nie można zapisać ustawień w {}: {e}",
+            anyhow::Error::new(e).context(format!(
+                "Nie można zapisać ustawień w {}",
                 self.home.join(CONFIG_FILE).display()
-            )
+            ))
         })?;
         *guard = new.clone();
         Ok((old, new))
+    }
+
+    /// The message of a failed [`Self::update_settings`] (the cause: the system's error).
+    pub(crate) fn save_failed(&self, e: &anyhow::Error) -> Msg {
+        Msg::error("settings_save_failed")
+            .arg("path", self.home.join(CONFIG_FILE).display())
+            .arg("detail", e.root_cause())
     }
 
     fn tools_present(config: &AppConfig) -> bool {
@@ -654,9 +667,7 @@ impl AppCore {
             && current.admin_password_hash.is_none()
             && patch.password.is_none()
         {
-            return Err(OpError::Invalid(
-                "Najpierw ustaw hasło panelu zdalnego.".into(),
-            ));
+            return Err(OpError::Invalid(Msg::error("password_first")));
         }
         // The named mode needs the permanent link its wizard set up (a start-up without its
         // files still falls back to the quick tunnel with a warning).
@@ -668,15 +679,13 @@ impl AppCore {
             )
             .is_none()
         {
-            return Err(OpError::Conflict(
-                "Najpierw ustaw stały link (Ustawienia → Internet → Ustaw stały link).".into(),
-            ));
+            return Err(OpError::Conflict(Msg::error("named_link_first")));
         }
         let password_hash = match patch.password.clone() {
             Some(password) => Some(
                 tokio::task::spawn_blocking(move || crate::http::auth::hash_password(&password))
                     .await
-                    .map_err(|e| OpError::Failed(format!("Nie udało się zapisać hasła: {e}")))?,
+                    .map_err(|e| OpError::Failed(failure("password_save_failed", e)))?,
             ),
             None => None,
         };
@@ -688,11 +697,11 @@ impl AppCore {
                 .await
                 .map_err(|e| anyhow!("{e}"))
                 .and_then(|r| r)
-                .map_err(|e| OpError::Failed(format!("Nie udało się zmienić autostartu: {e:#}")))?;
+                .map_err(|e| OpError::Failed(failure("autostart_failed", format!("{e:#}"))))?;
         }
         let (old, new) = self
             .update_settings(|s| patch.apply(s, password_hash))
-            .map_err(|e| OpError::Failed(format!("{e:#}")))?;
+            .map_err(|e| OpError::Failed(self.save_failed(&e)))?;
         self.apply_live();
         if !needs_restart(&old, &new) {
             // Switched on or off, another mode: the tunnel follows (an unchanged one is left
@@ -713,10 +722,8 @@ impl AppCore {
                 }
             });
             return Err(OpError::Failed(match self.restart_server().await {
-                Ok(()) => format!(
-                    "Nie udało się uruchomić serwera z nowymi ustawieniami ({e:#}). Przywrócono poprzednie."
-                ),
-                Err(again) => format!("Nie udało się uruchomić serwera: {again:#}"),
+                Ok(()) => failure("restart_reverted", format!("{e:#}")),
+                Err(again) => failure("server_start_failed", format!("{again:#}")),
             }));
         }
         Ok(true)
@@ -807,7 +814,7 @@ impl AppCore {
         let _guard = self.settings_change.lock().await;
         self.update_settings(|s| s.first_run_completed = true)
             .map(|_| ())
-            .map_err(|e| OpError::Failed(format!("{e:#}")))
+            .map_err(|e| OpError::Failed(self.save_failed(&e)))
     }
 
     /// Tests the hardware encoders with the installed ffmpeg and saves the result; the next
@@ -815,15 +822,13 @@ impl AppCore {
     pub(crate) async fn detect_encoder(self: &Arc<Self>) -> Result<VideoEncoder, OpError> {
         let ffmpeg = app_config(&self.settings(), &self.home).ffmpeg_path;
         if !ffmpeg.is_file() {
-            return Err(OpError::Conflict(
-                "Brak ffmpeg — najpierw pobierz narzędzia.".into(),
-            ));
+            return Err(OpError::Conflict(Msg::error("ffmpeg_missing")));
         }
         let found = crate::tools::detect_encoder(&ffmpeg).await;
         self.log(&format!("Test karty graficznej: {}", found.as_str()));
         let _guard = self.settings_change.lock().await;
         self.update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
-            .map_err(|e| OpError::Failed(format!("{e:#}")))?;
+            .map_err(|e| OpError::Failed(self.save_failed(&e)))?;
         // The next clip uses it; the stream is never interrupted for this.
         self.apply_live();
         Ok(found)
@@ -842,18 +847,20 @@ impl AppCore {
             .is_some_and(|h| !h.is_finished())
     }
 
-    /// Starts a tools job in the background; refused (why, in Polish) while one is already
+    /// Starts a tools job in the background; refused (why) while one is already
     /// running, or — for a job that replaces cloudflared — while the permanent-link wizard runs
     /// cloudflared (which in turn refuses its operations until the job is done).
-    pub(crate) fn start_tools_job(self: &Arc<Self>, job: ToolsJob) -> Result<(), &'static str> {
+    pub(crate) fn start_tools_job(self: &Arc<Self>, job: ToolsJob) -> Result<(), Msg> {
         let mut slot = lock(&self.tools_job);
         if slot.as_ref().is_some_and(|h| !h.is_finished()) {
-            return Err("Trwa już pobieranie narzędzi.");
+            return Err(Msg::error("tools_running"));
         }
         let wizard_hold = if Self::replaces_cloudflared(job) {
-            Some(self.named.hold_for_tools().ok_or(
-                "Trwa operacja stałego linku (logowanie do Cloudflare lub ustawianie adresu) — spróbuj ponownie, gdy się skończy.",
-            )?)
+            Some(
+                self.named
+                    .hold_for_tools()
+                    .ok_or_else(|| Msg::error("named_operation_running"))?,
+            )
         } else {
             None
         };
@@ -961,20 +968,19 @@ impl AppCore {
     /// Downloads and installs the offered release, then asks the shell to restart.
     pub(crate) async fn apply_update(&self) -> Result<Version, OpError> {
         let Ok(_guard) = self.applying_update.try_lock() else {
-            return Err(OpError::Conflict("Aktualizacja już trwa.".into()));
+            return Err(OpError::Conflict(Msg::error("update_running")));
         };
         let release = self
             .offered_update()
-            .ok_or_else(|| OpError::Conflict("Brak dostępnej aktualizacji.".into()))?;
-        let exe = self.hooks.exe_path().ok_or_else(|| {
-            OpError::Conflict("Aktualizacja nie jest dostępna w tej wersji programu.".into())
-        })?;
+            .ok_or_else(|| OpError::Conflict(Msg::error("no_update")))?;
+        let exe = self
+            .hooks
+            .exe_path()
+            .ok_or_else(|| OpError::Conflict(Msg::error("update_unavailable")))?;
         self.log(&format!("Instalowanie wersji {}...", release.version));
         if let Err(e) = self_update::apply(&release, &exe, &self.http).await {
             self.log(&format!("Aktualizacja nie powiodła się: {e:#}"));
-            return Err(OpError::Failed(format!(
-                "Aktualizacja nie powiodła się: {e:#}"
-            )));
+            return Err(OpError::Failed(failure("update_failed", format!("{e:#}"))));
         }
         self.log(&format!(
             "Zainstalowano wersję {}; ponowne uruchamianie programu.",

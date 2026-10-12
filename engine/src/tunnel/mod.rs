@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 
+use crate::i18n::Msg;
 use crate::pipeline::clip_factory::SharedLogFn;
 use process::{Cloudflared, Metrics};
 use state::Backoff;
@@ -395,7 +396,7 @@ struct Failure {
     /// For the log.
     reason: String,
     /// Shown as `TunnelState::Error` during the wait.
-    error: Option<String>,
+    error: Option<Msg>,
     rate_limited: bool,
     /// The longest stretch of continuous `Online` in this run; time `Reconnecting` while the
     /// process was alive does not count. At least `stable_after` resets the backoff.
@@ -475,9 +476,7 @@ impl Supervisor {
             ));
             let shown = if failure.rate_limited {
                 TunnelState::Error {
-                    message: format!(
-                        "Cloudflare chwilowo odmawia nowych szybkich tuneli (zbyt wiele prób). Ponowna próba za {seconds} s."
-                    ),
+                    message: Msg::new("tunnel.rate_limited").arg("seconds", seconds),
                 }
             } else if let Some(message) = failure.error {
                 TunnelState::Error { message }
@@ -502,8 +501,8 @@ impl Supervisor {
         let mut cloudflared = match Cloudflared::spawn(config) {
             Ok(process) => process,
             Err(e) => {
-                let message = format!("Nie można uruchomić cloudflared: {e}");
-                let mut failure = Failure::new(message.clone());
+                let message = Msg::error("cloudflared_start").arg("detail", &e);
+                let mut failure = Failure::new(format!("Nie można uruchomić cloudflared: {e}"));
                 failure.error = Some(message);
                 return Outcome::Failed(failure);
             }

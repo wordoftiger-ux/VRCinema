@@ -23,12 +23,13 @@ use super::auth::{
     remote_session_secret, session_cookie, session_kind, verify_password, verify_session_token,
 };
 use super::client_ip::{Trust, get_client_ip, is_https};
-use super::{AppState, DesktopSession, HttpConfig, build_router};
+use super::{AppState, DesktopSession, HttpConfig, build_router, request_lang};
 use crate::db::{
     AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueItem, QueueRepo, SettingsPatch,
     SettingsRepo, open_database,
 };
 use crate::engine::{Command, EngineHandle, Snapshot};
+use crate::i18n::Lang;
 use crate::library::MediaLibrary;
 use crate::pipeline::channel::{
     ChannelState, ChannelStatus, ControlState, NowPlaying, PauseReason,
@@ -81,6 +82,8 @@ fn config() -> HttpConfig {
         public_url: String::new(),
         trust_cloudflare: false,
         trust_proxy: false,
+        // The tests below read the Polish texts.
+        language: Lang::Pl,
     }
 }
 
@@ -445,7 +448,10 @@ async fn known_segment_is_served_unknown_is_404() {
     assert_eq!(ok.body.len(), 188);
     let missing = h.send(get("/live/main/6.ts")).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
-    assert_eq!(missing.json(), json!({"error": "Brak fragmentu"}));
+    assert_eq!(
+        missing.json(),
+        json!({"error": "Brak fragmentu", "code": "no_segment"})
+    );
     let traversal = h.send(get("/live/main/..%2F..%2Fpackage.json")).await;
     assert_eq!(traversal.status, StatusCode::NOT_FOUND);
 }
@@ -604,6 +610,122 @@ async fn invalid_link_is_400() {
         .send(call("POST", "/api/channels/main/requests").json(json!({"url": 5})))
         .await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
+}
+
+const INVALID_LINK_EN: &str = "That does not look like a valid link (http/https).";
+const INVALID_LINK_PL: &str = "To nie wygląda na poprawny link (http/https).";
+
+fn english_config() -> HttpConfig {
+    HttpConfig {
+        language: Lang::En,
+        ..config()
+    }
+}
+
+fn bad_request_call() -> Call {
+    call("POST", "/api/channels/main/requests").json(json!({"url": "to nie link"}))
+}
+
+#[tokio::test]
+async fn errors_have_a_code_and_are_in_the_apps_language_by_default() {
+    let h = Harness::with_config(english_config());
+    let res = h.send(bad_request_call()).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res.json(),
+        json!({"error": INVALID_LINK_EN, "code": "invalid_link"})
+    );
+    let res = h.send(get("/api/admin/channels/main")).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        res.json(),
+        json!({"error": "Log in.", "code": "login_required"})
+    );
+    // Errors of the body extractor too.
+    let res = h
+        .send(call("POST", "/api/channels/main/requests").raw("application/json", b"{x"))
+        .await;
+    assert_eq!(res.json()["code"], "invalid_json");
+
+    let h = Harness::new();
+    let res = h.send(bad_request_call()).await;
+    assert_eq!(
+        res.json(),
+        json!({"error": INVALID_LINK_PL, "code": "invalid_link"})
+    );
+}
+
+#[tokio::test]
+async fn the_request_picks_the_language_by_header_then_accept_language() {
+    let h = Harness::with_config(english_config());
+    let error = |c: Call| {
+        let h = &h;
+        async move { h.send(c).await.error() }
+    };
+    assert_eq!(
+        error(bad_request_call().header("x-vrcinema-lang", "pl")).await,
+        INVALID_LINK_PL
+    );
+    assert_eq!(
+        error(bad_request_call().header("accept-language", "pl-PL,pl;q=0.9,en;q=0.8")).await,
+        INVALID_LINK_PL
+    );
+    // The header wins over Accept-Language; an unknown header value does not count.
+    assert_eq!(
+        error(
+            bad_request_call()
+                .header("x-vrcinema-lang", "en")
+                .header("accept-language", "pl")
+        )
+        .await,
+        INVALID_LINK_EN
+    );
+    assert_eq!(
+        error(
+            bad_request_call()
+                .header("x-vrcinema-lang", "xx")
+                .header("accept-language", "pl")
+        )
+        .await,
+        INVALID_LINK_PL
+    );
+    // Nothing supported: the app's language.
+    assert_eq!(
+        error(bad_request_call().header("accept-language", "zh-CN,*")).await,
+        INVALID_LINK_EN
+    );
+    let polish_app = Harness::new();
+    assert_eq!(
+        polish_app
+            .send(bad_request_call().header("accept-language", "zh"))
+            .await
+            .error(),
+        INVALID_LINK_PL
+    );
+}
+
+#[test]
+fn request_lang_takes_the_header_then_accept_language_then_the_app() {
+    let headers = |pairs: &[(&'static str, &str)]| {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    };
+    assert_eq!(
+        request_lang(&headers(&[("x-vrcinema-lang", "de")]), Lang::Pl),
+        Lang::De
+    );
+    assert_eq!(
+        request_lang(&headers(&[("accept-language", "de-DE,de;q=0.9")]), Lang::Pl),
+        Lang::De
+    );
+    assert_eq!(
+        request_lang(&headers(&[("accept-language", "zh")]), Lang::Pl),
+        Lang::Pl
+    );
+    assert_eq!(request_lang(&headers(&[]), Lang::Ja), Lang::Ja);
 }
 
 #[tokio::test]
@@ -834,7 +956,10 @@ async fn without_a_session_the_admin_api_is_401() {
     let mut h = Harness::new();
     let res = h.send(get("/api/admin/channels/main")).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(res.json(), json!({"error": "Zaloguj się."}));
+    assert_eq!(
+        res.json(),
+        json!({"error": "Zaloguj się.", "code": "login_required"})
+    );
     let res = h.send(call("POST", "/api/admin/channels/main/skip")).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED);
     assert!(h.commands().is_empty());
@@ -857,7 +982,10 @@ async fn wrong_password_is_401_and_after_5_attempts_429() {
             .send(call("POST", "/api/admin/login").json(json!({"password": "x"})))
             .await;
         assert_eq!(res.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(res.json(), json!({"error": "Złe hasło."}));
+        assert_eq!(
+            res.json(),
+            json!({"error": "Złe hasło.", "code": "wrong_password"})
+        );
     }
     let blocked = h
         .send(call("POST", "/api/admin/login").json(json!({"password": "tajne"})))

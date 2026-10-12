@@ -16,14 +16,29 @@ use async_trait::async_trait;
 
 pub use types::{MediaMeta, PlaylistEntry, ResolvedStream, StreamInput};
 
-/// Resolver failure; the `Display` text is the user-facing (Polish) message and nothing else.
+use crate::i18n::Msg;
+
+/// Resolver failure: the message for the person (an `errors.` one, rendered in their
+/// language; `Display`: English).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct ResolveError(pub String);
+pub struct ResolveError(pub Msg);
 
 impl ResolveError {
+    /// A message from outside the program (yt-dlp, a server), shown as it is.
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self(Msg::error("source_message").arg("detail", message.into()))
+    }
+
+    /// The message `errors.<code>`.
+    pub fn coded(code: &'static str) -> Self {
+        Self(Msg::error(code))
+    }
+}
+
+impl From<Msg> for ResolveError {
+    fn from(msg: Msg) -> Self {
+        Self(msg)
     }
 }
 
@@ -75,9 +90,7 @@ impl CompositeResolver {
         if url.starts_with("local:") {
             return match &self.local {
                 Some(local) => Ok(local.as_ref()),
-                None => Err(ResolveError::new(
-                    "Pliki z dysku są wyłączone (brak MEDIA_DIRS w .env).",
-                )),
+                None => Err(ResolveError::coded("local_files_disabled")),
             };
         }
         if url
@@ -86,11 +99,11 @@ impl CompositeResolver {
         {
             return match &self.file {
                 Some(file) => Ok(file.as_ref()),
-                None => Err(ResolveError::new("Pliki z pełną ścieżką są niedostępne.")),
+                None => Err(ResolveError::coded("file_paths_unavailable")),
             };
         }
         let parsed = url::Url::parse(url)
-            .map_err(|_| ResolveError::new(format!("Niepoprawny adres URL: {url}")))?;
+            .map_err(|_| ResolveError(Msg::error("invalid_url").arg("url", url)))?;
         Ok(if pixeldrain::is_pixeldrain_host(&parsed) {
             self.pixeldrain.as_ref()
         } else {
@@ -168,7 +181,12 @@ mod tests {
     #[tokio::test]
     async fn local_without_libraries_is_rejected() {
         let c = CompositeResolver::new(tag("pd"), tag("yt"), None);
-        let msg = c.fetch_meta("local:0/a.mp4").await.unwrap_err().to_string();
+        let msg = c
+            .fetch_meta("local:0/a.mp4")
+            .await
+            .unwrap_err()
+            .0
+            .render(crate::i18n::Lang::Pl);
         assert_eq!(msg, "Pliki z dysku są wyłączone (brak MEDIA_DIRS w .env).");
         assert!(c.resolve("local:0/a.mp4").await.is_err());
     }

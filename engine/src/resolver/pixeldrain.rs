@@ -7,6 +7,7 @@ use base64::Engine as _;
 use serde_json::Value;
 use url::Url;
 
+use crate::i18n::Msg;
 use crate::live::LiveValue;
 
 use super::{
@@ -65,7 +66,11 @@ pub struct HttpResponse {
 /// The error string is a user-facing description of the transport failure.
 #[async_trait]
 pub trait HttpGet: Send + Sync {
-    async fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, String>;
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<HttpResponse, ResolveError>;
 }
 
 /// reqwest (rustls) implementation with a 20 s timeout.
@@ -83,7 +88,11 @@ impl ReqwestHttp {
 
 #[async_trait]
 impl HttpGet for ReqwestHttp {
-    async fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, String> {
+    async fn get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+    ) -> Result<HttpResponse, ResolveError> {
         let mut request = self.client.get(url);
         for (k, v) in headers {
             request = request.header(k.as_str(), v.as_str());
@@ -91,12 +100,12 @@ impl HttpGet for ReqwestHttp {
         let response = request
             .send()
             .await
-            .map_err(|e| format!("pixeldrain: błąd połączenia ({e})."))?;
+            .map_err(|e| ResolveError(Msg::error("pixeldrain_connection").arg("detail", e)))?;
         let status = response.status().as_u16();
         let body = response
             .text()
             .await
-            .map_err(|e| format!("pixeldrain: błąd odczytu odpowiedzi ({e})."))?;
+            .map_err(|e| ResolveError(Msg::error("pixeldrain_read").arg("detail", e)))?;
         Ok(HttpResponse { status, body })
     }
 }
@@ -166,28 +175,20 @@ impl PixeldrainResolver {
     }
 
     async fn get_json(&self, url: &str) -> Result<Value, ResolveError> {
-        let res = self
-            .http
-            .get(url, &self.headers())
-            .await
-            .map_err(ResolveError)?;
+        let res = self.http.get(url, &self.headers()).await?;
         if !(200..300).contains(&res.status) {
-            return Err(ResolveError::new(format!(
-                "pixeldrain: plik niedostępny (HTTP {}).",
-                res.status
-            )));
+            return Err(Msg::error("pixeldrain_unavailable")
+                .arg("status", res.status)
+                .into());
         }
-        serde_json::from_str(&res.body)
-            .map_err(|_| ResolveError::new("pixeldrain: niepoprawna odpowiedź serwera."))
+        serde_json::from_str(&res.body).map_err(|_| ResolveError::coded("pixeldrain_bad_answer"))
     }
 
     fn parse(url: &str) -> Result<(PixeldrainKind, String), ResolveError> {
         Url::parse(url)
             .ok()
             .and_then(|u| parse_pixeldrain_url(&u))
-            .ok_or_else(|| {
-                ResolveError::new("pixeldrain: nierozpoznany adres. Użyj linku /u/… albo /l/….")
-            })
+            .ok_or_else(|| ResolveError::coded("pixeldrain_bad_link"))
     }
 
     async fn duration(&self, stream_url: &str) -> Option<f64> {
@@ -235,10 +236,9 @@ impl MediaResolver for PixeldrainResolver {
         }
         let info = FileInfo::from_json(&self.get_json(&format!("{API}/file/{id}/info")).await?);
         if !is_media(&info.mime_type) {
-            return Err(ResolveError::new(format!(
-                "pixeldrain: \"{}\" nie jest plikiem wideo.",
-                info.name
-            )));
+            return Err(Msg::error("pixeldrain_not_video")
+                .arg("name", &info.name)
+                .into());
         }
         let duration_s = self.duration(&format!("{API}/file/{id}")).await;
         Ok(MediaMeta {
@@ -253,9 +253,7 @@ impl MediaResolver for PixeldrainResolver {
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError> {
         let (kind, id) = Self::parse(url)?;
         if kind == PixeldrainKind::List {
-            return Err(ResolveError::new(
-                "pixeldrain: listę trzeba najpierw rozwinąć na pojedyncze pliki.",
-            ));
+            return Err(ResolveError::coded("pixeldrain_list"));
         }
         let info = FileInfo::from_json(&self.get_json(&format!("{API}/file/{id}/info")).await?);
         let stream_url = format!("{API}/file/{id}");
@@ -275,6 +273,7 @@ impl MediaResolver for PixeldrainResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
     use serde_json::json;
 
     fn u(s: &str) -> Url {
@@ -327,7 +326,7 @@ mod tests {
             &self,
             url: &str,
             _headers: &[(String, String)],
-        ) -> Result<HttpResponse, String> {
+        ) -> Result<HttpResponse, ResolveError> {
             let ok = |v: Value| {
                 Ok(HttpResponse {
                     status: 200,
@@ -390,7 +389,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            e.to_string(),
+            e.0.render(Lang::Pl),
             "pixeldrain: \"a.pdf\" nie jest plikiem wideo."
         );
     }
@@ -401,7 +400,10 @@ mod tests {
             .fetch_meta("https://pixeldrain.com/u/zzz")
             .await
             .unwrap_err();
-        assert_eq!(e.to_string(), "pixeldrain: plik niedostępny (HTTP 404).");
+        assert_eq!(
+            e.0.render(Lang::Pl),
+            "pixeldrain: plik niedostępny (HTTP 404)."
+        );
     }
 
     #[tokio::test]
@@ -410,13 +412,13 @@ mod tests {
             .fetch_meta("https://pixeldrain.com/u/bad")
             .await
             .unwrap_err();
-        assert!(e.to_string().starts_with("pixeldrain:"));
+        assert!(e.0.render(Lang::Pl).starts_with("pixeldrain:"));
         let e = resolver(None, None)
             .fetch_meta("https://pixeldrain.com/")
             .await
             .unwrap_err();
         assert_eq!(
-            e.to_string(),
+            e.0.render(Lang::Pl),
             "pixeldrain: nierozpoznany adres. Użyj linku /u/… albo /l/…."
         );
     }
@@ -442,7 +444,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            e.to_string(),
+            e.0.render(Lang::Pl),
             "pixeldrain: listę trzeba najpierw rozwinąć na pojedyncze pliki."
         );
     }
