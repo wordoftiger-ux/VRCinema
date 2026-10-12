@@ -328,6 +328,7 @@ class Client {
       }
     }
     if (parsed && this.srv.name === 'rust') checkRequesterFields(name, parsed);
+    if (this.srv.name === 'rust' && text.includes('requesterIp')) throw new Error(`rust: "${name}": odpowiedź zawiera requesterIp`);
     const apiError = parsed && typeof parsed === 'object' && 'error' in parsed && !('statusCode' in parsed);
     if (apiError && this.srv.name === 'rust') {
       // Etap 4: każdy błąd API (nie 404 trasy w stylu Fastify) ma stały `code` (serwer TS go nie ma)

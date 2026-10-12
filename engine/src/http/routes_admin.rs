@@ -40,6 +40,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/nicks", get(list_nicks))
         .route("/api/admin/nicks/{skeleton}/release", post(release_nick))
         .route("/api/admin/devices/block", post(block_device))
+        .route("/api/admin/devices/unblock", post(unblock_device))
         .route("/api/admin/channels/main/local", post(add_local))
         .route("/api/admin/channels/main/skip", post(skip))
         .route("/api/admin/channels/main/pause", post(pause))
@@ -276,23 +277,44 @@ fn no_such_nick() -> ApiError {
     ApiError::coded(StatusCode::NOT_FOUND, "nick_not_found", &[])
 }
 
-/// Held nicks with their icon and last use; never the key or its hash.
+/// Held nicks (with their icon and last use) and blocked devices (with the nick they used
+/// last and the block date); never a key or its hash. A block stays listed after its nick is
+/// released.
 async fn list_nicks(State(state): State<AppState>) -> ApiResult {
-    let entries = state.with_db(|c| NickStore::new(c).list())?;
+    let now = crate::db::now_ms();
+    let (entries, blocked) = state.with_db(|c| {
+        let store = NickStore::new(c);
+        Ok((store.list(now)?, store.blocked()?))
+    })?;
+    let badge_json = |key_hash: &str| {
+        let b = badge(key_hash);
+        json!({ "hue": b.hue, "shape": b.shape })
+    };
     let nicks: Vec<Value> = entries
         .iter()
         .map(|e| {
-            let b = badge(&e.key_hash);
             json!({
                 "skeleton": e.skeleton,
                 "nick": e.display,
-                "badge": { "hue": b.hue, "shape": b.shape },
+                "badge": badge_json(&e.key_hash),
                 "lastUsedAt": e.last_used_at,
                 "blocked": e.blocked,
+                "blockId": e.block_id,
             })
         })
         .collect();
-    Ok(json_ok(&json!({ "nicks": nicks })))
+    let blocked: Vec<Value> = blocked
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id,
+                "nick": b.nick,
+                "badge": badge_json(&b.key_hash),
+                "blockedAt": b.blocked_at,
+            })
+        })
+        .collect();
+    Ok(json_ok(&json!({ "nicks": nicks, "blocked": blocked })))
 }
 
 async fn release_nick(State(state): State<AppState>, Path(skeleton): Path<String>) -> ApiResult {
@@ -318,6 +340,23 @@ async fn block_device(State(state): State<AppState>, JsonBody(body): JsonBody) -
         Ok(Ok(()))
     })??;
     Ok(ok())
+}
+
+/// Lifts a block by its id (from the list of blocked devices).
+async fn unblock_device(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let id = body
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| ApiError::bad_request("bad_request"))?;
+    if state.with_db(|c| NickStore::new(c).unblock(id))? {
+        Ok(ok())
+    } else {
+        Err(ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "block_not_found",
+            &[],
+        ))
+    }
 }
 
 // ---------- Pliki z dysku ----------

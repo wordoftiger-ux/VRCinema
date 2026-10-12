@@ -75,12 +75,13 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
     Ok(json_ok(&Value::Object(body)))
 }
 
-/// Control characters removed, trimmed, at most 32 UTF-16 units; empty means no name.
+/// Control and invisible format characters removed, trimmed, at most 32 UTF-16 units; empty
+/// means no name.
 fn clean_name(raw: Option<&Value>) -> Option<String> {
     let raw = raw?.as_str()?;
     let stripped: String = raw
         .chars()
-        .filter(|c| !matches!(*c, '\u{0}'..='\u{1f}' | '\u{7f}'))
+        .filter(|c| !c.is_control() && !crate::nicks::is_invisible(*c))
         .collect();
     let trimmed = stripped.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     let mut units = 0;
@@ -94,14 +95,25 @@ fn clean_name(raw: Option<&Value>) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// The viewer's nick and device-key hash from a request. A malformed key is refused and a
-/// blocked device gets 403. A nick that is reserved for the owner or held by another device is
-/// refused in the viewer's language. With a key a free nick is reserved for the device; without
-/// one it is shown as typed, with no icon and no reservation.
-fn resolve_nick(
-    state: &AppState,
-    body: &Value,
-) -> Result<(Option<String>, Option<String>), ApiError> {
+/// The nick and device key of a request.
+struct Viewer {
+    nick: Option<String>,
+    key_hash: Option<String>,
+}
+
+fn nick_error(e: NickError) -> ApiError {
+    match e {
+        NickError::Taken => ApiError::coded(StatusCode::CONFLICT, "nick_taken", &[]),
+        NickError::Reserved => ApiError::coded(StatusCode::CONFLICT, "nick_reserved", &[]),
+        NickError::Blocked => ApiError::coded(StatusCode::FORBIDDEN, "device_blocked", &[]),
+        NickError::Db(e) => ApiError::Internal(e),
+    }
+}
+
+/// Reads the viewer's nick and device key and checks them without reserving anything: a
+/// malformed key is 400, a blocked device 403, a nick reserved for the owner or held by another
+/// device 409 (in the viewer's language).
+fn check_viewer(state: &AppState, body: &Value) -> Result<Viewer, ApiError> {
     let key_hash = match body.get("deviceKey") {
         None | Some(Value::Null) => None,
         Some(Value::String(key)) => {
@@ -113,27 +125,38 @@ fn resolve_nick(
         .map(|n| n.chars().take(NICK_MAX_CHARS).collect::<String>())
         .filter(|n| !skeleton(n).is_empty());
     let now = crate::db::now_ms();
-    let outcome = state.with_db(|c| {
-        let store = NickStore::new(c);
-        Ok(match (&nick, &key_hash) {
-            (Some(nick), Some(key)) => store.claim(nick, key, now),
-            (Some(nick), None) => store.check(nick, None, now),
-            (None, Some(key)) if store.is_blocked(key) => Err(NickError::Blocked),
-            (None, _) => Ok(()),
-        })
-    })?;
-    match outcome {
-        Ok(()) => Ok((nick, key_hash)),
-        Err(NickError::Taken) => Err(ApiError::coded(StatusCode::CONFLICT, "nick_taken", &[])),
-        Err(NickError::Reserved) => {
-            Err(ApiError::coded(StatusCode::CONFLICT, "nick_reserved", &[]))
-        }
-        Err(NickError::Blocked) => Err(ApiError::coded(
-            StatusCode::FORBIDDEN,
-            "device_blocked",
-            &[],
-        )),
-    }
+    state
+        .with_db(|c| {
+            let store = NickStore::new(c);
+            Ok(match (&nick, &key_hash) {
+                (Some(nick), key) => store.check(nick, key.as_deref(), now),
+                (None, Some(key)) => store.is_blocked(key).map_or_else(
+                    |e| Err(NickError::from(e)),
+                    |blocked| {
+                        if blocked {
+                            Err(NickError::Blocked)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                ),
+                (None, None) => Ok(()),
+            })
+        })?
+        .map_err(nick_error)?;
+    Ok(Viewer { nick, key_hash })
+}
+
+/// Reserves the nick for the device (or renews it). Only for a request that is going to be
+/// queued: one the limiter or the link validation refused must not reserve or refresh a nick.
+fn claim_viewer(state: &AppState, viewer: &Viewer) -> Result<(), ApiError> {
+    let (Some(nick), Some(key)) = (&viewer.nick, &viewer.key_hash) else {
+        return Ok(());
+    };
+    let now = crate::db::now_ms();
+    state
+        .with_db(|c| Ok(NickStore::new(c).claim(nick, key, now)))?
+        .map_err(nick_error)
 }
 
 async fn post_request(
@@ -154,7 +177,7 @@ async fn post_request(
             &[("domains", &settings.allowed_domains.join(", "))],
         ));
     }
-    let (name, key_hash) = resolve_nick(&state, &body)?;
+    let viewer = check_viewer(&state, &body)?;
     let ip = ctx.ip;
     let active = state.with_db(|c| QueueRepo::new(c).count_active_by_ip(state.channel_id, &ip))?;
     if active >= i64::from(settings.max_active_per_requester) {
@@ -189,6 +212,7 @@ async fn post_request(
     if let Some(reason) = validate_meta(&meta, &settings, false) {
         return Err(ApiError::from_msg(StatusCode::BAD_REQUEST, reason));
     }
+    claim_viewer(&state, &viewer)?;
     let item = state.with_db(|c| {
         QueueRepo::new(c).add(&NewItem {
             channel_id: state.channel_id,
@@ -202,9 +226,9 @@ async fn post_request(
                 ItemStatus::Queued
             },
             added_by: AddedBy::Public,
-            requester_name: name.clone(),
+            requester_name: viewer.nick.clone(),
             requester_ip: Some(ip.clone()),
-            requester_key_hash: key_hash.clone(),
+            requester_key_hash: viewer.key_hash.clone(),
         })
     })?;
     (state.log)(

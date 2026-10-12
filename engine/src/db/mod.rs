@@ -70,19 +70,29 @@ CREATE TABLE IF NOT EXISTS blocked_devices (
 /// Brings an opened database up to the current schema: new tables and columns only, so no
 /// row is lost and the old server can still read the file.
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let has_key_hash = {
-        let mut stmt = conn.prepare("PRAGMA table_info(queue_items)")?;
-        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
-        let mut found = false;
-        for name in names {
-            found |= name? == "requester_key_hash";
-        }
-        found
-    };
-    if !has_key_hash {
-        conn.execute_batch("ALTER TABLE queue_items ADD COLUMN requester_key_hash TEXT")?;
+    conn.execute_batch(MIGRATIONS)?;
+    add_column_if_missing(conn, "queue_items", "requester_key_hash", "TEXT")?;
+    // The nick a blocked device used last (the block outlives the nick).
+    add_column_if_missing(conn, "blocked_devices", "nick", "TEXT")
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ty: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    let mut found = false;
+    for name in names {
+        found |= name? == column;
     }
-    conn.execute_batch(MIGRATIONS)
+    drop(stmt);
+    if found {
+        return Ok(());
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"))
 }
 
 /// Current time as Unix milliseconds (like JS `Date.now()`).

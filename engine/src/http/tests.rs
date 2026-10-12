@@ -935,6 +935,8 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
                 duration_s: Some(100.0),
                 position_s: 8,
                 requester_name: Some("Ola".into()),
+                added_by: AddedBy::Public,
+                requester_key_hash: crate::nicks::hash_device_key(KEY_A),
                 is_live: false,
             }),
             paused: false,
@@ -946,11 +948,13 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
     assert_eq!(body["status"], "playing");
     assert_eq!(body["paused"], false);
     assert_eq!(body["pauseReasons"], json!([]));
+    let badge = crate::nicks::badge(&crate::nicks::hash_device_key(KEY_A).unwrap());
     assert_eq!(
         body["current"],
         json!({
             "itemId": 7, "title": "Film", "durationS": 100, "positionS": 8,
-            "requesterName": "Ola", "isLive": false
+            "requesterName": "Ola", "requesterBadge": {"hue": badge.hue, "shape": badge.shape},
+            "isLive": false
         })
     );
 }
@@ -969,6 +973,8 @@ async fn a_paused_channel_reports_status_paused_reasons_and_the_paused_film() {
                 duration_s: Some(100.0),
                 position_s: 12,
                 requester_name: None,
+                added_by: AddedBy::Admin,
+                requester_key_hash: None,
                 is_live: false,
             }),
             paused: true,
@@ -981,6 +987,7 @@ async fn a_paused_channel_reports_status_paused_reasons_and_the_paused_film() {
     assert_eq!(body["paused"], true);
     assert_eq!(body["pauseReasons"], json!(["tunnel", "no_viewers"]));
     assert_eq!(body["current"]["positionS"], 12);
+    assert_eq!(body["current"]["requesterBadge"], "host");
 }
 
 #[tokio::test]
@@ -3422,4 +3429,191 @@ async fn panel_items_have_badges_and_never_an_address() {
     assert_eq!(queue[2]["requesterBadge"], Value::Null);
     // The per-viewer limit still counts by address in the database.
     assert_eq!(h.item(2).requester_ip.as_deref(), Some("9.9.9.9"));
+}
+
+impl Harness {
+    async fn request_url_as(&self, ip: &str, url: &str, name: &str, key: &str) -> Resp {
+        self.send(
+            call("POST", "/api/channels/main/requests")
+                .ip(ip)
+                .json(json!({"url": url, "name": name, "deviceKey": key})),
+        )
+        .await
+    }
+
+    fn nick_holder(&self, nick: &str) -> Option<(String, i64)> {
+        self.with_db(|c| {
+            c.query_row(
+                "SELECT key_hash, last_used_at FROM viewer_nicks WHERE skeleton = ?",
+                [crate::nicks::skeleton(nick)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+        })
+    }
+}
+
+#[tokio::test]
+async fn invisible_characters_do_not_get_around_a_taken_or_reserved_nick() {
+    let h = Harness::new();
+    h.request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    for (i, nick) in [
+        "Kas\u{200B}ia",
+        "Ka\u{200D}sia",
+        "K\u{2060}asia",
+        "Ka\u{ad}sia",
+        "\u{202E}Kasia",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let res = h
+            .request_as(&format!("7.7.7.{i}"), Some(nick), Some(KEY_B), None)
+            .await;
+        assert_eq!(res.json()["code"], "nick_taken", "{nick:?}");
+    }
+    let res = h
+        .request_as("7.7.8.1", Some("Ho\u{200B}st"), Some(KEY_B), None)
+        .await;
+    assert_eq!(res.json()["code"], "nick_reserved");
+    // The displayed name has no invisible characters either.
+    let ok = h
+        .request_as("7.7.8.2", Some("Ba\u{200B}sia"), Some(KEY_B), None)
+        .await;
+    assert_eq!(ok.json()["item"]["requesterName"], "Basia");
+}
+
+#[tokio::test]
+async fn a_refused_request_does_not_claim_or_refresh_a_nick() {
+    let h = Harness::new();
+    let hash = crate::nicks::hash_device_key(KEY_A).unwrap();
+    let old = crate::db::now_ms() - 10 * 24 * 60 * 60 * 1000;
+    h.with_db(|c| {
+        crate::nicks::NickStore::new(c)
+            .claim("Kasia", &hash, old)
+            .unwrap()
+    });
+
+    // Bad link: neither a new nick is reserved nor the old one refreshed.
+    let bad = h
+        .request_url_as("1.1.1.1", "https://youtu.be/unknown", "Kasia", KEY_A)
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    let bad = h
+        .request_url_as("1.1.1.1", "https://youtu.be/unknown", "Basia", KEY_A)
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    assert_eq!(h.nick_holder("Kasia"), Some((hash.clone(), old)));
+    assert_eq!(h.nick_holder("Basia"), None);
+
+    // Limiter: three requests pass, the fourth is refused before it can claim.
+    for _ in 0..3 {
+        assert_eq!(
+            h.request("https://youtu.be/a", "2.2.2.2", None)
+                .await
+                .status,
+            StatusCode::CREATED
+        );
+    }
+    let limited = h
+        .request_url_as("2.2.2.2", "https://youtu.be/a", "Kasia", KEY_A)
+        .await;
+    assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(h.nick_holder("Kasia"), Some((hash.clone(), old)));
+
+    // Too many active items.
+    h.update_settings(SettingsPatch {
+        max_active_per_requester: Some(1),
+        ..Default::default()
+    });
+    let active = h
+        .request_url_as("2.2.2.2", "https://youtu.be/a", "Kasia", KEY_A)
+        .await;
+    assert_eq!(active.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(h.nick_holder("Kasia"), Some((hash.clone(), old)));
+
+    // A request that goes through refreshes it.
+    let ok = h
+        .request_url_as("3.3.3.3", "https://youtu.be/a", "Kasia", KEY_A)
+        .await;
+    assert_eq!(ok.status, StatusCode::CREATED);
+    assert!(h.nick_holder("Kasia").unwrap().1 > old);
+    // The early check still answers a taken nick before the limiter.
+    let taken = h
+        .request_url_as("2.2.2.2", "https://youtu.be/a", "KASIA", KEY_B)
+        .await;
+    assert_eq!(taken.json()["code"], "nick_taken");
+}
+
+#[tokio::test]
+async fn a_block_is_listed_after_the_nick_is_released_and_can_be_lifted() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    h.request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    let sk = crate::nicks::skeleton("Kasia");
+    let block = |sk: String| {
+        call("POST", "/api/admin/devices/block")
+            .cookie(&cookie)
+            .json(json!({ "skeleton": sk }))
+    };
+    assert_eq!(h.send(block(sk.clone())).await.status, StatusCode::OK);
+    let release = format!("/api/admin/nicks/{sk}/release");
+    assert_eq!(
+        h.send(call("POST", &release).cookie(&cookie)).await.status,
+        StatusCode::OK
+    );
+    let list = h.send(get("/api/admin/nicks").cookie(&cookie)).await;
+    let body = list.json();
+    assert!(body["nicks"].as_array().unwrap().is_empty());
+    let blocked = body["blocked"].as_array().unwrap();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0]["nick"], "Kasia");
+    assert!(blocked[0]["blockedAt"].is_number() && blocked[0]["badge"]["hue"].is_number());
+    let hash = crate::nicks::hash_device_key(KEY_A).unwrap();
+    assert!(!list.text().contains(&hash));
+    // Still refused.
+    assert_eq!(
+        h.request_as("1.1.1.1", None, Some(KEY_A), None)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    // Unblock.
+    let unblock = |id: Value| {
+        call("POST", "/api/admin/devices/unblock")
+            .cookie(&cookie)
+            .json(json!({ "id": id }))
+    };
+    assert_eq!(
+        h.send(unblock(blocked[0]["id"].clone())).await.status,
+        StatusCode::OK
+    );
+    let again = h.send(unblock(blocked[0]["id"].clone())).await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    assert_eq!(again.json()["code"], "block_not_found");
+    assert_eq!(
+        h.send(call("POST", "/api/admin/devices/unblock").json(json!({"id": 1})))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        h.request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
+async fn a_database_failure_is_a_500_not_a_taken_nick() {
+    let h = Harness::new();
+    h.with_db(|c| c.execute_batch("DROP TABLE blocked_devices").unwrap());
+    let res = h
+        .request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
+        .await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.json()["code"], "internal");
 }

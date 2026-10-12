@@ -10,6 +10,7 @@
   "errors.autostart_failed": "Nie udało się zmienić autostartu: {detail}",
   "errors.backup_dir_failed": "Nie można utworzyć folderu kopii zapasowej w {path}.",
   "errors.bad_request": "Niepoprawne żądanie.",
+  "errors.block_not_found": "To urządzenie nie jest zablokowane (już odblokowane).",
   "errors.body_too_large": "Request body is too large",
   "errors.busy": "Trwa już inna operacja stałego linku — poczekaj, aż się skończy.",
   "errors.cancelled": "Logowanie do Cloudflare anulowano.",

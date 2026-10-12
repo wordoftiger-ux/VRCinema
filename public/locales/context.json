@@ -10,6 +10,7 @@
   "errors.autostart_failed": "API error (panel, request page or app window notice). Settings: switching \"start with Windows\" failed; {detail} is the system error.",
   "errors.backup_dir_failed": "Error text (shown in the app window and written to the log). Tools install; {path} is a folder.",
   "errors.bad_request": "API error (panel player controls): generic text of the code bad_request; answers usually carry a more specific text.",
+  "errors.block_not_found": "API error (panel). The block to lift does not exist (already lifted).",
   "errors.body_too_large": "API error (panel, request page or app window notice). Technical (request over 16 KB); the same English text in every language (API compatibility).",
   "errors.busy": "Permanent-link wizard (app window, Settings → Internet): a second operation was started while one runs.",
   "errors.cancelled": "Permanent-link wizard (app window, Settings → Internet): the owner cancelled the Cloudflare login.",

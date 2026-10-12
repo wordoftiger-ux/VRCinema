@@ -833,18 +833,18 @@ pub(crate) fn public_item(i: &QueueItem) -> Value {
         "title": i.title,
         "durationS": opt_num_json(i.duration_s),
         "requesterName": i.requester_name,
-        "requesterBadge": requester_badge(i),
+        "requesterBadge": requester_badge(i.added_by, i.requester_key_hash.as_deref()),
         "isLive": i.is_live,
     })
 }
 
-/// The icon of whoever added the item: `"host"` for the owner, `{hue, shape}` for a viewer
-/// with a device key, `null` for an anonymous one. Never the key or its hash.
-fn requester_badge(i: &QueueItem) -> Value {
-    if i.added_by == crate::db::AddedBy::Admin {
+/// The icon of whoever added an item: `"host"` for the owner, `{hue, shape}` for a viewer with
+/// a device key, `null` for an anonymous one. Never the key or its hash.
+fn requester_badge(added_by: crate::db::AddedBy, key_hash: Option<&str>) -> Value {
+    if added_by == crate::db::AddedBy::Admin {
         return json!("host");
     }
-    i.requester_key_hash.as_deref().map_or(Value::Null, |hash| {
+    key_hash.map_or(Value::Null, |hash| {
         let b = crate::nicks::badge(hash);
         json!({ "hue": b.hue, "shape": b.shape })
     })
@@ -873,6 +873,7 @@ pub(crate) fn state_map(state: &ChannelState) -> Map<String, Value> {
             "durationS": opt_num_json(c.duration_s),
             "positionS": c.position_s,
             "requesterName": c.requester_name,
+            "requesterBadge": requester_badge(c.added_by, c.requester_key_hash.as_deref()),
             "isLive": c.is_live,
         })
     });

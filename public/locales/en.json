@@ -10,6 +10,7 @@
   "errors.autostart_failed": "Could not change starting with Windows: {detail}",
   "errors.backup_dir_failed": "Cannot create a backup folder in {path}.",
   "errors.bad_request": "Invalid request.",
+  "errors.block_not_found": "This device is not blocked (already unblocked).",
   "errors.body_too_large": "Request body is too large",
   "errors.busy": "Another permanent link operation is running — wait until it ends.",
   "errors.cancelled": "The Cloudflare login was cancelled.",

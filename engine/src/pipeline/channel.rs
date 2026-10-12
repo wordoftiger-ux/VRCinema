@@ -131,6 +131,9 @@ pub struct NowPlaying {
     pub duration_s: Option<f64>,
     pub position_s: i64,
     pub requester_name: Option<String>,
+    /// Who added it: the owner shows as "host", a viewer with a device key by an icon.
+    pub added_by: crate::db::AddedBy,
+    pub requester_key_hash: Option<String>,
     pub is_live: bool,
 }
 
@@ -569,6 +572,8 @@ impl Channel {
                     duration_s: item.duration_s,
                     position_s: js_round(meta.position_s),
                     requester_name: item.requester_name.clone(),
+                    added_by: item.added_by,
+                    requester_key_hash: item.requester_key_hash.clone(),
                     is_live: item.is_live,
                 });
                 match (meta.kind, now_playing) {
@@ -862,7 +867,7 @@ impl Channel {
                         requester_name: item.requester_name.clone(),
                         // The owner's choice: it does not count towards the viewer's limit.
                         requester_ip: None,
-                        requester_key_hash: None,
+                        requester_key_hash: item.requester_key_hash.clone(),
                     })
                 })?;
                 again.id
@@ -1793,7 +1798,7 @@ mod tests {
                     added_by: AddedBy::Admin,
                     requester_name: Some("Ola".into()),
                     requester_ip: None,
-                    requester_key_hash: None,
+                    requester_key_hash: Some("ab".repeat(32)),
                 })
                 .unwrap()
         }
@@ -3281,6 +3286,8 @@ mod tests {
         assert_eq!(again.source_url, a.source_url);
         assert_eq!(again.title, a.title);
         assert_eq!(again.requester_name.as_deref(), Some("Ola"));
+        assert_eq!(again.requester_key_hash, a.requester_key_hash);
+        assert!(again.requester_key_hash.is_some());
         assert_eq!(e.factory.last_call_item(), again.id);
         // The old entry stays in the history; the rest of the queue waits.
         assert_eq!(e.get(a.id).status, ItemStatus::Played);
