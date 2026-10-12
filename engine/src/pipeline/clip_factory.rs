@@ -32,6 +32,10 @@ const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Source read rate: 1.5× real time leaves headroom without downloading the whole film.
 pub const READRATE: f64 = 1.5;
+/// Source read rate of a clip with the info ticker: real time, so ffmpeg (and the text it
+/// draws) stays only the initial burst (20 s) ahead of the stream; at 1.5× it would draw the
+/// text minutes before it airs and finish a long film with its last part's text frozen.
+pub const TICKER_READRATE: f64 = 1.0;
 
 /// How often a running ticker re-reads what it shows (and ffmpeg's progress).
 const TICKER_REFRESH: Duration = Duration::from_millis(500);
@@ -93,6 +97,38 @@ pub fn clip_start_line(
 /// (like `forceTranscode`).
 pub fn clip_video_mode(info: &VideoInfo, settings: &ChannelSettings) -> VideoMode {
     decide_video_mode(info, settings.force_transcode || settings.ticker.enabled)
+}
+
+/// How fast the source is read: a live stream as it comes, a clip with the ticker at real
+/// time ([`TICKER_READRATE`]), any other clip at [`READRATE`].
+pub fn clip_readrate(live: bool, ticker: bool) -> Option<f64> {
+    match (live, ticker) {
+        (true, _) => None,
+        (false, true) => Some(TICKER_READRATE),
+        (false, false) => Some(READRATE),
+    }
+}
+
+/// Marks in ffmpeg's error output of the ticker's filters (ffmpeg names a filter of a graph
+/// `Parsed_<filter>_<n>`) and of the files they read: only such a failure starts the clip
+/// again without the ticker. Plain words ("movie", "font") would also match a film's file name.
+const TICKER_ERROR_MARKS: [&str; 8] = [
+    "[parsed_drawtext_",
+    "[parsed_drawbox_",
+    "[parsed_movie_",
+    "[parsed_overlay_",
+    "[parsed_color_",
+    "'ticker.txt'",
+    "'qr.txt'",
+    "'qr.png'",
+];
+
+/// ffmpeg's last error lines say the ticker's filters failed (not the source or the encoder).
+pub fn ticker_failure(stderr_tail: &[String]) -> bool {
+    stderr_tail.iter().any(|line| {
+        let line = line.to_lowercase();
+        TICKER_ERROR_MARKS.iter().any(|mark| line.contains(mark))
+    })
 }
 
 /// Length of the film for the progress line: none for a live stream.
@@ -167,9 +203,13 @@ struct RealClipHandle {
 }
 
 impl RealClipHandle {
-    /// ffmpeg failed before its first segment with the ticker: it is started again without.
+    /// ffmpeg failed before its first segment because of the ticker: it is started again
+    /// without. Any other failure (the source, the encoder) is reported as usual.
     fn restart_pending(&self) -> bool {
-        self.fallback.is_some() && !self.produced && self.seg.state() == SegmenterState::Failed
+        self.fallback.is_some()
+            && !self.produced
+            && self.seg.state() == SegmenterState::Failed
+            && ticker_failure(&self.seg.stderr_tail())
     }
 
     fn stop_ticker(&mut self) {
@@ -261,11 +301,14 @@ impl ClipHandle for RealClipHandle {
             encoder: self.encoder.map(|e| e.as_str().to_string()),
             pid: self.seg.pid(),
             speed: self.seg.speed(),
-            ticker_slow: self
-                .ticker
-                .as_ref()
-                .is_some_and(|t| t.slow.load(Ordering::Relaxed)),
+            ticker_slow: self.ticker_slow(),
         }
+    }
+
+    fn ticker_slow(&self) -> bool {
+        self.ticker
+            .as_ref()
+            .is_some_and(|t| t.slow.load(Ordering::Relaxed))
     }
 
     /// Non-blocking: kills ffmpeg, and a background task removes the directory once the process
@@ -566,7 +609,6 @@ async fn run_ticker(
     slow: Arc<AtomicBool>,
     watch_speed: bool,
     log: Option<SharedLogFn>,
-    title: String,
 ) {
     let log = |msg: Msg| {
         if let Some(log) = &log {
@@ -601,16 +643,9 @@ async fn run_ticker(
             continue;
         }
         let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        match watch.observe(ms, seg.speed()) {
-            Some(true) => {
-                slow.store(true, Ordering::Relaxed);
-                log(Msg::new("log.ticker_slow")
-                    .arg("id", source.item_id)
-                    .arg("title", &title)
-                    .arg("speed", format!("{:.2}", seg.speed().unwrap_or_default())));
-            }
-            Some(false) => slow.store(false, Ordering::Relaxed),
-            None => {}
+        // The channel logs it for the film on air (not for one being prepared).
+        if let Some(slow_now) = watch.observe(ms, seg.speed()) {
+            slow.store(slow_now, Ordering::Relaxed);
         }
     }
     slow.store(false, Ordering::Relaxed);
@@ -680,7 +715,7 @@ async fn start_clip(
         segment_seconds: d.segment_seconds,
         out_dir: out_dir.clone(),
         start_at_s,
-        readrate: if live { None } else { Some(READRATE) },
+        readrate: clip_readrate(live, ticker.is_some()),
         overlay: None,
     };
     let (seg, ticker, fallback) = match ticker {
@@ -690,6 +725,7 @@ async fn start_clip(
                 args: build_clip_args(&ClipArgsOptions {
                     mode: plain_mode,
                     out_dir: plain_dir.clone(),
+                    readrate: clip_readrate(live, false),
                     ..options.clone()
                 }),
                 out_dir: plain_dir,
@@ -714,7 +750,6 @@ async fn start_clip(
                 Arc::clone(&slow),
                 !live,
                 d.log.clone(),
-                item.title.clone(),
             ));
             let run = TickerRun {
                 task: task.abort_handle(),
@@ -1395,5 +1430,209 @@ mod tests {
         assert_eq!(handle.state(), SegmenterState::Failed);
         assert!(handle.error().is_some());
         assert!(!dir.path().join("1-0-1-plain").exists());
+    }
+
+    // ---------- Fix round 1 ----------
+
+    /// A clip with the ticker is read at real time, so ffmpeg stays only the initial burst
+    /// ahead of what airs and a new text reaches the stream soon; plain clips keep 1.5×.
+    #[test]
+    fn a_clip_with_the_ticker_is_read_at_real_time() {
+        assert_eq!(clip_readrate(false, true), Some(1.0));
+        assert_eq!(clip_readrate(false, false), Some(READRATE));
+        assert_eq!(clip_readrate(true, true), None);
+        assert_eq!(clip_readrate(true, false), None);
+    }
+
+    /// With the real ffmpeg: the clip with the ticker comes out at the pace it plays (two
+    /// segments 8 s of film apart appear about 8 s apart, not 5.3 s as at 1.5×), so ffmpeg
+    /// draws a text at most the initial burst ahead of when it airs; and the text keeps
+    /// following changes until the end of the film.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ticker_text_follows_changes_until_the_end_of_a_clip_read_at_real_time() {
+        let (Some(ffmpeg), Some(ffprobe)) = (bin("ffmpeg"), bin("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg or bin/ffprobe missing");
+            return;
+        };
+        if !default_font().is_file() {
+            eprintln!("skip: no default font");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("film.mp4");
+        make_source(&ffmpeg, &source, 40).await;
+        let f = fixture(Some(source), dir, ffmpeg, ffprobe);
+        enable_ticker(&f, serde_json::json!({ "tickerMode": "continuous" }));
+        let mut handle = f.factory.create(f.item.clone(), 0.0, 0).await.unwrap();
+        let out_dir = f.clips.join(format!("{}-0-1", f.item.id));
+        let read = || {
+            crate::pipeline::ticker::TickerText::read(&out_dir.join(TEXT_FILE)).unwrap_or_default()
+        };
+        // When each segment appeared.
+        let mut seen: Vec<Instant> = Vec::new();
+        let mut changed = false;
+        let mut updated_while_running = false;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while handle.state() == SegmenterState::Running {
+            assert!(Instant::now() < deadline, "the clip did not end");
+            let fresh = handle.poll();
+            seen.extend(fresh.iter().map(|_| Instant::now()));
+            // Six segments out (24 s): the last part of the film, a few seconds before ffmpeg
+            // has read the whole source.
+            if !changed && seen.len() >= 6 {
+                changed = true;
+                let conn = f.db.lock().unwrap();
+                let patch = crate::db::sanitize_settings_patch(
+                    &serde_json::json!({ "tickerMessages": ["Ostatnia chwila"] }),
+                )
+                .unwrap();
+                SettingsRepo::new(&conn)
+                    .update(MAIN_CHANNEL_ID, &patch)
+                    .unwrap();
+            }
+            if changed && read().ends_with("Ostatnia chwila") {
+                updated_while_running = true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        seen.extend(handle.poll().iter().map(|_| Instant::now()));
+        assert_eq!(handle.state(), SegmenterState::Done, "{:?}", handle.error());
+        assert!(seen.len() >= 8, "{} segments", seen.len());
+        // Segment 3 (12-16 s) and segment 5 (20-24 s): 8 s of film. (Once the source is read
+        // to its end the frames still queued come out at once.)
+        let gap = seen[5].duration_since(seen[3]).as_secs_f64();
+        assert!(gap >= 6.8, "8 s of film came out in {gap:.1} s");
+        assert!(
+            updated_while_running,
+            "the text did not follow a change in the last part of the film"
+        );
+        handle.dispose();
+    }
+
+    /// A clip with the ticker that fails before its first segment for a reason that has
+    /// nothing to do with the ticker (the source cannot be opened) fails as before: no restart
+    /// without the ticker, no log line about it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failure_unrelated_to_the_ticker_is_reported_as_before() {
+        let Some(ffmpeg) = bin("ffmpeg") else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("1-0-1");
+        let plain_dir = dir.path().join("1-0-1-plain");
+        let options = ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: dir.path().join("brak.mp4").to_string_lossy().into_owned(),
+                headers: vec![],
+            }],
+            input_format: None,
+            mode: VideoMode::Transcode,
+            info: video("h264", 240, 25.0, false),
+            encoder: VideoEncoder::Libx264,
+            segment_seconds: 4,
+            out_dir: out_dir.clone(),
+            start_at_s: 0.0,
+            readrate: None,
+            overlay: Some("drawbox=x=0:y=0:w=10:h=10:t=fill".into()),
+        };
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let mut handle = test_handle(
+            &ffmpeg,
+            &options,
+            Some(dir.path().to_path_buf()),
+            PlainRestart {
+                args: build_clip_args(&ClipArgsOptions {
+                    mode: VideoMode::Copy,
+                    out_dir: plain_dir.clone(),
+                    overlay: None,
+                    ..options.clone()
+                }),
+                out_dir: plain_dir.clone(),
+                mode: VideoMode::Copy,
+                encoder: VideoEncoder::Libx264,
+            },
+            &lines,
+        );
+        let ended = wait_until(
+            || {
+                handle.poll();
+                handle.state() != SegmenterState::Running
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(ended);
+        assert_eq!(handle.state(), SegmenterState::Failed);
+        assert!(handle.error().is_some());
+        assert!(!plain_dir.exists());
+        assert!(
+            lines.lock().unwrap().is_empty(),
+            "{:?}",
+            lines.lock().unwrap()
+        );
+        handle.dispose();
+    }
+
+    #[test]
+    fn only_errors_from_the_ticker_filters_count_as_the_ticker_failing() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(ticker_failure(&lines(&[
+            "[Parsed_drawtext_6 @ 000001] Cannot read file 'ticker.txt': No such file or directory",
+            "Error opening output files: No such file or directory",
+        ])));
+        assert!(ticker_failure(&lines(&[
+            "[Parsed_movie_3 @ 0001] Failed to avformat_open_input 'qr.png'"
+        ])));
+        assert!(!ticker_failure(&lines(&[
+            "[in#0 @ 0001] Error opening input: No such file or directory",
+            "Error opening input file C:\\movies\\overlay font movie.mp4.",
+        ])));
+        assert!(!ticker_failure(&lines(&[
+            "[https @ 0001] HTTP error 403 Forbidden"
+        ])));
+    }
+
+    /// A handle as the factory makes it for a clip with the ticker (without its text task).
+    fn test_handle(
+        ffmpeg: &Path,
+        options: &ClipArgsOptions,
+        cwd: Option<PathBuf>,
+        fallback: PlainRestart,
+        lines: &Arc<Mutex<Vec<String>>>,
+    ) -> Box<dyn ClipHandle> {
+        let sink = Arc::clone(lines);
+        let seg = ClipSegmenter::start(
+            ffmpeg,
+            build_clip_args(options),
+            options.out_dir.clone(),
+            cwd,
+        );
+        Box::new(RealClipHandle {
+            seg: Arc::new(seg),
+            out_dir: options.out_dir.clone(),
+            ffmpeg_path: ffmpeg.to_path_buf(),
+            duration_s: Some(6.0),
+            copies_video: false,
+            probe: ProbeSummary {
+                codec: "h264".into(),
+                height: 240,
+                fps: 25.0,
+                pix_fmt: "yuv420p".into(),
+                has_audio: false,
+                duration_s: Some(6.0),
+            },
+            mode: StreamMode::Transcode,
+            encoder: Some(VideoEncoder::Libx264),
+            ticker: None,
+            fallback: Some(fallback),
+            produced: false,
+            item_id: 1,
+            title: "Test".into(),
+            log: Some(Arc::new(move |l: Msg| {
+                sink.lock().unwrap().push(l.to_string())
+            })),
+            disposed: false,
+        })
     }
 }

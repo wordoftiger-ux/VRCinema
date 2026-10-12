@@ -490,8 +490,13 @@ struct SwapState {
 pub enum SwapOutcome {
     /// The set on air already shows this address.
     Unchanged,
-    /// A new set was made and handed to the channel loop.
-    Replaced { generation: u32 },
+    /// A new set was made and handed to the channel loop. `address_changed`: for another
+    /// public address (not only another language or "connecting"), so a QR code drawn
+    /// elsewhere (the info ticker) is out of date too.
+    Replaced {
+        generation: u32,
+        address_changed: bool,
+    },
     /// Nothing changed: the previous set stays on air.
     Failed(Msg),
 }
@@ -649,6 +654,7 @@ impl SlateSwapper {
         }
         *self.notices.lock().unwrap_or_else(PoisonError::into_inner) = notices;
         let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
+        let address_changed = state.address.public_url != address.public_url;
         state.address = address;
         state.generation = generation;
         // The old segments may still be in the playlist and in the retention window.
@@ -660,7 +666,10 @@ impl SlateSwapper {
         let mut removals = self.removals.lock().unwrap_or_else(PoisonError::into_inner);
         removals.retain(|t| !t.is_finished());
         removals.push(removal);
-        SwapOutcome::Replaced { generation }
+        SwapOutcome::Replaced {
+            generation,
+            address_changed,
+        }
     }
 }
 
@@ -1267,7 +1276,10 @@ mod tests {
         );
         assert_eq!(
             swapper.swap_to(same(Lang::En), &tx).await,
-            SwapOutcome::Replaced { generation: 1 }
+            SwapOutcome::Replaced {
+                generation: 1,
+                address_changed: false
+            }
         );
         let Ok(Command::ReplaceSlates(en)) = rx.try_recv() else {
             panic!("no set");
@@ -1280,7 +1292,10 @@ mod tests {
         // Back to Polish: another set; the same language again: nothing.
         assert_eq!(
             swapper.swap_to(same(Lang::Pl), &tx).await,
-            SwapOutcome::Replaced { generation: 2 }
+            SwapOutcome::Replaced {
+                generation: 2,
+                address_changed: false
+            }
         );
         assert_eq!(title("g2"), "Brak filmów w kolejce");
         assert_eq!(
@@ -1369,7 +1384,10 @@ mod tests {
 
         assert_eq!(
             swapper.swap("https://nowy.example.com", &tx).await,
-            SwapOutcome::Replaced { generation: 1 }
+            SwapOutcome::Replaced {
+                generation: 1,
+                address_changed: true
+            }
         );
         let Ok(Command::ReplaceSlates(second)) = rx.try_recv() else {
             panic!("the new set was not handed over");
@@ -1387,7 +1405,10 @@ mod tests {
         // A second change makes generation 2 and clears the code with the address.
         assert_eq!(
             swapper.swap("", &tx).await,
-            SwapOutcome::Replaced { generation: 2 }
+            SwapOutcome::Replaced {
+                generation: 2,
+                address_changed: true
+            }
         );
         let Ok(Command::ReplaceSlates(third)) = rx.try_recv() else {
             panic!("the third set was not handed over");
@@ -1413,7 +1434,10 @@ mod tests {
         };
         assert_eq!(
             swapper.swap_to(connecting, &tx).await,
-            SwapOutcome::Replaced { generation: 1 }
+            SwapOutcome::Replaced {
+                generation: 1,
+                address_changed: false
+            }
         );
         let Ok(Command::ReplaceSlates(set)) = rx.try_recv() else {
             panic!("the connecting set was not handed over");
@@ -1494,7 +1518,10 @@ mod tests {
         // Swapping again removes the previous *own* folder (g1) after the hold.
         assert!(matches!(
             swapper.swap("https://b.example.com", &tx).await,
-            SwapOutcome::Replaced { generation: 2 }
+            SwapOutcome::Replaced {
+                generation: 2,
+                address_changed: true
+            }
         ));
         assert!(root.path().join("g1").is_dir());
         let gone = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1589,8 +1616,20 @@ mod tests {
             swapper.swap_to(read, &tx).await
         };
         let (a, b) = tokio::join!(first, second);
-        assert_eq!(a, SwapOutcome::Replaced { generation: 1 });
-        assert_eq!(b, SwapOutcome::Replaced { generation: 2 });
+        assert_eq!(
+            a,
+            SwapOutcome::Replaced {
+                generation: 1,
+                address_changed: true
+            }
+        );
+        assert_eq!(
+            b,
+            SwapOutcome::Replaced {
+                generation: 2,
+                address_changed: true
+            }
+        );
         let Ok(Command::ReplaceSlates(one)) = rx.try_recv() else {
             panic!("no first set");
         };

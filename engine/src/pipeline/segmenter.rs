@@ -76,6 +76,8 @@ struct Snapshot {
     error: Option<Msg>,
     /// Set once the child has really exited and been reaped (or never started).
     exited: bool,
+    /// ffmpeg's last stderr lines once it has exited.
+    stderr_tail: Vec<String>,
 }
 
 /// ffmpeg process cutting one clip into segments. States: Idle -> Running -> Done | Failed | Killed.
@@ -132,6 +134,7 @@ impl ClipSegmenter {
             state: SegmenterState::Running,
             error: None,
             exited: false,
+            stderr_tail: Vec::new(),
         });
         let mut segmenter = ClipSegmenter {
             out_dir,
@@ -182,6 +185,7 @@ impl ClipSegmenter {
                 }
             };
             let tail = tail.await.unwrap_or_default();
+            let lines: Vec<String> = tail.iter().cloned().collect();
             let (state, error) = match exit {
                 Ok(code) if code.success() => (SegmenterState::Done, None),
                 Ok(code) => {
@@ -203,9 +207,15 @@ impl ClipSegmenter {
                     s.error = error;
                 }
                 s.exited = true;
+                s.stderr_tail = lines;
             });
         });
         segmenter
+    }
+
+    /// ffmpeg's last stderr lines (empty until it has exited).
+    pub fn stderr_tail(&self) -> Vec<String> {
+        self.status.borrow().stderr_tail.clone()
     }
 
     /// Failure before any child exists: terminal state and exit signal at once.
@@ -601,6 +611,7 @@ mod tests {
             state: SegmenterState::Done,
             error: None,
             exited: true,
+            stderr_tail: Vec::new(),
         });
         ClipSegmenter {
             out_dir: dir.to_path_buf(),

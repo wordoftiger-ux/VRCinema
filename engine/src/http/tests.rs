@@ -1629,6 +1629,39 @@ async fn only_a_new_look_of_the_ticker_restarts_the_film_on_air() {
     assert_eq!(r.json()["code"], "ticker_too_many_messages");
 }
 
+/// A new slate set for another public address: the QR code the ticker draws is out of date,
+/// so the film on air starts again with the new one (only when the ticker draws a code).
+#[tokio::test]
+async fn a_new_public_address_restarts_the_film_when_the_ticker_draws_its_code() {
+    let captured = Arc::new(Mutex::new(None::<AppState>));
+    let keep = Arc::clone(&captured);
+    let mut h = Harness::with_state(config(), move |s| {
+        *keep.lock().unwrap() = Some(s.clone());
+        s
+    });
+    let state = captured.lock().unwrap().clone().unwrap();
+    let set = |h: &Harness, patch: Value| {
+        h.with_db(|c| {
+            let patch = crate::db::sanitize_settings_patch(&patch).unwrap();
+            SettingsRepo::new(c)
+                .update(MAIN_CHANNEL_ID, &patch)
+                .unwrap();
+        })
+    };
+    // The ticker is off by default: nothing to redraw.
+    state.after_slates_replaced(true);
+    assert!(h.commands().is_empty());
+    set(&h, json!({"tickerEnabled": true}));
+    state.after_slates_replaced(true);
+    assert_eq!(h.commands(), [Command::ApplyTicker]);
+    // Another language only: the code is the same.
+    state.after_slates_replaced(false);
+    assert!(h.commands().is_empty());
+    set(&h, json!({"tickerQr": "off"}));
+    state.after_slates_replaced(true);
+    assert!(h.commands().is_empty());
+}
+
 #[tokio::test]
 async fn saved_request_limit_applies_to_the_next_request() {
     let h = Harness::new();

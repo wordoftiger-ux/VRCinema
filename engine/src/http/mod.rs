@@ -209,11 +209,15 @@ impl AppState {
             use crate::pipeline::slates::SwapOutcome;
             match swapper.swap_to(address, &state.engine.commands).await {
                 SwapOutcome::Unchanged => {}
-                SwapOutcome::Replaced { generation } => {
+                SwapOutcome::Replaced {
+                    generation,
+                    address_changed,
+                } => {
                     (state.log)(Msg::new("log.slates_refreshed").arg("generation", generation));
                     for notice in swapper.notices() {
                         (state.log)(notice);
                     }
+                    state.after_slates_replaced(address_changed);
                 }
                 SwapOutcome::Failed(why) => {
                     (state.log)(Msg::new("log.slates_refresh_failed").arg_msg("reason", why));
@@ -296,6 +300,21 @@ impl AppState {
         SettingsRepo::new(&conn)
             .get(self.channel_id)
             .map_or_else(|_| crate::i18n::Lang::default(), |s| s.slate_language)
+    }
+
+    /// A new slate set went on air. For another public address the QR code the info ticker
+    /// draws is out of date too: the film on air starts again from where it is with the new
+    /// one (`Command::ApplyTicker`, joined with other changes within 700 ms).
+    pub(crate) fn after_slates_replaced(&self, address_changed: bool) {
+        if !address_changed {
+            return;
+        }
+        let draws_code = self.settings().is_ok_and(|s| {
+            s.ticker.enabled && s.ticker.qr != crate::pipeline::ticker::TickerQr::Off
+        });
+        if draws_code {
+            self.send_command(Command::ApplyTicker);
+        }
     }
 
     /// Stores whether the info ticker starts switched on, unless the channel has a value

@@ -39,6 +39,10 @@ pub trait ClipHandle: Send {
         false
     }
     fn kill(&mut self);
+    /// The conversion the info ticker needs has been too slow for 30 s.
+    fn ticker_slow(&self) -> bool {
+        false
+    }
     /// What the stats show about this clip (analysis, mode, process).
     fn stats(&self) -> ClipStats {
         ClipStats::default()
@@ -238,6 +242,8 @@ struct ActiveClip {
     earlier: Probed,
     /// The background start, so a seek can cancel it.
     start: Option<tokio::task::AbortHandle>,
+    /// The "too slow for the ticker" warning was logged while this film was on air.
+    slow_logged: bool,
 }
 
 /// What the clip's analysis found out about a film.
@@ -700,11 +706,34 @@ impl Channel {
         }
     }
 
-    /// Called by the engine loop every tick: runs a seek whose quiet has passed.
+    /// Called by the engine loop every tick: runs a seek whose quiet has passed and warns
+    /// when the film on air cannot keep up with its ticker.
     pub fn on_tick(&mut self) {
         if let Err(e) = self.run_due_seek() {
             self.log_error("log.channel_error_seek", &e);
         }
+        self.warn_if_too_slow();
+    }
+
+    /// Logs once per film on air (not for the next one being prepared) that the conversion
+    /// its ticker needs is too slow.
+    fn warn_if_too_slow(&mut self) {
+        let Some(c) = self.current.as_mut() else {
+            return;
+        };
+        let Some(handle) = c.handle.as_ref() else {
+            return;
+        };
+        if c.slow_logged || !handle.ticker_slow() {
+            return;
+        }
+        c.slow_logged = true;
+        let speed = handle.stats().speed.unwrap_or_default();
+        let msg = Msg::new("log.ticker_slow")
+            .arg("id", c.item.id)
+            .arg("title", &c.item.title)
+            .arg("speed", format!("{speed:.2}"));
+        self.log(msg);
     }
 
     fn run_due_seek(&mut self) -> anyhow::Result<()> {
@@ -745,8 +774,10 @@ impl Channel {
             seek.target_s
         };
         if seek.ticker && ends_film(target_s, c.duration_s()) {
-            // Not worth a restart: the film plays out with the old look.
+            // Not worth a restart: the film plays out with the old look. The next film,
+            // prepared with the old look, is prepared again with the new one.
             self.current = Some(c);
+            self.drop_prefetched();
             return Ok(());
         }
         if ends_film(target_s, c.duration_s()) {
@@ -1294,6 +1325,7 @@ impl Channel {
             stalled_since: None,
             earlier: Probed::default(),
             start: None,
+            slow_logged: false,
         };
         let start = self.o.factory.create(item, start_at_s, attempt);
         let tx = self.launch_tx.clone();
@@ -1529,6 +1561,9 @@ mod tests {
         fn copies_video(&self) -> bool {
             self.copies_video
         }
+        fn ticker_slow(&self) -> bool {
+            self.fake.lock().ticker_slow
+        }
         fn poll(&mut self) -> Vec<SegmentInfo> {
             std::mem::take(&mut self.fake.lock().pending)
         }
@@ -1660,6 +1695,7 @@ mod tests {
         factory: FakeFactory,
         now: Arc<AtomicU64>,
         removed: Arc<Mutex<Vec<PathBuf>>>,
+        logs: Arc<Mutex<Vec<String>>>,
         channel: Channel,
     }
 
@@ -1668,6 +1704,7 @@ mod tests {
         factory: &FakeFactory,
         now: &Arc<AtomicU64>,
         removed: &Arc<Mutex<Vec<PathBuf>>>,
+        logs: &Arc<Mutex<Vec<String>>>,
     ) -> Channel {
         let mut o = ChannelOptions::new(
             MAIN_CHANNEL_ID,
@@ -1681,6 +1718,10 @@ mod tests {
         o.remove_file = Some(Box::new(move |p: &Path| {
             removed.lock().unwrap().push(p.to_path_buf())
         }));
+        let logs = Arc::clone(logs);
+        o.log = Some(Box::new(move |m: Msg| {
+            logs.lock().unwrap().push(m.to_string())
+        }));
         Channel::new(o)
     }
 
@@ -1689,13 +1730,15 @@ mod tests {
         let factory = FakeFactory::default();
         let now = Arc::new(AtomicU64::new(0));
         let removed = Arc::new(Mutex::new(Vec::new()));
-        let mut channel = channel_for(&db, &factory, &now, &removed);
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut channel = channel_for(&db, &factory, &now, &removed, &logs);
         channel.start().unwrap();
         Env {
             db,
             factory,
             now,
             removed,
+            logs,
             channel,
         }
     }
@@ -2133,7 +2176,7 @@ mod tests {
         let a = e.add_item("a");
         e.add_item("b");
         e.set_status(a.id, ItemStatus::Playing);
-        let mut c2 = channel_for(&e.db, &e.factory, &e.now, &e.removed);
+        let mut c2 = channel_for(&e.db, &e.factory, &e.now, &e.removed, &e.logs);
         c2.start().unwrap();
         let conn = e.db.lock().unwrap();
         let head = QueueRepo::new(&conn).next_queued(MAIN_CHANNEL_ID).unwrap();
@@ -3522,6 +3565,65 @@ mod tests {
         assert!(!h.disposed());
         assert_eq!(e.starts(), 1);
         assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+    }
+
+    /// The next film prepared with the old look is dropped and prepared again with the new
+    /// one (a buffering slate before it is accepted).
+    #[tokio::test]
+    async fn a_ticker_restart_in_the_last_second_prepares_the_next_film_again() {
+        let mut e = setup();
+        let a = e.add("a", Some(12.5), false);
+        let b = e.add_item("b");
+        let h = e.air(&a, 3).await; // 12 s of 12.5: b is prefetched
+        e.flush().await;
+        assert_eq!(e.channel.prefetched_item_id(), Some(b.id));
+        let prefetched = e.factory.handle(1);
+        e.channel.apply_ticker();
+        e.advance(700);
+        e.tick();
+        assert!(!h.disposed());
+        assert!(prefetched.disposed(), "the old look is not aired");
+        assert_eq!(e.channel.prefetched_item_id(), None);
+        // The film ends: the next one starts with the new look.
+        h.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        assert_eq!(e.starts(), 3);
+    }
+
+    /// The warning about a computer too slow for the ticker is logged once, for the film on
+    /// air only (not for the next one being prepared).
+    #[tokio::test]
+    async fn a_slow_ticker_is_logged_once_and_only_for_the_film_on_air() {
+        let mut e = setup();
+        let a = e.add("a", Some(60.0), false);
+        let b = e.add_item("b");
+        let h = e.air(&a, 3).await; // 12 s of 60: b is prefetched
+        e.flush().await;
+        assert_eq!(e.channel.prefetched_item_id(), Some(b.id));
+        let slow = |e: &Env| {
+            e.logs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.starts_with("The computer cannot keep up with the info ticker"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        e.factory.handle(1).lock().ticker_slow = true;
+        e.tick();
+        assert!(slow(&e).is_empty(), "the prepared film is not on air");
+        h.lock().ticker_slow = true;
+        e.tick();
+        e.tick();
+        assert_eq!(
+            slow(&e),
+            [format!(
+                "The computer cannot keep up with the info ticker (video #{} \"a\" converts at 1.50× for 30 s). Switch the ticker off or turn on conversion on the graphics card.",
+                a.id
+            )]
+        );
     }
 
     #[tokio::test]

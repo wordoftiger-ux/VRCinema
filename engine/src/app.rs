@@ -820,11 +820,15 @@ impl AppCore {
         let current = || self.slate_address();
         match swapper.swap_to(current, &live.state.engine.commands).await {
             SwapOutcome::Unchanged => {}
-            SwapOutcome::Replaced { generation } => {
+            SwapOutcome::Replaced {
+                generation,
+                address_changed,
+            } => {
                 self.log(Msg::new("log.slates_refreshed").arg("generation", generation));
                 for notice in swapper.notices() {
                     self.log(notice);
                 }
+                live.state.after_slates_replaced(address_changed);
             }
             SwapOutcome::Failed(why) => {
                 self.log(Msg::new("log.slates_refresh_failed").arg_msg("reason", why))
