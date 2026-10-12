@@ -287,7 +287,6 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         }),
         segment_seconds: 4,
         window_size: 10,
-
         language: settings.language,
     }
 }

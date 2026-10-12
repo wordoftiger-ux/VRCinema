@@ -29,6 +29,19 @@ impl ItemStatus {
         }
     }
 
+    /// The status as a word for a person (a log message field).
+    pub fn msg(self) -> crate::i18n::Msg {
+        crate::i18n::Msg::new(match self {
+            Self::PendingApproval => "log.status_pending_approval",
+            Self::Queued => "log.status_queued",
+            Self::Playing => "log.status_playing",
+            Self::Played => "log.status_played",
+            Self::Failed => "log.status_failed",
+            Self::Removed => "log.status_removed",
+            Self::Rejected => "log.status_rejected",
+        })
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "pending_approval" => Self::PendingApproval,

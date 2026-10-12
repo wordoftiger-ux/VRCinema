@@ -6,8 +6,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 
+use crate::i18n::{Lang, Msg, MsgContext, msg_error, t};
 use crate::process::run_process;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -24,7 +25,11 @@ impl SetupOptions {
             match a.as_str() {
                 "--force" => o.force = true,
                 "--no-env" => o.no_env = true,
-                other => bail!("Nieznana opcja: {other} (dostępne: --force, --no-env)"),
+                other => {
+                    return Err(msg_error(
+                        Msg::error("setup_unknown_option").arg("option", other),
+                    ));
+                }
             }
         }
         Ok(o)
@@ -101,6 +106,11 @@ fn extract_tar_xz(archive: &Path, dest: &Path) -> Result<()> {
 /// Unpacks the archive (`.zip` or `.tar.xz`) next to `bin_dir`'s temp folder, copies
 /// `ffmpeg<exe>` and `ffprobe<exe>` from wherever they are nested into `bin_dir` and removes
 /// the temp folder.
+/// Prints `msg` in `lang`.
+fn say(lang: Lang, msg: Msg) {
+    println!("{}", msg.render(lang));
+}
+
 pub fn extract_ffmpeg_tools(archive: &Path, bin_dir: &Path, exe: &str) -> Result<()> {
     let tmp = bin_dir.join("ffmpeg-extract");
     let _ = fs::remove_dir_all(&tmp);
@@ -111,10 +121,11 @@ pub fn extract_ffmpeg_tools(archive: &Path, bin_dir: &Path, exe: &str) -> Result
         } else {
             extract_tar_xz(archive, &tmp)
         }
-        .context("Rozpakowanie ffmpeg nie powiodło się")?;
+        .msg_context(Msg::error("ffmpeg_unpack_failed"))?;
         for tool in ["ffmpeg", "ffprobe"] {
             let name = format!("{tool}{exe}");
-            let found = find_file(&tmp, &name).ok_or_else(|| anyhow!("W archiwum brak {name}"))?;
+            let found = find_file(&tmp, &name)
+                .ok_or_else(|| msg_error(Msg::error("archive_lacks_file").arg("file", &name)))?;
             let dest = bin_dir.join(&name);
             fs::copy(&found, &dest)?;
             make_executable(&dest)?;
@@ -137,17 +148,18 @@ fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn download(url: &str, dest: &Path) -> Result<()> {
-    println!("Pobieranie {url}");
+async fn download(url: &str, dest: &Path, lang: Lang) -> Result<()> {
+    say(lang, Msg::new("log.setup_downloading").arg("url", url));
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .build()?;
     let mut res = client.get(url).send().await?;
     if !res.status().is_success() {
-        bail!(
-            "Pobieranie nie powiodło się: {} {url}",
-            res.status().as_u16()
-        );
+        return Err(msg_error(
+            Msg::error("download_failed_status")
+                .arg("status", res.status().as_u16())
+                .arg("url", url),
+        ));
     }
     let mut file = fs::File::create(dest)?;
     while let Some(chunk) = res.chunk().await? {
@@ -157,26 +169,26 @@ async fn download(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn setup_ytdlp(bin: &Path, force: bool) -> Result<()> {
+async fn setup_ytdlp(bin: &Path, force: bool, lang: Lang) -> Result<()> {
     let dest = bin.join(format!("yt-dlp{}", exe_suffix()));
     if dest.exists() && !force {
-        println!("yt-dlp już jest.");
+        say(lang, Msg::new("log.setup_already").arg("tool", "yt-dlp"));
         return Ok(());
     }
-    download(ytdlp_url(), &dest).await?;
+    download(ytdlp_url(), &dest, lang).await?;
     make_executable(&dest)
 }
 
-async fn setup_ffmpeg(bin: &Path, force: bool) -> Result<()> {
+async fn setup_ffmpeg(bin: &Path, force: bool, lang: Lang) -> Result<()> {
     let exe = exe_suffix();
     let ffmpeg = bin.join(format!("ffmpeg{exe}"));
     let ffprobe = bin.join(format!("ffprobe{exe}"));
     if ffmpeg.exists() && ffprobe.exists() && !force {
-        println!("ffmpeg już jest.");
+        say(lang, Msg::new("log.setup_already").arg("tool", "ffmpeg"));
         return Ok(());
     }
     if cfg!(target_os = "macos") {
-        bail!("Na macOS zainstaluj ffmpeg przez Homebrew i ustaw FFMPEG_PATH/FFPROBE_PATH w .env.");
+        return Err(msg_error(Msg::error("setup_macos_ffmpeg")));
     }
     let archive = bin.join(if cfg!(windows) {
         "ffmpeg.zip"
@@ -184,8 +196,8 @@ async fn setup_ffmpeg(bin: &Path, force: bool) -> Result<()> {
         "ffmpeg.tar.xz"
     });
     let result = async {
-        download(ffmpeg_url(), &archive).await?;
-        println!("Rozpakowywanie ffmpeg...");
+        download(ffmpeg_url(), &archive, lang).await?;
+        say(lang, Msg::new("log.setup_unpacking"));
         let (a, b) = (archive.clone(), bin.to_path_buf());
         tokio::task::spawn_blocking(move || extract_ffmpeg_tools(&a, &b, exe_suffix())).await?
     }
@@ -194,30 +206,33 @@ async fn setup_ffmpeg(bin: &Path, force: bool) -> Result<()> {
     result
 }
 
-async fn print_version(bin: &Path, tool: &str, args: &[&str]) {
+async fn print_version(bin: &Path, tool: &str, args: &[&str], lang: Lang) {
     let path = bin.join(format!("{tool}{}", exe_suffix()));
     let args: Vec<_> = args.iter().map(Into::into).collect();
     let text = match run_process(&path, &args, Duration::from_secs(30)).await {
         Ok(out) if !out.stdout.trim().is_empty() => out.stdout,
         Ok(out) if !out.stderr.trim().is_empty() => out.stderr,
-        _ => "błąd".to_string(),
+        _ => t(lang, "log.setup_version_unknown", &[]),
     };
-    println!("{tool}: {}", text.lines().next().unwrap_or("błąd"));
+    let line = text.lines().next().unwrap_or_default();
+    println!("{tool}: {line}");
 }
 
-pub async fn run_setup(root: &Path, opts: SetupOptions) -> Result<()> {
+/// `vrcinema setup`; its messages are in `lang` (the `LANGUAGE` of the `.env`, English by default).
+pub async fn run_setup(root: &Path, opts: SetupOptions, lang: Lang) -> Result<()> {
     let bin = root.join("bin");
     fs::create_dir_all(&bin)?;
-    setup_ytdlp(&bin, opts.force).await?;
-    setup_ffmpeg(&bin, opts.force).await?;
-    print_version(&bin, "ffmpeg", &["-hide_banner", "-version"]).await;
-    print_version(&bin, "yt-dlp", &["--version"]).await;
+    setup_ytdlp(&bin, opts.force, lang).await?;
+    setup_ffmpeg(&bin, opts.force, lang).await?;
+    print_version(&bin, "ffmpeg", &["-hide_banner", "-version"], lang).await;
+    print_version(&bin, "yt-dlp", &["--version"], lang).await;
     let env = root.join(".env");
     if !opts.no_env && !env.exists() {
-        fs::copy(root.join(".env.example"), &env).context("Brak pliku .env.example")?;
-        println!("Utworzono .env z .env.example — ustaw w nim ADMIN_PASSWORD.");
+        fs::copy(root.join(".env.example"), &env)
+            .msg_context(Msg::error("setup_env_example_missing"))?;
+        say(lang, Msg::new("log.setup_env_created"));
     }
-    println!("Gotowe.");
+    say(lang, Msg::new("log.setup_done"));
     Ok(())
 }
 
@@ -269,7 +284,10 @@ mod tests {
         let bin = tmp.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let err = extract_ffmpeg_tools(&archive, &bin, ".exe").unwrap_err();
-        assert_eq!(err.to_string(), "W archiwum brak ffprobe.exe");
+        assert_eq!(
+            err.to_string(),
+            "The downloaded archive has no ffprobe.exe."
+        );
         assert!(!bin.join("ffmpeg-extract").exists());
     }
 
@@ -282,6 +300,14 @@ mod tests {
         );
         let o = SetupOptions::parse(&a(&["--force", "--no-env"])).unwrap();
         assert!(o.force && o.no_env);
-        assert!(SetupOptions::parse(&a(&["--x"])).is_err());
+        let err = SetupOptions::parse(&a(&["--x"])).unwrap_err();
+        assert_eq!(
+            crate::i18n::error_msg(&err).render(Lang::En),
+            "Unknown option: --x (available: --force, --no-env)"
+        );
+        assert_eq!(
+            crate::i18n::error_msg(&err).render(Lang::Pl),
+            "Nieznana opcja: --x (dostępne: --force, --no-env)"
+        );
     }
 }

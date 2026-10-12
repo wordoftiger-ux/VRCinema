@@ -34,7 +34,7 @@ pub struct LogSink {
     dir: PathBuf,
     max_bytes: u64,
     max_files: usize,
-    tail_lines: usize,
+    tail_entries: usize,
     inner: Mutex<Inner>,
 }
 
@@ -77,7 +77,7 @@ impl LogSink {
     }
 
     /// `max_files` counts the current file too (`vrcinema.log`, `vrcinema.1.log`, …).
-    pub fn with_limits(dir: &Path, max_bytes: u64, max_files: usize, tail_lines: usize) -> Self {
+    pub fn with_limits(dir: &Path, max_bytes: u64, max_files: usize, tail_entries: usize) -> Self {
         let (file, size) = match open_append(&dir.join(LOG_FILE)) {
             Some((file, size)) => (Some(file), size),
             None => (None, 0),
@@ -86,11 +86,11 @@ impl LogSink {
             dir: dir.to_path_buf(),
             max_bytes,
             max_files: max_files.max(1),
-            tail_lines,
+            tail_entries,
             inner: Mutex::new(Inner {
                 file,
                 size,
-                tail: VecDeque::with_capacity(tail_lines),
+                tail: VecDeque::with_capacity(tail_entries),
             }),
         }
     }
@@ -104,8 +104,8 @@ impl LogSink {
         for line in entry.lines(Lang::En) {
             self.write(&mut inner, &line);
         }
-        if self.tail_lines > 0 {
-            if inner.tail.len() == self.tail_lines {
+        if self.tail_entries > 0 {
+            if inner.tail.len() == self.tail_entries {
                 inner.tail.pop_front();
             }
             inner.tail.push_back(entry);

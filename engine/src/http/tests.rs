@@ -556,10 +556,75 @@ async fn adds_a_film_to_the_end_of_the_queue_with_a_nickname() {
     assert_eq!(item.requester_name.as_deref(), Some("Ola"));
     assert_eq!(item.requester_ip.as_deref(), Some("1.1.1.1"));
     assert_eq!(item.added_by, AddedBy::Public);
+    let logs = h.logs();
+    assert_eq!(logs.len(), 1);
+    let tag = logs[0]
+        .strip_prefix("Request from viewer ")
+        .and_then(|rest| rest.split(':').next())
+        .expect("an anonymous viewer tag")
+        .to_string();
+    assert_eq!(tag.len(), 8);
+    assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()), "{tag}");
     assert_eq!(
-        h.logs(),
-        vec!["Request from 1.1.1.1: \"A\" (queued)".to_string()]
+        logs[0],
+        format!("Request from viewer {tag}: \"A\" (queued)")
     );
+}
+
+/// A viewer address never reaches the log (spec section 8): only a tag, the same for the same
+/// viewer during one run, different for another one.
+#[tokio::test]
+async fn the_log_has_a_tag_of_the_viewer_never_the_address() {
+    let h = Harness::new();
+    h.update_settings(SettingsPatch {
+        max_active_per_requester: Some(9),
+        request_limit_count: Some(99),
+        ..SettingsPatch::default()
+    });
+    for (url, ip) in [
+        ("https://youtu.be/a", "1.1.1.1"),
+        ("https://youtu.be/b", "1.1.1.1"),
+        ("https://youtu.be/c", "2001:db8::7a"),
+        ("https://youtu.be/d", "::ffff:9.8.7.6"),
+    ] {
+        assert_eq!(
+            h.request(url, ip, None).await.status,
+            StatusCode::CREATED,
+            "{ip}"
+        );
+    }
+    let logs = h.logs();
+    assert_eq!(logs.len(), 4, "{logs:?}");
+    let tags: Vec<&str> = logs
+        .iter()
+        .map(|l| {
+            l.strip_prefix("Request from viewer ")
+                .unwrap()
+                .split(':')
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(tags[0], tags[1], "the same viewer, the same tag");
+    assert_ne!(tags[0], tags[2]);
+    assert_ne!(tags[2], tags[3]);
+    let all = logs.join(
+        "
+",
+    );
+    for ip in ["1.1.1.1", "2001:db8", "7a\"", "9.8.7.6"] {
+        assert!(!all.contains(ip), "{ip} in {all}");
+    }
+    // A new run has a new salt: the tag of the same address differs.
+    let other = Harness::new();
+    assert_eq!(
+        other
+            .request("https://youtu.be/a", "1.1.1.1", None)
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    assert_ne!(other.logs()[0], logs[0]);
 }
 
 #[tokio::test]

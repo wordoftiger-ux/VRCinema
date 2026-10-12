@@ -288,12 +288,14 @@ pub fn spawn_tooltip_refresh(app: AppHandle, created_in: Lang) {
             };
             if shown_lang.is_some_and(|shown| shown != lang) {
                 // Only a change rebuilds the menu: the first pass shows what `create` made.
-                if let Err(e) = rebuild_menu(&app, lang) {
-                    app.state::<Shell>()
-                        .log(Msg::new("log.tray_menu_failed").arg("error", e));
+                // The language counts as shown once the menu is rebuilt; else the next tick retries.
+                match rebuild_menu(&app, lang) {
+                    Ok(()) => shown_lang = Some(lang),
+                    Err(e) => app
+                        .state::<Shell>()
+                        .log(Msg::new("log.tray_menu_failed").arg("error", e)),
                 }
             }
-            shown_lang = Some(lang);
             if text != last
                 && let Some(tray) = app.tray_by_id(TRAY_ID)
                 && tray.set_tooltip(Some(&text)).is_ok()

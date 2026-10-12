@@ -306,6 +306,8 @@ async fn without_tools_the_server_starts_and_the_settings_are_saved_at_once() {
     let saved = app.saved();
     assert_eq!(saved["port"], json!(port), "the bound port is written back");
     assert_eq!(saved["sessionSecret"].as_str().unwrap().len(), 64);
+    // The language found at the first start is saved with the rest, so it does not drift later.
+    assert_eq!(saved["language"], "pl");
     let page = app.http.get(app.url("/")).send().await.unwrap();
     assert_eq!(page.status(), StatusCode::OK);
     assert!(app.home.join("logs").join("vrcinema.log").is_file());

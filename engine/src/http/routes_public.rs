@@ -164,9 +164,9 @@ async fn post_request(
     })?;
     (state.log)(
         Msg::new("log.request_received")
-            .arg("ip", &ip)
+            .arg("viewer", state.viewer_tag(&ip))
             .arg("title", &item.title)
-            .arg("status", item.status.as_str()),
+            .arg_msg("status", item.status.msg()),
     );
     Ok(json_response(
         StatusCode::CREATED,

@@ -92,6 +92,15 @@ pub enum PauseReason {
 }
 
 impl PauseReason {
+    /// The reason as a word for a person (a log message field).
+    pub fn msg(self) -> Msg {
+        Msg::new(match self {
+            Self::Tunnel => "log.pause_reason_tunnel",
+            Self::NoViewers => "log.pause_reason_no_viewers",
+            Self::Manual => "log.pause_reason_manual",
+        })
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tunnel => "tunnel",
@@ -777,7 +786,7 @@ impl Channel {
                 return Err(msg_error(
                     Msg::error("item_not_playable")
                         .arg("id", item_id)
-                        .arg("status", status.as_str()),
+                        .arg_msg("status", status.msg()),
                 ));
             }
         };
@@ -829,7 +838,7 @@ impl Channel {
         }
         self.log(
             Msg::new("log.pause")
-                .arg("reason", reason.as_str())
+                .arg_msg("reason", reason.msg())
                 .arg("id", p.item.id)
                 .arg("title", &p.item.title)
                 .arg("seconds", format!("{:.0}", p.position_s)),

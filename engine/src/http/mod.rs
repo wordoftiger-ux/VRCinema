@@ -90,6 +90,8 @@ pub struct AppState {
     pub(crate) viewers: Arc<ViewerActivity>,
     /// Previous sample of the encoder's CPU time, for the stats route.
     pub(crate) cpu: Arc<crate::stats::CpuSampler>,
+    /// Random per run: viewer tags in the log cannot be matched across restarts.
+    viewer_salt: Arc<[u8; 16]>,
 }
 
 impl AppState {
@@ -145,6 +147,7 @@ impl AppState {
             library: None,
             viewers: Arc::new(ViewerActivity::new()),
             cpu: Arc::default(),
+            viewer_salt: Arc::new(random_salt()),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -259,6 +262,19 @@ impl AppState {
                 false
             }
         }
+    }
+
+    /// An anonymous tag of a viewer for the log: the first 8 hex digits of SHA-256(salt + ip).
+    /// The same viewer has the same tag during one run; the address itself is never logged.
+    pub(crate) fn viewer_tag(&self, ip: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.viewer_salt.as_slice());
+        hasher.update(ip.as_bytes());
+        hasher.finalize()[..4]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// `CF-Connecting-IP` counts for a request from `peer`: trust switched on, and when it comes
@@ -700,6 +716,12 @@ impl FromRequestParts<AppState> for Ctx {
             https,
         })
     }
+}
+
+fn random_salt() -> [u8; 16] {
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).expect("system random number generator");
+    salt
 }
 
 // ---------- JSON shapes ----------

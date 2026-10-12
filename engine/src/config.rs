@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::i18n::Lang;
+use crate::i18n::{Lang, Msg};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoEncoder {
@@ -59,10 +59,27 @@ pub struct AppConfig {
     pub language: Lang,
 }
 
+/// The `LANGUAGE` of the environment, English when it is missing or unknown (for messages
+/// printed before the configuration is valid).
+pub fn env_language(env: &HashMap<String, String>) -> Lang {
+    trimmed(env, "LANGUAGE")
+        .and_then(Lang::parse)
+        .unwrap_or_default()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("{0}")]
-    Invalid(String),
+    #[error("{}", .0)]
+    Invalid(Msg),
+}
+
+impl ConfigError {
+    /// Why, for a person.
+    pub fn message(&self) -> Msg {
+        match self {
+            Self::Invalid(msg) => msg.clone(),
+        }
+    }
 }
 
 /// Zmienna środowiskowa po przycięciu; pusta wartość traktowana jak brak.
@@ -90,7 +107,7 @@ fn default_font(windows: bool) -> &'static str {
 fn random_secret() -> Result<String, ConfigError> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
-        .map_err(|e| ConfigError::Invalid(format!("Nie można wygenerować SESSION_SECRET: {e}")))?;
+        .map_err(|e| ConfigError::Invalid(Msg::error("config_session_secret").arg("detail", e)))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -99,35 +116,33 @@ pub fn load_config(
     root: &Path,
     windows: bool,
 ) -> Result<AppConfig, ConfigError> {
-    let admin_password = trimmed(env, "ADMIN_PASSWORD").ok_or_else(|| {
-        ConfigError::Invalid(
-            "Brak ADMIN_PASSWORD w pliku .env — ustaw hasło do panelu administratora.".into(),
-        )
-    })?;
+    let admin_password = trimmed(env, "ADMIN_PASSWORD")
+        .ok_or_else(|| ConfigError::Invalid(Msg::error("config_admin_password_missing")))?;
     if admin_password == "zmien-mnie" || admin_password.encode_utf16().count() < 8 {
-        return Err(ConfigError::Invalid(
-            "ADMIN_PASSWORD musi mieć co najmniej 8 znaków i nie może być przykładowym \"zmien-mnie\"."
-                .into(),
-        ));
+        return Err(ConfigError::Invalid(Msg::error(
+            "config_admin_password_weak",
+        )));
     }
 
     let encoder_name = trimmed(env, "VIDEO_ENCODER").unwrap_or("libx264");
     let video_encoder = VideoEncoder::parse(encoder_name).ok_or_else(|| {
         let allowed: Vec<&str> = VideoEncoder::ALL.iter().map(|e| e.as_str()).collect();
-        ConfigError::Invalid(format!(
-            "Nieznany VIDEO_ENCODER \"{encoder_name}\". Dozwolone: {}",
-            allowed.join(", ")
-        ))
+        ConfigError::Invalid(
+            Msg::error("config_unknown_encoder")
+                .arg("value", encoder_name)
+                .arg("allowed", allowed.join(", ")),
+        )
     })?;
 
     let language = match trimmed(env, "LANGUAGE") {
         None => Lang::En,
         Some(raw) => Lang::parse(raw).ok_or_else(|| {
             let allowed: Vec<&str> = Lang::ALL.iter().map(|l| l.as_str()).collect();
-            ConfigError::Invalid(format!(
-                "Nieznany LANGUAGE \"{raw}\". Dozwolone: {}",
-                allowed.join(", ")
-            ))
+            ConfigError::Invalid(
+                Msg::error("config_unknown_language")
+                    .arg("value", raw)
+                    .arg("allowed", allowed.join(", ")),
+            )
         })?,
     };
 
@@ -141,7 +156,9 @@ pub fn load_config(
             .parse::<u16>()
             .ok()
             .filter(|p| *p > 0)
-            .ok_or_else(|| ConfigError::Invalid(format!("Niepoprawny PORT: {raw}")))?,
+            .ok_or_else(|| {
+                ConfigError::Invalid(Msg::error("config_invalid_port").arg("value", raw))
+            })?,
     };
 
     let session_secret = match trimmed(env, "SESSION_SECRET") {
@@ -280,15 +297,18 @@ pub fn apply_env(target: &mut HashMap<String, String>, values: Vec<(String, Stri
 pub fn merged_env(
     process_env: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
     root: &Path,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<HashMap<String, String>, Msg> {
     let mut env: HashMap<String, String> = process_env
         .into_iter()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
         .collect();
     let env_file = root.join(".env");
     if env_file.exists() {
-        let values = read_env_file(&env_file)
-            .map_err(|e| format!("Nie można odczytać pliku {}: {e}", env_file.display()))?;
+        let values = read_env_file(&env_file).map_err(|e| {
+            Msg::error("env_file_unreadable")
+                .arg("path", env_file.display())
+                .arg("detail", e)
+        })?;
         apply_env(&mut env, values);
     }
     Ok(env)
@@ -381,7 +401,7 @@ mod tests {
             &root(),
             false,
         ));
-        assert!(e.contains("Brak ADMIN_PASSWORD"));
+        assert!(e.contains("ADMIN_PASSWORD is missing"));
     }
 
     #[test]
@@ -397,7 +417,7 @@ mod tests {
         ));
         assert_eq!(
             e,
-            "ADMIN_PASSWORD musi mieć co najmniej 8 znaków i nie może być przykładowym \"zmien-mnie\"."
+            "ADMIN_PASSWORD must be at least 8 characters and not the example \"zmien-mnie\"."
         );
     }
 
@@ -600,8 +620,28 @@ mod tests {
         assert!(e.contains("VIDEO_ENCODER"));
         assert_eq!(
             e,
-            "Nieznany VIDEO_ENCODER \"foo\". Dozwolone: libx264, h264_nvenc, h264_qsv, h264_amf"
+            "Unknown VIDEO_ENCODER \"foo\". Allowed: libx264, h264_nvenc, h264_qsv, h264_amf"
         );
+    }
+
+    #[test]
+    fn errors_are_told_in_the_configured_language_english_by_default() {
+        let bad = [("PORT", "abc"), ("ADMIN_PASSWORD", "haslo123")];
+        let e = env(&bad);
+        assert_eq!(env_language(&e), Lang::En);
+        let err = load_config(&e, &root(), false).unwrap_err();
+        assert_eq!(err.message().render(env_language(&e)), "Invalid PORT: abc");
+        let with_pl = env(&[
+            ("PORT", "abc"),
+            ("ADMIN_PASSWORD", "haslo123"),
+            ("LANGUAGE", "pl"),
+        ]);
+        let lang = env_language(&with_pl);
+        assert_eq!(lang, Lang::Pl);
+        let err = load_config(&with_pl, &root(), false).unwrap_err();
+        assert_eq!(err.message().render(lang), "Niepoprawny PORT: abc");
+        // An unknown LANGUAGE is English as well.
+        assert_eq!(env_language(&env(&[("LANGUAGE", "xx")])), Lang::En);
     }
 
     #[test]
@@ -612,7 +652,7 @@ mod tests {
                 &root(),
                 false,
             ));
-            assert_eq!(e, format!("Niepoprawny PORT: {p}"));
+            assert_eq!(e, format!("Invalid PORT: {p}"));
         }
         let c = load_config(
             &env(&[("ADMIN_PASSWORD", "haslo123"), ("PORT", "65535")]),

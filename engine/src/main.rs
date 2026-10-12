@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use vrcinema::config::{AppConfig, fake_resolver_file, find_root, load_config, merged_env};
-use vrcinema::i18n::{Lang, Msg};
+use vrcinema::config::{
+    AppConfig, env_language, fake_resolver_file, find_root, load_config, merged_env,
+};
+use vrcinema::i18n::{Lang, Msg, error_msg};
 use vrcinema::process::contain_this_process;
 use vrcinema::server::{RunOptions, log, run};
 use vrcinema::setup::{SetupOptions, run_setup};
@@ -18,7 +20,7 @@ fn application_root() -> PathBuf {
 }
 
 /// Environment plus `<root>/.env` (real environment variables win).
-fn load_env(root: &std::path::Path) -> Result<HashMap<String, String>, String> {
+fn load_env(root: &std::path::Path) -> Result<HashMap<String, String>, Msg> {
     // vars() panics on non-Unicode entries; merged_env skips those instead.
     merged_env(std::env::vars_os(), root)
 }
@@ -42,11 +44,15 @@ fn check_tools(config: &AppConfig) -> Result<(), Msg> {
 
 /// The configuration and the merged variables (environment + `.env`).
 fn prepare_server(root: &std::path::Path) -> Result<(AppConfig, HashMap<String, String>), String> {
-    let env = load_env(root)?;
+    let env = load_env(root).map_err(|m| {
+        Msg::new("log.headless_config_error")
+            .arg_msg("error", m)
+            .render(Lang::En)
+    })?;
     let config = load_config(&env, root, cfg!(windows)).map_err(|e| {
         Msg::new("log.headless_config_error")
-            .arg("error", e)
-            .render(Lang::En)
+            .arg("error", e.message().render(env_language(&env)))
+            .render(env_language(&env))
     })?;
     check_tools(&config).map_err(|m| m.render(config.language))?;
     if !env.contains_key("SESSION_SECRET") || env["SESSION_SECRET"].trim().is_empty() {
@@ -92,14 +98,16 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.first().is_some_and(|a| a == "setup") {
+        // The messages of `setup` are in the `LANGUAGE` of the environment or `.env`.
+        let lang = load_env(&root).map_or(Lang::En, |env| env_language(&env));
         let result = match SetupOptions::parse(&args[1..]) {
-            Ok(opts) => run_setup(&root, opts).await,
+            Ok(opts) => run_setup(&root, opts, lang).await,
             Err(e) => Err(e),
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("{e:#}");
+                eprintln!("{}", error_msg(&e).render(lang));
                 ExitCode::FAILURE
             }
         };
