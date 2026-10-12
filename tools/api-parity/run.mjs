@@ -313,6 +313,19 @@ class Client {
       }
       if (bodyShape && typeof bodyShape === 'object') delete bodyShape.code;
     }
+    // Etap 4, zadanie 5: ustawienia kanału mają nowe pole `slateLanguage` (język plansz i paska;
+    // serwer TS go nie ma). Po stronie Rust sprawdzamy wartość domyślną (`en` — skrypt go nie zmienia),
+    // potem pole jest pomijane w porównaniu.
+    // Ustawienia są ciałem odpowiedzi (`/settings`) albo polem `settings` (stan panelu).
+    if (this.srv.name === 'rust' && bodyShape && typeof bodyShape === 'object') {
+      for (const s of [bodyShape, bodyShape.settings]) {
+        if (!s || typeof s !== 'object' || !('discontinuityTags' in s)) continue;
+        if (s.slateLanguage !== 'en') {
+          throw new Error(`rust: "${name}": slateLanguage = ${JSON.stringify(s.slateLanguage)}, oczekiwano "en"`);
+        }
+        delete s.slateLanguage;
+      }
+    }
     // Znana różnica (etap 4, zadanie 4): serwer TS pisze „N filmów” dla każdej liczby, Rust używa
     // poprawnych form (1 film, 2-4 filmy, 5+ filmów) w polskim słowniku. Dotyczy wyłącznie komunikatu
     // `too_many_active`: po sprawdzeniu poprawności formy po stronie Rust oba komunikaty sprowadzamy

@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::i18n::Msg;
+use crate::i18n::{Lang, Msg};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +18,13 @@ pub struct ChannelSettings {
     pub moderation: bool,
     pub force_transcode: bool,
     pub discontinuity_tags: bool,
+    /// Language of the slates and of the info ticker on the stream.
+    #[serde(serialize_with = "serialize_lang")]
+    pub slate_language: Lang,
+}
+
+fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(lang.as_str())
 }
 
 impl Default for ChannelSettings {
@@ -33,6 +40,7 @@ impl Default for ChannelSettings {
             moderation: false,
             force_transcode: false,
             discontinuity_tags: true,
+            slate_language: Lang::En,
         }
     }
 }
@@ -61,6 +69,7 @@ pub struct SettingsPatch {
     pub moderation: Option<bool>,
     pub force_transcode: Option<bool>,
     pub discontinuity_tags: Option<bool>,
+    pub slate_language: Option<Lang>,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -101,6 +110,21 @@ fn expect_bool(key: &str, value: &Value) -> Result<bool, Msg> {
         .ok_or_else(|| Msg::error("setting_not_boolean").arg("key", key))
 }
 
+/// A language by its exact tag (`en`, `pl`, ...).
+fn lang_from_tag(value: &Value) -> Option<Lang> {
+    let tag = value.as_str()?;
+    Lang::ALL.into_iter().find(|l| l.as_str() == tag)
+}
+
+fn expect_lang(key: &str, value: &Value) -> Result<Lang, Msg> {
+    lang_from_tag(value).ok_or_else(|| {
+        let all = Lang::ALL.map(Lang::as_str).join(", ");
+        Msg::error("setting_not_language")
+            .arg("key", key)
+            .arg("languages", all)
+    })
+}
+
 /// Validates and normalises a partial settings object (e.g. from the admin
 /// panel). Mirrors the TS `sanitizeSettingsPatch`; errors are the messages
 /// shown to the admin. Keys are processed in input order, so the first
@@ -130,6 +154,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             "moderation" => out.moderation = Some(expect_bool(key, value)?),
             "forceTranscode" => out.force_transcode = Some(expect_bool(key, value)?),
             "discontinuityTags" => out.discontinuity_tags = Some(expect_bool(key, value)?),
+            "slateLanguage" => out.slate_language = Some(expect_lang(key, value)?),
             _ => return Err(Msg::error("unknown_setting").arg("key", key)),
         }
     }
@@ -197,6 +222,9 @@ impl<'a> SettingsRepo<'a> {
                 "discontinuityTags" => {
                     s.discontinuity_tags = value.as_bool().unwrap_or(s.discontinuity_tags);
                 }
+                "slateLanguage" => {
+                    s.slate_language = lang_from_tag(&value).unwrap_or(s.slate_language)
+                }
                 _ => {}
             }
         }
@@ -209,7 +237,7 @@ impl<'a> SettingsRepo<'a> {
         channel_id: i64,
         patch: &SettingsPatch,
     ) -> rusqlite::Result<ChannelSettings> {
-        let entries: [(&str, Option<String>); 8] = [
+        let entries: [(&str, Option<String>); 9] = [
             (
                 "allowedDomains",
                 patch.allowed_domains.as_deref().map(list_json),
@@ -235,6 +263,10 @@ impl<'a> SettingsRepo<'a> {
             (
                 "discontinuityTags",
                 patch.discontinuity_tags.map(|b| b.to_string()),
+            ),
+            (
+                "slateLanguage",
+                patch.slate_language.map(|l| format!("\"{}\"", l.as_str())),
             ),
         ];
         let tx = self.conn.unchecked_transaction()?;

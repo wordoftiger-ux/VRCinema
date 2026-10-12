@@ -297,7 +297,7 @@ async fn the_slates_follow_the_tunnel_address() {
     if font {
         assert_eq!(
             std::fs::read_to_string(slates.join("idle").join("subtitle.txt")).unwrap(),
-            "Łączenie z internetem…"
+            "Connecting to the internet…"
         );
     }
     wait_online(&app, &cookie).await;
@@ -853,7 +853,7 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
     if std::path::Path::new("C:/Windows/Fonts/arial.ttf").exists() {
         assert_eq!(
             std::fs::read_to_string(slates.join("g2").join("idle").join("subtitle.txt")).unwrap(),
-            "Łączenie z internetem…"
+            "Connecting to the internet…"
         );
     }
     app.stop().await;

@@ -1307,6 +1307,7 @@ mod tests {
             buffering: slate_in(dir, "buffering.ts"),
             pause: slate_in(dir, "pause.ts"),
             generation: 0,
+            japanese_font_missing: false,
         }
     }
 
@@ -1444,6 +1445,7 @@ mod tests {
                 buffering: slate_in(&slates_dir, "buffering.ts"),
                 pause: slate_in(&slates_dir, "pause.ts"),
                 generation: 0,
+                japanese_font_missing: false,
             };
             let channel = Channel::new(ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -1592,6 +1594,7 @@ mod tests {
             buffering: two("buffering"),
             pause: two("pause"),
             generation,
+            japanese_font_missing: false,
         }
     }
 

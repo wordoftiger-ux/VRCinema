@@ -288,12 +288,15 @@ impl AppCore {
         (config, connecting)
     }
 
-    /// What the idle slate should show right now.
+    /// What the slates should show right now (address and the channel's slate language).
     pub(crate) fn slate_address(&self) -> SlateAddress {
         let (config, connecting) = self.effective_config(&self.settings());
         SlateAddress {
             public_url: config.public_url,
             connecting,
+            lang: self
+                .live()
+                .map_or_else(Default::default, |l| l.state.slate_language()),
         }
     }
 }

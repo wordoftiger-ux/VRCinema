@@ -21,7 +21,9 @@ use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
 use crate::pipeline::channel::{Channel, ChannelOptions, PauseReason};
 use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_factory};
 use crate::pipeline::probe::probe_duration;
-use crate::pipeline::slates::{RETAIN_S, SlateOptions, generate_slates, request_url};
+use crate::pipeline::slates::{
+    RETAIN_S, SlateOptions, generate_slates, request_url, system_fonts_dir,
+};
 use crate::resolver::fake::FakeResolver;
 use crate::resolver::file::FileResolver;
 use crate::resolver::local::{FileDurationProbe, LocalResolver};
@@ -304,6 +306,12 @@ async fn start_channel_loop(
 ) -> anyhow::Result<(EngineHandle, EngineTask)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
+    let slate_language = {
+        let conn = db.lock().unwrap_or_else(PoisonError::into_inner);
+        SettingsRepo::new(&conn)
+            .get(MAIN_CHANNEL_ID)
+            .map_or_else(|_| Lang::default(), |s| s.slate_language)
+    };
     let slates = generate_slates(&SlateOptions {
         ffmpeg_path: config.ffmpeg_path.clone(),
         font_file: config.font_file.clone(),
@@ -312,9 +320,13 @@ async fn start_channel_loop(
         connecting,
         segment_seconds: config.segment_seconds,
         generation: 0,
-        lang: config.language,
+        lang: slate_language,
+        japanese_font_dir: system_fonts_dir(),
     })
     .await?;
+    if slates.japanese_font_missing {
+        shared_log(Msg::new("log.slates_japanese_font_missing"));
+    }
 
     let build = {
         let db = Arc::clone(db);

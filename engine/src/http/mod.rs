@@ -240,6 +240,14 @@ impl AppState {
         f(&conn).map_err(ApiError::from)
     }
 
+    /// The channel's slate language (English when the settings cannot be read).
+    pub(crate) fn slate_language(&self) -> crate::i18n::Lang {
+        let conn = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+        SettingsRepo::new(&conn)
+            .get(self.channel_id)
+            .map_or_else(|_| crate::i18n::Lang::default(), |s| s.slate_language)
+    }
+
     fn settings(&self) -> Result<crate::db::ChannelSettings, ApiError> {
         self.with_db(|c| SettingsRepo::new(c).get(self.channel_id))
     }

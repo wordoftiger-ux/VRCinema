@@ -1371,6 +1371,38 @@ async fn a_new_public_address_replaces_the_slates_live() {
     })
     .await;
     assert!(!slates.join("g2").join("idle").join("qr.png").exists());
+    let title = |set: &str| {
+        std::fs::read_to_string(slates.join(set).join("idle").join("title.txt")).unwrap()
+    };
+    assert_eq!(title("g2"), "No videos in the queue", "slates start in en");
+    // A new slate language makes another set at once, with the texts of that language, and the
+    // stream goes on (no restart, no loop restart, a playlist that keeps advancing).
+    let media_sequence = |text: &str| -> u64 {
+        text.lines()
+            .find_map(|l| l.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    let sequence_before = media_sequence(&playlist().await);
+    let (status, res) = app
+        .call(
+            "PUT",
+            "/api/admin/channels/main/settings",
+            Some(&cookie),
+            Some(json!({"slateLanguage": "pl"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    assert_eq!(res["slateLanguage"], "pl");
+    eventually(90, "the Polish slate set", || async {
+        slates.join("g3").join("idle").join("title.txt").is_file()
+    })
+    .await;
+    assert_eq!(title("g3"), "Brak filmów w kolejce");
+    eventually(60, "the stream to go on after the swap", || async {
+        media_sequence(&playlist().await) > sequence_before
+    })
+    .await;
     assert_eq!(app.engine().server_starts(), 1, "no restart");
     assert_eq!(
         app.engine().channel_loop_counter().load(Ordering::SeqCst),

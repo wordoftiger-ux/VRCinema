@@ -569,6 +569,10 @@ impl AppCore {
                     self.wait_or_abort(&mut join).await;
                     return Err(msg_error(Msg::error("server_no_state")));
                 };
+                let slates = channel.then(|| {
+                    let lang = state.slate_language();
+                    Arc::new(SlateSwapper::for_config(config, connecting, lang))
+                });
                 Ok((
                     Running {
                         stop: stop_tx,
@@ -579,8 +583,7 @@ impl AppCore {
                         state,
                         channel,
                         started_paused,
-                        slates: channel
-                            .then(|| Arc::new(SlateSwapper::for_config(config, connecting))),
+                        slates,
                     },
                 ))
             }
@@ -783,7 +786,7 @@ impl AppCore {
     /// nothing is made when the set on air already shows it. A failure leaves the previous
     /// slates on air and is logged. During a restart nothing is done: the new server starts
     /// with the current address and refreshes once it is published.
-    fn refresh_slates(self: &Arc<Self>) {
+    pub(crate) fn refresh_slates(self: &Arc<Self>) {
         if self.closing.load(Ordering::SeqCst) {
             return;
         }
@@ -804,7 +807,10 @@ impl AppCore {
         match swapper.swap_to(current, &live.state.engine.commands).await {
             SwapOutcome::Unchanged => {}
             SwapOutcome::Replaced { generation } => {
-                self.log(Msg::new("log.slates_refreshed").arg("generation", generation))
+                self.log(Msg::new("log.slates_refreshed").arg("generation", generation));
+                if swapper.japanese_font_missing() {
+                    self.log(Msg::new("log.slates_japanese_font_missing"));
+                }
             }
             SwapOutcome::Failed(why) => {
                 self.log(Msg::new("log.slates_refresh_failed").arg_msg("reason", why))

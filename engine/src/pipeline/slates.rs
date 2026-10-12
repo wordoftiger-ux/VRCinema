@@ -22,6 +22,86 @@ const QR_TARGET_PX: u32 = 400;
 const QR_QUIET_MODULES: u32 = 4;
 /// The code is placed in ffmpeg's working directory under this name.
 const QR_FILE: &str = "qr.png";
+/// The Japanese font Windows ships, and the one tried when it is missing.
+const YU_GOTHIC: &str = "YuGothM.ttc";
+const MEIRYO: &str = "meiryo.ttc";
+
+/// The Windows Fonts folder (where [`YU_GOTHIC`] and [`MEIRYO`] live).
+pub fn system_fonts_dir() -> PathBuf {
+    let windows = std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .map_or_else(|| PathBuf::from("C:/Windows"), PathBuf::from);
+    windows.join("Fonts")
+}
+
+/// The font to draw a text with (slates, and the info ticker for titles).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontChoice {
+    /// The configured Latin font (`FONT_FILE`).
+    Default(PathBuf),
+    /// A Japanese system font (a `.ttc` collection).
+    Japanese(PathBuf),
+    /// Japanese was needed but Windows has no Japanese font: the default font is returned so
+    /// something still draws (Japanese characters come out as boxes); callers log it.
+    JapaneseMissing(PathBuf),
+}
+
+impl FontChoice {
+    /// The font file to hand to ffmpeg.
+    pub fn file(&self) -> &Path {
+        match self {
+            Self::Default(p) | Self::Japanese(p) | Self::JapaneseMissing(p) => p,
+        }
+    }
+
+    /// Whether this is a Japanese font (not the fallback).
+    pub fn has_japanese(&self) -> bool {
+        matches!(self, Self::Japanese(_))
+    }
+}
+
+/// Characters only the Japanese font draws: Japanese punctuation, kana, kanji, full-width forms.
+fn is_japanese_char(c: char) -> bool {
+    matches!(c as u32,
+        0x3000..=0x30FF | 0x31F0..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+        | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
+}
+
+/// Font for `text` written in `lang`: the Japanese system font (`YuGothM.ttc`, else
+/// `meiryo.ttc`, looked up in `japanese_dir`) when the language is Japanese or the text has
+/// Japanese characters, otherwise `default`.
+pub fn font_for(lang: Lang, text: &str, default: &Path, japanese_dir: &Path) -> FontChoice {
+    if lang != Lang::Ja && !text.chars().any(is_japanese_char) {
+        return FontChoice::Default(default.to_path_buf());
+    }
+    [YU_GOTHIC, MEIRYO]
+        .iter()
+        .map(|name| japanese_dir.join(name))
+        .find(|p| p.is_file())
+        .map_or_else(
+            || FontChoice::JapaneseMissing(default.to_path_buf()),
+            FontChoice::Japanese,
+        )
+}
+
+/// Puts `font` into the slate folder as `font.ttc` / `font.ttf` (a hard link when possible,
+/// else a copy) and returns that name: the filter only ever sees a relative file name.
+fn place_font(font: &Path, dir: &Path) -> std::io::Result<&'static str> {
+    let name = if font
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("ttc"))
+    {
+        "font.ttc"
+    } else {
+        "font.ttf"
+    };
+    let target = dir.join(name);
+    if std::fs::hard_link(font, &target).is_err() {
+        std::fs::copy(font, &target)?;
+    }
+    Ok(name)
+}
+
 /// How long the broadcaster keeps segments that left the playlist (`retain_s` in server.rs).
 pub const RETAIN_S: u64 = 60;
 /// Extra time before an old slate set is deleted.
@@ -56,6 +136,9 @@ pub struct Slates {
     /// replacement. It is part of the source keys, so the broadcaster sees a new set as a
     /// different source (a discontinuity) even when the same kind of slate airs on.
     pub generation: u32,
+    /// The slates were meant to be Japanese but Windows has no Japanese font: they were made
+    /// in English (the caller logs it).
+    pub japanese_font_missing: bool,
 }
 
 impl Slates {
@@ -84,15 +167,19 @@ pub struct SlateOptions {
     pub generation: u32,
     /// Language of the texts.
     pub lang: Lang,
+    /// Where the Japanese system fonts are (see [`system_fonts_dir`]; tests use their own).
+    pub japanese_font_dir: PathBuf,
 }
 
-/// What the idle slate is made for: the public address (QR code and text of the request page)
-/// or none, and then whether the tunnel is still connecting.
+/// What a slate set is made for: the public address (QR code and text of the request page)
+/// or none, and then whether the tunnel is still connecting; and the language of the texts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SlateAddress {
     /// No trailing slash; empty: no public address.
     pub public_url: String,
     pub connecting: bool,
+    /// The channel's slate language.
+    pub lang: Lang,
 }
 
 impl From<String> for SlateAddress {
@@ -100,6 +187,7 @@ impl From<String> for SlateAddress {
         Self {
             public_url,
             connecting: false,
+            lang: Lang::default(),
         }
     }
 }
@@ -209,7 +297,7 @@ pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
 /// lavfi filter: dark 1080p30 background and two centred texts, with the QR code between them
 /// when `with_qr`. Texts, font and code are read from files in ffmpeg's working directory,
 /// which sidesteps path and character escaping.
-pub fn slate_filter(with_text: bool, with_qr: bool, seconds: u32) -> String {
+pub fn slate_filter(font_name: Option<&str>, with_qr: bool, seconds: u32) -> String {
     let base = format!("color=c=0x14161c:s=1920x1080:r=30:d={seconds}");
     let (title_y, subtitle_y) = if with_qr {
         ("110", "700")
@@ -217,8 +305,8 @@ pub fn slate_filter(with_text: bool, with_qr: bool, seconds: u32) -> String {
         ("(h/2)-90", "(h/2)+30")
     };
     let mut chain = vec![base];
-    if with_text {
-        let common = "fontfile=font.ttf:x=(w-text_w)/2";
+    if let Some(font_name) = font_name {
+        let common = format!("fontfile={font_name}:x=(w-text_w)/2");
         chain.push(format!(
             "drawtext={common}:fontcolor=white:textfile=title.txt:fontsize=72:y={title_y}"
         ));
@@ -244,7 +332,12 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
-async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentInfo>, SlateError> {
+/// `lang`: the language the texts are written in (English when Japanese has no font).
+async fn generate_one(
+    kind: SlateKind,
+    o: &SlateOptions,
+    lang: Lang,
+) -> Result<Vec<SegmentInfo>, SlateError> {
     // ffmpeg runs with cwd = the slate dir, so the dir handed to it must not be relative.
     let dir = std::path::absolute(o.dir.join(kind.as_str()))?;
     match std::fs::remove_dir_all(&dir) {
@@ -252,17 +345,22 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
         _ => {}
     }
     std::fs::create_dir_all(&dir)?;
-    let mut with_text = false;
-    if Path::new(&o.font_file).exists() {
-        std::fs::copy(&o.font_file, dir.join("font.ttf"))?;
-        let (title, subtitle) = texts(o.lang, kind, &o.request_url, o.connecting);
+    let (title, subtitle) = texts(lang, kind, &o.request_url, o.connecting);
+    let font = font_for(
+        lang,
+        &format!("{title}{subtitle}"),
+        &o.font_file,
+        &o.japanese_font_dir,
+    );
+    let mut font_name = None;
+    if font.file().exists() {
+        font_name = Some(place_font(font.file(), &dir)?);
         std::fs::write(dir.join("title.txt"), title)?;
         std::fs::write(dir.join("subtitle.txt"), subtitle)?;
-        with_text = true;
     } else {
         eprintln!(
             "Brak czcionki {} — plansze bez tekstu. Ustaw FONT_FILE w .env.",
-            o.font_file.display()
+            font.file().display()
         );
     }
     let with_qr = kind == SlateKind::Idle && !o.request_url.is_empty();
@@ -271,7 +369,7 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
     }
     let args = build_clip_args(&ClipArgsOptions {
         inputs: vec![StreamInput {
-            url: slate_filter(with_text, with_qr, SLATE_SECONDS),
+            url: slate_filter(font_name, with_qr, SLATE_SECONDS),
             headers: vec![],
         }],
         input_format: Some("lavfi".into()),
@@ -308,16 +406,27 @@ async fn generate_one(kind: SlateKind, o: &SlateOptions) -> Result<Vec<SegmentIn
 }
 
 pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
+    // Japanese without a Japanese font: English slates (the caller logs it).
+    let japanese_font_missing = matches!(
+        font_for(o.lang, "", &o.font_file, &o.japanese_font_dir),
+        FontChoice::JapaneseMissing(_)
+    );
+    let lang = if japanese_font_missing {
+        Lang::En
+    } else {
+        o.lang
+    };
     let (idle, buffering, pause) = tokio::join!(
-        generate_one(SlateKind::Idle, o),
-        generate_one(SlateKind::Buffering, o),
-        generate_one(SlateKind::Pause, o)
+        generate_one(SlateKind::Idle, o, lang),
+        generate_one(SlateKind::Buffering, o, lang),
+        generate_one(SlateKind::Pause, o, lang)
     );
     Ok(Slates {
         idle: idle?,
         buffering: buffering?,
         pause: pause?,
         generation: o.generation,
+        japanese_font_missing,
     })
 }
 
@@ -370,7 +479,11 @@ pub struct SlateSwapper {
     font_file: PathBuf,
     root: PathBuf,
     segment_seconds: u32,
+    /// Language of the texts for [`Self::swap`] (the app asks for a language with `swap_to`).
     lang: Lang,
+    japanese_font_dir: PathBuf,
+    /// Whether the last set made was meant to be Japanese but had no font.
+    japanese_font_missing: std::sync::atomic::AtomicBool,
     /// How long the old set's folder is kept after the swap.
     hold: Duration,
     state: tokio::sync::Mutex<SwapState>,
@@ -401,11 +514,15 @@ impl SlateSwapper {
     ) -> Self {
         let mut initial: SlateAddress = initial.into();
         initial.connecting &= initial.public_url.is_empty();
+        // The options say what the start-up set was made in.
+        initial.lang = options.lang;
         Self {
             ffmpeg_path: options.ffmpeg_path.clone(),
             font_file: options.font_file.clone(),
             segment_seconds: options.segment_seconds,
             lang: options.lang,
+            japanese_font_dir: options.japanese_font_dir.clone(),
+            japanese_font_missing: std::sync::atomic::AtomicBool::new(false),
             state: tokio::sync::Mutex::new(SwapState {
                 address: initial,
                 generation: options.generation,
@@ -418,8 +535,9 @@ impl SlateSwapper {
     }
 
     /// The swapper for a channel started with `config` (start-up set: generation 0 in
-    /// `<data>/slates`, made for `config.public_url` and `connecting`, see [`SlateOptions`]).
-    pub fn for_config(config: &AppConfig, connecting: bool) -> Self {
+    /// `<data>/slates`, made for `config.public_url`, `connecting` and the channel's slate
+    /// language `lang`, see [`SlateOptions`]).
+    pub fn for_config(config: &AppConfig, connecting: bool, lang: Lang) -> Self {
         let root = config.data_dir.join("slates");
         // The old set stays until its segments left the playlist (`window_size` segments) and the
         // broadcaster's retention (`RETAIN_S`), plus a margin.
@@ -433,19 +551,33 @@ impl SlateSwapper {
             connecting,
             segment_seconds: config.segment_seconds,
             generation: 0,
-            lang: config.language,
+            lang,
+            japanese_font_dir: system_fonts_dir(),
         };
         let initial = SlateAddress {
             public_url: config.public_url.clone(),
             connecting,
+            lang,
         };
         Self::new(&options, root, initial, hold)
     }
 
-    /// Makes the set for `public_url` and hands it to the loop behind `commands`. Calls are
-    /// serialized; one for the address already on air does nothing.
+    /// Makes the set for `public_url` (in the language the swapper started with) and hands it
+    /// to the loop behind `commands`. Calls are serialized; one for what is on air does nothing.
     pub async fn swap(&self, public_url: &str, commands: &mpsc::Sender<Command>) -> SwapOutcome {
-        self.swap_to(|| public_url, commands).await
+        let lang = self.lang;
+        let address = || SlateAddress {
+            lang,
+            ..SlateAddress::from(public_url)
+        };
+        self.swap_to(address, commands).await
+    }
+
+    /// Whether the last set made was meant to be Japanese but Windows has no Japanese font (it
+    /// is in English then).
+    pub fn japanese_font_missing(&self) -> bool {
+        self.japanese_font_missing
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Like [`Self::swap`], with the address read once the lock is held: of several racing
@@ -473,7 +605,8 @@ impl SlateSwapper {
             connecting: address.connecting,
             segment_seconds: self.segment_seconds,
             generation,
-            lang: self.lang,
+            lang: address.lang,
+            japanese_font_dir: self.japanese_font_dir.clone(),
         })
         .await;
         let slates = match made {
@@ -483,10 +616,13 @@ impl SlateSwapper {
                 return SwapOutcome::Failed(e.message());
             }
         };
+        let slates_font_missing = slates.japanese_font_missing;
         if commands.send(Command::ReplaceSlates(slates)).await.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
             return SwapOutcome::Failed(Msg::new("log.channel_loop_not_running"));
         }
+        self.japanese_font_missing
+            .store(slates_font_missing, std::sync::atomic::Ordering::SeqCst);
         let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
         state.address = address;
         state.generation = generation;
@@ -534,7 +670,84 @@ mod tests {
             segment_seconds: 4,
             generation,
             lang: Lang::Pl,
+            japanese_font_dir: system_fonts_dir(),
         }
+    }
+
+    /// A folder with fake Japanese fonts (`names`), for the choice of font.
+    fn fonts_with(names: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for name in names {
+            std::fs::write(dir.path().join(name), b"not really a font").unwrap();
+        }
+        dir
+    }
+
+    fn real_japanese_font() -> Option<PathBuf> {
+        let font = system_fonts_dir().join(YU_GOTHIC);
+        font.is_file().then_some(font)
+    }
+
+    #[test]
+    fn latin_text_uses_the_default_font_whatever_fonts_exist() {
+        let fonts = fonts_with(&[YU_GOTHIC, MEIRYO]);
+        let default = Path::new("arial.ttf");
+        for lang in [Lang::En, Lang::Pl, Lang::Es, Lang::De, Lang::Fr] {
+            assert_eq!(
+                font_for(lang, "Buffering… zażółć ñ ü é", default, fonts.path()),
+                FontChoice::Default(default.to_path_buf()),
+                "{lang:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn japanese_uses_yu_gothic_then_meiryo_then_reports_it_missing() {
+        let default = Path::new("arial.ttf");
+        let both = fonts_with(&[YU_GOTHIC, MEIRYO]);
+        assert_eq!(
+            font_for(Lang::Ja, "Hello", default, both.path()),
+            FontChoice::Japanese(both.path().join(YU_GOTHIC))
+        );
+        let only_meiryo = fonts_with(&[MEIRYO]);
+        assert_eq!(
+            font_for(Lang::Ja, "Hello", default, only_meiryo.path()),
+            FontChoice::Japanese(only_meiryo.path().join(MEIRYO))
+        );
+        let none = fonts_with(&[]);
+        let missing = font_for(Lang::Ja, "Hello", default, none.path());
+        assert_eq!(missing, FontChoice::JapaneseMissing(default.to_path_buf()));
+        // Either way a font to draw with is there: the default one.
+        assert_eq!(missing.file(), default);
+        assert!(!missing.has_japanese());
+        assert!(both.path().join(YU_GOTHIC).is_file());
+    }
+
+    /// The ticker asks too: a title with Japanese characters needs the Japanese font whatever
+    /// the language of the slates is.
+    #[test]
+    fn japanese_characters_need_the_japanese_font_in_any_language() {
+        let fonts = fonts_with(&[YU_GOTHIC]);
+        let default = Path::new("arial.ttf");
+        for text in [
+            "日本語",
+            "カタカナ",
+            "ひらがな",
+            "Tytuł 動画",
+            "ＡＢＣ",
+            "「quote」",
+        ] {
+            assert_eq!(
+                font_for(Lang::Pl, text, default, fonts.path()),
+                FontChoice::Japanese(fonts.path().join(YU_GOTHIC)),
+                "{text}"
+            );
+        }
+        let none = fonts_with(&[]);
+        assert_eq!(
+            font_for(Lang::En, "動画", default, none.path()),
+            FontChoice::JapaneseMissing(default.to_path_buf())
+        );
     }
 
     /// Decodes the QR codes found in a grey image.
@@ -572,10 +785,14 @@ mod tests {
 
     #[test]
     fn filter_with_font_draws_two_texts_from_files() {
-        let f = slate_filter(true, false, 8);
+        let f = slate_filter(Some("font.ttf"), false, 8);
         assert!(f.contains("textfile=title.txt"));
         assert!(f.contains("textfile=subtitle.txt"));
         assert!(f.contains("fontfile=font.ttf"));
+        // A collection keeps its own name; the path stays relative (no `C:\` in the filter).
+        let ttc = slate_filter(Some("font.ttc"), false, 8);
+        assert!(ttc.contains("fontfile=font.ttc:"), "{ttc}");
+        assert!(!ttc.contains('\\') && !ttc.contains("C:"), "{ttc}");
         assert!(f.starts_with("color=c=0x14161c:s=1920x1080:r=30:d=8"));
         assert!(!f.contains("movie="), "no code without an address");
     }
@@ -583,18 +800,18 @@ mod tests {
     #[test]
     fn filter_without_font_is_background_only() {
         assert_eq!(
-            slate_filter(false, false, 8),
+            slate_filter(None, false, 8),
             "color=c=0x14161c:s=1920x1080:r=30:d=8"
         );
     }
 
     #[test]
     fn filter_with_a_code_overlays_it_between_the_two_texts() {
-        let f = slate_filter(true, true, 8);
+        let f = slate_filter(Some("font.ttf"), true, 8);
         assert!(f.contains("movie=qr.png"), "{f}");
         assert!(f.contains("overlay=x=(W-w)/2:y=250"), "{f}");
         // The code is independent of the font: it still shows on a text-less slate.
-        let bare = slate_filter(false, true, 8);
+        let bare = slate_filter(None, true, 8);
         assert!(
             bare.contains("movie=qr.png") && !bare.contains("drawtext"),
             "{bare}"
@@ -685,7 +902,8 @@ mod tests {
             SlateAddress::from("https://a.example.com"),
             SlateAddress {
                 public_url: "https://a.example.com".into(),
-                connecting: false
+                connecting: false,
+                lang: Lang::En,
             }
         );
         assert_eq!(SlateAddress::default(), SlateAddress::from(String::new()));
@@ -818,6 +1036,183 @@ mod tests {
         assert!(!dir.path().join("idle").join("title.txt").exists());
     }
 
+    /// Bright pixels in the band where the title is drawn, of the frame `at_s` seconds into a
+    /// segment.
+    fn title_pixels(ffmpeg: &Path, segment: &Path, at_s: f64) -> usize {
+        let frame = segment.with_extension(format!("{at_s}.title.png"));
+        let out = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(segment)
+            .args(["-ss", &at_s.to_string(), "-frames:v", "1"])
+            .arg(&frame)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let gray = image::open(&frame).unwrap().to_luma8();
+        // Idle slate without a code: the title sits at y = (h/2)-90 = 450, 72 px high.
+        (440..540)
+            .flat_map(|y| (0..gray.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| gray.get_pixel(x, y).0[0] > 200)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn japanese_without_a_japanese_font_falls_back_to_english_and_says_so() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        if !default_font().exists() {
+            eprintln!("skip: no default font");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let none = fonts_with(&[]);
+        let slates = generate_slates(&SlateOptions {
+            lang: Lang::Ja,
+            japanese_font_dir: none.path().to_path_buf(),
+            ..options(ffmpeg.clone(), dir.path(), "", 0)
+        })
+        .await
+        .unwrap();
+        assert!(slates.japanese_font_missing);
+        let idle = dir.path().join("idle");
+        assert_eq!(
+            std::fs::read_to_string(idle.join("title.txt")).unwrap(),
+            "No videos in the queue"
+        );
+        assert!(idle.join("font.ttf").is_file());
+        assert!(title_pixels(&ffmpeg, &slates.idle[0].path, 1.0) > 500);
+        // With the language available nothing is reported.
+        let fine = generate_slates(&options(ffmpeg, dir.path(), "", 1))
+            .await
+            .unwrap();
+        assert!(!fine.japanese_font_missing);
+    }
+
+    /// Japanese slates with the real system font: the collection is placed next to the slate
+    /// (relative name in the filter) and the frame has the text on it.
+    #[tokio::test]
+    async fn japanese_slates_with_the_system_font_are_generated() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let Some(font) = real_japanese_font() else {
+            eprintln!("skip: {YU_GOTHIC} missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let slates = generate_slates(&SlateOptions {
+            lang: Lang::Ja,
+            ..options(ffmpeg.clone(), dir.path(), "", 0)
+        })
+        .await
+        .unwrap();
+        assert!(!slates.japanese_font_missing);
+        let idle = dir.path().join("idle");
+        assert_eq!(
+            std::fs::metadata(idle.join("font.ttc")).unwrap().len(),
+            std::fs::metadata(font).unwrap().len()
+        );
+        assert!(!idle.join("font.ttf").exists());
+        assert!(title_pixels(&ffmpeg, &slates.idle[0].path, 1.0) > 500);
+    }
+
+    /// Japanese characters really are drawn (not boxes) with the Japanese font: the same title
+    /// leaves clearly more ink than the missing-glyph boxes of the Latin font.
+    #[test]
+    fn japanese_characters_are_drawn_with_the_japanese_font() {
+        let (Some(ffmpeg), Some(font)) = (ffmpeg_bin(), real_japanese_font()) else {
+            eprintln!("skip: ffmpeg or {YU_GOTHIC} missing");
+            return;
+        };
+        let render = |font_file: &Path, name: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::copy(font_file, dir.path().join(name)).unwrap();
+            std::fs::write(dir.path().join("title.txt"), "日本語の動画").unwrap();
+            std::fs::write(dir.path().join("subtitle.txt"), "あいうえお").unwrap();
+            let out = std::process::Command::new(&ffmpeg)
+                .current_dir(dir.path())
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                .arg(slate_filter(Some(name), false, 1))
+                .args(["-frames:v", "1", "out.png"])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            image::open(dir.path().join("out.png")).unwrap().to_luma8()
+        };
+        let japanese = render(&font, "font.ttc");
+        assert!(japanese.pixels().filter(|p| p.0[0] > 200).count() > 1500);
+        // The glyphs of the Japanese font differ from the Latin font's boxes.
+        if default_font().exists() {
+            let latin = render(&default_font(), "font.ttf");
+            assert_ne!(japanese.as_raw(), latin.as_raw());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_language_swaps_in_a_new_set_without_touching_the_address() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        if !default_font().exists() {
+            eprintln!("skip: no default font");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        // The swapper starts with the language of its options (pl in `options`).
+        let swapper = swapper(
+            ffmpeg,
+            root.path(),
+            "https://a.example.com",
+            Duration::from_secs(3600),
+        );
+        let (tx, mut rx) = mpsc::channel(4);
+        let same = |lang| {
+            move || SlateAddress {
+                lang,
+                ..SlateAddress::from("https://a.example.com")
+            }
+        };
+        assert_eq!(
+            swapper.swap_to(same(Lang::Pl), &tx).await,
+            SwapOutcome::Unchanged
+        );
+        assert_eq!(
+            swapper.swap_to(same(Lang::En), &tx).await,
+            SwapOutcome::Replaced { generation: 1 }
+        );
+        let Ok(Command::ReplaceSlates(en)) = rx.try_recv() else {
+            panic!("no set");
+        };
+        assert_eq!(en.generation, 1);
+        let title = |set: &str| {
+            std::fs::read_to_string(root.path().join(set).join("idle").join("title.txt")).unwrap()
+        };
+        assert_eq!(title("g1"), "No videos in the queue");
+        // Back to Polish: another set; the same language again: nothing.
+        assert_eq!(
+            swapper.swap_to(same(Lang::Pl), &tx).await,
+            SwapOutcome::Replaced { generation: 2 }
+        );
+        assert_eq!(title("g2"), "Brak filmów w kolejce");
+        assert_eq!(
+            swapper.swap_to(same(Lang::Pl), &tx).await,
+            SwapOutcome::Unchanged
+        );
+        assert!(!swapper.japanese_font_missing());
+    }
+
     /// Review Focus 3: the code on the airing slate is readable and leads to the request page.
     #[tokio::test]
     async fn the_idle_slate_shows_a_qr_code_that_decodes_to_the_request_page() {
@@ -937,6 +1332,7 @@ mod tests {
         let connecting = || SlateAddress {
             public_url: String::new(),
             connecting: true,
+            lang: Lang::Pl,
         };
         assert_eq!(
             swapper.swap_to(connecting, &tx).await,
@@ -967,13 +1363,14 @@ mod tests {
                 Path::new("H"),
             )
         };
-        let swapper = SlateSwapper::for_config(&config, true);
+        let swapper = SlateSwapper::for_config(&config, true, Lang::Fr);
         let state = swapper.state.try_lock().unwrap();
         assert_eq!(
             state.address,
             SlateAddress {
                 public_url: String::new(),
-                connecting: true
+                connecting: true,
+                lang: Lang::Fr,
             }
         );
     }

@@ -1408,6 +1408,7 @@ mod tests {
             buffering: vec![info("/slates/buf/0.ts", 0)],
             pause: vec![info("/slates/pause/0.ts", 0), info("/slates/pause/1.ts", 1)],
             generation: 0,
+            japanese_font_missing: false,
         }
     }
 
@@ -2299,6 +2300,7 @@ mod tests {
                 info(&format!("{dir}/pause/1.ts"), 1),
             ],
             generation,
+            japanese_font_missing: false,
         }
     }
 

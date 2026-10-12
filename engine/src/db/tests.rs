@@ -355,6 +355,45 @@ fn default_settings_match_spec() {
     assert!(!d.moderation);
     assert!(!d.force_transcode);
     assert!(d.discontinuity_tags);
+    assert_eq!(d.slate_language, crate::i18n::Lang::En);
+}
+
+#[test]
+fn slate_language_is_validated_stored_and_read_back() {
+    let conn = mem();
+    let s = SettingsRepo::new(&conn);
+    let patch = sanitize_settings_patch(&json!({"slateLanguage": "ja"})).unwrap();
+    let got = s.update(MAIN_CHANNEL_ID, &patch).unwrap();
+    assert_eq!(got.slate_language, crate::i18n::Lang::Ja);
+    assert_eq!(
+        serde_json::to_value(&got).unwrap()["slateLanguage"],
+        json!("ja")
+    );
+    let stored: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'slateLanguage'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "\"ja\"");
+    // A hand-edited value that is not a language keeps the default.
+    conn.execute(
+        "UPDATE settings SET value = '\"xx\"' WHERE key = 'slateLanguage'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        s.get(MAIN_CHANNEL_ID).unwrap().slate_language,
+        crate::i18n::Lang::En
+    );
+    for bad in [json!("xx"), json!(1), json!(null), json!("PL")] {
+        let e = sanitize_settings_patch(&json!({ "slateLanguage": bad })).unwrap_err();
+        assert_eq!(
+            e.render(crate::i18n::Lang::Pl),
+            "slateLanguage: oczekiwano jednego z: en, pl, es, de, fr, ja"
+        );
+    }
 }
 
 #[test]
@@ -371,6 +410,7 @@ fn settings_serialize_with_camel_case_keys() {
             "moderation": false,
             "forceTranscode": false,
             "discontinuityTags": true,
+            "slateLanguage": "en",
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -385,7 +425,8 @@ fn settings_serialize_with_camel_case_keys() {
             "maxActivePerRequester",
             "moderation",
             "forceTranscode",
-            "discontinuityTags"
+            "discontinuityTags",
+            "slateLanguage"
         ]
     );
 }
