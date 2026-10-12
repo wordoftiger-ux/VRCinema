@@ -1551,6 +1551,84 @@ async fn settings_valid_ones_are_saved_bad_ones_rejected() {
     assert_eq!(r.json()["moderation"], true);
 }
 
+/// Spec section 7: a new look of the ticker restarts the film on air (one command), its texts
+/// do not (the clip's text file follows them by itself).
+#[tokio::test]
+async fn only_a_new_look_of_the_ticker_restarts_the_film_on_air() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    for (body, restart) in [
+        (
+            json!({"tickerMessages": ["Witajcie!"], "tickerShowNext": false}),
+            false,
+        ),
+        (
+            json!({"tickerShowAddress": true, "moderation": true}),
+            false,
+        ),
+        (json!({"tickerEnabled": true}), true),
+        // The same value again changes nothing.
+        (json!({"tickerEnabled": true}), false),
+        (
+            json!({"tickerMode": "continuous", "tickerMessages": []}),
+            true,
+        ),
+        (json!({"tickerIntervalS": 300}), true),
+        (json!({"tickerSpeed": "fast"}), true),
+        (json!({"tickerQr": "always"}), true),
+        (json!({"tickerProgress": false}), true),
+        (json!({"slateLanguage": "pl"}), false),
+    ] {
+        let r = h
+            .send(
+                call("PUT", "/api/admin/channels/main/settings")
+                    .cookie(&cookie)
+                    .json(body.clone()),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{body}");
+        let expected = if restart {
+            vec![Command::ApplyTicker]
+        } else {
+            vec![]
+        };
+        assert_eq!(h.commands(), expected, "{body}");
+    }
+    let r = h
+        .send(get("/api/admin/channels/main/settings").cookie(&cookie))
+        .await;
+    let s = r.json();
+    assert_eq!(
+        (
+            &s["tickerEnabled"],
+            &s["tickerMode"],
+            &s["tickerIntervalS"],
+            &s["tickerSpeed"],
+            &s["tickerQr"],
+            &s["tickerProgress"],
+            &s["tickerMessages"],
+        ),
+        (
+            &json!(true),
+            &json!("continuous"),
+            &json!(300),
+            &json!("fast"),
+            &json!("always"),
+            &json!(false),
+            &json!([]),
+        )
+    );
+    let r = h
+        .send(
+            call("PUT", "/api/admin/channels/main/settings")
+                .cookie(&cookie)
+                .json(json!({"tickerMessages": vec!["x"; 11]})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["code"], "ticker_too_many_messages");
+}
+
 #[tokio::test]
 async fn saved_request_limit_applies_to_the_next_request() {
     let h = Harness::new();
@@ -2962,6 +3040,7 @@ fn stats_snapshot(h: &Harness) -> Arc<Snapshot> {
             cpu_percent: None,
             rss_bytes: None,
         }),
+        ticker_slow: false,
     };
     Arc::new(snapshot)
 }

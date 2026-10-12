@@ -52,6 +52,9 @@ pub enum Command {
     PlayNow {
         item_id: i64,
     },
+    /// The ticker's layout changed (switch, mode, interval, speed, code, progress line): the
+    /// current film starts again from where it is (a live stream: from the next item).
+    ApplyTicker,
 }
 
 /// What HTTP reads: the state right after the latest tick.
@@ -86,6 +89,7 @@ pub trait ChannelControl: SegmentSource + Send {
     fn seek_to(&mut self, to_s: f64);
     fn seek_by(&mut self, delta_s: f64);
     fn play_now(&mut self, item_id: i64) -> anyhow::Result<()>;
+    fn apply_ticker(&mut self);
     /// Called every tick before the broadcaster (runs a seek once its quiet has passed).
     fn on_tick(&mut self);
     fn state(&self) -> ChannelState;
@@ -130,6 +134,9 @@ impl ChannelControl for Channel {
     }
     fn play_now(&mut self, item_id: i64) -> anyhow::Result<()> {
         Channel::play_now(self, item_id)
+    }
+    fn apply_ticker(&mut self) {
+        Channel::apply_ticker(self)
     }
     fn on_tick(&mut self) {
         Channel::on_tick(self)
@@ -458,7 +465,8 @@ where
                     | Command::Seek { .. }
                     | Command::SeekBy { .. }
                     | Command::Restart
-                    | Command::PlayNow { .. } => {}
+                    | Command::PlayNow { .. }
+                    | Command::ApplyTicker => {}
                 }
                 let play_now = matches!(command, Command::PlayNow { .. });
                 match guarded(|| core.apply(command)) {
@@ -532,6 +540,10 @@ impl<C: ChannelControl> Core<C> {
                 Ok(())
             }
             Command::PlayNow { item_id } => self.channel.play_now(item_id),
+            Command::ApplyTicker => {
+                self.channel.apply_ticker();
+                Ok(())
+            }
         }
     }
 
@@ -758,6 +770,9 @@ mod tests {
             self.probe.event(format!("play_now {item_id}"));
             Ok(())
         }
+        fn apply_ticker(&mut self) {
+            self.probe.event("apply_ticker".to_string());
+        }
         fn on_tick(&mut self) {
             self.probe.ticks.fetch_add(1, Ordering::SeqCst);
         }
@@ -966,6 +981,7 @@ mod tests {
             Command::SeekBy { delta_s: -10.0 },
             Command::Restart,
             Command::PlayNow { item_id: 5 },
+            Command::ApplyTicker,
             Command::Resume(PauseReason::Manual),
         ] {
             handle.commands.send(command).await.unwrap();
@@ -980,6 +996,7 @@ mod tests {
                 "seek_by -10",
                 "seek_to 0",
                 "play_now 5",
+                "apply_ticker",
                 "resume manual"
             ]
         );

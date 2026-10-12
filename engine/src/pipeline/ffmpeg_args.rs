@@ -27,6 +27,9 @@ pub struct ClipArgsOptions {
     pub start_at_s: f64,
     /// Source read-rate multiplier relative to real time; `None` = unlimited.
     pub readrate: Option<f64>,
+    /// Filters drawn on the converted picture after scaling (the info ticker, see
+    /// `ticker::overlay_filter`); ignored when the video is copied.
+    pub overlay: Option<String>,
 }
 
 fn is_network(url: &str) -> bool {
@@ -232,6 +235,10 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
                 filters.push(format!("fps={MAX_FPS}"));
             }
             filters.push("format=yuv420p".to_string());
+            if let Some(overlay) = &o.overlay {
+                filters.push(overlay.clone());
+                filters.push("format=yuv420p".to_string());
+            }
             push_all(&mut args, &["-vf", &filters.join(",")]);
             args.extend(encoder_args(o.encoder));
             push_all(
@@ -288,6 +295,7 @@ mod tests {
             out_dir: PathBuf::from("/tmp/clip"),
             start_at_s: 0.0,
             readrate: Some(1.5),
+            overlay: None,
         }
     }
 
@@ -472,6 +480,23 @@ mod tests {
             Some("expr:gte(t,n_forced*4)")
         );
         assert_eq!(value_after(&args, "-b:v", 0).as_deref(), Some("6M"));
+    }
+
+    #[test]
+    fn the_overlay_is_drawn_after_scaling_and_only_when_converting() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.info.fps = 60.0;
+        o.overlay = Some("drawbox=x=0[a];movie=qr.png[b];[a][b]overlay".into());
+        assert_eq!(
+            value_after(&build(&o), "-vf", 0).as_deref(),
+            Some(
+                "scale=-2:'min(1080,ih)',fps=30,format=yuv420p,\
+                 drawbox=x=0[a];movie=qr.png[b];[a][b]overlay,format=yuv420p"
+            )
+        );
+        o.mode = VideoMode::Copy;
+        assert!(!build(&o).contains(&"-vf".to_string()));
     }
 
     #[test]

@@ -149,6 +149,7 @@ async fn info(
         "paused": paused,
         "pauseReasons": reasons,
         "language": s.language.as_str(),
+        "tickerSlow": core.ticker_slow(),
     })))
 }
 

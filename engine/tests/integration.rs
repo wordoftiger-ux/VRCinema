@@ -176,6 +176,8 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
         db: Arc::clone(&db),
         channel_id: MAIN_CHANNEL_ID,
         log: None,
+        font_file: cfg.font_file.clone(),
+        public_url: vrcinema::live::LiveValue::new(String::new()),
     });
     let mut channel = Channel::new(ChannelOptions::new(
         MAIN_CHANNEL_ID,
@@ -401,6 +403,8 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
         db: Arc::clone(&db),
         channel_id: MAIN_CHANNEL_ID,
         log: None,
+        font_file: cfg.font_file.clone(),
+        public_url: vrcinema::live::LiveValue::new(String::new()),
     });
     let mut channel = Channel::new(ChannelOptions::new(
         MAIN_CHANNEL_ID,
@@ -723,6 +727,8 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
         db: Arc::clone(&db),
         channel_id: MAIN_CHANNEL_ID,
         log: None,
+        font_file: cfg.font_file.clone(),
+        public_url: vrcinema::live::LiveValue::new(String::new()),
     });
     let mut channel = Channel::new(ChannelOptions::new(
         MAIN_CHANNEL_ID,
@@ -908,4 +914,267 @@ async fn a_seek_of_a_copied_film_lands_on_the_keyframe_at_or_before_the_target()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seek_of_a_converted_film_lands_on_the_target() {
     seek_lands_on_its_target(true).await;
+}
+
+// ---------- Info ticker (stage 4, task 6) ----------
+
+/// The counter of the first frame of a segment, read from the top half of the picture only
+/// (the ticker draws at the bottom).
+fn counter_in_top(ffmpeg: &Path, segment: &Path) -> i64 {
+    let out = Command::new(ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(segment)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "crop=iw:ih/2:0:0",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && !out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let luma = &out.stdout[..out.stdout.len() * 2 / 3];
+    let mean = luma.iter().map(|&b| f64::from(b)).sum::<f64>() / luma.len() as f64;
+    ((mean - 16.0) / 3.0).round() as i64
+}
+
+/// A new look of the ticker while a film airs with it: the film starts again once, from where
+/// the channel is (the first new segment follows the last old one: no part repeated or
+/// skipped), with one discontinuity per source change and no DTS going backwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_ticker_look_starts_the_film_again_once_from_where_it_is() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let env: HashMap<String, String> = HashMap::from([(
+        "ADMIN_PASSWORD".to_string(),
+        "haslo-testowe-123".to_string(),
+    )]);
+    let cfg = load_config(&env, &root, cfg!(windows)).unwrap();
+    if !cfg.ffmpeg_path.exists() || !cfg.ffprobe_path.exists() || !cfg.font_file.is_file() {
+        eprintln!("pomijam: brak bin/ffmpeg, bin/ffprobe lub czcionki");
+        return;
+    }
+    let work = tempfile::tempdir().unwrap();
+    let work_dir = work.path();
+    let source = work_dir.join("licznik.mp4");
+    make_counter_clip(&cfg.ffmpeg_path, &source, 60);
+
+    let db = Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap()));
+    let update = |patch: serde_json::Value| {
+        let conn = db.lock().unwrap();
+        let patch = vrcinema::db::sanitize_settings_patch(&patch).unwrap();
+        SettingsRepo::new(&conn)
+            .update(MAIN_CHANNEL_ID, &patch)
+            .unwrap();
+    };
+    update(serde_json::json!({ "tickerEnabled": true, "tickerQr": "off" }));
+    {
+        let conn = db.lock().unwrap();
+        QueueRepo::new(&conn)
+            .add(&NewItem {
+                channel_id: MAIN_CHANNEL_ID,
+                source_url: source.to_string_lossy().into_owned(),
+                title: "licznik.mp4".to_string(),
+                duration_s: Some(60.0),
+                is_live: false,
+                status: ItemStatus::Queued,
+                added_by: AddedBy::Admin,
+                requester_name: None,
+                requester_ip: None,
+            })
+            .unwrap();
+    }
+    let slates = generate_slates(&SlateOptions {
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        font_file: cfg.font_file.clone(),
+        dir: work_dir.join("slates"),
+        request_url: String::new(),
+        connecting: false,
+        segment_seconds: 4,
+        generation: 0,
+        lang: vrcinema::i18n::Lang::En,
+        japanese_font_dir: vrcinema::pipeline::slates::system_fonts_dir(),
+    })
+    .await
+    .unwrap();
+    let clips_dir = work_dir.join("clips");
+    let logs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&logs);
+    let factory = create_clip_factory(ClipFactoryDeps {
+        resolver: Arc::new(PathResolver),
+        ffmpeg_path: cfg.ffmpeg_path.clone(),
+        ffprobe_path: cfg.ffprobe_path.clone(),
+        encoder: vrcinema::live::LiveValue::new(VideoEncoder::Libx264),
+        segment_seconds: 4,
+        clips_dir: clips_dir.clone(),
+        db: Arc::clone(&db),
+        channel_id: MAIN_CHANNEL_ID,
+        log: Some(Arc::new(move |m| sink.lock().unwrap().push(m.to_string()))),
+        font_file: cfg.font_file.clone(),
+        public_url: vrcinema::live::LiveValue::new(String::new()),
+    });
+    let mut options =
+        ChannelOptions::new(MAIN_CHANNEL_ID, Arc::clone(&db), Arc::new(factory), slates);
+    let sink = Arc::clone(&logs);
+    options.log = Some(Box::new(move |m| sink.lock().unwrap().push(m.to_string())));
+    let mut channel = Channel::new(options);
+    channel.start().unwrap();
+    let clock = Arc::new(AtomicU64::new(0));
+    let live_dir = work_dir.join("live");
+    let clock_for_broadcaster = Arc::clone(&clock);
+    let mut broadcaster = Broadcaster::new(
+        BroadcasterOptions {
+            dir: live_dir.clone(),
+            window_size: 500,
+            segment_seconds: 4.0,
+            path_prefix: String::new(),
+            discontinuity_tags: Box::new(|| true),
+            retain_s: Some(100_000),
+            log: None,
+        },
+        Box::new(move || clock_for_broadcaster.load(Ordering::SeqCst)),
+    );
+    let mut published: Vec<(u64, String)> = Vec::new();
+    broadcaster.start_initial(&mut PublishTap {
+        inner: &mut channel,
+        published: &mut published,
+    });
+    let clip_segments = |published: &[(u64, String)], suffix: Option<&str>| {
+        published
+            .iter()
+            .filter(|(_, k)| {
+                k.starts_with("clip-")
+                    && match suffix {
+                        Some(suffix) => k.ends_with(suffix),
+                        None => !k.contains("-r"),
+                    }
+            })
+            .count()
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while clip_segments(&published, None) < 2 {
+        assert!(Instant::now() < deadline, "film nie wystartował");
+        clock.fetch_add(1000, Ordering::SeqCst);
+        channel.on_tick();
+        broadcaster.tick(&mut PublishTap {
+            inner: &mut channel,
+            published: &mut published,
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    // The owner switches the ticker to continuous mode (twice, quickly: one restart).
+    update(serde_json::json!({ "tickerMode": "continuous" }));
+    channel.apply_ticker();
+    update(serde_json::json!({ "tickerSpeed": "fast" }));
+    channel.apply_ticker();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while clip_segments(&published, Some("-r1")) < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "po zmianie paska za mało fragmentów"
+        );
+        clock.fetch_add(1000, Ordering::SeqCst);
+        channel.on_tick();
+        broadcaster.tick(&mut PublishTap {
+            inner: &mut channel,
+            published: &mut published,
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let playlist = broadcaster.playlist();
+    let all = broadcaster.known_segments();
+    channel.stop();
+
+    assert_eq!(
+        clip_segments(&published, Some("-r2")),
+        0,
+        "one restart only"
+    );
+    let logs = logs.lock().unwrap().clone();
+    assert_eq!(
+        logs.iter()
+            .filter(|l| l.starts_with("Info ticker settings changed: video #"))
+            .count(),
+        1,
+        "{logs:?}"
+    );
+    let last_old = published
+        .iter()
+        .filter(|(_, k)| k.starts_with("clip-") && !k.contains("-r"))
+        .map(|(seq, _)| *seq)
+        .max()
+        .unwrap();
+    let first_new = published
+        .iter()
+        .find(|(_, k)| k.starts_with("clip-") && k.ends_with("-r1"))
+        .map(|(seq, _)| *seq)
+        .unwrap();
+    assert!(last_old < first_new);
+    let old = counter_in_top(&cfg.ffmpeg_path, &live_dir.join(format!("{last_old}.ts")));
+    let new = counter_in_top(&cfg.ffmpeg_path, &live_dir.join(format!("{first_new}.ts")));
+    // The old segment covers 4 s: the new one starts right after it.
+    assert!(
+        (3..=5).contains(&(new - old)),
+        "old segment at {old} s, new one at {new} s"
+    );
+
+    let keys: HashMap<u64, String> = published.iter().cloned().collect();
+    let mut discontinuity = false;
+    let mut listed: Vec<(u64, bool)> = Vec::new();
+    for line in playlist.lines() {
+        if line == "#EXT-X-DISCONTINUITY" {
+            discontinuity = true;
+        } else if let Some(seq) = line.strip_suffix(".ts").and_then(|s| s.parse::<u64>().ok()) {
+            listed.push((seq, discontinuity));
+            discontinuity = false;
+        }
+    }
+    for pair in listed.windows(2) {
+        let (prev, (seq, tagged)) = (pair[0].0, pair[1]);
+        assert_eq!(
+            tagged,
+            keys[&prev] != keys[&seq],
+            "segment {seq} ({} after {}): {playlist}",
+            keys[&seq],
+            keys[&prev]
+        );
+    }
+
+    let joined = work_dir.join("joined.ts");
+    let mut bytes = Vec::new();
+    for name in &all {
+        bytes.extend(std::fs::read(live_dir.join(name)).unwrap());
+    }
+    std::fs::write(&joined, bytes).unwrap();
+    assert_no_dts_backwards(&cfg.ffprobe_path, &joined);
+
+    // Clip folders are removed (the ticker's font copy stays for the next clip).
+    let cleanup_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let leftover: Vec<_> = std::fs::read_dir(&clips_dir)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n != "_fonts")
+                    .collect()
+            })
+            .unwrap_or_default();
+        if leftover.is_empty() || Instant::now() > cleanup_deadline {
+            assert!(leftover.is_empty(), "katalogi klipów: {leftover:?}");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }

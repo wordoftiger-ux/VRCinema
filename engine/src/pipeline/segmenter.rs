@@ -89,8 +89,33 @@ pub struct ClipSegmenter {
     kill: Arc<Notify>,
     /// The ffmpeg process, once it runs.
     pid: Option<u32>,
-    /// `speed=` of the latest progress report, as `f64` bits ([`NO_SPEED`]: none yet).
+    /// The latest progress report.
+    progress: Progress,
+}
+
+/// What ffmpeg's `-progress` reports, kept as `f64` bits ([`NOT_YET`]: nothing reported).
+#[derive(Debug, Clone)]
+struct Progress {
+    /// `speed=` (1.0: as fast as it plays).
     speed: Arc<AtomicU64>,
+    /// `out_time_us=` in seconds: how far the output got.
+    out_time_s: Arc<AtomicU64>,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            speed: Arc::new(AtomicU64::new(NOT_YET)),
+            out_time_s: Arc::new(AtomicU64::new(NOT_YET)),
+        }
+    }
+}
+
+fn read_cell(cell: &AtomicU64) -> Option<f64> {
+    match cell.load(Ordering::Relaxed) {
+        NOT_YET => None,
+        bits => Some(f64::from_bits(bits)),
+    }
 }
 
 impl ClipSegmenter {
@@ -114,7 +139,7 @@ impl ClipSegmenter {
             status,
             kill: Arc::new(Notify::new()),
             pid: None,
-            speed: Arc::new(AtomicU64::new(NO_SPEED)),
+            progress: Progress::new(),
         };
         if let Err(e) = std::fs::create_dir_all(&segmenter.out_dir) {
             segmenter.finish(SegmenterState::Failed, Some(output(e)));
@@ -143,7 +168,7 @@ impl ClipSegmenter {
         segmenter.pid = child.id();
         let stderr = child.stderr.take();
         if let Some(progress) = child.stdout.take() {
-            tokio::spawn(read_progress(progress, Arc::clone(&segmenter.speed)));
+            tokio::spawn(read_progress(progress, segmenter.progress.clone()));
         }
         let status = segmenter.status.clone();
         let kill = Arc::clone(&segmenter.kill);
@@ -202,10 +227,13 @@ impl ClipSegmenter {
 
     /// ffmpeg's `speed=` from its latest progress report (1.0: as fast as it plays).
     pub fn speed(&self) -> Option<f64> {
-        match self.speed.load(Ordering::Relaxed) {
-            NO_SPEED => None,
-            bits => Some(f64::from_bits(bits)),
-        }
+        read_cell(&self.progress.speed)
+    }
+
+    /// How far ffmpeg's output got, in seconds of the clip (`out_time` of its latest progress
+    /// report; the filters' `t` runs slightly ahead of it).
+    pub fn out_time_s(&self) -> Option<f64> {
+        read_cell(&self.progress.out_time_s)
     }
 
     pub fn state(&self) -> SegmenterState {
@@ -276,11 +304,23 @@ impl ClipSegmenter {
     }
 }
 
-/// No `speed=` reported yet.
-const NO_SPEED: u64 = u64::MAX;
+/// Nothing reported yet.
+const NOT_YET: u64 = u64::MAX;
 
-/// Follows ffmpeg's `-progress` report (`key=value` lines) and keeps the latest `speed`.
-async fn read_progress<R: AsyncRead + Unpin>(progress: R, speed: Arc<AtomicU64>) {
+/// `out_time_us=` of a progress line, in seconds.
+fn parse_out_time(line: &str) -> Option<f64> {
+    let us: i64 = line
+        .trim()
+        .strip_prefix("out_time_us=")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(us.max(0) as f64 / 1_000_000.0)
+}
+
+/// Follows ffmpeg's `-progress` report (`key=value` lines) and keeps the latest `speed` and
+/// `out_time`.
+async fn read_progress<R: AsyncRead + Unpin>(progress: R, cells: Progress) {
     /// A longer line is read in pieces (bounded memory); the report's lines are short.
     const MAX_LINE: u64 = 4096;
     let mut reader = BufReader::new(progress);
@@ -296,8 +336,11 @@ async fn read_progress<R: AsyncRead + Unpin>(progress: R, speed: Arc<AtomicU64>)
         {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                if let Some(value) = parse_speed(&String::from_utf8_lossy(&buf)) {
-                    speed.store(value.to_bits(), Ordering::Relaxed);
+                let line = String::from_utf8_lossy(&buf);
+                if let Some(value) = parse_speed(&line) {
+                    cells.speed.store(value.to_bits(), Ordering::Relaxed);
+                } else if let Some(value) = parse_out_time(&line) {
+                    cells.out_time_s.store(value.to_bits(), Ordering::Relaxed);
                 }
             }
         }
@@ -532,18 +575,24 @@ mod tests {
     async fn progress_reading_survives_bytes_that_are_not_utf8() {
         use tokio::io::AsyncWriteExt;
         let (mut tx, rx) = tokio::io::duplex(64);
-        let speed = Arc::new(AtomicU64::new(NO_SPEED));
-        let reader = tokio::spawn(read_progress(rx, Arc::clone(&speed)));
+        let cells = Progress::new();
+        let reader = tokio::spawn(read_progress(rx, cells.clone()));
         // A title with a broken encoding, then more reports, more than the pipe holds.
         tx.write_all(b"stream_0_0_q=\xff\xfe\xfd\nspeed=2x\n")
             .await
             .unwrap();
         for _ in 0..200 {
-            tx.write_all(b"frame=1\nspeed=1.5x\n").await.unwrap();
+            tx.write_all(b"frame=1\nout_time_us=N/A\nspeed=1.5x\n")
+                .await
+                .unwrap();
         }
+        tx.write_all(b"out_time_ms=999\nout_time_us=12500000\nout_time=00:00:12.500000\n")
+            .await
+            .unwrap();
         drop(tx);
         reader.await.unwrap();
-        assert_eq!(f64::from_bits(speed.load(Ordering::Relaxed)), 1.5);
+        assert_eq!(read_cell(&cells.speed), Some(1.5));
+        assert_eq!(read_cell(&cells.out_time_s), Some(12.5));
     }
 
     /// A segmenter that never started a child, to exercise `poll()` on hand-written lists.
@@ -559,7 +608,7 @@ mod tests {
             status,
             kill: Arc::new(Notify::new()),
             pid: None,
-            speed: Arc::new(AtomicU64::new(NO_SPEED)),
+            progress: Progress::new(),
         }
     }
 
@@ -651,6 +700,7 @@ mod tests {
             out_dir: dir.path().to_path_buf(),
             start_at_s: 0.0,
             readrate: None,
+            overlay: None,
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, dir.path().to_path_buf(), None);
         assert_eq!(seg.wait().await, SegmenterState::Done);
@@ -681,6 +731,7 @@ mod tests {
             out_dir: dir.path().to_path_buf(),
             start_at_s: 0.0,
             readrate: None,
+            overlay: None,
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, dir.path().to_path_buf(), None);
         assert_eq!(seg.wait().await, SegmenterState::Failed);
@@ -736,6 +787,7 @@ mod tests {
             out_dir: out_dir.clone(),
             start_at_s: 0.0,
             readrate: None,
+            overlay: None,
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, out_dir, None);
         let state = seg.wait().await;

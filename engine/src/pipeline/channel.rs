@@ -381,6 +381,9 @@ struct PendingSeek {
     item_id: i64,
     target_s: f64,
     due_at: u64,
+    /// A new ticker look asked for it: no target of its own, the film starts again from where
+    /// the channel is when it runs (and the log says why).
+    ticker: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -614,7 +617,7 @@ impl Channel {
     fn pending_seek_of(&self, item_id: i64) -> Option<f64> {
         self.pending_seek
             .as_ref()
-            .filter(|s| s.item_id == item_id)
+            .filter(|s| s.item_id == item_id && !s.ticker)
             .map(|s| s.target_s)
     }
 
@@ -634,6 +637,10 @@ impl Channel {
     }
 
     fn request_seek(&mut self, request: SeekRequest) {
+        self.request(request, false);
+    }
+
+    fn request(&mut self, request: SeekRequest, ticker: bool) {
         if let Some(p) = &self.parked {
             let Some(target) = request.target(p.position_s, p.probed.duration_s) else {
                 self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
@@ -664,11 +671,33 @@ impl Channel {
             self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
             return;
         };
+        // A real seek joined with a ticker restart is logged as the seek.
+        let ticker = ticker
+            && self
+                .pending_seek
+                .as_ref()
+                .is_none_or(|s| s.item_id != c.item.id || s.ticker);
         self.pending_seek = Some(PendingSeek {
             item_id: c.item.id,
             target_s,
             due_at: (self.now)().saturating_add(SEEK_QUIET_MS),
+            ticker,
         });
+    }
+
+    /// The ticker's layout changed: the current film starts again from where the channel is
+    /// (like a seek to the server position: after 700 ms of quiet, under a new source key, so
+    /// one discontinuity; the clip factory reads the new layout). A live stream keeps airing
+    /// and the next item gets it; a paused film gets it when it resumes.
+    pub fn apply_ticker(&mut self) {
+        if self.parked.is_some() {
+            return;
+        }
+        match &self.current {
+            None => {}
+            Some(c) if c.item.is_live => self.log(Msg::new("log.ticker_live_next_item")),
+            Some(_) => self.request(SeekRequest::By(0.0), true),
+        }
     }
 
     /// Called by the engine loop every tick: runs a seek whose quiet has passed.
@@ -710,7 +739,17 @@ impl Channel {
         else {
             return Ok(());
         };
-        if ends_film(seek.target_s, c.duration_s()) {
+        let target_s = if seek.ticker {
+            c.position_s()
+        } else {
+            seek.target_s
+        };
+        if seek.ticker && ends_film(target_s, c.duration_s()) {
+            // Not worth a restart: the film plays out with the old look.
+            self.current = Some(c);
+            return Ok(());
+        }
+        if ends_film(target_s, c.duration_s()) {
             self.log(
                 Msg::new("log.seek_to_end")
                     .arg("id", c.item.id)
@@ -723,21 +762,26 @@ impl Channel {
         self.drop_prefetched();
         if let Some(error) = c.failure() {
             // The process had already failed: the usual retry accounting, from the target.
-            c.base_s = seek.target_s;
+            c.base_s = target_s;
             c.emitted_s = 0.0;
             c.ready.clear();
             self.current = Some(c);
             return self.handle_failure(error);
         }
         let mut off = Parked::off_air(c);
-        self.log(
+        self.log(if seek.ticker {
+            Msg::new("log.ticker_applied")
+                .arg("id", off.item.id)
+                .arg("title", &off.item.title)
+                .arg("seconds", format!("{target_s:.0}"))
+        } else {
             Msg::new("log.seek")
                 .arg("id", off.item.id)
                 .arg("title", &off.item.title)
                 .arg("from", format!("{:.0}", off.position_s))
-                .arg("to", format!("{:.0}", seek.target_s)),
-        );
-        off.position_s = seek.target_s;
+                .arg("to", format!("{target_s:.0}"))
+        });
+        off.position_s = target_s;
         self.current = Some(self.relaunch(off));
         Ok(())
     }
@@ -822,7 +866,9 @@ impl Channel {
         let Some(c) = self.current.take() else {
             return;
         };
-        let target = seek.filter(|s| s.item_id == c.item.id).map(|s| s.target_s);
+        let target = seek
+            .filter(|s| s.item_id == c.item.id && !s.ticker)
+            .map(|s| s.target_s);
         if let Some(target) = target
             && ends_film(target, c.duration_s())
         {
@@ -963,6 +1009,7 @@ impl Channel {
                 rss_bytes: None,
             });
         ChannelStats {
+            ticker_slow: on_air.as_ref().is_some_and(|(_, clip)| clip.ticker_slow),
             on_air: on_air.map(|(info, _)| info),
             hls: None,
             next,
@@ -1325,7 +1372,11 @@ impl Channel {
 
     /// A seek waiting for a film that is gone never runs.
     fn forget_seek_of(&mut self, item_id: i64) {
-        if self.pending_seek_of(item_id).is_some() {
+        if self
+            .pending_seek
+            .as_ref()
+            .is_some_and(|s| s.item_id == item_id)
+        {
             self.pending_seek = None;
         }
     }
@@ -1422,6 +1473,7 @@ mod tests {
         n: usize,
         item_id: i64,
         start_at_s: f64,
+        ticker_slow: bool,
     }
 
     /// Test-side view of a fake handle (shared with the handle the channel owns).
@@ -1496,6 +1548,7 @@ mod tests {
                 }),
                 pid: Some(4321),
                 speed: Some(1.5),
+                ticker_slow: self.fake.lock().ticker_slow,
                 ..ClipStats::default()
             }
         }
@@ -1590,6 +1643,7 @@ mod tests {
                     n: 0,
                     item_id: item.id,
                     start_at_s,
+                    ticker_slow: false,
                 })));
                 shared.lock().unwrap().handles.push(fake.clone());
                 Ok(Box::new(FakeHandle {
@@ -3371,5 +3425,146 @@ mod tests {
         let a = e.add_item("a");
         e.air(&a, 1).await;
         assert!(!e.control().position_approx);
+    }
+
+    // ---------- Info ticker (stage 4, task 6) ----------
+
+    /// A change of the ticker's layout starts the film again from where the channel is, once,
+    /// under a new source key (a discontinuity), the old clip and the prefetched one stopped.
+    #[tokio::test]
+    async fn applying_the_ticker_starts_the_film_again_from_its_position() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        let h0 = e.air(&a, 3).await; // 12 s aired
+        e.channel.apply_ticker();
+        // Nothing waits for a seek: the controls show where the film is.
+        let c = e.control();
+        assert!(!c.seek_pending);
+        assert_eq!(c.position_s, 12.0);
+        // A burst of changes is one restart.
+        e.advance(300);
+        e.channel.apply_ticker();
+        // The old clip keeps airing meanwhile.
+        h0.produce(1);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        e.advance(699);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        e.advance(1);
+        e.tick();
+        assert!(h0.disposed());
+        // From where the channel is when it restarts (no part is aired twice).
+        assert_eq!(
+            e.factory.calls()[1..],
+            [Call {
+                item_id: a.id,
+                start_at_s: 16.0,
+                attempt: 0
+            }]
+        );
+        e.flush().await;
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), relaunched_key(&a, 0, 1));
+        assert_eq!(e.starts(), 2);
+        assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+    }
+
+    /// A seek and a new ticker look at once: one restart, at the seek's target. Pausing while
+    /// a ticker restart waits parks the film where it is.
+    #[tokio::test]
+    async fn a_seek_and_a_ticker_restart_together_are_one_start_at_the_seek_target() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.seek_to(50.0);
+        e.channel.apply_ticker();
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[1].start_at_s, 50.0);
+        e.flush().await;
+
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.apply_ticker();
+        e.channel.seek_by(10.0);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.factory.calls()[1].start_at_s, 22.0);
+        assert_eq!(e.starts(), 2);
+        e.flush().await;
+
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.apply_ticker();
+        e.channel.pause(PauseReason::Manual);
+        assert_eq!(e.control().position_s, 12.0);
+        e.advance(5_000);
+        e.tick();
+        e.channel.resume(PauseReason::Manual);
+        e.flush().await;
+        assert_eq!(e.factory.calls()[1].start_at_s, 12.0);
+        assert_eq!(e.starts(), 2);
+    }
+
+    /// In the last second of a film a new ticker look is not worth a restart: it plays out.
+    #[tokio::test]
+    async fn a_ticker_restart_in_the_last_second_lets_the_film_play_out() {
+        let mut e = setup();
+        let a = e.add("a", Some(12.5), false);
+        let h = e.air(&a, 3).await; // 12 s of 12.5
+        e.channel.apply_ticker();
+        e.advance(700);
+        e.tick();
+        assert!(!h.disposed());
+        assert_eq!(e.starts(), 1);
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn applying_the_ticker_to_a_live_stream_waits_for_the_next_item() {
+        let mut e = setup();
+        let live = e.add("live", None, true);
+        let h = e.air(&live, 2).await;
+        e.channel.apply_ticker();
+        e.advance(5_000);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        assert!(!h.disposed());
+    }
+
+    #[tokio::test]
+    async fn applying_the_ticker_while_paused_or_idle_starts_nothing() {
+        let mut e = setup();
+        e.channel.apply_ticker();
+        e.advance(5_000);
+        e.tick();
+        assert_eq!(e.starts(), 0);
+        let a = e.add_item("a");
+        e.air(&a, 1).await;
+        e.channel.pause(PauseReason::Manual);
+        e.channel.apply_ticker();
+        e.advance(5_000);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        // The resume starts it with the new layout anyway.
+        e.channel.resume(PauseReason::Manual);
+        e.flush().await;
+        assert_eq!(e.starts(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_slow_ticker_of_the_film_on_air_shows_in_the_stats() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 1).await;
+        assert!(!e.channel.stats().ticker_slow);
+        e.factory.lock().handles[0].lock().ticker_slow = true;
+        assert!(e.channel.stats().ticker_slow);
     }
 }

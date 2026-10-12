@@ -324,6 +324,25 @@ class Client {
           throw new Error(`rust: "${name}": slateLanguage = ${JSON.stringify(s.slateLanguage)}, oczekiwano "en"`);
         }
         delete s.slateLanguage;
+        // Etap 4, zadanie 6: pola paska informacyjnego (serwer TS ich nie ma). Wartości domyślne
+        // po stronie Rust (koder libx264 → pasek wyłączony), potem pomijane w porównaniu.
+        const tickerDefaults = {
+          tickerEnabled: false,
+          tickerMode: 'interval',
+          tickerIntervalS: 60,
+          tickerSpeed: 'normal',
+          tickerShowNext: true,
+          tickerShowAddress: false,
+          tickerQr: 'with_ticker',
+          tickerProgress: true,
+          tickerMessages: [],
+        };
+        for (const [key, expected] of Object.entries(tickerDefaults)) {
+          if (JSON.stringify(s[key]) !== JSON.stringify(expected)) {
+            throw new Error(`rust: "${name}": ${key} = ${JSON.stringify(s[key])}, oczekiwano ${JSON.stringify(expected)}`);
+          }
+          delete s[key];
+        }
       }
     }
     // Znana różnica (etap 4, zadanie 4): serwer TS pisze „N filmów” dla każdej liczby, Rust używa

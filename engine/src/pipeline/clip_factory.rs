@@ -1,20 +1,28 @@
 //! The real clip factory: resolve, probe and start an ffmpeg cut. Port of
-//! `src/pipeline/clipFactory.ts`.
+//! `src/pipeline/clipFactory.ts`, extended with the info ticker (stage 4).
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::Connection;
 
 use crate::config::VideoEncoder;
-use crate::db::{QueueItem, SettingsRepo};
-use crate::i18n::Msg;
+use crate::db::{ChannelSettings, ItemStatus, QueueItem, QueueRepo, SettingsRepo};
+use crate::i18n::{Lang, Msg};
+use crate::live::LiveValue;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
-use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
+use crate::pipeline::ffmpeg_args::{ClipArgsOptions, MAX_HEIGHT, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
+use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
+use crate::pipeline::ticker::{
+    CAPTION_FILE, FONTS_DIR, OverlayContext, QR_FILE, QR_PX, QrOverlay, Schedule, SlowWatch,
+    TEXT_FILE, TickerContent, TickerMode, TickerQr, TickerWriter, compose_text, overlay_filter,
+    prepare_after_s, window_budget_px,
+};
 use crate::resolver::MediaResolver;
 use crate::stats::{ClipStats, ProbeSummary, StreamMode};
 
@@ -25,6 +33,9 @@ const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(200);
 /// Source read rate: 1.5× real time leaves headroom without downloading the whole film.
 pub const READRATE: f64 = 1.5;
 
+/// How often a running ticker re-reads what it shows (and ffmpeg's progress).
+const TICKER_REFRESH: Duration = Duration::from_millis(500);
+
 pub type SharedLogFn = Arc<dyn Fn(Msg) + Send + Sync>;
 
 pub struct ClipFactoryDeps {
@@ -32,12 +43,17 @@ pub struct ClipFactoryDeps {
     pub ffmpeg_path: PathBuf,
     pub ffprobe_path: PathBuf,
     /// Read when each clip starts: the desktop app may change it while the channel runs.
-    pub encoder: crate::live::LiveValue<VideoEncoder>,
+    pub encoder: LiveValue<VideoEncoder>,
     pub segment_seconds: u32,
     pub clips_dir: PathBuf,
     pub db: Arc<Mutex<Connection>>,
     pub channel_id: i64,
     pub log: Option<SharedLogFn>,
+    /// The info ticker's Latin font (`FONT_FILE`, like the slates).
+    pub font_file: PathBuf,
+    /// The public address (the request page in the ticker and its QR code); read while the
+    /// ticker runs.
+    pub public_url: LiveValue<String>,
 }
 
 /// Log entry written when a clip starts.
@@ -73,6 +89,17 @@ pub fn clip_start_line(
         .arg_msg("resume", resume)
 }
 
+/// Copy or convert: the ticker is drawn on a converted picture, so it forces the conversion
+/// (like `forceTranscode`).
+pub fn clip_video_mode(info: &VideoInfo, settings: &ChannelSettings) -> VideoMode {
+    decide_video_mode(info, settings.force_transcode || settings.ticker.enabled)
+}
+
+/// Length of the film for the progress line: none for a live stream.
+pub fn progress_duration(live: bool, duration_s: Option<f64>) -> Option<f64> {
+    if live { None } else { duration_s }
+}
+
 /// Removes a clip directory, best effort with a few retries. A leftover directory is cleared at
 /// the next server start.
 async fn remove_dir(dir: &Path) {
@@ -88,25 +115,118 @@ async fn remove_dir(dir: &Path) {
     }
 }
 
+/// Removes `dir` once `seg`'s ffmpeg has really exited (Windows keeps open files locked).
+fn remove_after_exit(seg: Arc<ClipSegmenter>, dir: PathBuf) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn(async move {
+                seg.wait().await;
+                remove_dir(&dir).await;
+            });
+        }
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// The ticker of a running clip: the task keeping its text up to date and its speed warning.
+struct TickerRun {
+    task: tokio::task::AbortHandle,
+    slow: Arc<AtomicBool>,
+}
+
+/// The same clip without the ticker, started when ffmpeg cannot draw it (e.g. a broken font)
+/// before the first segment: no attempt of the film is used up.
+struct PlainRestart {
+    args: Vec<OsString>,
+    out_dir: PathBuf,
+    mode: VideoMode,
+    encoder: VideoEncoder,
+}
+
 /// A running ffmpeg cut of one clip.
 struct RealClipHandle {
     seg: Arc<ClipSegmenter>,
     out_dir: PathBuf,
+    ffmpeg_path: PathBuf,
     duration_s: Option<f64>,
     copies_video: bool,
     probe: ProbeSummary,
     mode: StreamMode,
     /// `None` when the video is copied.
     encoder: Option<VideoEncoder>,
+    ticker: Option<TickerRun>,
+    fallback: Option<PlainRestart>,
+    /// A segment came out (after that a failure is a normal failure, not the ticker's).
+    produced: bool,
+    item_id: i64,
+    title: String,
+    log: Option<SharedLogFn>,
     disposed: bool,
+}
+
+impl RealClipHandle {
+    /// ffmpeg failed before its first segment with the ticker: it is started again without.
+    fn restart_pending(&self) -> bool {
+        self.fallback.is_some() && !self.produced && self.seg.state() == SegmenterState::Failed
+    }
+
+    fn stop_ticker(&mut self) {
+        if let Some(ticker) = self.ticker.take() {
+            ticker.task.abort();
+            ticker.slow.store(false, Ordering::Relaxed);
+        }
+    }
+
+    fn restart_plain(&mut self) {
+        let Some(plain) = self.fallback.take() else {
+            return;
+        };
+        let error = self
+            .seg
+            .error()
+            .unwrap_or_else(|| Msg::new("item_errors.ffmpeg_stopped"));
+        self.stop_ticker();
+        if let Some(log) = &self.log {
+            log(Msg::new("log.ticker_failed_plain")
+                .arg("id", self.item_id)
+                .arg("title", &self.title)
+                .arg_msg("error", error));
+        }
+        remove_after_exit(Arc::clone(&self.seg), self.out_dir.clone());
+        self.seg = Arc::new(ClipSegmenter::start(
+            &self.ffmpeg_path,
+            plain.args,
+            plain.out_dir.clone(),
+            None,
+        ));
+        self.out_dir = plain.out_dir;
+        self.copies_video = plain.mode == VideoMode::Copy;
+        self.mode = stream_mode(plain.mode);
+        self.encoder = (plain.mode == VideoMode::Transcode).then_some(plain.encoder);
+    }
+}
+
+fn stream_mode(mode: VideoMode) -> StreamMode {
+    match mode {
+        VideoMode::Copy => StreamMode::Copy,
+        VideoMode::Transcode => StreamMode::Transcode,
+    }
 }
 
 impl ClipHandle for RealClipHandle {
     fn state(&self) -> SegmenterState {
+        if self.restart_pending() {
+            return SegmenterState::Running;
+        }
         self.seg.state()
     }
 
     fn error(&self) -> Option<Msg> {
+        if self.restart_pending() {
+            return None;
+        }
         self.seg.error()
     }
 
@@ -119,7 +239,15 @@ impl ClipHandle for RealClipHandle {
     }
 
     fn poll(&mut self) -> Vec<SegmentInfo> {
-        self.seg.poll()
+        let fresh = self.seg.poll();
+        if !fresh.is_empty() {
+            self.produced = true;
+            self.fallback = None;
+        }
+        if self.restart_pending() {
+            self.restart_plain();
+        }
+        fresh
     }
 
     fn kill(&mut self) {
@@ -133,6 +261,10 @@ impl ClipHandle for RealClipHandle {
             encoder: self.encoder.map(|e| e.as_str().to_string()),
             pid: self.seg.pid(),
             speed: self.seg.speed(),
+            ticker_slow: self
+                .ticker
+                .as_ref()
+                .is_some_and(|t| t.slow.load(Ordering::Relaxed)),
         }
     }
 
@@ -143,20 +275,10 @@ impl ClipHandle for RealClipHandle {
             return;
         }
         self.disposed = true;
+        self.stop_ticker();
+        self.fallback = None;
         self.seg.kill();
-        let seg = Arc::clone(&self.seg);
-        let dir = self.out_dir.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => {
-                rt.spawn(async move {
-                    seg.wait().await;
-                    remove_dir(&dir).await;
-                });
-            }
-            Err(_) => {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
-        }
+        remove_after_exit(Arc::clone(&self.seg), self.out_dir.clone());
     }
 }
 
@@ -171,18 +293,333 @@ impl Drop for RealClipHandle {
 pub struct RealClipFactory {
     deps: Arc<ClipFactoryDeps>,
     counter: Arc<AtomicU64>,
+    /// Which of the owner's messages the ticker shows next (interval mode), across clips.
+    rotation: Arc<AtomicUsize>,
 }
 
 pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
     RealClipFactory {
         deps: Arc::new(deps),
         counter: Arc::new(AtomicU64::new(0)),
+        rotation: Arc::new(AtomicUsize::new(0)),
     }
+}
+
+/// Where a running ticker reads what it shows.
+#[derive(Clone)]
+struct ContentSource {
+    db: Arc<Mutex<Connection>>,
+    channel_id: i64,
+    item_id: i64,
+    public_url: LiveValue<String>,
+    /// The font has Japanese: without it, Japanese texts are drawn in English.
+    japanese_font: bool,
+}
+
+impl ContentSource {
+    fn read(&self) -> rusqlite::Result<TickerContent> {
+        let (settings, next) = {
+            let conn = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+            let settings = SettingsRepo::new(&conn).get(self.channel_id)?;
+            // The next film is the first queued one that is not this one (a prefetched clip
+            // is itself still queued).
+            let next = QueueRepo::new(&conn)
+                .list_by_status(self.channel_id, &[ItemStatus::Queued])?
+                .into_iter()
+                .find(|i| i.id != self.item_id)
+                .map(|i| i.title);
+            (settings, next)
+        };
+        let lang = match settings.slate_language {
+            Lang::Ja if !self.japanese_font => Lang::En,
+            lang => lang,
+        };
+        Ok(TickerContent {
+            lang,
+            settings: settings.ticker,
+            next_title: next,
+            address: request_url(&self.public_url.get()),
+        })
+    }
+}
+
+/// The ticker of a clip about to start: its filters and the writer of its texts.
+struct PreparedTicker {
+    overlay: String,
+    writer: TickerWriter,
+    source: ContentSource,
+}
+
+/// A copy of `font` in `<clips>/_fonts`, named by its file name and size (a changed font gets
+/// a new name, a running ffmpeg may hold the old one), as ffmpeg sees it from a clip folder.
+fn place_ticker_font(font: &Path, clips_dir: &Path) -> std::io::Result<String> {
+    let size = std::fs::metadata(font)?.len();
+    let stem: String = font
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let ext = if font
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("ttc"))
+    {
+        "ttc"
+    } else {
+        "ttf"
+    };
+    let name = format!("{stem}-{size}.{ext}");
+    let dir = clips_dir.join(FONTS_DIR);
+    let target = dir.join(&name);
+    if std::fs::metadata(&target).is_ok_and(|m| m.len() == size) {
+        return Ok(format!("../{FONTS_DIR}/{name}"));
+    }
+    std::fs::create_dir_all(&dir)?;
+    // Two clips may start at once: each copies to its own file, the last rename wins.
+    static COPIES: AtomicU64 = AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        "{name}.{}.{}.tmp",
+        std::process::id(),
+        COPIES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::copy(font, &tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        let _ = std::fs::remove_file(&tmp);
+        if !std::fs::metadata(&target).is_ok_and(|m| m.len() == size) {
+            return Err(e);
+        }
+    }
+    Ok(format!("../{FONTS_DIR}/{name}"))
+}
+
+/// Height of the converted picture (see `build_clip_args`: never above 1080).
+fn output_height(info: &VideoInfo) -> u32 {
+    if info.height == 0 {
+        MAX_HEIGHT
+    } else {
+        info.height.min(MAX_HEIGHT)
+    }
+}
+
+struct TickerStart<'a> {
+    item: &'a QueueItem,
+    settings: &'a ChannelSettings,
+    info: &'a VideoInfo,
+    duration_s: Option<f64>,
+    start_at_s: f64,
+    out_dir: &'a Path,
+}
+
+/// Writes the ticker's files into the clip folder and builds its filters; `None` (logged): the
+/// clip starts without the ticker (no font, files cannot be written).
+fn prepare_ticker(
+    d: &ClipFactoryDeps,
+    rotation: &Arc<AtomicUsize>,
+    s: &TickerStart<'_>,
+) -> Option<PreparedTicker> {
+    let log = |msg: Msg| {
+        if let Some(log) = &d.log {
+            log(msg);
+        }
+    };
+    let ticker = &s.settings.ticker;
+    let mut source = ContentSource {
+        db: Arc::clone(&d.db),
+        channel_id: d.channel_id,
+        item_id: s.item.id,
+        public_url: d.public_url.clone(),
+        japanese_font: true,
+    };
+    let content = match source.read() {
+        Ok(content) => content,
+        Err(e) => {
+            log(Msg::new("log.ticker_text_failed").arg("error", e));
+            return None;
+        }
+    };
+    let candidates = |content: &TickerContent| -> Vec<String> {
+        let now = crate::pipeline::ticker::NowNext {
+            title: s.item.title.clone(),
+            requester: crate::pipeline::ticker::Requester::of(s.item),
+            next_title: content.next_title.clone(),
+            address: content.address.clone(),
+        };
+        let count = match ticker.mode {
+            TickerMode::Interval => ticker.messages.len().max(1),
+            TickerMode::Continuous => 1,
+        };
+        (0..count)
+            .map(|i| compose_text(content.lang, &now, ticker, i))
+            .collect()
+    };
+    let japanese_dir = system_fonts_dir();
+    let mut texts = candidates(&content);
+    let mut font = font_for(content.lang, &texts.join(" "), &d.font_file, &japanese_dir);
+    if matches!(font, FontChoice::JapaneseMissing(_)) && content.lang == Lang::Ja {
+        // Japanese without a Japanese font: the texts in English (like the slates).
+        let english = TickerContent {
+            lang: Lang::En,
+            ..content.clone()
+        };
+        texts = candidates(&english);
+        font = font_for(Lang::En, &texts.join(" "), &d.font_file, &japanese_dir);
+    }
+    source.japanese_font = font.has_japanese();
+    if !font.file().is_file() {
+        log(Msg::new("log.ticker_font_missing")
+            .arg("path", font.file().display())
+            .arg("id", s.item.id)
+            .arg("title", &s.item.title));
+        return None;
+    }
+    let font_name = match place_ticker_font(font.file(), &d.clips_dir) {
+        Ok(name) => name,
+        Err(e) => {
+            log(Msg::new("log.ticker_text_failed").arg("error", e));
+            return None;
+        }
+    };
+    // What the running ticker reads from now on (Japanese without its font: English).
+    let content = TickerContent {
+        lang: match content.lang {
+            Lang::Ja if !source.japanese_font => Lang::En,
+            lang => lang,
+        },
+        ..content
+    };
+    let height = output_height(s.info);
+    let k = f64::from(height) / f64::from(MAX_HEIGHT);
+    let qr_size = if ticker.qr != TickerQr::Off && !content.address.is_empty() {
+        let written = qr_image(&content.address, (QR_PX * k).round() as u32)
+            .map_err(|e| e.message())
+            .and_then(|(png, size)| {
+                std::fs::create_dir_all(s.out_dir)
+                    .and_then(|()| std::fs::write(s.out_dir.join(QR_FILE), png))
+                    .map(|()| size)
+                    .map_err(Msg::text)
+            });
+        match written {
+            Ok(size) => Some(size),
+            Err(e) => {
+                log(Msg::new("log.ticker_text_failed").arg_msg("error", e));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let budget = window_budget_px(ticker, &texts);
+    let schedule = Schedule {
+        mode: ticker.mode,
+        interval_s: f64::from(ticker.interval_s),
+        prepare_after_s: prepare_after_s(ticker, budget),
+    };
+    let mut writer = TickerWriter::new(
+        s.out_dir.to_path_buf(),
+        s.item,
+        schedule,
+        (ticker.mode == TickerMode::Interval).then_some(budget),
+        Arc::clone(rotation),
+    );
+    if let Err(e) =
+        std::fs::create_dir_all(s.out_dir).and_then(|()| writer.update(None, &content).map(drop))
+    {
+        log(Msg::new("log.ticker_text_failed").arg("error", e));
+        return None;
+    }
+    let overlay = overlay_filter(
+        ticker,
+        &OverlayContext {
+            duration_s: s.duration_s,
+            start_at_s: s.start_at_s,
+            text_file: TEXT_FILE,
+            font: &font_name,
+            qr: qr_size.map(|size_px| QrOverlay {
+                png: QR_FILE,
+                size_px,
+                caption_file: CAPTION_FILE,
+            }),
+            frame_height: height,
+            text_budget_px: budget,
+        },
+    );
+    Some(PreparedTicker {
+        overlay,
+        writer,
+        source,
+    })
+}
+
+/// Keeps the ticker's texts up to date while the clip runs and watches the conversion speed
+/// (`watch_speed`: not for a live stream, which never runs faster than real time).
+async fn run_ticker(
+    mut writer: TickerWriter,
+    source: ContentSource,
+    seg: Arc<ClipSegmenter>,
+    slow: Arc<AtomicBool>,
+    watch_speed: bool,
+    log: Option<SharedLogFn>,
+    title: String,
+) {
+    let log = |msg: Msg| {
+        if let Some(log) = &log {
+            log(msg);
+        }
+    };
+    let started = tokio::time::Instant::now();
+    let mut watch = SlowWatch::default();
+    let mut reported = false;
+    while seg.state() == SegmenterState::Running {
+        tokio::time::sleep(TICKER_REFRESH).await;
+        if let Ok(content) = source.read() {
+            let t = seg.out_time_s();
+            // Replacing the file may wait for ffmpeg reading it: not on a runtime thread.
+            let Ok((back, result)) = tokio::task::spawn_blocking(move || {
+                let result = writer.update(t, &content);
+                (writer, result)
+            })
+            .await
+            else {
+                break;
+            };
+            writer = back;
+            if let Err(e) = result
+                && !reported
+            {
+                reported = true;
+                log(Msg::new("log.ticker_text_failed").arg("error", e));
+            }
+        }
+        if !watch_speed {
+            continue;
+        }
+        let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match watch.observe(ms, seg.speed()) {
+            Some(true) => {
+                slow.store(true, Ordering::Relaxed);
+                log(Msg::new("log.ticker_slow")
+                    .arg("id", source.item_id)
+                    .arg("title", &title)
+                    .arg("speed", format!("{:.2}", seg.speed().unwrap_or_default())));
+            }
+            Some(false) => slow.store(false, Ordering::Relaxed),
+            None => {}
+        }
+    }
+    slow.store(false, Ordering::Relaxed);
 }
 
 async fn start_clip(
     d: Arc<ClipFactoryDeps>,
     counter: Arc<AtomicU64>,
+    rotation: Arc<AtomicUsize>,
     item: QueueItem,
     start_at_s: f64,
     attempt: u32,
@@ -195,22 +632,46 @@ async fn start_clip(
     let info = probe_video(&d.ffprobe_path, &stream.inputs)
         .await
         .map_err(|e| e.message())?;
-    let force_transcode = {
+    let settings = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
             .get(d.channel_id)
             .map_err(Msg::text)?
-            .force_transcode
     };
-    let mode = decide_video_mode(&info, force_transcode);
     let live = item.is_live || stream.is_live;
     let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+    // ffmpeg runs in this folder when it draws the ticker, so it must not be relative.
     let out_dir = d.clips_dir.join(format!("{}-{attempt}-{n}", item.id));
+    let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
+    let start_at_s = if live { 0.0 } else { start_at_s };
+    let duration_s = info.duration_s.or(stream.duration_s);
+    let ticker = if settings.ticker.enabled {
+        prepare_ticker(
+            &d,
+            &rotation,
+            &TickerStart {
+                item: &item,
+                settings: &settings,
+                info: &info,
+                duration_s: progress_duration(live, duration_s.or(item.duration_s)),
+                start_at_s,
+                out_dir: &out_dir,
+            },
+        )
+    } else {
+        None
+    };
+    let plain_mode = decide_video_mode(&info, settings.force_transcode);
+    let mode = if ticker.is_some() {
+        clip_video_mode(&info, &settings)
+    } else {
+        plain_mode
+    };
     if let Some(log) = &d.log {
         log(clip_start_line(&item, mode, &info, start_at_s));
     }
     let encoder = d.encoder.get();
-    let args = build_clip_args(&ClipArgsOptions {
+    let options = ClipArgsOptions {
         inputs: stream.inputs,
         input_format: None,
         mode,
@@ -218,14 +679,60 @@ async fn start_clip(
         encoder,
         segment_seconds: d.segment_seconds,
         out_dir: out_dir.clone(),
-        start_at_s: if live { 0.0 } else { start_at_s },
+        start_at_s,
         readrate: if live { None } else { Some(READRATE) },
-    });
-    let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), None);
+        overlay: None,
+    };
+    let (seg, ticker, fallback) = match ticker {
+        Some(prepared) => {
+            let plain_dir = PathBuf::from(format!("{}-plain", out_dir.display()));
+            let fallback = PlainRestart {
+                args: build_clip_args(&ClipArgsOptions {
+                    mode: plain_mode,
+                    out_dir: plain_dir.clone(),
+                    ..options.clone()
+                }),
+                out_dir: plain_dir,
+                mode: plain_mode,
+                encoder,
+            };
+            let args = build_clip_args(&ClipArgsOptions {
+                overlay: Some(prepared.overlay),
+                ..options
+            });
+            let seg = Arc::new(ClipSegmenter::start(
+                &d.ffmpeg_path,
+                args,
+                out_dir.clone(),
+                Some(out_dir.clone()),
+            ));
+            let slow = Arc::new(AtomicBool::new(false));
+            let task = tokio::spawn(run_ticker(
+                prepared.writer,
+                prepared.source,
+                Arc::clone(&seg),
+                Arc::clone(&slow),
+                !live,
+                d.log.clone(),
+                item.title.clone(),
+            ));
+            let run = TickerRun {
+                task: task.abort_handle(),
+                slow,
+            };
+            (seg, Some(run), Some(fallback))
+        }
+        None => {
+            let args = build_clip_args(&options);
+            let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), None);
+            (Arc::new(seg), None, None)
+        }
+    };
     Ok(Box::new(RealClipHandle {
-        seg: Arc::new(seg),
+        seg,
         out_dir,
-        duration_s: info.duration_s.or(stream.duration_s),
+        ffmpeg_path: d.ffmpeg_path.clone(),
+        duration_s,
         copies_video: mode == VideoMode::Copy,
         probe: ProbeSummary {
             codec: info.codec.clone(),
@@ -235,11 +742,14 @@ async fn start_clip(
             has_audio: info.has_audio,
             duration_s: info.duration_s,
         },
-        mode: match mode {
-            VideoMode::Copy => StreamMode::Copy,
-            VideoMode::Transcode => StreamMode::Transcode,
-        },
+        mode: stream_mode(mode),
         encoder: (mode == VideoMode::Transcode).then_some(encoder),
+        ticker,
+        fallback,
+        produced: false,
+        item_id: item.id,
+        title: item.title.clone(),
+        log: d.log.clone(),
         disposed: false,
     }))
 }
@@ -254,6 +764,7 @@ impl ClipFactory for RealClipFactory {
         Box::pin(start_clip(
             Arc::clone(&self.deps),
             Arc::clone(&self.counter),
+            Arc::clone(&self.rotation),
             item,
             start_at_s,
             attempt,
@@ -368,6 +879,7 @@ mod tests {
         factory: RealClipFactory,
         item: QueueItem,
         lines: Arc<Mutex<Vec<String>>>,
+        db: Arc<Mutex<Connection>>,
     }
 
     fn fixture(
@@ -375,6 +887,24 @@ mod tests {
         dir: tempfile::TempDir,
         ffmpeg: PathBuf,
         ffprobe: PathBuf,
+    ) -> Fixture {
+        fixture_with_font(source, dir, ffmpeg, ffprobe, default_font())
+    }
+
+    fn default_font() -> PathBuf {
+        if cfg!(windows) {
+            "C:/Windows/Fonts/arial.ttf".into()
+        } else {
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".into()
+        }
+    }
+
+    fn fixture_with_font(
+        source: Option<PathBuf>,
+        dir: tempfile::TempDir,
+        ffmpeg: PathBuf,
+        ffprobe: PathBuf,
+        font_file: PathBuf,
     ) -> Fixture {
         let conn = open_database(Path::new(":memory:")).unwrap();
         let item = QueueRepo::new(&conn)
@@ -393,6 +923,7 @@ mod tests {
         let clips = dir.path().join("clips");
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&lines);
+        let db = Arc::new(Mutex::new(conn));
         let factory = create_clip_factory(ClipFactoryDeps {
             resolver: Arc::new(FileResolver(source)),
             ffmpeg_path: ffmpeg,
@@ -400,11 +931,13 @@ mod tests {
             encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
             segment_seconds: 4,
             clips_dir: clips.clone(),
-            db: Arc::new(Mutex::new(conn)),
+            db: Arc::clone(&db),
             channel_id: MAIN_CHANNEL_ID,
             log: Some(Arc::new(move |l: Msg| {
                 sink.lock().unwrap().push(l.to_string())
             })),
+            font_file,
+            public_url: crate::live::LiveValue::new("https://kanal.example.com".to_string()),
         });
         Fixture {
             _dir: dir,
@@ -412,6 +945,7 @@ mod tests {
             factory,
             item,
             lines,
+            db,
         }
     }
 
@@ -541,5 +1075,325 @@ mod tests {
             )
             .await
         );
+    }
+
+    // ---------- Info ticker (stage 4, task 6) ----------
+
+    #[test]
+    fn the_ticker_forces_the_conversion() {
+        let info = video("h264", 720, 25.0, true);
+        let mut settings = ChannelSettings::default();
+        assert_eq!(clip_video_mode(&info, &settings), VideoMode::Copy);
+        settings.ticker.enabled = true;
+        assert_eq!(clip_video_mode(&info, &settings), VideoMode::Transcode);
+        settings.ticker.enabled = false;
+        settings.force_transcode = true;
+        assert_eq!(clip_video_mode(&info, &settings), VideoMode::Transcode);
+    }
+
+    #[test]
+    fn a_live_stream_has_no_progress_line() {
+        assert_eq!(progress_duration(true, Some(60.0)), None);
+        assert_eq!(progress_duration(false, Some(60.0)), Some(60.0));
+        assert_eq!(progress_duration(false, None), None);
+    }
+
+    fn enable_ticker(f: &Fixture, patch: serde_json::Value) {
+        let conn = f.db.lock().unwrap();
+        let mut body = serde_json::json!({ "tickerEnabled": true });
+        body.as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let patch = crate::db::sanitize_settings_patch(&body).unwrap();
+        SettingsRepo::new(&conn)
+            .update(MAIN_CHANNEL_ID, &patch)
+            .unwrap();
+    }
+
+    /// Polls the handle until ffmpeg is done; the handle never reports a failure on the way.
+    async fn run_to_the_end(handle: &mut Box<dyn ClipHandle>) -> Vec<SegmentInfo> {
+        let mut segments = Vec::new();
+        let mut failed = false;
+        let finished = wait_until(
+            || {
+                segments.extend(handle.poll());
+                failed |= handle.state() == SegmenterState::Failed;
+                handle.state() != SegmenterState::Running
+            },
+            Duration::from_secs(120),
+        )
+        .await;
+        assert!(finished);
+        segments.extend(handle.poll());
+        assert!(!failed, "{:?}", handle.error());
+        assert_eq!(handle.state(), SegmenterState::Done, "{:?}", handle.error());
+        segments
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ticker_text_names_the_film_and_follows_the_queue_messages_and_language() {
+        let (Some(ffmpeg), Some(ffprobe)) = (bin("ffmpeg"), bin("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg or bin/ffprobe missing");
+            return;
+        };
+        if !default_font().is_file() {
+            eprintln!("skip: no default font");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("film.mp4");
+        make_source(&ffmpeg, &source, 60).await;
+        let f = fixture(Some(source), dir, ffmpeg, ffprobe);
+        enable_ticker(
+            &f,
+            serde_json::json!({ "tickerMode": "continuous", "tickerMessages": ["Witajcie!"] }),
+        );
+        {
+            let conn = f.db.lock().unwrap();
+            QueueRepo::new(&conn)
+                .add(&NewItem {
+                    channel_id: MAIN_CHANNEL_ID,
+                    source_url: "https://youtu.be/y".into(),
+                    title: "Następny".into(),
+                    duration_s: Some(6.0),
+                    is_live: false,
+                    status: ItemStatus::Queued,
+                    added_by: AddedBy::Public,
+                    requester_name: Some("Kasia".into()),
+                    requester_ip: None,
+                })
+                .unwrap();
+        }
+        let mut handle = f.factory.create(f.item.clone(), 0.0, 0).await.unwrap();
+        let out_dir = f.clips.join(format!("{}-0-1", f.item.id));
+        let read = |name: &str| {
+            crate::pipeline::ticker::TickerText::read(&out_dir.join(name)).unwrap_or_default()
+        };
+        assert_eq!(
+            read(TEXT_FILE),
+            "► Now: Test   ·   added by Host   ·   next: Następny   ·   Witajcie!"
+        );
+        assert_eq!(read(CAPTION_FILE), "Add a video");
+        assert!(out_dir.join(QR_FILE).is_file());
+        assert!(!handle.copies_video(), "the ticker forces the conversion");
+        assert!(
+            f.lines.lock().unwrap()[0].contains("transcoding"),
+            "{:?}",
+            f.lines.lock().unwrap()
+        );
+        // Content changes reach the running clip through its text file.
+        {
+            let conn = f.db.lock().unwrap();
+            let patch = crate::db::sanitize_settings_patch(&serde_json::json!({
+                "tickerMessages": ["Nowa wiadomość"], "slateLanguage": "pl"
+            }))
+            .unwrap();
+            SettingsRepo::new(&conn)
+                .update(MAIN_CHANNEL_ID, &patch)
+                .unwrap();
+        }
+        let expected = "► Teraz: Test   ·   dodane przez Gospodarza   ·   następnie: Następny   ·   Nowa wiadomość";
+        assert!(
+            wait_until(|| read(TEXT_FILE) == expected, Duration::from_secs(5)).await,
+            "{}",
+            read(TEXT_FILE)
+        );
+        assert_eq!(read(CAPTION_FILE), "Dodaj film");
+        // ffmpeg draws it: segments come out while the file is being rewritten.
+        let mut segments = Vec::new();
+        assert!(
+            wait_until(
+                || {
+                    segments.extend(handle.poll());
+                    !segments.is_empty()
+                },
+                Duration::from_secs(60)
+            )
+            .await,
+            "{:?}",
+            handle.error()
+        );
+        assert_eq!(handle.state(), SegmenterState::Running);
+        handle.dispose();
+        assert!(wait_until(|| !out_dir.exists(), Duration::from_secs(10)).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_its_font_the_clip_starts_without_the_ticker_and_it_is_logged() {
+        let (Some(ffmpeg), Some(ffprobe)) = (bin("ffmpeg"), bin("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg or bin/ffprobe missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("film.mp4");
+        make_source(&ffmpeg, &source, 6).await;
+        let missing = dir.path().join("brak").join("czcionka.ttf");
+        let f = fixture_with_font(Some(source), dir, ffmpeg, ffprobe, missing);
+        enable_ticker(&f, serde_json::json!({}));
+        let mut handle = f.factory.create(f.item.clone(), 0.0, 0).await.unwrap();
+        // The same attempt, no ticker files, the video copied as without the ticker.
+        let out_dir = f.clips.join(format!("{}-0-1", f.item.id));
+        assert!(out_dir.exists());
+        assert!(!out_dir.join(TEXT_FILE).exists());
+        assert!(handle.copies_video());
+        let lines = f.lines.lock().unwrap().clone();
+        assert!(
+            lines[0].starts_with("The info ticker font (")
+                && lines[0].contains(&format!(
+                    "video #{} \"Test\" plays without the ticker",
+                    f.item.id
+                )),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("repackaging"), "{lines:?}");
+        assert!(!run_to_the_end(&mut handle).await.is_empty());
+        handle.dispose();
+    }
+
+    /// ffmpeg cannot draw the ticker (this ffmpeg falls back to another font by itself, so the
+    /// failure here is a text file it cannot read): the handle starts the clip again without
+    /// the ticker, the channel never sees the failure (no attempt of the film is used up) and
+    /// the log says why.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clip_that_cannot_draw_its_ticker_starts_again_without_it() {
+        let Some(ffmpeg) = bin("ffmpeg") else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("film.mp4");
+        make_source(&ffmpeg, &source, 6).await;
+        let out_dir = dir.path().join("1-0-1");
+        let plain_dir = dir.path().join("1-0-1-plain");
+        let options = ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: source.to_string_lossy().into_owned(),
+                headers: vec![],
+            }],
+            input_format: None,
+            mode: VideoMode::Transcode,
+            info: video("h264", 240, 25.0, false),
+            encoder: VideoEncoder::Libx264,
+            segment_seconds: 4,
+            out_dir: out_dir.clone(),
+            start_at_s: 0.0,
+            readrate: None,
+            overlay: Some("drawtext=textfile=brak.txt".into()),
+        };
+        let fallback = PlainRestart {
+            args: build_clip_args(&ClipArgsOptions {
+                mode: VideoMode::Copy,
+                out_dir: plain_dir.clone(),
+                overlay: None,
+                ..options.clone()
+            }),
+            out_dir: plain_dir.clone(),
+            mode: VideoMode::Copy,
+            encoder: VideoEncoder::Libx264,
+        };
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        let seg = ClipSegmenter::start(
+            &ffmpeg,
+            build_clip_args(&options),
+            out_dir.clone(),
+            Some(dir.path().to_path_buf()),
+        );
+        let mut handle: Box<dyn ClipHandle> = Box::new(RealClipHandle {
+            seg: Arc::new(seg),
+            out_dir: out_dir.clone(),
+            ffmpeg_path: ffmpeg,
+            duration_s: Some(6.0),
+            copies_video: false,
+            probe: ProbeSummary {
+                codec: "h264".into(),
+                height: 240,
+                fps: 25.0,
+                pix_fmt: "yuv420p".into(),
+                has_audio: false,
+                duration_s: Some(6.0),
+            },
+            mode: StreamMode::Transcode,
+            encoder: Some(VideoEncoder::Libx264),
+            ticker: None,
+            fallback: Some(fallback),
+            produced: false,
+            item_id: 1,
+            title: "Test".into(),
+            log: Some(Arc::new(move |l: Msg| {
+                sink.lock().unwrap().push(l.to_string())
+            })),
+            disposed: false,
+        });
+        let segments = run_to_the_end(&mut handle).await;
+        assert!(!segments.is_empty());
+        assert!(
+            segments.iter().all(|s| s.path.starts_with(&plain_dir)),
+            "{segments:?}"
+        );
+        assert!(
+            handle.copies_video(),
+            "without the ticker the video is copied"
+        );
+        assert_eq!(handle.stats().mode, Some(StreamMode::Copy));
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("Video #1 \"Test\" could not start with the info ticker (")
+                && lines[0].ends_with("It starts again without the ticker."),
+            "{lines:?}"
+        );
+        assert!(wait_until(|| !out_dir.exists(), Duration::from_secs(10)).await);
+        handle.dispose();
+        assert!(wait_until(|| !plain_dir.exists(), Duration::from_secs(10)).await);
+    }
+
+    /// A failure after the first segment is a normal failure (the channel's retry).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_its_first_segment_a_clip_with_the_ticker_fails_like_any_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("1-0-1");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("list.csv"), "seg_00000.ts,0.000000,4.000000\n").unwrap();
+        // "ffmpeg" that cannot start: the state is Failed at once.
+        let seg = ClipSegmenter::start(
+            &dir.path().join("brak-ffmpeg.exe"),
+            vec![],
+            out_dir.clone(),
+            None,
+        );
+        let mut handle = RealClipHandle {
+            seg: Arc::new(seg),
+            out_dir: out_dir.clone(),
+            ffmpeg_path: dir.path().join("brak-ffmpeg.exe"),
+            duration_s: None,
+            copies_video: false,
+            probe: ProbeSummary {
+                codec: "h264".into(),
+                height: 240,
+                fps: 25.0,
+                pix_fmt: "yuv420p".into(),
+                has_audio: false,
+                duration_s: None,
+            },
+            mode: StreamMode::Transcode,
+            encoder: Some(VideoEncoder::Libx264),
+            ticker: None,
+            fallback: Some(PlainRestart {
+                args: vec![],
+                out_dir: dir.path().join("1-0-1-plain"),
+                mode: VideoMode::Copy,
+                encoder: VideoEncoder::Libx264,
+            }),
+            produced: false,
+            item_id: 1,
+            title: "Test".into(),
+            log: None,
+            disposed: false,
+        };
+        assert_eq!(handle.poll().len(), 1);
+        assert_eq!(handle.state(), SegmenterState::Failed);
+        assert!(handle.error().is_some());
+        assert!(!dir.path().join("1-0-1-plain").exists());
     }
 }

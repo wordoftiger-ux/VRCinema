@@ -142,6 +142,8 @@ async fn main() -> ExitCode {
     let opts = RunOptions {
         update_ytdlp: fake_resolver.is_none(),
         fake_resolver,
+        // The info ticker starts switched on with a GPU encoder (first start only).
+        ticker_default: Some(config.video_encoder.is_gpu()),
         ..RunOptions::new(root)
     };
     match run(config, opts, shutdown_signal()).await {

@@ -270,6 +270,8 @@ pub struct ClipStats {
     pub pid: Option<u32>,
     /// ffmpeg's `speed=` (1.0: as fast as it plays).
     pub speed: Option<f64>,
+    /// The conversion the info ticker needs has been slower than real time for 30 s.
+    pub ticker_slow: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -323,6 +325,9 @@ pub struct ChannelStats {
     pub hls: Option<HlsCounters>,
     pub next: Option<NextInfo>,
     pub ffmpeg: Option<FfmpegInfo>,
+    /// The film on air converts slower than real time because of the info ticker (the app
+    /// shows a banner).
+    pub ticker_slow: bool,
 }
 
 /// The tunnel, as the stats show it.

@@ -298,6 +298,13 @@ impl AppState {
             .map_or_else(|_| crate::i18n::Lang::default(), |s| s.slate_language)
     }
 
+    /// Stores whether the info ticker starts switched on, unless the channel has a value
+    /// already (the app's first encoder detection; a failure leaves it to the next start).
+    pub(crate) fn seed_ticker_enabled(&self, gpu: bool) {
+        let conn = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = SettingsRepo::new(&conn).seed_ticker_enabled(self.channel_id, gpu);
+    }
+
     fn settings(&self) -> Result<crate::db::ChannelSettings, ApiError> {
         self.with_db(|c| SettingsRepo::new(c).get(self.channel_id))
     }

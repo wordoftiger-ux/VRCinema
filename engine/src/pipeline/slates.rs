@@ -281,6 +281,12 @@ fn texts(lang: Lang, kind: SlateKind, request_url: &str, connecting: bool) -> (S
 /// PNG of the QR code for `text`: error correction M, a quiet zone of [`QR_QUIET_MODULES`]
 /// modules, whole-pixel modules, about [`QR_TARGET_PX`] px wide.
 pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
+    qr_image(text, QR_TARGET_PX).map(|(png, _)| png)
+}
+
+/// Like [`qr_png`], about `target_px` wide (the info ticker draws a smaller one); returns the
+/// PNG and its real width.
+pub fn qr_image(text: &str, target_px: u32) -> Result<(Vec<u8>, u32), SlateError> {
     use image::{ImageFormat, Luma};
     use qrcode::{Color, EcLevel, QrCode};
 
@@ -292,7 +298,7 @@ pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
         .map_err(|e| failed(Msg::new("log.slate_qr_failed").arg("error", e)))?;
     let modules = u32::try_from(code.width()).unwrap_or(u32::MAX);
     let total = modules + 2 * QR_QUIET_MODULES;
-    let scale = (QR_TARGET_PX / total).max(1);
+    let scale = (target_px / total).max(1);
     let colors = code.to_colors();
     let image = image::ImageBuffer::from_fn(total * scale, total * scale, |x, y| {
         let (mx, my) = (x / scale, y / scale);
@@ -307,7 +313,7 @@ pub fn qr_png(text: &str) -> Result<Vec<u8>, SlateError> {
     image
         .write_to(&mut png, ImageFormat::Png)
         .map_err(|e| failed(Msg::new("log.slate_qr_save_failed").arg("error", e)))?;
-    Ok(png.into_inner())
+    Ok((png.into_inner(), total * scale))
 }
 
 /// lavfi filter: dark 1080p30 background and two centred texts, with the QR code between them
@@ -392,6 +398,7 @@ async fn generate_one(
         out_dir: dir.clone(),
         start_at_s: 0.0,
         readrate: None,
+        overlay: None,
     });
     let seg = ClipSegmenter::start(&o.ffmpeg_path, args, dir.clone(), Some(dir));
     // Dropped before the end (the generation aborted: a swap cancelled, the app quitting):

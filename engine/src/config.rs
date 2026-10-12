@@ -13,6 +13,11 @@ pub enum VideoEncoder {
 }
 
 impl VideoEncoder {
+    /// A graphics card encoder (NVIDIA, Intel, AMD): converting costs the computer little.
+    pub fn is_gpu(self) -> bool {
+        !matches!(self, Self::Libx264)
+    }
+
     pub const ALL: [VideoEncoder; 4] = [
         VideoEncoder::Libx264,
         VideoEncoder::H264Nvenc,

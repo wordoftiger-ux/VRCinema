@@ -383,6 +383,8 @@ async fn info_describes_the_app() {
     assert_eq!(info["update"], Value::Null);
     assert_eq!(info["tunnel"]["state"], "off");
     assert_eq!(info["tunnelEnabled"], false);
+    // The banner "the computer cannot keep up with the info ticker" is off.
+    assert_eq!(info["tickerSlow"], false);
     assert_eq!(info["tunnel"]["url"], Value::Null);
     assert_eq!(info["paused"], false);
     assert_eq!(info["pauseReasons"], json!([]));
@@ -1498,6 +1500,24 @@ async fn a_remote_switch_during_a_restart_reaches_the_new_server() {
     );
     assert!(core.live_settings.trust_cloudflare.get());
     app.stop().await;
+}
+
+/// The info ticker starts switched on when the detected encoder is a GPU one; before the first
+/// detection nothing is decided (the server stores nothing).
+#[test]
+fn the_ticker_default_follows_the_detected_encoder() {
+    let with = |detected: Option<&str>| {
+        detected_gpu(&AppSettings {
+            detected_encoder: detected.map(String::from),
+            ..AppSettings::default()
+        })
+    };
+    assert_eq!(with(None), None);
+    assert_eq!(with(Some("libx264")), Some(false));
+    for gpu in ["h264_nvenc", "h264_qsv", "h264_amf"] {
+        assert_eq!(with(Some(gpu)), Some(true), "{gpu}");
+    }
+    assert_eq!(with(Some("nieznany")), None);
 }
 
 mod language;

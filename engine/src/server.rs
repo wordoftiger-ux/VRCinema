@@ -65,6 +65,10 @@ pub struct RunOptions {
     /// Desktop app: pause reasons active right now (automatic pause); the channel loop starts
     /// with them, so a restarted server does not air a film before they reach it.
     pub pause_reasons: Vec<PauseReason>,
+    /// Whether the info ticker starts switched on (a GPU encoder), stored only when the
+    /// channel has no `tickerEnabled` yet: the server without a window passes it from
+    /// `VIDEO_ENCODER`, the app once an encoder was detected. `None`: nothing is stored.
+    pub ticker_default: Option<bool>,
 }
 
 impl RunOptions {
@@ -84,6 +88,7 @@ impl RunOptions {
             slates_connecting: false,
             builtin_tunnel: false,
             pause_reasons: Vec::new(),
+            ticker_default: None,
         }
     }
 }
@@ -336,6 +341,7 @@ async fn start_channel_loop(
         let config = config.clone();
         let shared_log = Arc::clone(shared_log);
         let encoder = live.encoder.clone();
+        let public_url = live.public_url.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -351,6 +357,8 @@ async fn start_channel_loop(
                 db: Arc::clone(&db),
                 channel_id: MAIN_CHANNEL_ID,
                 log: Some(Arc::clone(&shared_log)),
+                font_file: config.font_file.clone(),
+                public_url: public_url.clone(),
             });
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -405,6 +413,7 @@ pub async fn run(
         slates_connecting,
         builtin_tunnel,
         pause_reasons,
+        ticker_default,
     } = opts;
     let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
     let print_banner = custom_log.is_none();
@@ -420,6 +429,10 @@ pub async fn run(
     let db = Arc::new(Mutex::new(open_database(
         &config.data_dir.join("vrcinema.db"),
     )?));
+    if let Some(gpu) = ticker_default {
+        let conn = db.lock().unwrap_or_else(PoisonError::into_inner);
+        SettingsRepo::new(&conn).seed_ticker_enabled(MAIN_CHANNEL_ID, gpu)?;
+    }
 
     let library = Arc::new(MediaLibrary::new(config.media_dirs.clone()));
     for r in library.roots() {
@@ -815,6 +828,67 @@ mod tests {
             "the injected log is used: {lines:?}"
         );
         assert!(!lines.iter().any(|l| l.contains("Generating the slates")));
+    }
+
+    /// Spec section 7: the info ticker starts switched on with a GPU encoder. The first start
+    /// with an encoder stores it; later starts (another encoder) and the owner's choice stay.
+    #[tokio::test]
+    async fn the_ticker_default_is_stored_at_the_first_start_only() {
+        let (tmp, data, _markers) = data_with_markers();
+        let start = |ticker_default: Option<bool>| {
+            let mut config = test_config(&data, 0);
+            config.ffmpeg_path = tmp.path().join("brak").join("ffmpeg.exe");
+            let (log, _) = capture_log();
+            let opts = RunOptions {
+                log: Some(log),
+                start_channel: false,
+                ticker_default,
+                ..test_opts(tmp.path())
+            };
+            async move {
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let (stop_tx, stop_rx) = oneshot::channel::<()>();
+                let opts = RunOptions {
+                    ready: Some(ready_tx),
+                    ..opts
+                };
+                let server = tokio::spawn(run(config, opts, async {
+                    let _ = stop_rx.await;
+                }));
+                tokio::time::timeout(std::time::Duration::from_secs(10), ready_rx)
+                    .await
+                    .expect("server did not start in 10 s")
+                    .unwrap();
+                stop_tx.send(()).unwrap();
+                server.await.unwrap().unwrap();
+            }
+        };
+        let enabled = || {
+            let conn = open_database(&data.join("vrcinema.db")).unwrap();
+            SettingsRepo::new(&conn)
+                .get(MAIN_CHANNEL_ID)
+                .unwrap()
+                .ticker
+                .enabled
+        };
+        start(None).await;
+        assert!(!enabled(), "nothing stored without an encoder");
+        start(Some(true)).await;
+        assert!(enabled(), "a GPU encoder switches it on");
+        start(Some(false)).await;
+        assert!(enabled(), "later starts change nothing");
+        {
+            let conn = open_database(&data.join("vrcinema.db")).unwrap();
+            let off = crate::db::sanitize_settings_patch(&serde_json::json!({
+                "tickerEnabled": false
+            }))
+            .unwrap();
+            SettingsRepo::new(&conn)
+                .update(MAIN_CHANNEL_ID, &off)
+                .unwrap();
+        }
+        start(Some(true)).await;
+        assert!(!enabled(), "the owner's choice stays");
     }
 
     #[tokio::test]

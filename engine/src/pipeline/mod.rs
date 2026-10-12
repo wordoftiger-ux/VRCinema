@@ -8,4 +8,5 @@ pub mod playlist;
 pub mod probe;
 pub mod segmenter;
 pub mod slates;
+pub mod ticker;
 pub mod tsrewrite;

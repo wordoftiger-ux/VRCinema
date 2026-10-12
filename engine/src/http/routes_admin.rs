@@ -573,7 +573,18 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
     let body = if body.is_null() { json!({}) } else { body };
     let patch = sanitize_settings_patch(&body)
         .map_err(|e| ApiError::from_msg(StatusCode::BAD_REQUEST, e))?;
-    let updated = state.with_db(|c| SettingsRepo::new(c).update(state.channel_id, &patch))?;
+    let (before, updated) = state.with_db(|c| {
+        let repo = SettingsRepo::new(c);
+        Ok((
+            repo.get(state.channel_id)?,
+            repo.update(state.channel_id, &patch)?,
+        ))
+    })?;
+    // A new look of the ticker restarts the film on air from where it is; its texts change
+    // through the text file by themselves.
+    if !before.ticker.same_layout(&updated.ticker) {
+        state.send_command(Command::ApplyTicker);
+    }
     state
         .request_limiter
         .lock()

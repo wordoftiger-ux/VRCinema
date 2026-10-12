@@ -152,6 +152,15 @@ fn admin_auth(s: &AppSettings) -> AdminAuth {
     }
 }
 
+/// Whether the detected encoder is a graphics card one (the info ticker then starts switched
+/// on); `None` before the first detection.
+fn detected_gpu(s: &AppSettings) -> Option<bool> {
+    s.detected_encoder
+        .as_deref()
+        .and_then(VideoEncoder::parse)
+        .map(VideoEncoder::is_gpu)
+}
+
 /// Settings the running server cannot take over: only the listening address. Everything else
 /// is read at use time ([`LiveSettings`]); a new public address also reaches the slates live
 /// ([`AppCore::refresh_slates`]).
@@ -415,6 +424,13 @@ impl AppCore {
         })
     }
 
+    /// The film on air converts slower than real time because of the info ticker (the window
+    /// shows a banner).
+    pub(crate) fn ticker_slow(&self) -> bool {
+        self.live()
+            .is_some_and(|l| l.state.engine.snapshot.borrow().stats.ticker_slow)
+    }
+
     pub(crate) fn version(&self) -> &Version {
         &self.options.version
     }
@@ -555,6 +571,7 @@ impl AppCore {
             slates_connecting: connecting,
             builtin_tunnel: settings.tunnel_enabled,
             pause_reasons,
+            ticker_default: detected_gpu(settings),
             ..RunOptions::new(self.home.clone())
         };
         let mut join = tokio::spawn(run(config.clone(), opts, async move {
@@ -851,6 +868,11 @@ impl AppCore {
         let _guard = self.settings_change.lock().await;
         self.update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
             .map_err(|e| OpError::Failed(self.save_failed(&e)))?;
+        // The first detection decides whether the info ticker starts switched on (a running
+        // server stores it now, otherwise the next start does).
+        if let Some(live) = self.live() {
+            live.state.seed_ticker_enabled(found.is_gpu());
+        }
         // The next clip uses it; the stream is never interrupted for this.
         self.apply_live();
         Ok(found)

@@ -411,6 +411,15 @@ fn settings_serialize_with_camel_case_keys() {
             "forceTranscode": false,
             "discontinuityTags": true,
             "slateLanguage": "en",
+            "tickerEnabled": false,
+            "tickerMode": "interval",
+            "tickerIntervalS": 60,
+            "tickerSpeed": "normal",
+            "tickerShowNext": true,
+            "tickerShowAddress": false,
+            "tickerQr": "with_ticker",
+            "tickerProgress": true,
+            "tickerMessages": [],
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -426,7 +435,16 @@ fn settings_serialize_with_camel_case_keys() {
             "moderation",
             "forceTranscode",
             "discontinuityTags",
-            "slateLanguage"
+            "slateLanguage",
+            "tickerEnabled",
+            "tickerMode",
+            "tickerIntervalS",
+            "tickerSpeed",
+            "tickerShowNext",
+            "tickerShowAddress",
+            "tickerQr",
+            "tickerProgress",
+            "tickerMessages"
         ]
     );
 }
@@ -826,4 +844,162 @@ fn add_first_leaves_nothing_behind_when_it_fails() {
         .unwrap();
     assert_eq!(all, 1);
     assert_eq!(queued_titles(&q), ["a"]);
+}
+
+#[test]
+fn ticker_settings_are_validated_stored_and_read_back() {
+    use crate::pipeline::ticker::{TickerMode, TickerQr, TickerSpeed};
+    let conn = mem();
+    let s = SettingsRepo::new(&conn);
+    let patch = sanitize_settings_patch(&json!({
+        "tickerEnabled": true,
+        "tickerMode": "continuous",
+        "tickerIntervalS": 300,
+        "tickerSpeed": "fast",
+        "tickerShowNext": false,
+        "tickerShowAddress": true,
+        "tickerQr": "always",
+        "tickerProgress": false,
+        "tickerMessages": ["  Witajcie!  ", "", "Max 3 filmy"],
+    }))
+    .unwrap();
+    let got = s.update(MAIN_CHANNEL_ID, &patch).unwrap();
+    let t = &got.ticker;
+    assert!(t.enabled);
+    assert_eq!(t.mode, TickerMode::Continuous);
+    assert_eq!(t.interval_s, 300);
+    assert_eq!(t.speed, TickerSpeed::Fast);
+    assert!(!t.show_next);
+    assert!(t.show_address);
+    assert_eq!(t.qr, TickerQr::Always);
+    assert!(!t.progress);
+    // Trimmed, empty ones dropped.
+    assert_eq!(t.messages, ["Witajcie!", "Max 3 filmy"]);
+    assert_eq!(s.get(MAIN_CHANNEL_ID).unwrap(), got);
+    let v = serde_json::to_value(&got).unwrap();
+    assert_eq!(v["tickerMode"], "continuous");
+    assert_eq!(v["tickerQr"], "always");
+    assert_eq!(v["tickerMessages"], json!(["Witajcie!", "Max 3 filmy"]));
+    // Hand-edited nonsense keeps the defaults.
+    for key in [
+        "tickerMode",
+        "tickerIntervalS",
+        "tickerSpeed",
+        "tickerQr",
+        "tickerMessages",
+    ] {
+        conn.execute("UPDATE settings SET value = '\"xx\"' WHERE key = ?1", [key])
+            .unwrap();
+    }
+    let t = s.get(MAIN_CHANNEL_ID).unwrap().ticker;
+    let d = ChannelSettings::default().ticker;
+    assert_eq!(
+        (t.mode, t.interval_s, t.speed, t.qr, t.messages),
+        (d.mode, d.interval_s, d.speed, d.qr, d.messages)
+    );
+}
+
+#[test]
+fn ticker_settings_refuse_too_many_or_too_long_messages_and_odd_values() {
+    let err = |v: serde_json::Value| {
+        sanitize_settings_patch(&v)
+            .err()
+            .unwrap()
+            .render(crate::i18n::Lang::En)
+    };
+    let ten: Vec<String> = (0..10).map(|i| format!("m{i}")).collect();
+    assert!(sanitize_settings_patch(&json!({ "tickerMessages": ten })).is_ok());
+    let eleven: Vec<String> = (0..11).map(|i| format!("m{i}")).collect();
+    assert_eq!(
+        err(json!({ "tickerMessages": eleven })),
+        "tickerMessages: at most 10 messages"
+    );
+    let max = "ż".repeat(200);
+    assert!(sanitize_settings_patch(&json!({ "tickerMessages": [max] })).is_ok());
+    assert_eq!(
+        err(json!({ "tickerMessages": ["ż".repeat(201)] })),
+        "tickerMessages: a message can have at most 200 characters"
+    );
+    assert_eq!(
+        err(json!({ "tickerMessages": "tekst" })),
+        "tickerMessages: expected a list"
+    );
+    assert_eq!(
+        err(json!({ "tickerMessages": [1] })),
+        "tickerMessages: expected a list"
+    );
+    for ok in [60, 120, 300, 600] {
+        assert!(sanitize_settings_patch(&json!({ "tickerIntervalS": ok })).is_ok());
+    }
+    for bad in [
+        json!(0),
+        json!(30),
+        json!(90),
+        json!(60.5),
+        json!(1200),
+        json!("60"),
+    ] {
+        assert_eq!(
+            err(json!({ "tickerIntervalS": bad })),
+            "tickerIntervalS: expected one of: 60, 120, 300, 600"
+        );
+    }
+    assert_eq!(
+        err(json!({ "tickerMode": "loop" })),
+        "tickerMode: expected one of: interval, continuous"
+    );
+    assert_eq!(
+        err(json!({ "tickerSpeed": "Normal" })),
+        "tickerSpeed: expected one of: slow, normal, fast"
+    );
+    assert_eq!(
+        err(json!({ "tickerQr": true })),
+        "tickerQr: expected one of: off, with_ticker, always"
+    );
+    assert_eq!(
+        err(json!({ "tickerEnabled": "true" })),
+        "tickerEnabled: expected true/false"
+    );
+}
+
+#[test]
+fn the_ticker_default_is_stored_once_and_the_owner_choice_wins() {
+    let conn = mem();
+    let s = SettingsRepo::new(&conn);
+    assert!(!s.get(MAIN_CHANNEL_ID).unwrap().ticker.enabled);
+    // First detection of a GPU encoder: on.
+    assert!(s.seed_ticker_enabled(MAIN_CHANNEL_ID, true).unwrap());
+    assert!(s.get(MAIN_CHANNEL_ID).unwrap().ticker.enabled);
+    // Later detections do not change it.
+    assert!(!s.seed_ticker_enabled(MAIN_CHANNEL_ID, false).unwrap());
+    assert!(s.get(MAIN_CHANNEL_ID).unwrap().ticker.enabled);
+    // Nor do they override the owner.
+    let off = sanitize_settings_patch(&json!({"tickerEnabled": false})).unwrap();
+    s.update(MAIN_CHANNEL_ID, &off).unwrap();
+    assert!(!s.seed_ticker_enabled(MAIN_CHANNEL_ID, true).unwrap());
+    assert!(!s.get(MAIN_CHANNEL_ID).unwrap().ticker.enabled);
+}
+
+#[test]
+fn only_layout_changes_of_the_ticker_restart_the_film() {
+    let base = ChannelSettings::default().ticker;
+    let mut content = base.clone();
+    content.messages = vec!["nowa".into()];
+    content.show_next = !content.show_next;
+    content.show_address = !content.show_address;
+    assert!(base.same_layout(&content));
+    use crate::pipeline::ticker::{TickerMode, TickerQr, TickerSettings, TickerSpeed};
+    let changes: [fn(&mut TickerSettings); 6] = [
+        |t| t.enabled = !t.enabled,
+        |t| t.mode = TickerMode::Continuous,
+        |t| t.interval_s = 600,
+        |t| t.speed = TickerSpeed::Slow,
+        |t| t.qr = TickerQr::Off,
+        |t| t.progress = !t.progress,
+    ];
+    for change in changes {
+        let mut other = base.clone();
+        change(&mut other);
+        assert!(!base.same_layout(&other), "{other:?}");
+    }
 }

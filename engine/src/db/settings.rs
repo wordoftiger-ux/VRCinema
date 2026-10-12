@@ -5,6 +5,9 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::i18n::{Lang, Msg};
+use crate::pipeline::ticker::{
+    INTERVALS_S, MAX_MESSAGE_CHARS, MAX_MESSAGES, TickerMode, TickerQr, TickerSettings, TickerSpeed,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +24,9 @@ pub struct ChannelSettings {
     /// Language of the slates and of the info ticker on the stream.
     #[serde(serialize_with = "serialize_lang")]
     pub slate_language: Lang,
+    /// The info ticker (keys `tickerEnabled`, `tickerMode`, ...).
+    #[serde(flatten)]
+    pub ticker: TickerSettings,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -41,6 +47,7 @@ impl Default for ChannelSettings {
             force_transcode: false,
             discontinuity_tags: true,
             slate_language: Lang::En,
+            ticker: TickerSettings::default(),
         }
     }
 }
@@ -70,6 +77,15 @@ pub struct SettingsPatch {
     pub force_transcode: Option<bool>,
     pub discontinuity_tags: Option<bool>,
     pub slate_language: Option<Lang>,
+    pub ticker_enabled: Option<bool>,
+    pub ticker_mode: Option<TickerMode>,
+    pub ticker_interval_s: Option<u32>,
+    pub ticker_speed: Option<TickerSpeed>,
+    pub ticker_show_next: Option<bool>,
+    pub ticker_show_address: Option<bool>,
+    pub ticker_qr: Option<TickerQr>,
+    pub ticker_progress: Option<bool>,
+    pub ticker_messages: Option<Vec<String>>,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -125,6 +141,62 @@ fn expect_lang(key: &str, value: &Value) -> Result<Lang, Msg> {
     })
 }
 
+/// One of `all` by its exact name.
+fn one_of<T: Copy>(
+    key: &str,
+    value: &Value,
+    all: &[T],
+    name: fn(T) -> &'static str,
+) -> Result<T, Msg> {
+    value
+        .as_str()
+        .and_then(|v| all.iter().copied().find(|t| name(*t) == v))
+        .ok_or_else(|| {
+            let names: Vec<&str> = all.iter().map(|t| name(*t)).collect();
+            Msg::error("setting_not_one_of")
+                .arg("key", key)
+                .arg("values", names.join(", "))
+        })
+}
+
+fn expect_interval(key: &str, value: &Value) -> Result<u32, Msg> {
+    value
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| INTERVALS_S.contains(v))
+        .ok_or_else(|| {
+            let all: Vec<String> = INTERVALS_S.iter().map(u32::to_string).collect();
+            Msg::error("setting_not_one_of")
+                .arg("key", key)
+                .arg("values", all.join(", "))
+        })
+}
+
+/// The owner's ticker messages: trimmed, empty ones dropped, at most [`MAX_MESSAGES`] of at
+/// most [`MAX_MESSAGE_CHARS`] characters.
+fn expect_messages(key: &str, value: &Value) -> Result<Vec<String>, Msg> {
+    let not_list = || Msg::error("setting_not_list").arg("key", key);
+    let list = value.as_array().ok_or_else(not_list)?;
+    let mut out = Vec::new();
+    for v in list {
+        let text = v.as_str().ok_or_else(not_list)?.trim();
+        if text.chars().count() > MAX_MESSAGE_CHARS {
+            return Err(Msg::error("ticker_message_too_long")
+                .arg("key", key)
+                .arg("max", MAX_MESSAGE_CHARS));
+        }
+        if !text.is_empty() {
+            out.push(text.to_string());
+        }
+    }
+    if out.len() > MAX_MESSAGES {
+        return Err(Msg::error("ticker_too_many_messages")
+            .arg("key", key)
+            .arg("max", MAX_MESSAGES));
+    }
+    Ok(out)
+}
+
 /// Validates and normalises a partial settings object (e.g. from the admin
 /// panel). Mirrors the TS `sanitizeSettingsPatch`; errors are the messages
 /// shown to the admin. Keys are processed in input order, so the first
@@ -155,6 +227,22 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             "forceTranscode" => out.force_transcode = Some(expect_bool(key, value)?),
             "discontinuityTags" => out.discontinuity_tags = Some(expect_bool(key, value)?),
             "slateLanguage" => out.slate_language = Some(expect_lang(key, value)?),
+            "tickerEnabled" => out.ticker_enabled = Some(expect_bool(key, value)?),
+            "tickerMode" => {
+                out.ticker_mode = Some(one_of(key, value, &TickerMode::ALL, TickerMode::as_str)?);
+            }
+            "tickerIntervalS" => out.ticker_interval_s = Some(expect_interval(key, value)?),
+            "tickerSpeed" => {
+                out.ticker_speed =
+                    Some(one_of(key, value, &TickerSpeed::ALL, TickerSpeed::as_str)?);
+            }
+            "tickerShowNext" => out.ticker_show_next = Some(expect_bool(key, value)?),
+            "tickerShowAddress" => out.ticker_show_address = Some(expect_bool(key, value)?),
+            "tickerQr" => {
+                out.ticker_qr = Some(one_of(key, value, &TickerQr::ALL, TickerQr::as_str)?);
+            }
+            "tickerProgress" => out.ticker_progress = Some(expect_bool(key, value)?),
+            "tickerMessages" => out.ticker_messages = Some(expect_messages(key, value)?),
             _ => return Err(Msg::error("unknown_setting").arg("key", key)),
         }
     }
@@ -225,6 +313,37 @@ impl<'a> SettingsRepo<'a> {
                 "slateLanguage" => {
                     s.slate_language = lang_from_tag(&value).unwrap_or(s.slate_language)
                 }
+                "tickerEnabled" => s.ticker.enabled = value.as_bool().unwrap_or(s.ticker.enabled),
+                "tickerMode" => {
+                    s.ticker.mode = one_of(&key, &value, &TickerMode::ALL, TickerMode::as_str)
+                        .unwrap_or(s.ticker.mode);
+                }
+                "tickerIntervalS" => {
+                    s.ticker.interval_s =
+                        expect_interval(&key, &value).unwrap_or(s.ticker.interval_s);
+                }
+                "tickerSpeed" => {
+                    s.ticker.speed = one_of(&key, &value, &TickerSpeed::ALL, TickerSpeed::as_str)
+                        .unwrap_or(s.ticker.speed);
+                }
+                "tickerShowNext" => {
+                    s.ticker.show_next = value.as_bool().unwrap_or(s.ticker.show_next);
+                }
+                "tickerShowAddress" => {
+                    s.ticker.show_address = value.as_bool().unwrap_or(s.ticker.show_address);
+                }
+                "tickerQr" => {
+                    s.ticker.qr = one_of(&key, &value, &TickerQr::ALL, TickerQr::as_str)
+                        .unwrap_or(s.ticker.qr);
+                }
+                "tickerProgress" => {
+                    s.ticker.progress = value.as_bool().unwrap_or(s.ticker.progress);
+                }
+                "tickerMessages" => {
+                    if let Ok(messages) = expect_messages(&key, &value) {
+                        s.ticker.messages = messages;
+                    }
+                }
                 _ => {}
             }
         }
@@ -237,7 +356,8 @@ impl<'a> SettingsRepo<'a> {
         channel_id: i64,
         patch: &SettingsPatch,
     ) -> rusqlite::Result<ChannelSettings> {
-        let entries: [(&str, Option<String>); 9] = [
+        let quoted = |name: &str| format!("\"{name}\"");
+        let entries: [(&str, Option<String>); 18] = [
             (
                 "allowedDomains",
                 patch.allowed_domains.as_deref().map(list_json),
@@ -268,6 +388,33 @@ impl<'a> SettingsRepo<'a> {
                 "slateLanguage",
                 patch.slate_language.map(|l| format!("\"{}\"", l.as_str())),
             ),
+            ("tickerEnabled", patch.ticker_enabled.map(|b| b.to_string())),
+            ("tickerMode", patch.ticker_mode.map(|m| quoted(m.as_str()))),
+            (
+                "tickerIntervalS",
+                patch.ticker_interval_s.map(|n| n.to_string()),
+            ),
+            (
+                "tickerSpeed",
+                patch.ticker_speed.map(|v| quoted(v.as_str())),
+            ),
+            (
+                "tickerShowNext",
+                patch.ticker_show_next.map(|b| b.to_string()),
+            ),
+            (
+                "tickerShowAddress",
+                patch.ticker_show_address.map(|b| b.to_string()),
+            ),
+            ("tickerQr", patch.ticker_qr.map(|q| quoted(q.as_str()))),
+            (
+                "tickerProgress",
+                patch.ticker_progress.map(|b| b.to_string()),
+            ),
+            (
+                "tickerMessages",
+                patch.ticker_messages.as_deref().map(list_json),
+            ),
         ];
         let tx = self.conn.unchecked_transaction()?;
         {
@@ -283,5 +430,16 @@ impl<'a> SettingsRepo<'a> {
         }
         tx.commit()?;
         self.get(channel_id)
+    }
+
+    /// Stores the default of `tickerEnabled` (on for a GPU encoder) unless a value is stored
+    /// already: the first encoder detection decides, later only the owner. Returns whether it
+    /// was stored now.
+    pub fn seed_ticker_enabled(&self, channel_id: i64, gpu: bool) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO settings (channel_id, key, value) VALUES (?, 'tickerEnabled', ?)",
+            params![channel_id, gpu.to_string()],
+        )?;
+        Ok(changed > 0)
     }
 }
