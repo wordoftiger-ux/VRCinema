@@ -497,8 +497,9 @@ pub enum SwapOutcome {
         generation: u32,
         address_changed: bool,
     },
-    /// Nothing changed: the previous set stays on air.
-    Failed(Msg),
+    /// No new set: the previous one stays on air. `address_changed` as for `Replaced` (the
+    /// address changed even though its slates could not be made).
+    Failed { reason: Msg, address_changed: bool },
 }
 
 /// Replaces the slate set of a running channel when the public address changes: the new set is
@@ -626,6 +627,7 @@ impl SlateSwapper {
             return SwapOutcome::Unchanged;
         }
         let public_url = address.public_url.as_str();
+        let address_changed = state.address.public_url != address.public_url;
         let generation = state.generation + 1;
         let dir = self.root.join(format!("g{generation}"));
         let made = generate_slates(&SlateOptions {
@@ -644,17 +646,22 @@ impl SlateSwapper {
             Ok(slates) => slates,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&dir);
-                return SwapOutcome::Failed(e.message());
+                return SwapOutcome::Failed {
+                    reason: e.message(),
+                    address_changed,
+                };
             }
         };
         let notices = slates.notices();
         if commands.send(Command::ReplaceSlates(slates)).await.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
-            return SwapOutcome::Failed(Msg::new("log.channel_loop_not_running"));
+            return SwapOutcome::Failed {
+                reason: Msg::new("log.channel_loop_not_running"),
+                address_changed,
+            };
         }
         *self.notices.lock().unwrap_or_else(PoisonError::into_inner) = notices;
         let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
-        let address_changed = state.address.public_url != address.public_url;
         state.address = address;
         state.generation = generation;
         // The old segments may still be in the playlist and in the retention window.
@@ -1546,7 +1553,13 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::channel(4);
         let outcome = swapper.swap("https://nowy.example.com", &tx).await;
-        let SwapOutcome::Failed(why) = outcome else {
+        // The address changed even though its slates could not be made (the ticker's code
+        // follows the address on its own).
+        let SwapOutcome::Failed {
+            reason: why,
+            address_changed: true,
+        } = outcome
+        else {
             panic!("{outcome:?}");
         };
         assert!(
@@ -1564,7 +1577,7 @@ mod tests {
         // The address on air did not change: the same request is tried again, not skipped.
         assert!(matches!(
             swapper.swap("https://nowy.example.com", &tx).await,
-            SwapOutcome::Failed(_)
+            SwapOutcome::Failed { .. }
         ));
         assert_eq!(
             swapper.swap("https://stary.example.com", &tx).await,
@@ -1657,7 +1670,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let outcome = swapper.swap("https://nowy.example.com", &tx).await;
-        assert!(matches!(outcome, SwapOutcome::Failed(_)), "{outcome:?}");
+        assert!(matches!(outcome, SwapOutcome::Failed { .. }), "{outcome:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(root.path().join("idle").is_dir());
     }

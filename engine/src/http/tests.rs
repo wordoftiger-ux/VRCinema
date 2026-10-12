@@ -1577,7 +1577,17 @@ async fn only_a_new_look_of_the_ticker_restarts_the_film_on_air() {
         (json!({"tickerSpeed": "fast"}), true),
         (json!({"tickerQr": "always"}), true),
         (json!({"tickerProgress": false}), true),
+        // Polish, German...: the same font, the text file follows by itself.
         (json!({"slateLanguage": "pl"}), false),
+        (json!({"slateLanguage": "de"}), false),
+        // To or from Japanese: another font, the film starts again with it.
+        (json!({"slateLanguage": "ja"}), true),
+        (json!({"slateLanguage": "ja"}), false),
+        (json!({"slateLanguage": "en"}), true),
+        (json!({"tickerEnabled": false}), true),
+        // Without the ticker nothing is drawn.
+        (json!({"slateLanguage": "ja"}), false),
+        (json!({"slateLanguage": "en", "tickerEnabled": true}), true),
     ] {
         let r = h
             .send(

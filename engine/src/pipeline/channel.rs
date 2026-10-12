@@ -60,6 +60,15 @@ pub trait ClipFactory: Send + Sync {
         start_at_s: f64,
         attempt: u32,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>>;
+
+    /// Like [`Self::create`] from the start, for the next film prepared ahead of its turn
+    /// (the current one still airs for up to a minute).
+    fn create_ahead(
+        &self,
+        item: QueueItem,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        self.create(item, 0.0, 0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1301,14 +1310,31 @@ impl Channel {
         }
         let channel_id = self.o.channel_id;
         match self.queue(|q| q.next_queued(channel_id)) {
-            Ok(Some(head)) => self.prefetched = Some(self.launch(head, 0.0, 0)),
+            Ok(Some(head)) => self.prefetched = Some(self.launch_ahead(head)),
             Ok(None) => {}
             Err(e) => self.log_error("log.queue_error_prefetch", &e),
         }
     }
 
+    /// Starts the next film ahead of its turn (see [`ClipFactory::create_ahead`]).
+    fn launch_ahead(&mut self, item: QueueItem) -> ActiveClip {
+        let start = self.o.factory.create_ahead(item.clone());
+        self.launch_with(item, 0.0, 0, start)
+    }
+
     /// Starts the clip in a background task; the result arrives through `poll_launches`.
     fn launch(&mut self, item: QueueItem, start_at_s: f64, attempt: u32) -> ActiveClip {
+        let start = self.o.factory.create(item.clone(), start_at_s, attempt);
+        self.launch_with(item, start_at_s, attempt, start)
+    }
+
+    fn launch_with(
+        &mut self,
+        item: QueueItem,
+        start_at_s: f64,
+        attempt: u32,
+        start: BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>>,
+    ) -> ActiveClip {
         self.next_clip_id += 1;
         let id = self.next_clip_id;
         let mut clip = ActiveClip {
@@ -1327,7 +1353,6 @@ impl Channel {
             start: None,
             slow_logged: false,
         };
-        let start = self.o.factory.create(item, start_at_s, attempt);
         let tx = self.launch_tx.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(rt) => {
@@ -1614,6 +1639,8 @@ mod tests {
         on_create: Option<CreateHook>,
         /// Clips started from now on copy the video (instead of converting it).
         copies_video: bool,
+        /// Items started ahead of their turn (`create_ahead`).
+        ahead: Vec<i64>,
     }
 
     #[derive(Clone, Default)]
@@ -1635,6 +1662,14 @@ mod tests {
     }
 
     impl ClipFactory for FakeFactory {
+        fn create_ahead(
+            &self,
+            item: QueueItem,
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+            self.lock().ahead.push(item.id);
+            self.create(item, 0.0, 0)
+        }
+
         fn create(
             &self,
             item: QueueItem,
@@ -3658,6 +3693,24 @@ mod tests {
         e.channel.resume(PauseReason::Manual);
         e.flush().await;
         assert_eq!(e.starts(), 2);
+    }
+
+    /// The next film is started ahead of its turn as such (the factory reads it without the
+    /// initial burst); a film started when it is due is not.
+    #[tokio::test]
+    async fn the_next_film_is_prepared_ahead_of_its_turn() {
+        let mut e = setup();
+        let a = e.add("a", Some(60.0), false);
+        let b = e.add_item("b");
+        e.air(&a, 1).await; // 56 s left: b is prepared ahead
+        e.flush().await;
+        assert_eq!(e.channel.prefetched_item_id(), Some(b.id));
+        assert_eq!(e.factory.lock().ahead, [b.id]);
+        // A film started on its turn is not "ahead".
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 1).await;
+        assert!(e.factory.lock().ahead.is_empty());
     }
 
     #[tokio::test]

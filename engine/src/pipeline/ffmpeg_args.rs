@@ -13,6 +13,31 @@ pub const MAX_FPS: u32 = 30;
 
 pub const AUDIO_ARGS: [&str; 8] = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"];
 
+/// The pace a source is read at, relative to real time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadRate {
+    pub rate: f64,
+    /// Seconds of the source read at once before the pace applies.
+    pub initial_burst_s: f64,
+    /// The pace while the reading is behind its schedule (after a stall); `None`: ffmpeg's
+    /// default (1.05×).
+    pub catchup: Option<f64>,
+}
+
+/// The initial burst of a source read at a pace.
+pub const INITIAL_BURST_S: f64 = 20.0;
+
+impl ReadRate {
+    /// `rate` with the usual initial burst and no catch-up of its own.
+    pub const fn new(rate: f64) -> Self {
+        Self {
+            rate,
+            initial_burst_s: INITIAL_BURST_S,
+            catchup: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClipArgsOptions {
     pub inputs: Vec<StreamInput>,
@@ -25,8 +50,8 @@ pub struct ClipArgsOptions {
     pub out_dir: std::path::PathBuf,
     /// Resume from this second (0 = from the start).
     pub start_at_s: f64,
-    /// Source read-rate multiplier relative to real time; `None` = unlimited.
-    pub readrate: Option<f64>,
+    /// The pace the source is read at; `None` = unlimited.
+    pub readrate: Option<ReadRate>,
     /// Filters drawn on the converted picture after scaling (the info ticker, see
     /// `ticker::overlay_filter`); ignored when the video is copied.
     pub overlay: Option<String>,
@@ -192,11 +217,14 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
                 &mut args,
                 &[
                     "-readrate",
-                    &rate.to_string(),
+                    &rate.rate.to_string(),
                     "-readrate_initial_burst",
-                    "20",
+                    &rate.initial_burst_s.to_string(),
                 ],
             );
+            if let Some(catchup) = rate.catchup {
+                push_all(&mut args, &["-readrate_catchup", &catchup.to_string()]);
+            }
         }
         if let Some(format) = &o.input_format {
             push_all(&mut args, &["-f", format]);
@@ -294,7 +322,7 @@ mod tests {
             segment_seconds: 4,
             out_dir: PathBuf::from("/tmp/clip"),
             start_at_s: 0.0,
-            readrate: Some(1.5),
+            readrate: Some(ReadRate::new(1.5)),
             overlay: None,
         }
     }
@@ -581,6 +609,31 @@ mod tests {
                 "12M"
             ]
         );
+    }
+
+    /// A clip read at real time (the ticker) catches up at 1.5× after a stall; a clip
+    /// prepared ahead of its turn has no initial burst.
+    #[test]
+    fn a_slower_read_rate_catches_up_and_the_burst_can_be_left_out() {
+        let mut o = opts();
+        o.readrate = Some(ReadRate {
+            rate: 1.0,
+            initial_burst_s: 0.0,
+            catchup: Some(1.5),
+        });
+        let args = build(&o);
+        assert_eq!(value_after(&args, "-readrate", 0).as_deref(), Some("1"));
+        assert_eq!(
+            value_after(&args, "-readrate_initial_burst", 0).as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            value_after(&args, "-readrate_catchup", 0).as_deref(),
+            Some("1.5")
+        );
+        assert!(pos(&args, "-readrate_catchup") < pos(&args, "-i"));
+        // The usual read rate has no catch-up of its own.
+        assert!(!build(&opts()).contains(&"-readrate_catchup".to_string()));
     }
 
     #[test]

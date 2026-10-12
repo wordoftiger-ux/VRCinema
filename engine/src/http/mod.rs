@@ -219,8 +219,12 @@ impl AppState {
                     }
                     state.after_slates_replaced(address_changed);
                 }
-                SwapOutcome::Failed(why) => {
-                    (state.log)(Msg::new("log.slates_refresh_failed").arg_msg("reason", why));
+                SwapOutcome::Failed {
+                    reason,
+                    address_changed,
+                } => {
+                    (state.log)(Msg::new("log.slates_refresh_failed").arg_msg("reason", reason));
+                    state.after_slates_replaced(address_changed);
                 }
             }
         });

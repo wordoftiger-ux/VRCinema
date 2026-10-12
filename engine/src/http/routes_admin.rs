@@ -582,7 +582,11 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
     })?;
     // A new look of the ticker restarts the film on air from where it is; its texts change
     // through the text file by themselves.
-    if !before.ticker.same_layout(&updated.ticker) {
+    // Switching to or from Japanese changes the ticker's font (the text alone would come out
+    // in boxes): the film starts again with it too. Other languages share the font.
+    let font_changed = updated.ticker.enabled
+        && (before.slate_language == Lang::Ja) != (updated.slate_language == Lang::Ja);
+    if !before.ticker.same_layout(&updated.ticker) || font_changed {
         state.send_command(Command::ApplyTicker);
     }
     state

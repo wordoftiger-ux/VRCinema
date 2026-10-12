@@ -830,8 +830,13 @@ impl AppCore {
                 }
                 live.state.after_slates_replaced(address_changed);
             }
-            SwapOutcome::Failed(why) => {
-                self.log(Msg::new("log.slates_refresh_failed").arg_msg("reason", why))
+            SwapOutcome::Failed {
+                reason,
+                address_changed,
+            } => {
+                self.log(Msg::new("log.slates_refresh_failed").arg_msg("reason", reason));
+                // The ticker's code follows the address in effect, slates or not.
+                live.state.after_slates_replaced(address_changed);
             }
         }
     }

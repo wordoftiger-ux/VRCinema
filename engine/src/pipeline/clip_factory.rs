@@ -14,7 +14,7 @@ use crate::db::{ChannelSettings, ItemStatus, QueueItem, QueueRepo, SettingsRepo}
 use crate::i18n::{Lang, Msg};
 use crate::live::LiveValue;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
-use crate::pipeline::ffmpeg_args::{ClipArgsOptions, MAX_HEIGHT, build_clip_args};
+use crate::pipeline::ffmpeg_args::{ClipArgsOptions, MAX_HEIGHT, ReadRate, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
@@ -99,13 +99,25 @@ pub fn clip_video_mode(info: &VideoInfo, settings: &ChannelSettings) -> VideoMod
     decide_video_mode(info, settings.force_transcode || settings.ticker.enabled)
 }
 
-/// How fast the source is read: a live stream as it comes, a clip with the ticker at real
-/// time ([`TICKER_READRATE`]), any other clip at [`READRATE`].
-pub fn clip_readrate(live: bool, ticker: bool) -> Option<f64> {
+/// How fast the source is read: a live stream as it comes, any clip without the ticker at
+/// [`READRATE`]; a clip with the ticker at real time ([`TICKER_READRATE`]), catching up at
+/// [`READRATE`] after a stall (ffmpeg's own catch-up, 1.05×, would take minutes to win back
+/// a few seconds), and without the initial burst when it is the next film prepared
+/// `ahead` of its turn (the prefetch window is its cushion; with the burst too, its text
+/// would be drawn about 80 s before it airs).
+pub fn clip_readrate(live: bool, ticker: bool, ahead: bool) -> Option<ReadRate> {
     match (live, ticker) {
         (true, _) => None,
-        (false, true) => Some(TICKER_READRATE),
-        (false, false) => Some(READRATE),
+        (false, true) => Some(ReadRate {
+            rate: TICKER_READRATE,
+            initial_burst_s: if ahead {
+                0.0
+            } else {
+                crate::pipeline::ffmpeg_args::INITIAL_BURST_S
+            },
+            catchup: Some(READRATE),
+        }),
+        (false, false) => Some(ReadRate::new(READRATE)),
     }
 }
 
@@ -658,6 +670,7 @@ async fn start_clip(
     item: QueueItem,
     start_at_s: f64,
     attempt: u32,
+    ahead: bool,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
     let stream = d
         .resolver
@@ -715,7 +728,7 @@ async fn start_clip(
         segment_seconds: d.segment_seconds,
         out_dir: out_dir.clone(),
         start_at_s,
-        readrate: clip_readrate(live, ticker.is_some()),
+        readrate: clip_readrate(live, ticker.is_some(), ahead),
         overlay: None,
     };
     let (seg, ticker, fallback) = match ticker {
@@ -725,7 +738,7 @@ async fn start_clip(
                 args: build_clip_args(&ClipArgsOptions {
                     mode: plain_mode,
                     out_dir: plain_dir.clone(),
-                    readrate: clip_readrate(live, false),
+                    readrate: clip_readrate(live, false, ahead),
                     ..options.clone()
                 }),
                 out_dir: plain_dir,
@@ -803,6 +816,22 @@ impl ClipFactory for RealClipFactory {
             item,
             start_at_s,
             attempt,
+            false,
+        ))
+    }
+
+    fn create_ahead(
+        &self,
+        item: QueueItem,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        Box::pin(start_clip(
+            Arc::clone(&self.deps),
+            Arc::clone(&self.counter),
+            Arc::clone(&self.rotation),
+            item,
+            0.0,
+            0,
+            true,
         ))
     }
 }
@@ -1438,16 +1467,40 @@ mod tests {
     /// ahead of what airs and a new text reaches the stream soon; plain clips keep 1.5×.
     #[test]
     fn a_clip_with_the_ticker_is_read_at_real_time() {
-        assert_eq!(clip_readrate(false, true), Some(1.0));
-        assert_eq!(clip_readrate(false, false), Some(READRATE));
-        assert_eq!(clip_readrate(true, true), None);
-        assert_eq!(clip_readrate(true, false), None);
+        let ticker = |ahead| clip_readrate(false, true, ahead).unwrap();
+        // Real time, catching up at 1.5× after a stall; the usual 20 s burst, none for the
+        // next film prepared ahead (the prefetch window is its cushion).
+        assert_eq!(
+            ticker(false),
+            ReadRate {
+                rate: 1.0,
+                initial_burst_s: 20.0,
+                catchup: Some(READRATE)
+            }
+        );
+        assert_eq!(
+            ticker(true),
+            ReadRate {
+                rate: 1.0,
+                initial_burst_s: 0.0,
+                catchup: Some(READRATE)
+            }
+        );
+        for ahead in [false, true] {
+            assert_eq!(
+                clip_readrate(false, false, ahead),
+                Some(ReadRate::new(READRATE))
+            );
+            assert_eq!(clip_readrate(true, true, ahead), None);
+            assert_eq!(clip_readrate(true, false, ahead), None);
+        }
     }
 
-    /// With the real ffmpeg: the clip with the ticker comes out at the pace it plays (two
-    /// segments 8 s of film apart appear about 8 s apart, not 5.3 s as at 1.5×), so ffmpeg
-    /// draws a text at most the initial burst ahead of when it airs; and the text keeps
-    /// following changes until the end of the film.
+    /// With the real ffmpeg: the clip with the ticker is read at the pace it plays after the
+    /// 20 s burst (the 40 s film takes at least about 20 s, about 13 s at 1.5×; the catch-up
+    /// after a stall never runs ahead of that schedule, a busy computer only makes it longer),
+    /// so ffmpeg draws a text at most about the burst ahead of when it airs; and the text
+    /// keeps following changes until the end of the film.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_ticker_text_follows_changes_until_the_end_of_a_clip_read_at_real_time() {
         let (Some(ffmpeg), Some(ffprobe)) = (bin("ffmpeg"), bin("ffprobe")) else {
@@ -1463,6 +1516,7 @@ mod tests {
         make_source(&ffmpeg, &source, 40).await;
         let f = fixture(Some(source), dir, ffmpeg, ffprobe);
         enable_ticker(&f, serde_json::json!({ "tickerMode": "continuous" }));
+        let started = Instant::now();
         let mut handle = f.factory.create(f.item.clone(), 0.0, 0).await.unwrap();
         let out_dir = f.clips.join(format!("{}-0-1", f.item.id));
         let read = || {
@@ -1498,10 +1552,8 @@ mod tests {
         seen.extend(handle.poll().iter().map(|_| Instant::now()));
         assert_eq!(handle.state(), SegmenterState::Done, "{:?}", handle.error());
         assert!(seen.len() >= 8, "{} segments", seen.len());
-        // Segment 3 (12-16 s) and segment 5 (20-24 s): 8 s of film. (Once the source is read
-        // to its end the frames still queued come out at once.)
-        let gap = seen[5].duration_since(seen[3]).as_secs_f64();
-        assert!(gap >= 6.8, "8 s of film came out in {gap:.1} s");
+        let took = started.elapsed().as_secs_f64();
+        assert!(took >= 18.0, "the 40 s film came out in {took:.1} s");
         assert!(
             updated_while_running,
             "the text did not follow a change in the last part of the film"
