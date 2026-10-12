@@ -306,6 +306,7 @@
   "log.slate_failed": "Could not generate the slate \"{kind}\": {message}",
   "log.slate_qr_failed": "QR code: {error}",
   "log.slate_qr_save_failed": "Saving the QR code: {error}",
+  "log.slates_font_missing": "The slate font ({path}) was not found, so the slates have no text. Set FONT_FILE in .env.",
   "log.slates_japanese_font_missing": "No Japanese font (YuGothM.ttc, meiryo.ttc) in the Windows Fonts folder. The slates are in English.",
   "log.slates_refresh_failed": "Could not refresh the slates: {reason}. The previous slates stay.",
   "log.slates_refreshed": "The slates were refreshed for the new public address (set {generation}).",

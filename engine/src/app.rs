@@ -569,10 +569,7 @@ impl AppCore {
                     self.wait_or_abort(&mut join).await;
                     return Err(msg_error(Msg::error("server_no_state")));
                 };
-                let slates = channel.then(|| {
-                    let lang = state.slate_language();
-                    Arc::new(SlateSwapper::for_config(config, connecting, lang))
-                });
+                let slates = if channel { state.slates() } else { None };
                 Ok((
                     Running {
                         stop: stop_tx,
@@ -808,8 +805,8 @@ impl AppCore {
             SwapOutcome::Unchanged => {}
             SwapOutcome::Replaced { generation } => {
                 self.log(Msg::new("log.slates_refreshed").arg("generation", generation));
-                if swapper.japanese_font_missing() {
-                    self.log(Msg::new("log.slates_japanese_font_missing"));
+                for notice in swapper.notices() {
+                    self.log(notice);
                 }
             }
             SwapOutcome::Failed(why) => {

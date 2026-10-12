@@ -84,9 +84,10 @@ pub fn font_for(lang: Lang, text: &str, default: &Path, japanese_dir: &Path) -> 
         )
 }
 
-/// Puts `font` into the slate folder as `font.ttc` / `font.ttf` (a hard link when possible,
-/// else a copy) and returns that name: the filter only ever sees a relative file name.
-fn place_font(font: &Path, dir: &Path) -> std::io::Result<&'static str> {
+/// Puts `font` into the slate set's folder `dir` as `font.ttc` / `font.ttf` (one copy for the
+/// three slates; `C:\Windows\Fonts` cannot be hard-linked from the data folder) and returns the
+/// name the slates' filters use: relative to a slate folder, so no `C:` or `\` in a filter.
+fn place_font(font: &Path, dir: &Path) -> std::io::Result<String> {
     let name = if font
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("ttc"))
@@ -95,12 +96,13 @@ fn place_font(font: &Path, dir: &Path) -> std::io::Result<&'static str> {
     } else {
         "font.ttf"
     };
-    let target = dir.join(name);
-    if std::fs::hard_link(font, &target).is_err() {
-        std::fs::copy(font, &target)?;
-    }
-    Ok(name)
+    std::fs::create_dir_all(dir)?;
+    std::fs::copy(font, dir.join(name))?;
+    Ok(format!("../{name}"))
 }
+
+/// The font files [`place_font`] puts in a set's folder.
+const FONT_FILES: [&str; 2] = ["font.ttc", "font.ttf"];
 
 /// How long the broadcaster keeps segments that left the playlist (`retain_s` in server.rs).
 pub const RETAIN_S: u64 = 60;
@@ -139,9 +141,23 @@ pub struct Slates {
     /// The slates were meant to be Japanese but Windows has no Japanese font: they were made
     /// in English (the caller logs it).
     pub japanese_font_missing: bool,
+    /// The font file that was not there (the set has no text at all).
+    pub font_missing: Option<PathBuf>,
 }
 
 impl Slates {
+    /// What the person running the channel should be told about this set (for the log).
+    pub fn notices(&self) -> Vec<Msg> {
+        let mut notices = Vec::new();
+        if let Some(path) = &self.font_missing {
+            notices.push(Msg::new("log.slates_font_missing").arg("path", path.display()));
+        }
+        if self.japanese_font_missing {
+            notices.push(Msg::new("log.slates_japanese_font_missing"));
+        }
+        notices
+    }
+
     /// Source key of `kind` in this set (`idle`, then `idle-g1`, `idle-g2`, ...).
     pub fn source_key(&self, kind: SlateKind) -> String {
         match self.generation {
@@ -332,11 +348,13 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
-/// `lang`: the language the texts are written in (English when Japanese has no font).
+/// `lang`: the language the texts are written in (English when Japanese has no font);
+/// `font_name`: the placed font as the slate folder sees it (`None`: no font, no text).
 async fn generate_one(
     kind: SlateKind,
     o: &SlateOptions,
     lang: Lang,
+    font_name: Option<&str>,
 ) -> Result<Vec<SegmentInfo>, SlateError> {
     // ffmpeg runs with cwd = the slate dir, so the dir handed to it must not be relative.
     let dir = std::path::absolute(o.dir.join(kind.as_str()))?;
@@ -345,23 +363,10 @@ async fn generate_one(
         _ => {}
     }
     std::fs::create_dir_all(&dir)?;
-    let (title, subtitle) = texts(lang, kind, &o.request_url, o.connecting);
-    let font = font_for(
-        lang,
-        &format!("{title}{subtitle}"),
-        &o.font_file,
-        &o.japanese_font_dir,
-    );
-    let mut font_name = None;
-    if font.file().exists() {
-        font_name = Some(place_font(font.file(), &dir)?);
+    if font_name.is_some() {
+        let (title, subtitle) = texts(lang, kind, &o.request_url, o.connecting);
         std::fs::write(dir.join("title.txt"), title)?;
         std::fs::write(dir.join("subtitle.txt"), subtitle)?;
-    } else {
-        eprintln!(
-            "Brak czcionki {} — plansze bez tekstu. Ustaw FONT_FILE w .env.",
-            font.file().display()
-        );
     }
     let with_qr = kind == SlateKind::Idle && !o.request_url.is_empty();
     if with_qr {
@@ -416,10 +421,19 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
     } else {
         o.lang
     };
+    // One font for the whole set, placed once in the set's folder.
+    let font = font_for(lang, "", &o.font_file, &o.japanese_font_dir);
+    let (font_name, font_missing) = if font.file().is_file() {
+        let root = std::path::absolute(&o.dir)?;
+        (Some(place_font(font.file(), &root)?), None)
+    } else {
+        (None, Some(font.file().to_path_buf()))
+    };
+    let font_name = font_name.as_deref();
     let (idle, buffering, pause) = tokio::join!(
-        generate_one(SlateKind::Idle, o, lang),
-        generate_one(SlateKind::Buffering, o, lang),
-        generate_one(SlateKind::Pause, o, lang)
+        generate_one(SlateKind::Idle, o, lang, font_name),
+        generate_one(SlateKind::Buffering, o, lang, font_name),
+        generate_one(SlateKind::Pause, o, lang, font_name)
     );
     Ok(Slates {
         idle: idle?,
@@ -427,6 +441,7 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
         pause: pause?,
         generation: o.generation,
         japanese_font_missing,
+        font_missing,
     })
 }
 
@@ -444,6 +459,9 @@ impl SetDir {
             SetDir::Root(root) => {
                 for kind in SlateKind::ALL {
                     let _ = std::fs::remove_dir_all(root.join(kind.as_str()));
+                }
+                for font in FONT_FILES {
+                    let _ = std::fs::remove_file(root.join(font));
                 }
             }
             SetDir::Own(dir) => {
@@ -482,8 +500,8 @@ pub struct SlateSwapper {
     /// Language of the texts for [`Self::swap`] (the app asks for a language with `swap_to`).
     lang: Lang,
     japanese_font_dir: PathBuf,
-    /// Whether the last set made was meant to be Japanese but had no font.
-    japanese_font_missing: std::sync::atomic::AtomicBool,
+    /// Notices about the last set made.
+    notices: std::sync::Mutex<Vec<Msg>>,
     /// How long the old set's folder is kept after the swap.
     hold: Duration,
     state: tokio::sync::Mutex<SwapState>,
@@ -522,7 +540,7 @@ impl SlateSwapper {
             segment_seconds: options.segment_seconds,
             lang: options.lang,
             japanese_font_dir: options.japanese_font_dir.clone(),
-            japanese_font_missing: std::sync::atomic::AtomicBool::new(false),
+            notices: std::sync::Mutex::new(Vec::new()),
             state: tokio::sync::Mutex::new(SwapState {
                 address: initial,
                 generation: options.generation,
@@ -573,11 +591,12 @@ impl SlateSwapper {
         self.swap_to(address, commands).await
     }
 
-    /// Whether the last set made was meant to be Japanese but Windows has no Japanese font (it
-    /// is in English then).
-    pub fn japanese_font_missing(&self) -> bool {
-        self.japanese_font_missing
-            .load(std::sync::atomic::Ordering::SeqCst)
+    /// What to tell the person about the last set made (missing fonts), see [`Slates::notices`].
+    pub fn notices(&self) -> Vec<Msg> {
+        self.notices
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Like [`Self::swap`], with the address read once the lock is held: of several racing
@@ -616,13 +635,12 @@ impl SlateSwapper {
                 return SwapOutcome::Failed(e.message());
             }
         };
-        let slates_font_missing = slates.japanese_font_missing;
+        let notices = slates.notices();
         if commands.send(Command::ReplaceSlates(slates)).await.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
             return SwapOutcome::Failed(Msg::new("log.channel_loop_not_running"));
         }
-        self.japanese_font_missing
-            .store(slates_font_missing, std::sync::atomic::Ordering::SeqCst);
+        *self.notices.lock().unwrap_or_else(PoisonError::into_inner) = notices;
         let old = std::mem::replace(&mut state.dir, SetDir::Own(dir));
         state.address = address;
         state.generation = generation;
@@ -1085,7 +1103,7 @@ mod tests {
             std::fs::read_to_string(idle.join("title.txt")).unwrap(),
             "No videos in the queue"
         );
-        assert!(idle.join("font.ttf").is_file());
+        assert!(dir.path().join("font.ttf").is_file());
         assert!(title_pixels(&ffmpeg, &slates.idle[0].path, 1.0) > 500);
         // With the language available nothing is reported.
         let fine = generate_slates(&options(ffmpeg, dir.path(), "", 1))
@@ -1114,13 +1132,65 @@ mod tests {
         .await
         .unwrap();
         assert!(!slates.japanese_font_missing);
-        let idle = dir.path().join("idle");
         assert_eq!(
-            std::fs::metadata(idle.join("font.ttc")).unwrap().len(),
+            std::fs::metadata(dir.path().join("font.ttc"))
+                .unwrap()
+                .len(),
             std::fs::metadata(font).unwrap().len()
         );
-        assert!(!idle.join("font.ttf").exists());
+        assert!(!dir.path().join("font.ttf").exists());
         assert!(title_pixels(&ffmpeg, &slates.idle[0].path, 1.0) > 500);
+    }
+
+    /// The font is copied once per set (not once per slate) and each slate's filter reaches it
+    /// by a relative name; a swapped set has its own copy next to its slates.
+    #[tokio::test]
+    async fn the_font_is_placed_once_per_set() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        if !default_font().exists() {
+            eprintln!("skip: no default font");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        generate_slates(&options(ffmpeg, dir.path(), "", 0))
+            .await
+            .unwrap();
+        assert!(dir.path().join("font.ttf").is_file());
+        for kind in SlateKind::ALL {
+            let folder = dir.path().join(kind.as_str());
+            assert!(
+                !folder.join("font.ttf").exists(),
+                "{kind:?} has its own copy"
+            );
+            assert!(folder.join("title.txt").is_file());
+        }
+        // Dropping the set removes the shared font with the kind folders.
+        SetDir::Root(dir.path().to_path_buf()).remove();
+        assert!(!dir.path().join("font.ttf").exists());
+    }
+
+    #[tokio::test]
+    async fn a_missing_default_font_gives_a_notice_and_text_less_slates() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("brak.ttf");
+        let slates = generate_slates(&SlateOptions {
+            font_file: missing.clone(),
+            ..options(ffmpeg, dir.path(), "", 0)
+        })
+        .await
+        .unwrap();
+        assert_eq!(slates.font_missing, Some(missing.clone()));
+        let notices = slates.notices();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].key(), "log.slates_font_missing");
+        assert!(notices[0].render(Lang::En).contains("FONT_FILE"));
     }
 
     /// Japanese characters really are drawn (not boxes) with the Japanese font: the same title
@@ -1210,7 +1280,7 @@ mod tests {
             swapper.swap_to(same(Lang::Pl), &tx).await,
             SwapOutcome::Unchanged
         );
-        assert!(!swapper.japanese_font_missing());
+        assert!(swapper.notices().is_empty());
     }
 
     /// Review Focus 3: the code on the airing slate is readable and leads to the request page.

@@ -84,6 +84,9 @@ pub struct AppState {
     /// The desktop app's engine (`/api/desktop/*`); `None` in `.env` mode, where those routes
     /// do not exist. Weak: the engine owns the server that owns this state.
     desktop: Option<Weak<crate::app::AppCore>>,
+    /// The slate swapper of the running channel (`None` without a channel). The app swaps
+    /// through [`crate::app::AppCore`]; a server without a window swaps from the settings route.
+    slates: Option<Arc<crate::pipeline::slates::SlateSwapper>>,
     /// Read per request (`trust_cloudflare`, `public_url`): HttpConfig keeps the start values.
     live: LiveSettings,
     /// Segment fetches (viewers), for the automatic pause of the app.
@@ -130,6 +133,7 @@ impl AppState {
             admin_auth: Arc::new(RwLock::new(admin_auth)),
             desktop_key: Arc::new(DesktopKey::generate().0),
             desktop: None,
+            slates: None,
             live: LiveSettings {
                 trust_cloudflare: LiveValue::new(config.trust_cloudflare),
                 cloudflare_from_loopback_only: LiveValue::new(false),
@@ -170,6 +174,52 @@ impl AppState {
     pub fn with_viewers(mut self, viewers: Arc<ViewerActivity>) -> Self {
         self.viewers = viewers;
         self
+    }
+
+    /// The swapper of the slate set the channel started with.
+    pub fn with_slates(
+        mut self,
+        slates: Option<Arc<crate::pipeline::slates::SlateSwapper>>,
+    ) -> Self {
+        self.slates = slates;
+        self
+    }
+
+    pub(crate) fn slates(&self) -> Option<Arc<crate::pipeline::slates::SlateSwapper>> {
+        self.slates.clone()
+    }
+
+    /// The slate language changed: a server without a window makes the new slate set in the
+    /// background and hands it to the channel (the app does the same through `AppCore`).
+    /// The address is the one of `.env`; nothing is made when the set on air already fits.
+    pub(crate) fn refresh_slates_headless(&self) {
+        if self.desktop.is_some() {
+            return;
+        }
+        let Some(swapper) = self.slates.clone() else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            let address = || crate::pipeline::slates::SlateAddress {
+                public_url: state.live.public_url.get(),
+                connecting: false,
+                lang: state.slate_language(),
+            };
+            use crate::pipeline::slates::SwapOutcome;
+            match swapper.swap_to(address, &state.engine.commands).await {
+                SwapOutcome::Unchanged => {}
+                SwapOutcome::Replaced { generation } => {
+                    (state.log)(Msg::new("log.slates_refreshed").arg("generation", generation));
+                    for notice in swapper.notices() {
+                        (state.log)(notice);
+                    }
+                }
+                SwapOutcome::Failed(why) => {
+                    (state.log)(Msg::new("log.slates_refresh_failed").arg_msg("reason", why));
+                }
+            }
+        });
     }
 
     pub fn with_log(mut self, log: LogFn) -> Self {

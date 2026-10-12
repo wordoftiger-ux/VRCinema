@@ -22,7 +22,7 @@ use crate::pipeline::channel::{Channel, ChannelOptions, PauseReason};
 use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_factory};
 use crate::pipeline::probe::probe_duration;
 use crate::pipeline::slates::{
-    RETAIN_S, SlateOptions, generate_slates, request_url, system_fonts_dir,
+    RETAIN_S, SlateOptions, SlateSwapper, generate_slates, request_url, system_fonts_dir,
 };
 use crate::resolver::fake::FakeResolver;
 use crate::resolver::file::FileResolver;
@@ -303,7 +303,7 @@ async fn start_channel_loop(
     shared_log: &SharedLogFn,
     connecting: bool,
     pause_reasons: Vec<PauseReason>,
-) -> anyhow::Result<(EngineHandle, EngineTask)> {
+) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
     let slate_language = {
@@ -324,9 +324,11 @@ async fn start_channel_loop(
         japanese_font_dir: system_fonts_dir(),
     })
     .await?;
-    if slates.japanese_font_missing {
-        shared_log(Msg::new("log.slates_japanese_font_missing"));
+    for notice in slates.notices() {
+        shared_log(notice);
     }
+    // The swapper starts with what the start-up set was really made for.
+    let swapper = Arc::new(SlateSwapper::for_config(config, connecting, slate_language));
 
     let build = {
         let db = Arc::clone(db);
@@ -379,11 +381,8 @@ async fn start_channel_loop(
         }
     };
     let engine_log = Arc::clone(shared_log);
-    Ok(spawn_engine_paused(
-        build,
-        move |m: Msg| engine_log(m),
-        pause_reasons,
-    ))
+    let (handle, task) = spawn_engine_paused(build, move |m: Msg| engine_log(m), pause_reasons);
+    Ok((handle, task, swapper))
 }
 
 /// Starts everything and serves until `shutdown` completes, then stops cleanly.
@@ -441,8 +440,9 @@ pub async fn run(
     let _ = std::fs::remove_dir_all(&clips_dir);
     std::fs::create_dir_all(&clips_dir)?;
 
+    let mut slates = None;
     let (handle, engine_task) = if start_channel {
-        let (handle, task) = start_channel_loop(
+        let (handle, task, swapper) = start_channel_loop(
             &config,
             &db,
             &resolver,
@@ -452,6 +452,7 @@ pub async fn run(
             pause_reasons,
         )
         .await?;
+        slates = Some(swapper);
         (handle, LoopGuard::new(Some(task), channel_loops))
     } else {
         shared_log(Msg::new("log.channel_not_started"));
@@ -482,7 +483,8 @@ pub async fn run(
         )?
         .with_library(Some(library))
         .with_log(Arc::clone(&shared_log))
-        .with_live(live.clone());
+        .with_live(live.clone())
+        .with_slates(slates);
         if let Some(configure) = configure_state {
             state = configure(state);
         }
@@ -901,6 +903,108 @@ mod tests {
         let lines = lines.lock().unwrap().clone();
         assert!(
             lines.iter().any(|l| l.contains("Generating the slates")),
+            "{lines:?}"
+        );
+    }
+
+    /// A server without a window (`.env`) swaps its slates live too when the panel changes the
+    /// slate language: a new set airs as one discontinuity, the stream goes on, no restart.
+    #[tokio::test]
+    async fn a_headless_server_swaps_its_slates_when_the_slate_language_changes() {
+        let exe = if cfg!(windows) { ".exe" } else { "" };
+        if !repo_root()
+            .join("bin")
+            .join(format!("ffmpeg{exe}"))
+            .exists()
+        {
+            eprintln!("pomijam: brak bin/ffmpeg");
+            return;
+        }
+        let (tmp, data, _markers) = data_with_markers();
+        let (log, lines) = capture_log();
+        let loops = Arc::new(AtomicUsize::new(0));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let opts = RunOptions {
+            ready: Some(ready_tx),
+            log: Some(log),
+            channel_loops: Some(Arc::clone(&loops)),
+            ..test_opts(tmp.path())
+        };
+        let config = test_config_with(&data, 0, &[("LANGUAGE", "pl")]);
+        let server = tokio::spawn(run(config, opts, async {
+            let _ = stop_rx.await;
+        }));
+        let addr = tokio::time::timeout(std::time::Duration::from_secs(60), ready_rx)
+            .await
+            .expect("server did not start in 60 s")
+            .unwrap();
+        let title = |set: &str| {
+            std::fs::read_to_string(data.join("slates").join(set).join("idle").join("title.txt"))
+        };
+        if !data.join("slates").join("idle").join("title.txt").exists() {
+            eprintln!("pomijam: brak czcionki");
+            stop_tx.send(()).unwrap();
+            server.await.unwrap().unwrap();
+            return;
+        }
+        let sequence = |text: &str| -> u64 {
+            text.lines()
+                .find_map(|l| l.strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        let before = sequence(&http_get(addr, "/live/main.m3u8").await.1);
+        let client = reqwest::Client::new();
+        let login = client
+            .post(format!("http://{addr}/api/admin/login"))
+            .json(&serde_json::json!({"password": "haslo-testowe-123"}))
+            .send()
+            .await
+            .unwrap();
+        let cookie = login
+            .headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .unwrap()
+            .to_string();
+        let put = |lang: &'static str| {
+            client
+                .put(format!("http://{addr}/api/admin/channels/main/settings"))
+                .header("cookie", cookie.clone())
+                .json(&serde_json::json!({ "slateLanguage": lang }))
+                .send()
+        };
+        assert_eq!(put("pl").await.unwrap().status(), 200);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut saw_tag = false;
+        while !(saw_tag
+            && title("g1").is_ok()
+            && sequence(&http_get(addr, "/live/main.m3u8").await.1) > before)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no new slate set aired (g1: {:?})",
+                title("g1")
+            );
+            saw_tag |= http_get(addr, "/live/main.m3u8")
+                .await
+                .1
+                .contains("#EXT-X-DISCONTINUITY\n");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(title("g1").unwrap(), "Brak filmów w kolejce");
+        // The same language again changes nothing.
+        assert_eq!(put("pl").await.unwrap().status(), 200);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(!data.join("slates").join("g2").exists());
+        assert_eq!(loops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        stop_tx.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        let lines = lines.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains("slates were refreshed")),
             "{lines:?}"
         );
     }

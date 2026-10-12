@@ -303,6 +303,7 @@
   "log.slate_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {kind} is a technical word (idle, buffering, pause).",
   "log.slate_qr_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Part of log.slate_failed.",
   "log.slate_qr_save_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Part of log.slate_failed.",
+  "log.slates_font_missing": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {path} is the font file path. FONT_FILE is a setting name in the .env file - keep it as is.",
   "log.slates_japanese_font_missing": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Shown when the slate language is Japanese but Windows has no Japanese font; the slates then stay in English. YuGothM.ttc and meiryo.ttc are file names - keep them.",
   "log.slates_refresh_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {reason} is why.",
   "log.slates_refreshed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {generation} is a number.",

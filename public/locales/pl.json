@@ -308,6 +308,7 @@
   "log.slate_failed": "Nie udało się wygenerować planszy „{kind}”: {message}",
   "log.slate_qr_failed": "kod QR: {error}",
   "log.slate_qr_save_failed": "zapis kodu QR: {error}",
+  "log.slates_font_missing": "Nie znaleziono czcionki plansz ({path}), więc plansze są bez tekstu. Ustaw FONT_FILE w .env.",
   "log.slates_japanese_font_missing": "Brak japońskiej czcionki (YuGothM.ttc, meiryo.ttc) w folderze czcionek Windows. Plansze są po angielsku.",
   "log.slates_refresh_failed": "Nie udało się odświeżyć plansz: {reason}. Zostają poprzednie plansze.",
   "log.slates_refreshed": "Plansze odświeżone dla nowego adresu publicznego (zestaw {generation}).",

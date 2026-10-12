@@ -1308,6 +1308,7 @@ mod tests {
             pause: slate_in(dir, "pause.ts"),
             generation: 0,
             japanese_font_missing: false,
+            font_missing: None,
         }
     }
 
@@ -1446,6 +1447,7 @@ mod tests {
                 pause: slate_in(&slates_dir, "pause.ts"),
                 generation: 0,
                 japanese_font_missing: false,
+                font_missing: None,
             };
             let channel = Channel::new(ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -1595,6 +1597,7 @@ mod tests {
             pause: two("pause"),
             generation,
             japanese_font_missing: false,
+            font_missing: None,
         }
     }
 

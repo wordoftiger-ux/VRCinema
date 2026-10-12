@@ -583,10 +583,11 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
             Duration::from_secs(updated.request_limit_window_s),
         );
     if patch.slate_language.is_some() {
-        // A new slate language makes a new slate set at once (the app only: a server without a
-        // window makes its slates when it starts).
+        // A new slate language makes a new slate set at once (the app and the server without a window alike).
         if let Some(core) = state.app_core() {
             core.refresh_slates();
+        } else {
+            state.refresh_slates_headless();
         }
     }
     Ok(json_ok(&json!(updated)))
