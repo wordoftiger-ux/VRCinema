@@ -32,6 +32,11 @@ export async function pasteLink(text) {
     showToast(t('queue.paste_not_link'));
     return;
   }
+  await queueLink(url);
+}
+
+/** Adds `url` and says so in a message over the player bar (also when it is refused). */
+export async function queueLink(url) {
   const { message, error } = await add(url);
   if (error) showToast(errorText(error));
   else showToast(message, 'info');

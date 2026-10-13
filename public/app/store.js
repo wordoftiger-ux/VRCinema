@@ -23,6 +23,8 @@ export const history = signal([]);
 /** The window's info (`/api/desktop/info`); null in a remote session or without a window. */
 export const info = signal(null);
 export const tunnel = computed(() => info.value?.tunnel ?? null);
+/** True in a remote session (or a server without a window): the window-only routes answer 403/404. */
+export const remote = signal(false);
 /** `loading`, `ok`, or `signed_out` (no panel session). */
 export const session = signal('loading');
 /** A short message over the player bar: `{text, kind}` (`error` or `info`). */
@@ -115,6 +117,7 @@ export async function refreshInfo() {
   try {
     const data = await api('GET', INFO);
     info.value = data;
+    remote.value = false;
     const current = !switchingLanguage && switches === languageSwitches;
     if (current && data?.language && data.language !== lang.value) {
       await loadLang(data.language);
@@ -125,6 +128,7 @@ export async function refreshInfo() {
     if (e.status === 403 || e.status === 404) {
       infoAvailable = false;
       info.value = null;
+      remote.value = true;
       return 'stop';
     }
     return e.status === 401 ? 'stop' : 'fail';
@@ -327,6 +331,24 @@ export const channelLink = computed(() => {
   if (i.tunnel?.state === 'online' && i.tunnel.url) return link(i.tunnel.url);
   if (!i.tunnelEnabled && i.publicUrl) return link(i.publicUrl);
   return local;
+});
+
+/** The page where viewers add videos: the public one when there is one, else the local one. */
+export const requestLink = computed(() => {
+  const i = info.value;
+  const local = channel.value?.requestUrl ?? null;
+  if (!i) return local;
+  const base = publicAddress.value;
+  return base ? `${String(base).replace(/\/+$/, '')}/` : local;
+});
+
+/** The public address of the channel in the window (tunnel or manual); null while there is none. */
+export const publicAddress = computed(() => {
+  const i = info.value;
+  if (!i) return null;
+  if (i.tunnel?.state === 'online' && i.tunnel.url) return i.tunnel.url;
+  if (!i.tunnelEnabled && i.publicUrl) return i.publicUrl;
+  return null;
 });
 
 /** The internet status of the window: `online`, `connecting`, `offline`, `manual`, `local`. */

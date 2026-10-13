@@ -24,6 +24,8 @@ import { DialogLayer, dialog, openDialog } from './components/dialog.js';
 import { DropZone } from './components/dropzone.js';
 import { pasteLink } from './components/addlink.js';
 import { ChannelView } from './views/channel.js';
+import { HistoryView } from './views/history.js';
+import { ShareView } from './views/share.js';
 import { toggleStats } from './components/stats.js';
 
 // ---------- Keyboard shortcuts ----------
@@ -114,6 +116,8 @@ function onPaste(e) {
 function View() {
   const { view, section } = route.value;
   if (view === 'channel') return html`<${ChannelView} />`;
+  if (view === 'history') return html`<${HistoryView} />`;
+  if (view === 'share') return html`<${ShareView} />`;
   const titleKey = {
     channel: 'nav.channel',
     history: 'nav.history',

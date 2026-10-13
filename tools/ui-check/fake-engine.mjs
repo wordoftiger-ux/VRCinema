@@ -10,6 +10,17 @@
 // answers with), panelFail (the panel answers 500), panelDelayMs, patchDelayMs, signedOut, remote, tunnel}. The queue lives in memory: POST …/items adds,
 // PATCH /api/admin/items/{id} moves ({position}) or decides ({action}), DELETE removes.
 // GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
+// History (panel field `history`): played, skipped (played with a reason), failed (localized
+// reason), a file from disk and an old row with a plain-text reason. Share view: GET
+// /api/desktop/tunnel/qr (window; 403 for a remote session, 404 without a public address) and
+// GET /api/admin/qr (panel; 404 without an address) answer a PNG; scenario `tunnelUrl` changes
+// the address (the QR must follow), `tunnel` is 'online'|'off'|'connecting'|'error'.
+// POST /api/desktop/tunnel/restart rotates the quick address. Permanent link wizard
+// (/api/desktop/tunnel/named/…): scenario `namedLogin` 'done' (default, after `loginMs`),
+// 'wait' (stays running until cancelled) or 'fail'; `browserOpened` (default false); host
+// names: taken.example.com → dns_taken (unless overwrite), nodomain.example.com → no_domain
+// (+ helpUrl), slow.example.com → takes 2.5 s; any other works. GET /api/desktop/config
+// answers tunnelMode / namedTunnelHostname.
 // Stats route (GET /api/admin/channels/main/stats): scenario `stats` is 'full' (default) or
 // 'nulls' (every group null, as when nothing plays) or 'partial' (the full one with a source analysis lacking height, frame rate and length). The preview's stream (/live/main.m3u8
 // and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
@@ -63,6 +74,18 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
   const pendingList = (n) =>
     Array.from({ length: n }, (_, i) => queued(20 + i, i === 0 ? 'Nyan Cat 10 godzin' : `Film do zatwierdzenia ${i}`, { status: 'pending_approval', requesterName: i === 1 ? null : 'Bartek', requesterBadge: i === 1 ? null : { hue: 300, shape: 7 } }));
 
+  const idleProgress = () => ({ operation: null, state: 'idle', running: false, step: null, message: null, code: null, helpUrl: null, loginUrl: null, browserOpened: null });
+  const initialHistory = () => {
+    const now = Date.now();
+    return [
+      queued(1, 'Daft Punk — One More Time', { status: 'played', durationS: 320, finishedAt: now - 60000 }),
+      queued(2, 'Kot gra na pianinie', { status: 'played', durationS: 48, requesterName: 'Kasia', error: 'Skipped by the owner', finishedAt: now - 120000 }),
+      queued(3, 'Bez tytułu', { status: 'failed', durationS: null, requesterName: 'Bartek', sourceUrl: 'https://pixeldrain.com/u/aB3x', error: 'The file does not exist', finishedAt: now - 180000 }),
+      queued(4, 'Shrek (2001).mkv', { status: 'played', durationS: 5402, requesterName: null, requesterBadge: 'host', sourceUrl: 'local:0/Shrek.mkv', addedBy: 'admin', finishedAt: now - 86400000 * 3 }),
+      queued(5, 'Stary film', { status: 'failed', requesterName: null, requesterBadge: null, error: 'Nie udało się pobrać filmu (stary wpis).', finishedAt: now - 86400000 * 4 }),
+    ];
+  };
+
   function reset() {
     requests = [];
     s = {
@@ -78,6 +101,10 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       signedOut: false,
       remote: false,
       tunnel: 'online',
+      tunnelUrl: 'https://proba-kanalu.trycloudflare.com',
+      namedLogin: 'done',
+      loginMs: 2500,
+      browserOpened: false,
       paused: false,
       pauseReasons: [],
       positionS: 92,
@@ -86,6 +113,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       hls: true,
     };
     s.queue = initialQueue();
+    s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
+    s.rotations = 0;
+    s.history = initialHistory();
     s.pendingItems = [];
     nextId = 100;
     maxPanelInFlight = 0;
@@ -132,7 +162,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       playing: current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : [],
       queue: s.queue,
       pending: s.pendingItems,
-      history: [],
+      history: s.history,
       settings: {},
       control: control(),
       channelUrl: `http://127.0.0.1:${port}/live/main.m3u8`,
@@ -178,6 +208,87 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     }
   }
 
+  const tunnelView = () => ({
+    state: s.tunnel,
+    url: s.tunnel === 'online' ? (s.named.mode === 'named' ? `https://${s.named.host}` : s.tunnelUrl) : null,
+    message: s.tunnel === 'error' ? 'No internet' : null,
+    mode: s.named.mode,
+    hostname: s.named.mode === 'named' ? s.named.host : null,
+    warning: null,
+  });
+  const publicAddress = () => (s.tunnel === 'online' ? tunnelView().url : null);
+
+  // The 1x1 PNG the QR routes answer with.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const sendQr = (res) => {
+    if (!publicAddress()) return coded(res, 404, 'no_public_address', 'No public address');
+    res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+    return res.end(PNG);
+  };
+
+  const progressOf = (patch) => (s.named.progress = { ...idleProgress(), ...patch, loggedIn: s.named.loggedIn });
+  async function namedRoute(res, action, req, payload) {
+    const n = s.named;
+    if (action === 'progress' && req.method === 'GET') return json(res, 200, { ...n.progress, loggedIn: n.loggedIn });
+    if (req.method !== 'POST') return json(res, 404, { error: 'Not Found' });
+    const lang = req.headers['x-vrcinema-lang'] === 'pl';
+    if (action === 'login') {
+      if (payload?.cancel) {
+        n.loginRun = (n.loginRun ?? 0) + 1;
+        progressOf({ operation: 'login', state: 'cancelled' });
+        return json(res, 200, { ...n.progress });
+      }
+      if (n.progress.running) return coded(res, 409, 'busy', 'A permanent link operation is running');
+      const run = (n.loginRun = (n.loginRun ?? 0) + 1);
+      progressOf({
+        operation: 'login',
+        state: 'running',
+        running: true,
+        step: 'waiting_for_browser',
+        message: lang ? 'Zaloguj się w Cloudflare w przeglądarce.' : 'Log in to Cloudflare in the browser.',
+        loginUrl: 'https://dash.cloudflare.com/argotunnel?fake=1',
+        browserOpened: s.browserOpened,
+      });
+      if (s.namedLogin !== 'wait') {
+        setTimeout(() => {
+          if (n.loginRun !== run) return;
+          if (s.namedLogin === 'fail') progressOf({ operation: 'login', state: 'failed', code: 'timeout', message: 'cloudflared did not answer within 300 s.' });
+          else {
+            n.loggedIn = true;
+            progressOf({ operation: 'login', state: 'done', message: 'Connected to Cloudflare.' });
+          }
+        }, s.loginMs);
+      }
+      return json(res, 202, { ...n.progress });
+    }
+    if (action === 'create') {
+      const host = String(payload?.hostname ?? '').trim().toLowerCase();
+      if (!n.loggedIn) return coded(res, 409, 'not_logged_in', 'Connect to Cloudflare first.');
+      const fail = (status, code, message, extra = {}) => {
+        progressOf({ operation: 'create', state: 'failed', code, message, ...extra });
+        return json(res, status, { error: message, code, ...extra });
+      };
+      progressOf({ operation: 'create', state: 'running', running: true, step: 'creating_tunnel', message: 'Creating the tunnel vrcinema in Cloudflare…' });
+      await sleep(host === 'slow.example.com' ? 2500 : 300);
+      if (host === 'taken.example.com' && !payload?.overwrite) return fail(409, 'dns_taken', `The address ${host} is already taken in Cloudflare DNS.`, { helpUrl: null });
+      if (host === 'nodomain.example.com') return fail(422, 'no_domain', `Add a domain to Cloudflare first (${host}).`, { helpUrl: 'https://example.invalid/add-domain' });
+      n.mode = 'named';
+      n.host = host;
+      progressOf({ operation: 'create', state: 'done', message: `Permanent link https://${host} is ready.` });
+      return json(res, 200, { ok: true, message: n.progress.message, tunnel: tunnelView() });
+    }
+    if (action === 'quick' || action === 'delete') {
+      n.mode = 'quick';
+      if (action === 'delete') {
+        n.host = null;
+        n.loggedIn = false;
+      }
+      progressOf({});
+      return json(res, 200, { ok: true, message: action === 'delete' ? 'Permanent link deleted — the quick tunnel runs.' : 'The quick tunnel runs.', tunnel: tunnelView() });
+    }
+    return json(res, 404, { error: 'Not Found' });
+  }
+
   function info() {
     return {
       version: '0.2.0',
@@ -185,7 +296,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       publicUrl: '',
       language: s.language,
       tunnelEnabled: s.tunnel !== 'off',
-      tunnel: { state: s.tunnel, url: s.tunnel === 'online' ? 'https://proba-kanalu.trycloudflare.com' : null, message: null, mode: 'quick', hostname: null, warning: null },
+      tunnel: tunnelView(),
       paused: s.paused,
       pauseReasons: s.pauseReasons,
     };
@@ -248,11 +359,26 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       if (s.remote) return coded(res, 403, 'window_only', 'Window only');
       if (req.method === 'PUT') {
         if (payload?.language) s.language = payload.language;
+        if (payload?.tunnelMode) s.named.mode = payload.tunnelMode;
         return json(res, 200, { restarted: false });
       }
+      if (path === '/api/desktop/config') return json(res, 200, { language: s.language, tunnelEnabled: s.tunnel !== 'off', tunnelMode: s.named.mode, namedTunnelHostname: s.named.host });
       return json(res, 200, info());
     }
     if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
+    if (path.startsWith('/api/desktop/')) {
+      if (s.remote) return coded(res, 403, 'window_only', 'Window only');
+      if (path === '/api/desktop/tunnel/qr') return sendQr(res);
+      if (path === '/api/desktop/tunnel/restart' && req.method === 'POST') {
+        if (s.tunnel === 'off') return coded(res, 409, 'tunnel_off', 'Tunnel is off');
+        s.rotations += 1;
+        s.tunnelUrl = `https://proba-kanalu-${s.rotations}.trycloudflare.com`;
+        return json(res, 200, tunnelView());
+      }
+      if (path.startsWith('/api/desktop/tunnel/named/')) return namedRoute(res, path.slice('/api/desktop/tunnel/named/'.length), req, payload);
+      return json(res, 404, { error: 'Not Found' });
+    }
+    if (path === '/api/admin/qr') return sendQr(res);
     const base = '/api/admin/channels/main';
     if (path === base && req.method === 'GET') {
       if (s.panelFail) return coded(res, 500, 'internal', 'boom');

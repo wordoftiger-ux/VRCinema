@@ -3242,6 +3242,48 @@ async fn the_stats_route_works_with_a_remote_password_session_too() {
     assert_eq!(res.status, StatusCode::OK);
 }
 
+// ---------- QR code of the request page ----------
+
+const QR_ROUTE: &str = "/api/admin/qr";
+
+#[tokio::test]
+async fn the_panel_qr_route_needs_a_session() {
+    let h = Harness::new();
+    let res = h.send(get(QR_ROUTE)).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_panel_qr_route_has_nothing_to_draw_without_a_public_address() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let res = h.send(get(QR_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    assert!(res.json()["error"].as_str().unwrap().contains("adres"));
+}
+
+#[tokio::test]
+async fn the_panel_qr_route_draws_a_png_that_is_never_cached() {
+    let mut cfg = config();
+    cfg.public_url = "https://tv.example.com".into();
+    let h = Harness::with_config(cfg);
+    let cookie = h.login().await;
+    let res = h.send(get(QR_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.header("content-type"), "image/png");
+    assert_eq!(res.header("cache-control"), "no-store");
+    assert_eq!(&res.body[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+#[tokio::test]
+async fn the_panel_qr_route_is_open_to_a_remote_password_session_too() {
+    let (a, _key) = app_harness(remote_on("sekret"));
+    let remote = cookie_of(&remote_login(&a, "sekret").await);
+    let res = a.h.send(get(QR_ROUTE).cookie(&remote)).await;
+    // Not refused (no 401/403): there is just no public address in this harness.
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+}
+
 // ---------- nicki widzów ----------
 
 const KEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -665,6 +665,28 @@ pub(crate) fn json_ok(value: &Value) -> Response {
     json_response(StatusCode::OK, value)
 }
 
+/// The QR code (PNG, never cached) of the request page at the public address `address`; 404
+/// while there is none. Shared by the window's route and the panel's.
+pub(crate) fn request_qr_response(address: &str) -> ApiResult {
+    if address.is_empty() {
+        return Err(ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "no_public_address",
+            &[],
+        ));
+    }
+    let png = crate::pipeline::slates::qr_png(&crate::pipeline::slates::request_url(address))
+        .map_err(|e| {
+            ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "qr_failed", &[])
+                .with_msg_arg("detail", e.message())
+        })?;
+    Ok((
+        [(CONTENT_TYPE, "image/png"), (CACHE_CONTROL, "no-store")],
+        png,
+    )
+        .into_response())
+}
+
 /// Fastify's default 404 (also used for a known path with another method).
 async fn not_found(method: Method, uri: Uri) -> Response {
     let url = uri.path_and_query().map_or("/", |p| p.as_str());

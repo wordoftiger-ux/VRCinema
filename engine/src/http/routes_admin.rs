@@ -48,6 +48,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/channels/main/seek", post(seek))
         .route("/api/admin/channels/main/restart", post(restart))
         .route("/api/admin/channels/main/stats", get(stats))
+        .route("/api/admin/qr", get(qr))
         .route("/api/admin/channels/main/play-now", post(play_now))
         .route(
             "/api/admin/channels/main/settings",
@@ -658,6 +659,12 @@ async fn stats(State(state): State<AppState>) -> ApiResult {
         "viewers": value(serde_json::to_value(state.viewers.stats(now))),
         "tunnel": value(serde_json::to_value(&tunnel)),
     })))
+}
+
+/// The QR code (PNG) of the request page, for the share view (the window has its own route,
+/// `/api/desktop/tunnel/qr`; this one also serves a remote session); 404 without an address.
+async fn qr(State(state): State<AppState>) -> ApiResult {
+    super::request_qr_response(&state.live.public_url.get())
 }
 
 async fn get_settings(State(state): State<AppState>) -> ApiResult {

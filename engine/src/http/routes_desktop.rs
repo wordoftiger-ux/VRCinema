@@ -6,7 +6,6 @@
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Map, Value, json};
@@ -18,7 +17,6 @@ use super::{
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
 use crate::app_settings::TunnelModeSetting;
 use crate::i18n::{Lang, Msg, error_msg};
-use crate::pipeline::slates::request_url;
 use crate::tools::Tool;
 use crate::tunnel::TunnelState;
 use crate::tunnel::named::{ADD_DOMAIN_HELP, ErrorCode, NamedError, Phase};
@@ -480,23 +478,7 @@ async fn tunnel(
 /// while there is no address.
 async fn tunnel_qr(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
-    let address = core.live_settings.public_url.get();
-    if address.is_empty() {
-        return Err(ApiError::coded(
-            StatusCode::NOT_FOUND,
-            "no_public_address",
-            &[],
-        ));
-    }
-    let png = crate::pipeline::slates::qr_png(&request_url(&address)).map_err(|e| {
-        ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "qr_failed", &[])
-            .with_msg_arg("detail", e.message())
-    })?;
-    Ok((
-        [(CONTENT_TYPE, "image/png"), (CACHE_CONTROL, "no-store")],
-        png,
-    )
-        .into_response())
+    super::request_qr_response(&core.live_settings.public_url.get())
 }
 
 /// A new cloudflared (a quick tunnel gets a new address); 409 while the tunnel is off.
