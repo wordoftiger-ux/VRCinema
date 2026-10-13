@@ -300,6 +300,7 @@ fn remove_swapped_slate_sets(slates_dir: &Path) {
 }
 
 /// Generates the slates and spawns the supervised channel loop.
+#[allow(clippy::too_many_arguments)]
 async fn start_channel_loop(
     config: &AppConfig,
     db: &Arc<Mutex<rusqlite::Connection>>,
@@ -308,6 +309,7 @@ async fn start_channel_loop(
     shared_log: &SharedLogFn,
     connecting: bool,
     pause_reasons: Vec<PauseReason>,
+    fake_resolver: bool,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -360,6 +362,9 @@ async fn start_channel_loop(
                 font_file: config.font_file.clone(),
                 public_url: public_url.clone(),
                 host_resolver: Arc::new(crate::rules::SystemHostResolver),
+                // The fake resolver (a test mode of black-box tests, no extractor involved)
+                // hands out local files as media.
+                check_viewer_media: !fake_resolver,
             });
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -464,6 +469,7 @@ pub async fn run(
             &shared_log,
             slates_connecting,
             pause_reasons,
+            fake_resolver.is_some(),
         )
         .await?;
         slates = Some(swapper);

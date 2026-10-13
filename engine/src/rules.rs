@@ -62,8 +62,10 @@ pub enum LinkError {
     DomainNotAllowed,
     /// A name or address of the owner's own network (or of the machine itself).
     LocalAddress,
-    /// Not `http` or `https`.
+    /// Not `http` or `https` (or not a plain address that every program reads the same way).
     BadScheme,
+    /// The name could not be looked up in time: refused rather than guessed.
+    LookupFailed,
 }
 
 impl LinkError {
@@ -73,6 +75,7 @@ impl LinkError {
             Self::DomainNotAllowed => "domain_not_allowed",
             Self::LocalAddress => "local_address",
             Self::BadScheme => "bad_scheme",
+            Self::LookupFailed => "lookup_failed",
         }
     }
 }
@@ -154,7 +157,11 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 /// Names that mean the owner's network or machine, without asking the DNS.
 fn is_local_name(host: &str) -> bool {
     let host = host.to_lowercase();
-    let host = host.strip_suffix('.').unwrap_or(&host);
+    let host = host.trim_end_matches('.');
+    // A name without a dot (`nas`, `printer`) is one of the owner's network.
+    if !host.contains('.') {
+        return true;
+    }
     ["localhost", "local", "lan", "home.arpa", "internal"]
         .iter()
         .any(|s| host == *s || host.strip_suffix(s).is_some_and(|rest| rest.ends_with('.')))
@@ -187,8 +194,9 @@ pub fn check_viewer_link_offline(url: &Url, settings: &ChannelSettings) -> Resul
     listed.then_some(()).ok_or(LinkError::DomainNotAllowed)
 }
 
-/// A host name that resolves to anything but public addresses (one is enough) is refused. A name
-/// that does not resolve passes: the fetch that follows reports it.
+/// A host name that resolves to anything but public addresses (one is enough) is refused, and so
+/// is one whose lookup timed out. A name that does not exist passes: the fetch that follows
+/// reports it.
 pub async fn check_host_resolves_public(
     url: &Url,
     resolver: &dyn HostResolver,
@@ -200,6 +208,7 @@ pub async fn check_host_resolves_public(
         Ok(addresses) if addresses.iter().any(|ip| !is_public_ip(*ip)) => {
             Err(LinkError::LocalAddress)
         }
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Err(LinkError::LookupFailed),
         _ => Ok(()),
     }
 }
@@ -215,12 +224,35 @@ pub async fn check_viewer_link(
     check_host_resolves_public(url, resolver).await
 }
 
-/// The address of the media a resolver found for a viewer's link, checked before ffmpeg is given
-/// it: public `http(s)` only.
-pub async fn check_media_url(raw: &str, resolver: &dyn HostResolver) -> Result<(), LinkError> {
+/// The address of the media a resolver found for a viewer's link, checked before ffprobe or ffmpeg
+/// get it: public `http(s)` only. Returns the checked address as the parser wrote it; **that**
+/// text, not `raw`, must be handed to the programs: they parse it by their own rules (a
+/// backslash is a path separator for the URL standard, but ffmpeg connects to the host after the
+/// `@`). An address with a backslash, a space or a control character is refused for the same
+/// reason.
+pub async fn check_media_url(raw: &str, resolver: &dyn HostResolver) -> Result<String, LinkError> {
+    if raw
+        .chars()
+        .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return Err(LinkError::BadScheme);
+    }
     let url = Url::parse(raw).map_err(|_| LinkError::BadScheme)?;
     check_scheme_and_host(&url)?;
-    check_host_resolves_public(&url, resolver).await
+    check_host_resolves_public(&url, resolver).await?;
+    Ok(url.to_string())
+}
+
+/// [`check_media_url`] for every input at the same time (a slow lookup does not add up). The
+/// first refusal in the order of the inputs wins.
+pub async fn check_media_urls(
+    raws: &[&str],
+    resolver: &dyn HostResolver,
+) -> Result<Vec<String>, LinkError> {
+    futures_util::future::join_all(raws.iter().map(|raw| check_media_url(raw, resolver)))
+        .await
+        .into_iter()
+        .collect()
 }
 
 /// A table instead of the DNS, for tests (a name that is not in it does not resolve).
@@ -228,6 +260,8 @@ pub async fn check_media_url(raw: &str, resolver: &dyn HostResolver) -> Result<(
 pub(crate) struct TableHostResolver {
     table: HashMap<String, Vec<IpAddr>>,
     lookups: std::sync::atomic::AtomicUsize,
+    timing_out: Vec<String>,
+    delay: Duration,
 }
 
 #[cfg(test)]
@@ -244,7 +278,21 @@ impl TableHostResolver {
                 })
                 .collect(),
             lookups: std::sync::atomic::AtomicUsize::new(0),
+            timing_out: Vec::new(),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// A name whose lookup times out.
+    pub(crate) fn timing_out(mut self, host: &str) -> Self {
+        self.timing_out.push(host.to_string());
+        self
+    }
+
+    /// Every lookup takes this long.
+    pub(crate) fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     pub(crate) fn lookups(&self) -> usize {
@@ -258,6 +306,12 @@ impl HostResolver for TableHostResolver {
     async fn lookup(&self, host: &str) -> std::io::Result<Vec<IpAddr>> {
         self.lookups
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        if self.timing_out.iter().any(|h| h == host) {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
         self.table
             .get(host)
             .cloned()
@@ -871,7 +925,7 @@ mod tests {
         let r = table();
         assert_eq!(
             check_media_url("https://cdn.example/v.mp4", &r).await,
-            Ok(())
+            Ok("https://cdn.example/v.mp4".to_string())
         );
         assert_eq!(
             check_media_url("http://192.168.0.5/v.mp4", &r).await,
@@ -889,6 +943,95 @@ mod tests {
             check_media_url("C:\\secret.mp4", &r).await,
             Err(LinkError::BadScheme)
         );
+    }
+
+    /// WHATWG reads `\` as a path separator; ffmpeg connects to the host after the `@`. The
+    /// checked address and the one handed over must be the same text.
+    #[tokio::test]
+    async fn a_backslash_cannot_hide_the_real_host_of_the_media() {
+        let r = table();
+        for raw in [
+            r"http://93.184.216.34\@192.168.1.1/v.mp4",
+            r"http://user\@192.168.1.1/v.mp4",
+            r"http://127.0.0.2:9\@127.0.0.1:9/v.mp4",
+            r"http://a@cdn.example\@127.0.0.1/v.mp4",
+            "http://cdn.example/a b.mp4\n",
+        ] {
+            assert_eq!(
+                check_media_url(raw, &r).await,
+                Err(LinkError::BadScheme),
+                "{raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_media_address_handed_to_ffmpeg_is_the_checked_serialisation() {
+        let r = table();
+        assert_eq!(
+            check_media_url("HTTPS://CDN.Example", &r).await,
+            Ok("https://cdn.example/".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn single_label_hosts_and_repeated_dots_are_local() {
+        for raw in [
+            "http://nas/x",
+            "http://printer./x",
+            "http://localhost../x",
+            "http://router.local../x",
+        ] {
+            assert_eq!(
+                check(raw, LinkMode::All).await,
+                Err(LinkError::LocalAddress),
+                "{raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_times_out_fails_closed_a_missing_name_passes() {
+        let r = table().timing_out("slow.example");
+        let url = url("https://slow.example/x");
+        assert_eq!(
+            check_host_resolves_public(&url, &r).await,
+            Err(LinkError::LookupFailed)
+        );
+        assert_eq!(
+            check_media_url("https://slow.example/x", &r).await,
+            Err(LinkError::LookupFailed)
+        );
+        assert_eq!(
+            check_media_url("https://nowhere.example/x", &r).await,
+            Ok("https://nowhere.example/x".to_string())
+        );
+        assert_eq!(LinkError::LookupFailed.code(), "lookup_failed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_inputs_are_checked_at_the_same_time() {
+        let r = table().with_delay(Duration::from_secs(5));
+        let started = tokio::time::Instant::now();
+        let out = check_media_urls(
+            &[
+                "https://cdn.example/v.mp4",
+                "https://cdn.example/a.m4a",
+                "https://youtu.be/x",
+            ],
+            &r,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 3);
+        assert!(
+            started.elapsed() < Duration::from_secs(6),
+            "{:?}",
+            started.elapsed()
+        );
+        let bad =
+            check_media_urls(&["https://cdn.example/v.mp4", "http://192.168.0.5/x"], &r).await;
+        assert_eq!(bad, Err(LinkError::LocalAddress));
     }
 
     #[test]

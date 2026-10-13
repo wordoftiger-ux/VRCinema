@@ -3813,6 +3813,22 @@ async fn a_refusal_of_the_address_does_not_use_up_the_limit() {
 }
 
 #[tokio::test]
+async fn a_name_whose_lookup_times_out_is_refused_in_the_viewers_language() {
+    let h = Harness::with_state(config(), |s| {
+        s.with_host_resolver(Arc::new(host_table().timing_out("slow.example")))
+    });
+    let (code, error) = refused(&h, "https://slow.example/x", "1.1.1.1").await;
+    assert_eq!(code, "lookup_failed");
+    assert_eq!(
+        error,
+        "Nie udało się w porę sprawdzić adresu tej strony. Spróbuj za chwilę."
+    );
+    // A single-word name is the owner's network.
+    let (code, _) = refused(&h, "http://nas/x", "1.1.1.2").await;
+    assert_eq!(code, "local_address");
+}
+
+#[tokio::test]
 async fn the_owner_adds_links_to_the_local_network_in_every_mode() {
     for mode in LinkMode::ALL {
         let h = Harness::new();

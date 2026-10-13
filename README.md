@@ -155,9 +155,16 @@ The owner can add anything yt-dlp supports, live streams, YouTube playlists and 
 
 The link mode (`linkMode` in the channel settings) is `all` (any site; the default for a new database), `allowlist` (only the listed sites and their subdomains; what an existing database becomes, with the list it had) or `blocklist` (every site except the listed ones). Both lists are always kept.
 
-In every mode, a link from a viewer must be `http` or `https` and must not point into your own network: `localhost`, `*.local`, `*.lan`, `*.home.arpa` and `*.internal` names are refused, and so is any name that resolves to a loopback, private (RFC 1918, `fc00::/7`), link-local, CGNAT (`100.64.0.0/10`), multicast or otherwise reserved address (also an IPv4 address written inside an IPv6 one). The address of the video that yt-dlp finds for the link is checked the same way before ffmpeg gets it. Links added by the owner are never limited.
+In every mode, a link from a viewer must be `http` or `https` and must not point into your own network: `localhost`, `*.local`, `*.lan`, `*.home.arpa`, `*.internal` and single-word names such as `nas` are refused, and so is any name that resolves to a loopback, private (RFC 1918, `fc00::/7`), link-local, CGNAT (`100.64.0.0/10`), multicast or otherwise reserved address (also an IPv4 address written inside an IPv6 one). A name whose lookup times out is refused too. The check runs when the link arrives and again when the video starts (the name may have changed). The address of the video that yt-dlp finds is checked the same way and ffprobe and ffmpeg are given exactly the checked address, never the text yt-dlp wrote; an address with a backslash, a space or a control character is refused. Links added by the owner are never limited.
 
-Known limit: the name is looked up when the link arrives and again for the final video address, but yt-dlp's own redirects in between, and a name that changes its answer between the checks, are not checked.
+Known limits (what is checked is the address, not what happens after it is fetched):
+
+- yt-dlp's own redirects, and ffmpeg's HTTP redirects (a public video address that answers 302 to a page on your network), are not checked.
+- A playlist or manifest (HLS, DASH) on a public address may list segments on your network; ffmpeg follows them.
+- A name that changes its answer between the check and the fetch (DNS rebinding) is not caught.
+- What a page on your network says can leak: through yt-dlp's generic extractor the title or the error text of such a page could show up as a queue title or an item error.
+
+If your network matters more than convenience, use the `allowlist` mode with sites you trust.
 
 `.env` options are documented in [.env.example](.env.example). They cover the GPU encoder (`VIDEO_ENCODER=h264_nvenc`), YouTube cookies (`YTDLP_COOKIES`), a pixeldrain API key, and paths.
 

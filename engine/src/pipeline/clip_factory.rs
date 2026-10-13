@@ -24,7 +24,7 @@ use crate::pipeline::ticker::{
     prepare_after_s, window_budget_px,
 };
 use crate::resolver::MediaResolver;
-use crate::rules::{HostResolver, check_media_url};
+use crate::rules::{HostResolver, LinkError, check_media_url, check_media_urls};
 use crate::stats::{ClipStats, ProbeSummary, StreamMode};
 
 /// Retries when removing a clip directory (Windows may hold a file lock for a moment).
@@ -61,6 +61,9 @@ pub struct ClipFactoryDeps {
     pub public_url: LiveValue<String>,
     /// Looks up the host of the media a viewer's link led to (the home-network protection).
     pub host_resolver: Arc<dyn HostResolver>,
+    /// Whether the media of a viewer's link is checked (always, but with the fake resolver of
+    /// the black-box tests, whose media are local files).
+    pub check_viewer_media: bool,
 }
 
 /// Log entry written when a clip starts.
@@ -675,18 +678,28 @@ async fn start_clip(
     attempt: u32,
     ahead: bool,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
-    let stream = d
-        .resolver
-        .resolve(&item.source_url)
-        .await
-        .map_err(|e| e.0)?;
-    // What a viewer's link led to must not be the owner's network; checked before ffprobe or
-    // ffmpeg touch it. The owner's own films are not limited.
-    if item.added_by == AddedBy::Public {
-        for input in &stream.inputs {
-            check_media_url(&input.url, d.host_resolver.as_ref())
-                .await
-                .map_err(|e| Msg::error(e.code()))?;
+    let viewer = item.added_by == AddedBy::Public && d.check_viewer_media;
+    let refused = |e: LinkError| Msg::error(e.code());
+    // A viewer's link is looked up again now (yt-dlp fetches it anew): its name may have started
+    // to point into the owner's network since the request. The owner's films are not limited.
+    let source = if viewer {
+        check_media_url(&item.source_url, d.host_resolver.as_ref())
+            .await
+            .map_err(refused)?
+    } else {
+        item.source_url.clone()
+    };
+    let mut stream = d.resolver.resolve(&source).await.map_err(|e| e.0)?;
+    if viewer {
+        // What the link led to must not be the owner's network, and the programs get exactly the
+        // address that was checked (not the text the extractor wrote, which they could read
+        // differently), before ffprobe or ffmpeg touch it.
+        let raw: Vec<&str> = stream.inputs.iter().map(|i| i.url.as_str()).collect();
+        let checked = check_media_urls(&raw, d.host_resolver.as_ref())
+            .await
+            .map_err(refused)?;
+        for (input, url) in stream.inputs.iter_mut().zip(checked) {
+            input.url = url;
         }
     }
     let info = probe_video(&d.ffprobe_path, &stream.inputs)
@@ -1017,6 +1030,7 @@ mod tests {
             font_file,
             public_url: crate::live::LiveValue::new("https://kanal.example.com".to_string()),
             host_resolver: Arc::new(crate::rules::TableHostResolver::new(&[])),
+            check_viewer_media: true,
         });
         Fixture {
             _dir: dir,
@@ -1085,14 +1099,22 @@ mod tests {
             font_file: default_font(),
             public_url: crate::live::LiveValue::new(String::new()),
             host_resolver: Arc::new(hosts),
+            check_viewer_media: true,
         })
     }
 
     async fn start_error(factory: &RealClipFactory, added_by: AddedBy) -> Msg {
-        let item = QueueItem {
-            added_by,
-            ..item(1, "Test")
-        };
+        start_error_of(
+            factory,
+            QueueItem {
+                added_by,
+                ..item(1, "Test")
+            },
+        )
+        .await
+    }
+
+    async fn start_error_of(factory: &RealClipFactory, item: QueueItem) -> Msg {
         factory
             .create(item, 0.0, 0)
             .await
@@ -1106,6 +1128,9 @@ mod tests {
             "http://192.168.0.5/v.mp4",
             "https://evil.example/v.m3u8",
             "file:///C:/secret.mp4",
+            // The URL standard reads the backslash as the end of the host; ffmpeg does not.
+            r"http://93.184.216.34\@192.168.1.1/v.mp4",
+            r"http://user\@192.168.1.1/v.mp4",
         ] {
             let factory = factory_for_media(vec![url]);
             let err = start_error(&factory, AddedBy::Public).await;
@@ -1137,14 +1162,45 @@ mod tests {
             AddedBy::Admin,
         )
         .await;
-        assert_ne!(err.code(), Some("local_address"), "{err:?}");
+        assert_eq!(err.render(Lang::En), "program not found", "{err:?}");
         // A public address passes the check as well.
         let err = start_error(
             &factory_for_media(vec!["https://cdn.example/v.mp4"]),
             AddedBy::Public,
         )
         .await;
-        assert_ne!(err.code(), Some("local_address"), "{err:?}");
+        assert_eq!(err.render(Lang::En), "program not found", "{err:?}");
+    }
+
+    /// The viewer's own link is looked up again when the film starts: yt-dlp fetches it anew, and
+    /// the name may point into the owner's network by now. The owner's link is not looked up.
+    #[tokio::test]
+    async fn the_name_of_the_viewers_link_is_looked_up_again_before_the_resolver_runs() {
+        let factory = factory_for_media(vec!["https://cdn.example/v.mp4"]);
+        let with_source = |added_by, source: &str| QueueItem {
+            added_by,
+            source_url: source.into(),
+            ..item(1, "Test")
+        };
+        let err = start_error_of(
+            &factory,
+            with_source(AddedBy::Public, "https://evil.example/watch?v=1"),
+        )
+        .await;
+        assert_eq!(err.code(), Some("local_address"), "{err:?}");
+        let err = start_error_of(
+            &factory,
+            with_source(AddedBy::Public, "http://nas/watch?v=1"),
+        )
+        .await;
+        assert_eq!(err.code(), Some("local_address"), "{err:?}");
+        // The same name for the owner is not looked at.
+        let err = start_error_of(
+            &factory,
+            with_source(AddedBy::Admin, "https://evil.example/watch?v=1"),
+        )
+        .await;
+        assert_eq!(err.render(Lang::En), "program not found", "{err:?}");
     }
 
     async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {
