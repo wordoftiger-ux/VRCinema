@@ -6,6 +6,7 @@ mod hooks;
 mod tray;
 mod window;
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -67,6 +68,8 @@ pub struct Shell {
     pub hidden_notice_shown: AtomicBool,
     /// The port of the server the window was last pointed at.
     window_port: Mutex<Option<u16>>,
+    /// The engine's ports whose page may use the window commands (see `window`).
+    controls_ports: Mutex<BTreeSet<u16>>,
     /// The app's data folder (`%LOCALAPPDATA%\VRCinema` or `VRCINEMA_HOME`).
     pub home: PathBuf,
 }
@@ -79,6 +82,7 @@ impl Shell {
             quitting: AtomicBool::new(false),
             hidden_notice_shown: AtomicBool::new(false),
             window_port: Mutex::new(None),
+            controls_ports: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -102,6 +106,12 @@ impl Shell {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
+
+    pub fn controls_ports(&self) -> MutexGuard<'_, BTreeSet<u16>> {
+        self.controls_ports
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Stops the engine (the channel and its processes), then ends the program; with `relaunch`
@@ -111,6 +121,8 @@ pub fn quit(app: &AppHandle, relaunch: Option<PathBuf>) {
     if shell.quitting.swap(true, Ordering::SeqCst) {
         return;
     }
+    // A move just before quitting may not be saved yet.
+    window::save_place(app);
     if let Some(w) = app.get_webview_window(window::MAIN) {
         let _ = w.hide();
     }

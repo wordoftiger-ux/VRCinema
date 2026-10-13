@@ -745,10 +745,12 @@ impl AppCore {
         }
         if let Err(e) = self.restart_server().await {
             self.log(Msg::new("log.restart_failed_reverting").arg_msg("error", error_msg(&e)));
-            // Back to what worked (autostart was already changed in Windows: keep it).
+            // Back to what worked (autostart was already changed in Windows: keep it; the
+            // window's place is not a setting of this change).
             let _ = self.update_settings(|s| {
                 *s = AppSettings {
                     autostart: s.autostart,
+                    window: s.window,
                     ..old.clone()
                 }
             });
@@ -1242,6 +1244,21 @@ impl AppEngine {
     /// while it is enabled (empty while it has none), else the manual one. The tray's links.
     pub fn public_url(&self) -> String {
         self.core.live_settings.public_url.get()
+    }
+
+    /// Where the window was when it was last placed (`None`: never saved).
+    pub fn window_state(&self) -> Option<crate::app_settings::WindowState> {
+        self.core.settings().window
+    }
+
+    /// Keeps the window's place in `config.json` (written only when it changed).
+    pub fn save_window_state(&self, state: crate::app_settings::WindowState) -> anyhow::Result<()> {
+        if self.core.settings().window == Some(state) {
+            return Ok(());
+        }
+        self.core
+            .update_settings(|s| s.window = Some(state))
+            .map(|_| ())
     }
 
     /// The app's language now.

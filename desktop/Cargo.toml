@@ -27,6 +27,8 @@ tokio = { version = "1.53.2", features = ["sync", "time", "net"] }
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["rt", "macros"] }
+# The mock runtime: the window commands' permissions are checked without a window.
+tauri = { version = "2", features = ["tray-icon", "test"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }

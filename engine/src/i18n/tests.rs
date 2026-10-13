@@ -560,3 +560,160 @@ fn every_code_of_the_permanent_link_wizard_has_a_message() {
         assert!(dicts()[index(Lang::En)].contains_key(&key), "{key}");
     }
 }
+
+// ---------- Keys used by the new interface (public/app) ----------
+
+/// Namespaces of the interface's own keys: a literal `"<namespace>.…"` in its code is a key.
+const UI_NAMESPACES: [&str; 6] = ["nav", "net", "player", "shortcuts", "titlebar", "ui"];
+
+/// The string literals of a JavaScript source (quotes, apostrophes and backticks), comments
+/// skipped.
+fn js_literals(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+        } else if matches!(c, '\'' | '"' | '`') {
+            let mut literal = String::new();
+            i += 1;
+            while i < chars.len() && chars[i] != c {
+                if chars[i] == '\\' {
+                    i += 1;
+                }
+                if let Some(&ch) = chars.get(i) {
+                    literal.push(ch);
+                }
+                i += 1;
+            }
+            out.push(literal);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_key_text(s: &str) -> bool {
+    s.contains('.')
+        && !s.starts_with('.')
+        && !s.ends_with('.')
+        && !s.contains("..")
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
+}
+
+/// Keys named in the interface's code: literals of a UI namespace, and the first argument of
+/// `t('…'` / `tn('…'` whatever its namespace (`errors.…` too).
+fn ui_keys_in(text: &str) -> BTreeSet<String> {
+    let mut keys: BTreeSet<String> = js_literals(text)
+        .into_iter()
+        .filter(|s| is_key_text(s))
+        .filter(|s| {
+            UI_NAMESPACES
+                .iter()
+                .any(|ns| s.starts_with(&format!("{ns}.")))
+        })
+        .collect();
+    for call in ["t(", "tn("] {
+        for (at, _) in text.match_indices(call) {
+            let before = text[..at].chars().next_back();
+            if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+                continue; // `split(`, `obj.t(`
+            }
+            let rest = &text[at + call.len()..];
+            let Some(quote) = rest.chars().next().filter(|q| matches!(q, '\'' | '"')) else {
+                continue;
+            };
+            if let Some(end) = rest[1..].find(quote) {
+                let key = &rest[1..1 + end];
+                if is_key_text(key) {
+                    keys.insert(key.to_string());
+                }
+            }
+        }
+    }
+    keys
+}
+
+fn js_sources(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            js_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "js") {
+            out.push((path.clone(), std::fs::read_to_string(&path).unwrap()));
+        }
+    }
+}
+
+#[test]
+fn the_interface_key_scanner_finds_keys_in_code_but_not_in_comments() {
+    let code = r#"
+        // 'player.in_a_comment' is not used
+        /* "nav.neither" */
+        const items = [{ label: 'player.restart' }, { label: "nav.history" }];
+        html`<b>${t('errors.live_item')}</b> ${tn("ui.videos", 3)}`;
+        const s = `titlebar.close`;
+        const notKey = 'player.';
+        const other = 'tunnel.online';
+        path.split('.');
+        const msg = "it's fine";
+        const url = 'app.html';
+    "#;
+    assert_eq!(
+        ui_keys_in(code),
+        [
+            "errors.live_item",
+            "nav.history",
+            "player.restart",
+            "titlebar.close",
+            "ui.videos",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    );
+}
+
+#[test]
+fn every_key_the_new_interface_uses_is_in_english_and_polish() {
+    let mut sources = Vec::new();
+    js_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../public/app"),
+        &mut sources,
+    );
+    let mut used = BTreeSet::new();
+    for (path, text) in &sources {
+        for key in ui_keys_in(text) {
+            used.insert((key, path.display().to_string()));
+        }
+    }
+    assert!(
+        used.len() > 20,
+        "the scanner found only {} keys",
+        used.len()
+    );
+    for lang in [Lang::En, Lang::Pl] {
+        let dict = &dicts()[index(lang)];
+        for (key, path) in &used {
+            assert!(
+                dict.contains_key(key),
+                "{}.json: no key {key} (used in {path})",
+                lang.as_str()
+            );
+        }
+    }
+}

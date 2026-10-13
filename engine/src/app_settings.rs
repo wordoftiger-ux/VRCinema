@@ -47,6 +47,26 @@ pub struct AppSettings {
     /// or `ja`. A file without it (or with an unknown one) gets the language of Windows.
     #[serde(with = "lang_setting")]
     pub language: Lang,
+    /// Where the window was and how big (the window shell keeps it; `None`: centred, default
+    /// size). A damaged entry reads as `None` (it never costs the other settings).
+    #[serde(deserialize_with = "lenient_window")]
+    pub window: Option<WindowState>,
+}
+
+fn lenient_window<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<WindowState>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// `window` in `config.json`: the window's place in physical pixels — its outer position and
+/// inner size while not maximised — and whether it was maximised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub maximized: bool,
 }
 
 /// `tunnelMode` in `config.json`: `"quick"` or `"named"` (anything else reads as quick).
@@ -110,6 +130,7 @@ impl Default for AppSettings {
             pause_on_tunnel_loss: true,
             pause_when_no_viewers: false,
             language: Lang::En,
+            window: None,
         }
     }
 }
@@ -448,6 +469,52 @@ mod tests {
             AppSettings::load_with(tmp.path(), Lang::De).0.language,
             Lang::De
         );
+    }
+
+    #[test]
+    fn the_window_state_round_trips_and_is_absent_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = AppSettings::load_with(tmp.path(), Lang::En);
+        assert_eq!(s.window, None);
+        s.window = Some(WindowState {
+            x: -1200,
+            y: 40,
+            w: 1500,
+            h: 900,
+            maximized: true,
+        });
+        s.save(tmp.path()).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(tmp.path().join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved["window"],
+            serde_json::json!({"x": -1200, "y": 40, "w": 1500, "h": 900, "maximized": true})
+        );
+        assert_eq!(AppSettings::load_with(tmp.path(), Lang::En).0, s);
+    }
+
+    /// A damaged `window` entry costs the window's place, never the other settings.
+    #[test]
+    fn a_damaged_window_state_is_dropped_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        for window in [
+            "\"duże\"",
+            "{\"x\": 1}",
+            "{\"x\": 1.5, \"y\": 0, \"w\": 100, \"h\": 100, \"maximized\": false}",
+            "{\"x\": 0, \"y\": 0, \"w\": -5, \"h\": 100, \"maximized\": false}",
+            "null",
+        ] {
+            std::fs::write(
+                tmp.path().join("config.json"),
+                format!("{{\"port\": 8123, \"window\": {window}}}"),
+            )
+            .unwrap();
+            let (s, warning) = AppSettings::load_with(tmp.path(), Lang::En);
+            assert!(warning.is_none(), "{window}: {warning:?}");
+            assert_eq!(s.port, 8123, "{window}");
+            assert_eq!(s.window, None, "{window}");
+        }
     }
 
     #[test]

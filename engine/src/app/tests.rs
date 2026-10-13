@@ -856,6 +856,41 @@ async fn dropped_files_are_queued_and_the_tray_helpers_work_without_a_channel() 
     app.stop().await;
 }
 
+/// The window shell keeps the window's place through the engine: saved in `config.json`, still
+/// there after a settings change from the window, read back at the next start.
+#[tokio::test]
+async fn the_window_state_is_saved_and_survives_other_settings_changes() {
+    let app = App::start().await;
+    assert_eq!(app.engine().window_state(), None);
+    let state = crate::app_settings::WindowState {
+        x: 120,
+        y: -8,
+        w: 1400,
+        h: 860,
+        maximized: false,
+    };
+    app.engine().save_window_state(state).unwrap();
+    assert_eq!(app.engine().window_state(), Some(state));
+    assert_eq!(
+        app.saved()["window"],
+        json!({"x": 120, "y": -8, "w": 1400, "h": 860, "maximized": false})
+    );
+    let cookie = app.window_cookie().await;
+    let res = app
+        .http
+        .put(app.url("/api/desktop/config"))
+        .header("cookie", &cookie)
+        .json(&json!({"pauseWhenNoViewers": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(app.saved()["pauseWhenNoViewers"], true);
+    assert_eq!(app.engine().window_state(), Some(state));
+    assert_eq!(app.saved()["window"]["w"], 1400);
+    app.stop().await;
+}
+
 // ---------- Tools ----------
 
 #[tokio::test]

@@ -4,11 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Panel kanału</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
 </head>
 <body>
 <main>
@@ -281,6 +277,7 @@
 </main>
 
 <script type="module">
+  import Hls from '/static/vendor/hls.mjs';
   import { api, el, fmtTime, renderMonitor, setupCopy, notice, isAppWindow } from '/static/common.js';
 
   const $ = (id) => document.getElementById(id);
@@ -332,7 +329,7 @@
   let hls = null;
   function startPreview() {
     const src = '/live/main.m3u8';
-    if (window.Hls && Hls.isSupported()) {
+    if (Hls.isSupported()) {
       hls = new Hls({ liveSyncDurationCount: 3 });
       hls.loadSource(src);
       hls.attachMedia(video);

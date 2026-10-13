@@ -2074,6 +2074,39 @@ async fn serves_static_files_and_favicon() {
     assert!(fav.body.is_empty());
 }
 
+/// The new player interface (stage 4) is served at `/app` until it replaces `/admin`; its
+/// modules and the bundled libraries come from `/static` with a JavaScript type (`.mjs` too:
+/// browsers refuse module scripts of any other type).
+#[tokio::test]
+async fn serves_the_new_interface_and_its_libraries() {
+    let h = Harness::new();
+    let app = h.send(get("/app")).await;
+    assert_eq!(app.status, StatusCode::OK);
+    assert_eq!(app.header("content-type"), "text/html; charset=utf-8");
+    assert_eq!(
+        app.body,
+        std::fs::read(repo_public_dir().join("app.html")).unwrap()
+    );
+    assert!(String::from_utf8_lossy(&app.body).contains("/static/app/main.js"));
+    for path in [
+        "/static/app/main.js",
+        "/static/vendor/preact.mjs",
+        "/static/vendor/hls.mjs",
+    ] {
+        let r = h.send(get(path)).await;
+        assert_eq!(r.status, StatusCode::OK, "{path}");
+        assert_eq!(
+            r.header("content-type"),
+            "application/javascript; charset=utf-8",
+            "{path}"
+        );
+    }
+    let css = h.send(get("/static/app/theme.css")).await;
+    assert_eq!(css.header("content-type"), "text/css; charset=utf-8");
+    let en = h.send(get("/static/locales/en.json")).await;
+    assert_eq!(en.header("content-type"), "application/json; charset=utf-8");
+}
+
 #[tokio::test]
 async fn unknown_routes_are_404_like_fastify() {
     let h = Harness::new();
