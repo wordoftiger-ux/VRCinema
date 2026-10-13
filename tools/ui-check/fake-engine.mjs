@@ -2,7 +2,7 @@
 // serves public/ like the engine (/static/…, /app) and answers the panel's API from a scenario
 // in memory, recording every API request. Never port 8080.
 //
-//   node tools/ui-check/fake-engine.mjs [port]      (default 8193)
+//   [FAKE_HLS_DIR=<folder>] node tools/ui-check/fake-engine.mjs [port]      (default 8193)
 //
 // Test hooks (not engine routes): GET /__test/requests, POST /__test/reset,
 // POST /__test/scenario {language, playing: 'film'|'live'|'none', canSeek, positionApprox,
@@ -10,6 +10,11 @@
 // answers with), panelFail (the panel answers 500), panelDelayMs, patchDelayMs, signedOut, remote, tunnel}. The queue lives in memory: POST …/items adds,
 // PATCH /api/admin/items/{id} moves ({position}) or decides ({action}), DELETE removes.
 // GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
+// Stats route (GET /api/admin/channels/main/stats): scenario `stats` is 'full' (default) or
+// 'nulls' (every group null, as when nothing plays). The preview's stream (/live/main.m3u8
+// and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
+// playlist is served without EXT-X-ENDLIST so the player treats it as live); the scenario
+// `hls: false` makes it 404.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -25,7 +30,7 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-export function startFakeEngine(port = 8193) {
+export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
   if (port === 8080) throw new Error('never port 8080');
   let requests = [];
   let s;
@@ -77,6 +82,8 @@ export function startFakeEngine(port = 8193) {
       pauseReasons: [],
       positionS: 92,
       durationS: 213,
+      stats: 'full',
+      hls: true,
     };
     s.queue = initialQueue();
     s.pendingItems = [];
@@ -133,6 +140,39 @@ export function startFakeEngine(port = 8193) {
     };
   }
 
+  const statsAnswer = () =>
+    s.stats === 'nulls'
+      ? { onAir: null, hls: null, next: null, ffmpeg: null, viewers: { watching: 0, fetchesPerMin: 0, bytesPerS: 0, history: new Array(60).fill(0) }, tunnel: null }
+      : {
+          onAir: {
+            title: 'Never Gonna Give You Up',
+            source: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+            positionS: s.positionS,
+            attempt: 1,
+            probe: { codec: 'h264', height: 1080, fps: 25, pixFmt: 'yuv420p', hasAudio: true, durationS: 213 },
+            mode: 'copy',
+            encoder: null,
+            readySegments: 5,
+          },
+          hls: { sequence: 18342, window: 10, segmentS: 4, discontinuities: 37, lastPts: 1482900, dtsContinuous: true },
+          next: { title: 'Darude — Sandstorm', state: 'ready', readySegments: 3 },
+          ffmpeg: { pid: 18872, speed: 1.9, cpuPercent: null, rssBytes: 88080384 },
+          viewers: { watching: 4, fetchesPerMin: 58, bytesPerS: 1400000, history: Array.from({ length: 60 }, (_, i) => (i % 7) * 200000) },
+          tunnel: { state: 'online', onlineS: 4320, reconnects: 1, connections: 4, locations: ['waw01', 'fra02'] },
+        };
+
+  async function serveLive(res, name) {
+    if (!hlsDir || !s.hls || !/^(main\.m3u8|\d+\.ts)$/.test(name)) return json(res, 404, { error: 'Not Found' });
+    try {
+      let bytes = await readFile(join(hlsDir, name));
+      if (name.endsWith('.m3u8')) bytes = Buffer.from(bytes.toString('utf8').replace('#EXT-X-ENDLIST', ''));
+      res.writeHead(200, { 'content-type': name.endsWith('.ts') ? 'video/mp2t' : 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' });
+      res.end(bytes);
+    } catch {
+      json(res, 404, { error: 'Not Found' });
+    }
+  }
+
   function info() {
     return {
       version: '0.2.0',
@@ -179,6 +219,7 @@ export function startFakeEngine(port = 8193) {
       res.writeHead(204);
       return res.end();
     }
+    if (path.startsWith('/live/')) return serveLive(res, path.slice('/live/'.length));
     if (path.startsWith('/static/')) return serveFile(res, decodeURIComponent(path.slice('/static/'.length)));
     if (path === '/__test/requests') return json(res, 200, requests);
     if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight });
@@ -217,6 +258,7 @@ export function startFakeEngine(port = 8193) {
       panelInFlight -= 1;
       return json(res, 200, answer);
     }
+    if (path === `${base}/stats` && req.method === 'GET') return json(res, 200, statsAnswer());
     const itemRoute = path.match(/^\/api\/admin\/items\/(\d+)$/);
     if (itemRoute) {
       const id = Number(itemRoute[1]);
@@ -298,6 +340,6 @@ export function startFakeEngine(port = 8193) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv[1])) {
   const port = Number(process.argv[2] ?? 8193);
-  const { port: bound } = await startFakeEngine(port);
+  const { port: bound } = await startFakeEngine(port, { hlsDir: process.env.FAKE_HLS_DIR ?? null });
   console.log(`fake engine on http://127.0.0.1:${bound}/app`);
 }

@@ -24,6 +24,7 @@ import { DialogLayer, dialog, openDialog } from './components/dialog.js';
 import { DropZone } from './components/dropzone.js';
 import { pasteLink } from './components/addlink.js';
 import { ChannelView } from './views/channel.js';
+import { toggleStats } from './components/stats.js';
 
 // ---------- Keyboard shortcuts ----------
 
@@ -91,7 +92,8 @@ function onKeyDown(e) {
     if (can.canSeek) action = restart;
   } else if ((e.key === 'n' || e.key === 'N') && plain) {
     if (can.current) action = skip;
-  } else if (e.key === '?' && plain) action = openShortcuts;
+  } else if ((e.key === 'i' || e.key === 'I') && plain) action = toggleStats;
+  else if (e.key === '?' && plain) action = openShortcuts;
   if (!action) return;
   e.preventDefault();
   action();

@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
+import { makeTestStream } from './hls-fixture.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -27,7 +28,8 @@ function check(cond, what, detail) {
   console.log(`ok - ${what}`);
 }
 
-const engine = await startFakeEngine(port);
+const stream = await makeTestStream(); // the preview's stream (404s would count as errors)
+const engine = await startFakeEngine(port, { hlsDir: stream.dir });
 const base = `http://127.0.0.1:${port}`;
 const profile = mkdtempSync(join(tmpdir(), 'brave-ui-check-'));
 const ctx = await chromium.launchPersistentContext(profile, {
@@ -504,4 +506,5 @@ try {
   await ctx.close();
   rmSync(profile, { recursive: true, force: true });
   await engine.close();
+  stream.cleanup();
 }

@@ -27,6 +27,10 @@ export const tunnel = computed(() => info.value?.tunnel ?? null);
 export const session = signal('loading');
 /** A short message over the player bar: `{text, kind}` (`error` or `info`). */
 export const toast = signal(null);
+/** How far behind the server the preview plays, in seconds (measured by the preview); null: unknown. */
+export const previewDelayS = signal(null);
+/** Raised by every successful seek: the preview shows a bubble for a few seconds. */
+export const seekBubble = signal(0);
 
 let infoAvailable = true;
 // Panel changes made here (move, remove, approve) that have not finished, and when the last
@@ -203,9 +207,15 @@ export function togglePause() {
   if (!c) return Promise.resolve(false);
   return c.pauseReasons?.includes('manual') ? resume() : pause();
 }
-export const seekBy = (byS) => send('seek', { byS });
-export const seekTo = (toS) => send('seek', { toS: Math.max(0, toS) });
-export const restart = () => send('restart');
+/** A seek (or restart) the engine accepted: viewers see it after the preview's delay. */
+async function sought(action, body) {
+  const ok = await send(action, body);
+  if (ok) seekBubble.value += 1;
+  return ok;
+}
+export const seekBy = (byS) => sought('seek', { byS });
+export const seekTo = (toS) => sought('seek', { toS: Math.max(0, toS) });
+export const restart = () => sought('restart');
 export const playNow = (itemId) => send('play-now', { itemId });
 export async function skip() {
   try {
