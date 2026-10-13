@@ -3,12 +3,12 @@
 // only while it is open; "Copy" puts all of it on the clipboard as text.
 
 import { signal } from '/static/vendor/signals.mjs';
-import { useEffect, useState } from '/static/vendor/hooks.mjs';
+import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { api } from '../api.js';
-import { lang, t } from '../i18n.js';
+import { lang, t, tn } from '../i18n.js';
 import { Icon } from '../icons.js';
-import { control, tunnel } from '../store.js';
+import { control, showToast, tunnel } from '../store.js';
 import { copyText, formatTime } from './playerbar.js';
 
 const STATS = '/api/admin/channels/main/stats';
@@ -113,8 +113,8 @@ export function statGroups(data, own) {
         ]),
         row('stats.row_format', probe
           ? [
-              `${probe.height}p`,
-              t('stats.v_fps', { fps: num(probe.fps) }),
+              Number.isFinite(probe.height) ? `${probe.height}p` : null,
+              Number.isFinite(probe.fps) ? t('stats.v_fps', { fps: num(probe.fps) }) : null,
               probe.codec,
               probe.pixFmt,
               probe.hasAudio ? t('stats.v_audio') : t('stats.v_no_audio'),
@@ -124,7 +124,7 @@ export function statGroups(data, own) {
           onAir?.mode ? t(onAir.mode === 'copy' ? 'stats.v_mode_copy' : 'stats.v_mode_transcode') : null,
         ]),
         row('stats.row_buffer', [
-          onAir ? t('stats.v_ready', { count: onAir.readySegments, seconds: Number.isFinite(readyS) ? num(readyS) : '—' }) : null,
+          onAir ? tn('stats.v_ready', onAir.readySegments, { seconds: Number.isFinite(readyS) ? num(readyS) : '—' }) : null,
         ]),
       ],
     },
@@ -156,7 +156,7 @@ export function statGroups(data, own) {
         row('stats.row_video', [next?.title]),
         row('stats.row_next_state', [
           next ? t(NEXT_KEYS[next.state] ?? 'stats.v_next_failed') : null,
-          next ? t('stats.v_ready', { count: next.readySegments, seconds: hls ? num(next.readySegments * hls.segmentS) : '—' }) : null,
+          next ? tn('stats.v_ready', next.readySegments, { seconds: hls ? num(next.readySegments * hls.segmentS) : '—' }) : null,
         ]),
       ],
     },
@@ -217,7 +217,7 @@ export function statGroups(data, own) {
 /** All the groups as plain text (for "Copy"). */
 export function statsText(groups) {
   return groups
-    .map((g) => `${t(g.titleKey)}\n${g.rows.map((r) => `  ${t(r.labelKey)}: ${r.text}`).join('\n')}`)
+    .map((g) => `${t(g.titleKey)}\n${g.rows.map((r) => `  ${t(r.labelKey)}: ${r.text}${r.bars ? ` [${r.bars.join(' ')}]` : ''}`).join('\n')}`)
     .join('\n\n');
 }
 
@@ -259,10 +259,18 @@ export function StatsOverlay({ delayS }) {
   const data = useStats();
   const [copied, setCopied] = useState(false);
   const groups = statGroups(data, { delayS, ...previewStats.value });
+  const timer = useRef(0);
+  useEffect(() => () => clearTimeout(timer.current), []);
   const copy = async () => {
-    await copyText(statsText(groups));
+    try {
+      await copyText(statsText(groups));
+    } catch (e) {
+      showToast(e.message);
+      return;
+    }
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setCopied(false), 1500);
   };
   return html`
     <section class="stats" role="region" aria-label=${t('stats.title')}>

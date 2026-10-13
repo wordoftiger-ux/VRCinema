@@ -2,8 +2,10 @@
 // viewers get it) played with hls.js, so the owner sees what VRChat sees and how far behind
 // the server it is. The delay is measured here once a second (`previewDelayS`) and drives the
 // caption under the preview and the bubble after a seek. A right click opens the preview menu;
-// the "Stats for nerds" overlay sits on top of the picture.
+// the "Stats for nerds" overlay sits on top of the picture. While the window is hidden
+// (minimised, in the tray) the preview stops loading, so it does not count as a viewer.
 
+import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import Hls from '/static/vendor/hls.mjs';
 import { html } from '../html.js';
@@ -25,6 +27,16 @@ const SOURCE = '/live/main.m3u8';
 const MEASURE_EVERY_MS = 1000;
 const RETRY_AFTER_MS = 3000;
 const BUBBLE_MS = 5000;
+/** Immediate recoveries from a media error, then the stream is rebuilt. */
+const MAX_MEDIA_RECOVERIES = 2;
+/** Rebuilds in a row (without healthy playback in between) before the preview gives up. */
+const MAX_RETRIES = 4;
+
+/** The preview gave up after several tries: shows "Preview unavailable" and a retry button. */
+export const previewFailed = signal(false);
+
+/** The last delay that was really measured (the bubble falls back to it). */
+let lastGoodDelayS = null;
 
 /** The seconds buffered ahead of the playing position (0 with nothing buffered there). */
 function bufferedAhead(video) {
@@ -38,89 +50,156 @@ function bufferedAhead(video) {
 }
 
 /**
- * Plays the channel in `video` until the returned function is called. A stream that cannot be
- * read (the channel is starting, the network dropped) is tried again every few seconds.
+ * Plays the channel in `video`. Returns `{stop, retry}`. A stream that cannot be read (the
+ * channel is starting, the network dropped) is tried again every few seconds, a few times;
+ * then `previewFailed` is raised until `retry()`.
  */
 function play(video) {
   let hls = null;
-  let retry = 0;
+  let timer = 0;
   let stopped = false;
+  let waitingForVisible = false;
+  let mediaRecoveries = 0;
+  let retries = 0;
+  let lastTime = -1;
 
   const start = () => {
     if (stopped) return;
+    if (document.hidden) {
+      waitingForVisible = true;
+      return;
+    }
     hls = new Hls({ lowLatencyMode: false });
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       // A browser may refuse sound before the first click: play muted rather than not at all.
       video.play().catch(() => {
+        previewMuted.value = true;
         video.muted = true;
         video.play().catch(() => {});
       });
     });
     hls.on(Hls.Events.ERROR, (_event, error) => {
       if (!error.fatal) return;
-      if (error.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      if (error.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < MAX_MEDIA_RECOVERIES) {
+        mediaRecoveries += 1;
         hls.recoverMediaError();
         return;
       }
       hls.destroy();
       hls = null;
-      retry = setTimeout(start, RETRY_AFTER_MS);
+      if (retries >= MAX_RETRIES) {
+        previewFailed.value = true;
+        return;
+      }
+      retries += 1;
+      timer = setTimeout(start, RETRY_AFTER_MS);
     });
     hls.loadSource(SOURCE);
     hls.attachMedia(video);
   };
   start();
 
+  const onVisibility = () => {
+    if (document.hidden) {
+      hls?.stopLoad();
+      video.pause();
+    } else if (waitingForVisible) {
+      waitingForVisible = false;
+      start();
+    } else if (hls) {
+      hls.startLoad();
+      video.play().catch(() => {});
+    }
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+
   const measure = setInterval(() => {
-    const ready = hls && video.readyState >= 2;
-    previewDelayS.value = ready && Number.isFinite(hls.latency) ? hls.latency : null;
+    const alive = Boolean(hls) && video.readyState >= 2 && !document.hidden;
+    if (!alive) {
+      previewDelayS.value = null;
+      previewStats.value = { bufferS: null, dropped: null };
+      return;
+    }
+    const advancing = !video.paused && !video.seeking;
+    if (advancing) {
+      // hls.js reports 0 (or NaN) while it does not know: that is no measurement.
+      const latency = hls.latency;
+      if (Number.isFinite(latency) && latency > 0) {
+        lastGoodDelayS = latency;
+        previewDelayS.value = latency;
+      } else {
+        previewDelayS.value = null;
+      }
+      // Healthy playback: the counters start again.
+      if (video.currentTime > lastTime + 0.5) {
+        mediaRecoveries = 0;
+        retries = 0;
+      }
+    }
+    lastTime = video.currentTime;
     previewStats.value = {
-      bufferS: ready ? bufferedAhead(video) : null,
-      dropped: ready ? (video.getVideoPlaybackQuality?.().droppedVideoFrames ?? null) : null,
+      bufferS: bufferedAhead(video),
+      dropped: video.getVideoPlaybackQuality?.().droppedVideoFrames ?? null,
     };
   }, MEASURE_EVERY_MS);
 
-  return () => {
-    stopped = true;
-    clearInterval(measure);
-    clearTimeout(retry);
-    hls?.destroy();
-    previewDelayS.value = null;
-    previewStats.value = { bufferS: null, dropped: null };
+  return {
+    retry() {
+      clearTimeout(timer);
+      hls?.destroy();
+      hls = null;
+      mediaRecoveries = 0;
+      retries = 0;
+      previewFailed.value = false;
+      start();
+    },
+    stop() {
+      stopped = true;
+      clearInterval(measure);
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      hls?.destroy();
+      previewDelayS.value = null;
+      previewStats.value = { bufferS: null, dropped: null };
+      previewFailed.value = false;
+      lastGoodDelayS = null;
+    },
   };
 }
 
-/** The bubble that follows a seek: when the viewers will see it. */
+/** The bubble that follows a seek: when the viewers will see it (fixed when the seek happens). */
 function SeekBubble() {
   const count = seekBubble.value;
   const seen = useRef(count);
-  const [shown, setShown] = useState(false);
+  const [bubble, setBubble] = useState(null);
   useEffect(() => {
     if (count === seen.current) return undefined;
     seen.current = count;
-    setShown(true);
-    const timer = setTimeout(() => setShown(false), BUBBLE_MS);
+    const delay = previewDelayS.peek() ?? lastGoodDelayS;
+    setBubble({ seconds: Number.isFinite(delay) ? Math.max(1, Math.round(delay)) : null });
+    const timer = setTimeout(() => setBubble(null), BUBBLE_MS);
     return () => clearTimeout(timer);
   }, [count]);
-  if (!shown) return null;
-  const delay = previewDelayS.value;
-  const text = Number.isFinite(delay)
-    ? t('preview.seek_bubble', { seconds: Math.max(1, Math.round(delay)) })
-    : t('preview.seek_bubble_unknown');
+  if (!bubble) return null;
+  const text = bubble.seconds === null
+    ? t('preview.seek_bubble_unknown')
+    : t('preview.seek_bubble', { seconds: bubble.seconds });
   return html`<div class="seek-bubble" role="status">⏩ ${text}</div>`;
 }
 
 export function Preview() {
   const video = useRef(null);
+  const player = useRef(null);
   const volume = previewVolume.value;
   const muted = previewMuted.value || volume === 0;
   const delay = previewDelayS.value;
 
   useEffect(() => {
     previewShown.value = true;
-    const stop = Hls.isSupported() ? play(video.current) : () => {};
+    if (Hls.isSupported()) player.current = play(video.current);
     return () => {
-      stop();
+      player.current?.stop();
+      player.current = null;
       previewShown.value = false;
     };
   }, []);
@@ -147,6 +226,12 @@ export function Preview() {
     <div class="video" tabindex="0" aria-label=${t('preview.label')}
       ...${contextMenuHandlers('preview.menu', menuItems)}>
       <video ref=${video} playsinline></video>
+      ${previewFailed.value
+        ? html`<div class="preview-unavailable" role="alert">
+            <span>${t('preview.unavailable')}</span>
+            <button type="button" class="btn" onClick=${() => player.current?.retry()}>${t('preview.retry')}</button>
+          </div>`
+        : null}
       <${SeekBubble} />
       ${statsOpen.value ? html`<${StatsOverlay} delayS=${delay} />` : null}
     </div>

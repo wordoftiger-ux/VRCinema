@@ -99,6 +99,42 @@ try {
   check(Math.abs(Number(caption.match(/\d+/)[0]) - (await delayOf(page))) <= 2, 'the caption number is the measured delay, rounded');
   await page.screenshot({ path: join(shots, 'after-preview-en-1100x680.png') });
 
+  // The autoplay fallback keeps the stored mute choice in step with the video.
+  const sync = await page.evaluate(async () => {
+    const { previewMuted, previewVolume } = await import('/static/app/components/playerbar.js');
+    return { video: document.querySelector('.video video').muted, signal: previewMuted.value || previewVolume.value === 0 };
+  });
+  check(sync.video === sync.signal, 'the video is muted exactly when previewMuted says so (autoplay fallback included)', sync);
+
+  // Never "0 s": a measurement is a number above zero or nothing.
+  const samples = [];
+  for (let i = 0; i < 6; i += 1) {
+    samples.push(await delayOf(page));
+    await sleep(500);
+  }
+  check(samples.every((x) => x === null || x > 0), 'the measured delay is never 0 or negative', samples);
+
+  // A hidden window stops the preview loading (so it is no viewer) and resumes when shown.
+  const liveRequests = [];
+  page.on('request', (r) => r.url().includes('/live/') && liveRequests.push(Date.now()));
+  const setHidden = (hidden) =>
+    page.evaluate((h) => {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => h });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, hidden);
+  await setHidden(true);
+  await sleep(500); // a request already on its way may still land
+  const during = liveRequests.length;
+  await sleep(4500);
+  check(liveRequests.length === during, 'hidden window: no more requests for the stream (0 in 4.5 s)', liveRequests.length - during);
+  check(await page.$eval('.video video', (v) => v.paused), 'hidden window: the video is paused');
+  check((await delayOf(page)) === null, 'hidden window: the delay is unknown, not a stale number');
+  await setHidden(false);
+  await waitFor(() => page.$eval('.video video', (v) => !v.paused && v.currentTime > 0), 'the video plays again');
+  await waitFor(async () => liveRequests.length > during, 'requests resume');
+  await waitFor(async () => Number.isFinite(await delayOf(page)), 'the delay is measured again');
+  check(true, 'visible again: loading and playing resume, the delay is measured again');
+
   // Volume and mute: the signals drive the video, the choice is remembered in localStorage.
   await page.click('.vol .icon-button');
   await waitFor(() => page.$eval('.video video', (e) => e.muted), 'the video is muted');
@@ -169,7 +205,11 @@ try {
       return null;
     }, delayValue);
   check((await bubbleFor(11.8)) === 'Viewers will see this in about 12 s', 'the bubble rounds the delay (11.8 s -> 12 s)');
-  check((await bubbleFor(null)) === 'Viewers will see this in a few seconds', 'without a measurement the bubble says "a few seconds"');
+  await page.evaluate(async () => (await import('/static/app/store.js')).previewDelayS.value = 3);
+  await sleep(150);
+  check((await text(page, '.seek-bubble')).endsWith('about 12 s'), 'the bubble keeps the number from the moment of the seek (not the live delay)', await text(page, '.seek-bubble'));
+  const fallback = await bubbleFor(null);
+  check(/^Viewers will see this in about \d+ s$/.test(fallback), 'with no current measurement the bubble uses the last good one', fallback);
   await waitFor(async () => (await page.$('.seek-bubble')) === null, 'the bubble goes away by itself', 7000);
   check(true, 'the bubble goes away after a few seconds');
 
@@ -248,6 +288,7 @@ try {
   // Copy: all the groups, as text.
   await page.click('.stats-copy');
   const copied = await page.evaluate(() => navigator.clipboard.readText());
+  check(/\[\d+( \d+){59}\]/.test(copied), 'the copied text carries the 60 samples of the viewers history');
   const missing = ['On air', 'HLS channel', 'Next video', 'ffmpeg', 'Viewers', 'Internet (tunnel)', 'Preview in this window', 'Never Gonna Give You Up', 'PID 18872', '58/min', 'WAW01', 'Darude — Sandstorm', 'Delay:'].filter((x) => !copied.includes(x));
   check(missing.length === 0, 'Copy puts every group on the clipboard as text', { missing, copied });
   check(copied.split('\n').length > 20 && !/<|\[object/.test(copied), 'the copied text is plain lines (group heading, indented "label: value")');
@@ -258,6 +299,8 @@ try {
   await waitFor(async () => (await text(page, '.stats-head b')) === 'Statystyki dla nerdów', 'the overlay switches to Polish');
   const plTitles = await page.$$eval('.stats h5', (h) => h.map((e) => e.textContent.trim()));
   check(plTitles[0] === 'Teraz na antenie' && plTitles.at(-1) === 'Podgląd w tym oknie', 'group headings follow the language', plTitles);
+  check((await rowText(page, 'Bufor serwera')) === '5 gotowych (ok. 20 s)', 'plural (many) in the buffer row', await rowText(page, 'Bufor serwera'));
+  check((await rowText(page, 'Stan', 0)).includes('3 gotowe'), 'plural (few) in the next video row', await rowText(page, 'Stan', 0));
   check((await rowText(page, 'Pozycja serwera')) === '1:42.0 / 3:33.0 · próba 1', 'row values follow the language', await rowText(page, 'Pozycja serwera'));
   const raw = await page.$eval('.stage', (e) => e.textContent.match(/\b(stats|preview)\.[a-z_0-9]+/g));
   check(raw === null, 'no untranslated keys in the stage', raw);
@@ -280,6 +323,18 @@ try {
   check(page.__errors.length === 0, 'no errors in the console', page.__errors);
   await page.close();
 
+  // ---------- A source analysis with holes ----------
+  await reset();
+  await scenario({ stats: 'partial' });
+  page = await openApp();
+  await page.keyboard.press('i');
+  await waitFor(async () => (await rowText(page, 'Source')) !== null && (await rowText(page, 'Watching')) === '≈ 4', 'the partial stats arrive');
+  check((await rowText(page, 'Source')) === '— · — · h264 · yuv420p · audio', 'a source without height and frame rate: dashes for those, no "nullp"', await rowText(page, 'Source'));
+  check((await rowText(page, 'Server position')) === '1:32.0 / — · attempt 1', 'an unknown length is a dash', await rowText(page, 'Server position'));
+  check((await rowText(page, 'Server buffer')) === '5 ready (about 20 s)', 'the plural form for 5 in English');
+  check(page.__errors.length === 0, 'no errors with partial stats', page.__errors);
+  await page.close();
+
   // ---------- Without a stream ----------
   await reset();
   await scenario({ hls: false });
@@ -287,6 +342,22 @@ try {
   await sleep(1500);
   check((await text(page, '.stage-caption')) === 'Preview', 'no stream: the caption is just "Preview"');
   check((await delayOf(page)) === null, 'no stream: the delay stays unknown');
+  await page.evaluate(async () => { (await import('/static/app/store.js')).seekBubble.value += 1; });
+  await waitFor(() => page.$('.seek-bubble'), 'bubble without any measurement');
+  check((await text(page, '.seek-bubble')).endsWith('Viewers will see this in a few seconds'), 'no measurement at all: the bubble says "a few seconds"');
+  // It gives up after a few tries (no endless loop) and offers a retry.
+  const playlistReads = [];
+  page.on('request', (r) => r.url().includes('/live/main.m3u8') && playlistReads.push(Date.now()));
+  await waitFor(() => page.$('.preview-unavailable'), 'the preview gives up', 40000);
+  check((await text(page, '.preview-unavailable span')) === 'Preview unavailable', 'after several failed tries: "Preview unavailable"');
+  const reads = playlistReads.length;
+  await sleep(4500);
+  check(playlistReads.length === reads, 'once given up it stops requesting the stream', playlistReads.length - reads);
+  await page.screenshot({ path: join(shots, 'after-preview-unavailable-en-1100x680.png') });
+  await scenario({ hls: true });
+  await page.click('.preview-unavailable .btn');
+  await waitFor(async () => Number.isFinite(await delayOf(page)), 'the retry plays the stream');
+  check((await page.$('.preview-unavailable')) === null, 'Try again plays the stream and the message goes away');
   await page.close();
 
   console.log(`\n${passed} checks passed`);

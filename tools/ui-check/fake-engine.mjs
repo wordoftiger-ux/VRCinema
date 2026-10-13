@@ -11,7 +11,7 @@
 // PATCH /api/admin/items/{id} moves ({position}) or decides ({action}), DELETE removes.
 // GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
 // Stats route (GET /api/admin/channels/main/stats): scenario `stats` is 'full' (default) or
-// 'nulls' (every group null, as when nothing plays). The preview's stream (/live/main.m3u8
+// 'nulls' (every group null, as when nothing plays) or 'partial' (the full one with a source analysis lacking height, frame rate and length). The preview's stream (/live/main.m3u8
 // and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
 // playlist is served without EXT-X-ENDLIST so the player treats it as live); the scenario
 // `hls: false` makes it 404.
@@ -140,7 +140,12 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     };
   }
 
-  const statsAnswer = () =>
+  const statsAnswer = () => {
+    const full = statsFull();
+    if (s.stats === 'partial') full.onAir.probe = { codec: 'h264', height: null, fps: null, pixFmt: 'yuv420p', hasAudio: true, durationS: null };
+    return full;
+  };
+  const statsFull = () =>
     s.stats === 'nulls'
       ? { onAir: null, hls: null, next: null, ffmpeg: null, viewers: { watching: 0, fetchesPerMin: 0, bytesPerS: 0, history: new Array(60).fill(0) }, tunnel: null }
       : {

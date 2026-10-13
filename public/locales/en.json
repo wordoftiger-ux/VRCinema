@@ -447,8 +447,10 @@
   "preview.copy_channel_link": "Copy channel link",
   "preview.label": "Live preview of the channel",
   "preview.menu": "Preview menu",
+  "preview.retry": "Try again",
   "preview.seek_bubble": "Viewers will see this in about {seconds} s",
   "preview.seek_bubble_unknown": "Viewers will see this in a few seconds",
+  "preview.unavailable": "Preview unavailable",
   "queue.add_button": "Add",
   "queue.add_label": "Add a link",
   "queue.add_placeholder": "Paste a link to a video or playlist…",
@@ -565,7 +567,10 @@
   "stats.v_pid": "PID {pid}",
   "stats.v_pts": "PTS {seconds} s",
   "stats.v_ram": "RAM {mb} MB",
-  "stats.v_ready": "{count} ready (about {seconds} s)",
+  "stats.v_ready": {
+    "one": "{count} ready (about {seconds} s)",
+    "other": "{count} ready (about {seconds} s)"
+  },
   "stats.v_reconnects": "reconnects {n}",
   "stats.v_seconds": "{s} s",
   "stats.v_segment": "segment {seconds} s",

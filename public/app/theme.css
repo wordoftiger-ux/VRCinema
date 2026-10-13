@@ -868,6 +868,19 @@ kbd {
   object-fit: contain;
 }
 
+.preview-unavailable {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(10, 11, 18, 0.55);
+  font-size: 13px;
+  z-index: 1;
+}
+
 .stage-caption {
   margin: 8px 2px 0;
   font-size: 12px;
