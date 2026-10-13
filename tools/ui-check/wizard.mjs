@@ -57,8 +57,18 @@ async function waitFor(fn, what, timeout = 8000) {
   }
 }
 
-async function open() {
+async function open({ trackFocus = false } = {}) {
   const page = await ctx.newPage();
+  if (trackFocus) {
+    await page.addInitScript(() => {
+      window.__focus = [];
+      const original = HTMLElement.prototype.focus;
+      HTMLElement.prototype.focus = function (...args) {
+        window.__focus.push(this.tagName === 'H1' ? 'h1' : this.getAttribute('data-next') !== null ? 'next' : this.tagName.toLowerCase());
+        return original.apply(this, args);
+      };
+    });
+  }
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(`${base}/wizard`);
@@ -79,7 +89,7 @@ try {
   await waitFor(() => has(page, '.wz-lang'), 'language buttons');
   check((await heading(page)) === 'Witaj w VRCinema', 'step 1 renders in the detected language (pl)');
   check((await page.locator('.wz-lang').count()) === 6, 'six languages are offered');
-  check((await page.locator('[data-lang=pl]').getAttribute('aria-checked')) === 'true', 'the detected language is selected');
+  check((await page.locator('[data-lang=pl]').getAttribute('aria-pressed')) === 'true', 'the detected language is selected');
   check((await text(page, '[data-lang=ja]')) === '日本語 (beta)', 'Japanese is marked beta');
   check((await text(page, '.wz-no')) === 'Krok 1 z 4', 'the step counter is Polish');
   await shot(page, '1-language-pl');
@@ -88,7 +98,7 @@ try {
   await waitFor(async () => (await heading(page)) === 'Welcome to VRCinema', 'English applied live');
   const put = (await sent('PUT', '/api/desktop/config')).at(-1);
   check(put?.body?.language === 'en', 'selecting a language saves it with PUT /api/desktop/config', put?.body);
-  check((await page.locator('[data-lang=en]').getAttribute('aria-checked')) === 'true', 'the choice is marked');
+  check((await page.locator('[data-lang=en]').getAttribute('aria-pressed')) === 'true', 'the choice is marked');
   check((await text(page, '.wz-no')) === 'Step 1 of 4', 'the counter follows the language');
   await shot(page, '1-language-en');
   await page.click('[data-lang=pl]');
@@ -198,7 +208,7 @@ try {
   page = await open();
   await waitFor(() => has(page, '.wz-lang'), 'wizard comes back');
   check((await heading(page)) === 'Witaj w VRCinema', 'the wizard returns in the saved language');
-  check((await page.locator('[data-lang=pl]').getAttribute('aria-checked')) === 'true', 'saved language selected');
+  check((await page.locator('[data-lang=pl]').getAttribute('aria-pressed')) === 'true', 'saved language selected');
   await page.click('[data-next]');
   await waitFor(() => has(page, '[data-next]'), 'the download finishes (watched, not restarted)', 20000);
   check(true, 'the interrupted download is picked up');
@@ -241,6 +251,75 @@ try {
   await page.click('[data-skip]');
   await page.waitForURL(`${base}/app#/channel`);
   check((await sent('POST', '/api/desktop/wizard/complete')).length === 1, 'Skip while connecting completes the first run');
+  await page.close();
+
+  // ---------- Fix round 1: focus is not stolen by re-renders ----------
+  const activeIs = (page, sel) => page.evaluate((s) => document.activeElement === document.querySelector(s), sel);
+  await reset();
+  await scenario({ firstRun: true, tunnel: 'off', tunnelOnEnable: 'connecting', toolsMissing: [] });
+  page = await open({ trackFocus: true });
+  await waitFor(() => has(page, '.wz-lang'), 'step 1');
+  check(await page.evaluate(() => document.activeElement?.tagName === 'H1'), 'step 1: the heading has the focus');
+  await page.click('[data-next]');
+  await waitFor(() => has(page, '[data-next]'), 'tools done');
+  await waitFor(() => activeIs(page, '[data-next]'), 'Next is focused when the step is done');
+  await page.click('[data-next]');
+  await waitFor(() => has(page, '.wz-result'), 'encoder');
+  await page.click('[data-next]');
+  await waitFor(() => has(page, '[data-tunnel=connecting]'), 'connecting');
+  await page.focus('[data-skip]');
+  await sleep(3000);
+  check(await activeIs(page, '[data-skip]'), 'polling does not take the focus from Skip (3 s)');
+  const calls = await page.evaluate(() => window.__focus);
+  check(calls.filter((c) => c === 'h1').length === 4, 'the heading is focused once per step', calls);
+  check(calls.filter((c) => c === 'next').length === 2, 'Next is focused once per finished step', calls);
+  await scenario({ tunnel: 'online' });
+  await waitFor(() => has(page, '[data-tunnel=online]'), 'online');
+  await page.focus('[data-link=channel] button');
+  await sleep(3000);
+  check(await activeIs(page, '[data-link=channel] button'), 'polling does not take the focus from Copy (3 s)');
+  await page.close();
+
+  // ---------- Fix round 1: language choice is a pressed-button group; a failed save is shown ----------
+  await reset();
+  await scenario({ firstRun: true, language: 'pl' });
+  page = await open();
+  await waitFor(() => has(page, '.wz-lang'), 'step 1');
+  check((await page.locator('[role=radio]').count()) === 0 && (await page.locator('.wz-lang[aria-pressed]').count()) === 6, 'language buttons use aria-pressed');
+  await scenario({ configFail: true });
+  await page.click('[data-lang=en]');
+  await waitFor(() => has(page, '[role=alert]'), 'the failed save is shown');
+  check((await text(page, '[role=alert]')).trim().length > 0, 'the error text is shown', await text(page, '[role=alert]'));
+  check((await heading(page)) === 'Witaj w VRCinema', 'the language did not change after the failed save');
+  await page.close();
+
+  // ---------- Fix round 1: the engine answers late at the start ----------
+  await reset();
+  await scenario({ firstRun: true, infoFail: true });
+  page = await open();
+  await sleep(1200);
+  await scenario({ infoFail: false });
+  await waitFor(() => has(page, '.wz-lang'), 'the wizard appears once the engine answers', 12000);
+  check(page.url() === `${base}/wizard`, 'no redirect to /app while the engine is slow', page.url());
+  await page.close();
+
+  // ---------- Fix round 1: a failed switch-on of the tunnel stays until Retry ----------
+  await reset();
+  await scenario({ firstRun: true, tunnel: 'off', toolsMissing: [], configFail: true });
+  page = await open();
+  await page.click('[data-next]');
+  await waitFor(() => has(page, '[data-next]'), 'tools');
+  await page.click('[data-next]');
+  await waitFor(() => has(page, '.wz-result'), 'encoder');
+  await page.click('[data-next]');
+  await waitFor(() => has(page, '[data-tunnel=error]'), 'the switch-on failure');
+  await sleep(3000);
+  check((await has(page, '[data-tunnel=error]')) && (await text(page, '.wz-note.err')).trim().length > 0, 'the error stays through the polls', await text(page, '.wz-note'));
+  check(await has(page, '[data-skip]'), 'Skip is there');
+  await scenario({ configFail: false });
+  await page.click('[data-retry]');
+  await waitFor(() => has(page, '[data-tunnel=online]'), 'Retry switches the tunnel on and connects');
+  check((await sent('PUT', '/api/desktop/config')).some((r) => r.body?.tunnelEnabled === true), 'Retry saves tunnelEnabled');
   await page.close();
 
   // ---------- Not the program's window: no wizard ----------

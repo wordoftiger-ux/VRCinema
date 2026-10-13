@@ -308,13 +308,6 @@ pre.log {
 .tool-row[data-kind='waiting'] { opacity: 0.6; }
 
 /* Kreator */
-.steps { display: flex; gap: 8px; margin: 6px 0 26px; padding: 0; list-style: none; }
-.steps li { flex: 1; height: 5px; border-radius: 3px; background: var(--panel-2); }
-.steps li.done, .steps li.current { background: var(--amber); }
-.steps li.current { box-shadow: 0 0 0 3px rgb(242 184 75 / 0.22); }
-.wizard h1 { font-size: 1.9rem; letter-spacing: -0.02em; margin-bottom: 14px; }
-.wizard .step-no { color: var(--muted); font-size: 0.9rem; margin: 0 0 6px; }
-.wizard .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
 .wizard .result { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
 .wizard .result strong { display: block; font: 700 1.25rem var(--display); margin-bottom: 4px; }
 .wizard ol.howto-list { padding-left: 1.3em; margin: 0 0 16px; }

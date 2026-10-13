@@ -21,7 +21,7 @@
 // names: taken.example.com → dns_taken (unless overwrite), nodomain.example.com → no_domain
 // (+ helpUrl), slow.example.com → takes 2.5 s; any other works. GET /api/desktop/config
 // answers tunnelMode / namedTunnelHostname.
-// First-run wizard: GET /wizard serves public/wizard.html; scenario `firstRun` (info.firstRunCompleted is its opposite; POST /api/desktop/wizard/complete clears it), `tunnelOnEnable` (state the tunnel takes when switched on: online (default), connecting, reconnecting, error), GET /api/desktop/tunnel.
+// First-run wizard: GET /wizard serves public/wizard.html; scenario `firstRun` (info.firstRunCompleted is its opposite; POST /api/desktop/wizard/complete clears it), `tunnelOnEnable` (state the tunnel takes when switched on: online (default), connecting, reconnecting, error), GET /api/desktop/tunnel; `configFail`: PUT /api/desktop/config answers 500.
 // Stats route (GET /api/admin/channels/main/stats): scenario `stats` is 'full' (default) or
 // 'nulls' (every group null, as when nothing plays) or 'partial' (the full one with a source analysis lacking height, frame rate and length). The preview's stream (/live/main.m3u8
 // and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
@@ -156,6 +156,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       signedOut: false,
       remote: false,
       firstRun: false,
+      configFail: false,
       tunnelOnEnable: 'online',
       tunnel: 'online',
       tunnelUrl: 'https://proba-kanalu.trycloudflare.com',
@@ -418,6 +419,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
 
   function putConfig(res, patch) {
     const bad = (code, message) => coded(res, 400, code, message);
+    if (s.configFail) return coded(res, 500, 'internal', 'Could not save the settings.');
     if ('port' in patch && !(Number.isInteger(patch.port) && patch.port >= 1024 && patch.port <= 65535)) return bad('invalid_port', 'The port must be a number from 1024 to 65535.');
     if (typeof patch.password === 'string' && [...patch.password].length < 8) return bad('password_too_short', 'The password must have at least 8 characters.');
     if ('ytdlpCookies' in patch && patch.ytdlpCookies !== null) return bad('cookies_by_picker', 'Choose the cookies file in the file picker.');

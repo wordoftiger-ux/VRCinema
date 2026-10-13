@@ -6,7 +6,9 @@ import { signal } from '/static/vendor/signals.mjs';
 import { html } from '../html.js';
 import { browserLang, lang, loadLang, t } from '../i18n.js';
 import { api } from '../api.js';
-import { firstInfo, setLanguage } from '../store.js';
+import { firstInfo, setLanguage, toast } from '../store.js';
+import { Icon } from '../icons.js';
+import { focusOnMount } from './focus.js';
 import { LANGUAGES, LANGUAGE_NAME_KEYS } from '../views/settings/common.js';
 import { ToolsStep } from './tools-step.js';
 import { EncoderStep } from './encoder-step.js';
@@ -27,18 +29,30 @@ function LanguageStep() {
     if (code !== lang.value) setLanguage(code);
   };
   return html`
-    <h1 tabindex="-1" ref=${(el) => el?.focus()}>${t('wizard.welcome_title')}</h1>
+    <h1 tabindex="-1" ref=${focusOnMount}>${t('wizard.welcome_title')}</h1>
     <p>${t('wizard.welcome_intro')}</p>
     <p>${t('wizard.welcome_setup')}</p>
     <h2 id="wizard-language">${t('wizard.language_title')}</h2>
-    <div class="wz-langs" role="radiogroup" aria-labelledby="wizard-language">
+    <div class="wz-langs" role="group" aria-labelledby="wizard-language">
       ${LANGUAGES.map((code) => html`
-        <button type="button" role="radio" class="wz-lang" data-lang=${code} aria-checked=${lang.value === code}
+        <button type="button" class="wz-lang" data-lang=${code} aria-pressed=${lang.value === code}
           onClick=${() => choose(code)}>${t(LANGUAGE_NAME_KEYS[code])}</button>`)}
     </div>
     <p class="wz-hint">${t('wizard.language_hint')}</p>
     <div class="wz-actions">
       <button type="button" class="btn pri" data-next onClick=${() => (step.value = 2)}>${t('wizard.start')}</button>
+    </div>`;
+}
+
+/** A message over the steps (a failed save of the language), as the interface shows it. */
+function Toast() {
+  const msg = toast.value;
+  if (!msg) return null;
+  return html`
+    <div class=${`toast toast-${msg.kind}`} role=${msg.kind === 'error' ? 'alert' : 'status'}>
+      <span>${msg.text}</span>
+      <button type="button" class="icon-button" aria-label=${t('ui.close')} title=${t('ui.close')}
+        onClick=${() => (toast.value = null)}><${Icon} name="close" size=${14} /></button>
     </div>`;
 }
 
@@ -59,11 +73,21 @@ function Wizard() {
       </ol>
       <p class="wz-no">${t('wizard.step', { n, total: STEPS })}</p>
       <div class="wz-body" key=${n}>${body}</div>
+      <${Toast} />
     </main>`;
 }
 
+/** The window's info; the engine may still be starting, so a few tries before giving up. */
+async function readInfo() {
+  for (let attempt = 1; ; attempt += 1) {
+    const info = await firstInfo();
+    if (info || attempt >= 6) return info;
+    await new Promise((r) => setTimeout(r, 700));
+  }
+}
+
 async function start() {
-  const info = await firstInfo();
+  const info = await readInfo();
   if (!info) {
     // Not the program's window (or the session is gone): the panel signs in or says so.
     location.replace('/app');

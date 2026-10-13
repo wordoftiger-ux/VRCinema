@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
+import { focusOnMount } from './focus.js';
 import { copyText } from '../components/playerbar.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,6 +29,14 @@ function LinkRow({ label, value, name }) {
     </div>`;
 }
 
+/** Switches the tunnel on in the program's settings when it is off. */
+async function ensureTunnelOn() {
+  const cfg = await api('GET', '/api/desktop/config');
+  if (!cfg.tunnelEnabled) await api('PUT', '/api/desktop/config', { tunnelEnabled: true });
+}
+
+const sameTunnel = (a, b) => a.state === b.state && a.url === b.url && a.message === b.message;
+
 export function InternetStep({ finish }) {
   const [tun, setTun] = useState({ state: 'connecting' });
   const [failure, setFailure] = useState(null);
@@ -38,15 +47,15 @@ export function InternetStep({ finish }) {
     alive.current = true;
     (async () => {
       try {
-        const cfg = await api('GET', '/api/desktop/config');
-        if (!cfg.tunnelEnabled) await api('PUT', '/api/desktop/config', { tunnelEnabled: true });
+        await ensureTunnelOn();
       } catch (e) {
-        if (alive.current) setTun({ state: 'error', message: errorText(e) });
+        if (alive.current) setTun({ state: 'error', message: errorText(e), local: true });
       }
       while (alive.current) {
         try {
           const v = await api('GET', '/api/desktop/tunnel');
-          if (alive.current) setTun((old) => (old.state === 'error' && old.local && v.state === 'connecting' ? old : v));
+          // A failure of ours stays until Retry; a poll with nothing new changes nothing (no re-render).
+          if (alive.current) setTun((old) => (old.local || sameTunnel(old, v) ? old : v));
         } catch {
           // the engine does not answer for a moment: the next try
         }
@@ -69,6 +78,7 @@ export function InternetStep({ finish }) {
     setRetrying(true);
     setTun({ state: 'connecting' });
     try {
+      await ensureTunnelOn();
       await api('POST', '/api/desktop/tunnel/restart');
     } catch (e) {
       setTun({ state: 'error', message: errorText(e), local: true });
@@ -80,7 +90,7 @@ export function InternetStep({ finish }) {
   const online = tun.state === 'online' && tun.url;
   const bad = tun.state === 'error' || tun.state === 'reconnecting';
   return html`
-    <h1 tabindex="-1" ref=${(el) => el?.focus()}>${t('wizard.net_title')}</h1>
+    <h1 tabindex="-1" ref=${focusOnMount}>${t('wizard.net_title')}</h1>
     <p>${t('wizard.net_intro')}</p>
     <div class="wz-stack" aria-live="polite" data-tunnel=${online ? 'online' : bad ? tun.state : 'connecting'}>
       ${online
@@ -104,7 +114,7 @@ export function InternetStep({ finish }) {
     </div>
     <div class="wz-actions">
       ${online
-        ? html`<button type="button" class="btn pri" data-finish onClick=${() => leave()}>${t('wizard.done')}</button>
+        ? html`<button type="button" class="btn pri" data-finish ref=${focusOnMount} onClick=${() => leave()}>${t('wizard.done')}</button>
             <button type="button" class="btn" data-permanent onClick=${() => leave('#/settings/internet')}>${t('wizard.permanent')}</button>`
         : html`${bad ? html`<button type="button" class="btn pri" data-retry disabled=${retrying} onClick=${again}>${t('wizard.retry')}</button>` : null}
             <button type="button" class="btn" data-skip onClick=${() => leave()}>${t('wizard.skip')}</button>`}

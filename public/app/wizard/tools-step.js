@@ -4,6 +4,7 @@ import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
+import { focusOnMount } from './focus.js';
 import { TOOL_NAME_KEYS, TOOL_ORDER, rowState } from '../views/settings/tools.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -92,7 +93,7 @@ export function ToolsStep({ next, finish }) {
   };
   const { phase, names, progress, installed, error } = state;
   return html`
-    <h1 tabindex="-1" ref=${(el) => el?.focus()}>${t('wizard.tools_title')}</h1>
+    <h1 tabindex="-1" ref=${focusOnMount}>${t('wizard.tools_title')}</h1>
     <p>${t('wizard.tools_intro')}</p>
     <${Rows} names=${names} progress=${progress} all=${phase === 'done'} />
     ${phase === 'done'
@@ -103,7 +104,7 @@ export function ToolsStep({ next, finish }) {
       : null}
     ${leaving ? html`<p class="wz-note err" role="alert">${leaving}</p>` : null}
     <div class="wz-actions">
-      ${phase === 'done' ? html`<button type="button" class="btn pri" data-next ref=${(el) => el?.focus()} onClick=${next}>${t('wizard.next')}</button>` : null}
+      ${phase === 'done' ? html`<button type="button" class="btn pri" data-next ref=${focusOnMount} onClick=${next}>${t('wizard.next')}</button>` : null}
       ${phase === 'failed'
         ? html`<button type="button" class="btn pri" data-retry onClick=${() => setAttempt(attempt + 1)}>${t('wizard.retry')}</button>
             <button type="button" class="btn" data-skip onClick=${leave}>${t('wizard.tools_skip')}</button>`
