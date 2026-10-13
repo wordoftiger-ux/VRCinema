@@ -49,6 +49,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/channels/main/restart", post(restart))
         .route("/api/admin/channels/main/stats", get(stats))
         .route("/api/admin/qr", get(qr))
+        .route("/api/admin/environment", get(environment))
         .route("/api/admin/channels/main/play-now", post(play_now))
         .route(
             "/api/admin/channels/main/settings",
@@ -658,6 +659,18 @@ async fn stats(State(state): State<AppState>) -> ApiResult {
         "ffmpeg": value(serde_json::to_value(&ffmpeg)),
         "viewers": value(serde_json::to_value(state.viewers.stats(now))),
         "tunnel": value(serde_json::to_value(&tunnel)),
+    })))
+}
+
+/// What the panel runs in: whether the program has its own window (a server without one has
+/// no program language, tools or tunnel to manage), the encoder in use and whether the info
+/// ticker makes the computer fall behind. Open to a remote session too (the window-only routes
+/// are not).
+async fn environment(State(state): State<AppState>) -> ApiResult {
+    Ok(json_ok(&json!({
+        "window": state.app_core().is_some(),
+        "encoder": state.live.encoder.get().as_str(),
+        "tickerSlow": state.snapshot().stats.ticker_slow,
     })))
 }
 

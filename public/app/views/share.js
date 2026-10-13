@@ -9,12 +9,12 @@ import { api, errorText } from '../api.js';
 import { NamedLink } from '../components/named-wizard.js';
 import { copyText } from '../components/playerbar.js';
 import {
+  access,
   channelLink,
   info,
   netStatus,
   publicAddress,
   refreshInfo,
-  remote,
   requestLink,
   showToast,
   tunnel,
@@ -71,7 +71,8 @@ async function reconnect() {
 function InternetCard() {
   const net = netStatus.value;
   const tun = tunnel.value;
-  const windowed = !remote.value;
+  const windowed = access.value === 'window';
+  const known = access.value !== 'unknown';
   return html`
     <section class="card2" aria-labelledby="share-internet">
       <h2 id="share-internet">${t('share.internet_title')}
@@ -85,16 +86,20 @@ function InternetCard() {
               ? html`<div class="pl-actions"><button type="button" class="btn" disabled=${reconnecting.value} onClick=${reconnect}>
                   ${reconnecting.value ? t('share.reconnecting') : t('share.reconnect')}</button></div>`
               : null}`
-        : html`<p class="window-only">${t('ui.window_only')}</p>`}
+        : known
+          ? html`<p class="window-only">${t('ui.window_only')}</p>`
+          : null}
     </section>`;
 }
 
 /** The QR code of the request page. It is drawn again whenever the address changes. */
 function QrCard() {
-  const isRemote = remote.value;
+  const mode = access.value;
+  const isRemote = mode !== 'window';
   const address = requestLink.value;
-  // The window knows whether there is a public address; a remote session just asks.
-  const has = isRemote ? Boolean(address) : Boolean(publicAddress.value);
+  // The window knows whether there is a public address; a remote session just asks. Nothing
+  // is asked before it is known which of the two this is.
+  const has = mode === 'unknown' ? false : isRemote ? Boolean(address) : Boolean(publicAddress.value);
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [address, has]);
   const route = isRemote ? '/api/admin/qr' : '/api/desktop/tunnel/qr';

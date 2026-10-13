@@ -26,6 +26,7 @@ import { pasteLink } from './components/addlink.js';
 import { ChannelView } from './views/channel.js';
 import { HistoryView } from './views/history.js';
 import { ShareView } from './views/share.js';
+import { SettingsView } from './views/settings.js';
 import { toggleStats } from './components/stats.js';
 
 // ---------- Keyboard shortcuts ----------
@@ -118,6 +119,7 @@ function View() {
   if (view === 'channel') return html`<${ChannelView} />`;
   if (view === 'history') return html`<${HistoryView} />`;
   if (view === 'share') return html`<${ShareView} />`;
+  if (view === 'settings') return html`<${SettingsView} />`;
   const titleKey = {
     channel: 'nav.channel',
     history: 'nav.history',

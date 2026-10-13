@@ -26,6 +26,7 @@
 // and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
 // playlist is served without EXT-X-ENDLIST so the player treats it as live); the scenario
 // `hls: false` makes it 404.
+// Settings view: GET /api/admin/environment ({window, encoder, tickerSlow}; scenario `headless`: no window — the window routes answer 403 like for a remote session, window false; `tickerSlow`, `encoder`), GET/PUT /api/desktop/config (validated like the engine; a new port or lanAccess answers restarted: true), tools (GET /api/desktop/tools, POST install|update|repair then GET progress; scenario `toolsMissing`), POST encoder/detect, pick-cookies (scenario `pickCookies`), GET log, GET update (scenario `updateOffer` {version, notes}, `toolsFail`, `infoFail`: the info route answers 500), POST update/apply, POST restart; GET/PUT /api/admin/channels/main/settings (validated like the engine: ticker messages <= 10 x <= 200 chars, intervals 60/120/300/600), GET /api/admin/nicks and POST nicks/{skeleton}/release, devices/block, devices/unblock.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -86,6 +87,59 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     ];
   };
 
+  const initialConfig = () => ({
+    port,
+    lanAccess: false,
+    publicUrl: '',
+    remoteAdmin: false,
+    hasPassword: false,
+    videoEncoder: 'auto',
+    detectedEncoder: null,
+    ytdlpCookies: null,
+    pixeldrainApiKey: null,
+    autostart: false,
+    trustCloudflare: false,
+    firstRunCompleted: true,
+    toolsInstalled: true,
+    skippedUpdateVersion: null,
+    pauseOnTunnelLoss: true,
+    pauseWhenNoViewers: false,
+  });
+  const initialSettings = () => ({
+    linkMode: 'all',
+    allowedDomains: ['youtube.com', 'youtu.be'],
+    blockedDomains: [],
+    maxDurationS: 7200,
+    requestLimitCount: 3,
+    requestLimitWindowS: 600,
+    maxActivePerRequester: 5,
+    moderation: false,
+    forceTranscode: false,
+    discontinuityTags: true,
+    slateLanguage: 'en',
+    tickerEnabled: true,
+    tickerMode: 'interval',
+    tickerIntervalS: 60,
+    tickerSpeed: 'normal',
+    tickerShowNext: true,
+    tickerShowAddress: false,
+    tickerQr: 'with_ticker',
+    tickerProgress: true,
+    tickerMessages: ['Welcome to the Friday show!'],
+  });
+  const POPULAR = ['youtube.com', 'youtu.be', 'twitch.tv', 'kick.com', 'vimeo.com', 'pixeldrain.com', 'cda.pl'];
+  const initialNicks = () => [
+    { skeleton: 'kasia', nick: 'Kasia', badge: { hue: 40, shape: 3 }, lastUsedAt: Date.now() - 60000, blocked: false, blockId: null },
+    { skeleton: 'a/b?c#d%e', nick: 'A/B?C#D%E', badge: { hue: 200, shape: 8 }, lastUsedAt: Date.now() - 7200000, blocked: false, blockId: null },
+    { skeleton: 'troll', nick: 'Troll', badge: { hue: 10, shape: 5 }, lastUsedAt: Date.now() - 86400000, blocked: true, blockId: 1 },
+  ];
+  const initialTools = () => [
+    { name: 'yt-dlp', installed: true, version: '2025.10.1', installedAt: 0 },
+    { name: 'ffmpeg', installed: true, version: '7.1', installedAt: 0 },
+    { name: 'deno', installed: true, version: '2.0.0', installedAt: 0 },
+    { name: 'cloudflared', installed: true, version: '2025.9.0', installedAt: 0 },
+  ];
+
   function reset() {
     requests = [];
     s = {
@@ -111,11 +165,25 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       durationS: 213,
       stats: 'full',
       hls: true,
+      headless: false,
+      infoFail: false,
+      toolsFail: false,
+      tickerSlow: false,
+      encoder: 'h264_nvenc',
+      toolsMissing: [],
+      updateOffer: null,
+      pickCookies: 'C:/cookies.txt',
     };
     s.queue = initialQueue();
     s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
     s.rotations = 0;
     s.history = initialHistory();
+    s.config = initialConfig();
+    s.settings = initialSettings();
+    s.nicks = initialNicks();
+    s.blocks = [{ id: 1, nick: 'Troll', badge: { hue: 10, shape: 5 }, blockedAt: Date.now() - 3600000 }];
+    s.tools = initialTools();
+    s.toolsJob = null;
     s.pendingItems = [];
     nextId = 100;
     maxPanelInFlight = 0;
@@ -299,6 +367,15 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       tunnel: tunnelView(),
       paused: s.paused,
       pauseReasons: s.pauseReasons,
+      toolsOk: s.toolsMissing.length === 0,
+      missingTools: s.toolsMissing,
+      toolsRunning: Boolean(s.toolsJob?.running),
+      channelRunning: true,
+      channelError: null,
+      restarting: false,
+      encoder: s.encoder,
+      update: s.updateOffer,
+      tickerSlow: s.tickerSlow,
     };
   }
 
@@ -325,6 +402,108 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     } catch {
       json(res, 404, { error: 'Not Found' });
     }
+  }
+
+  const configView = () => ({
+    ...s.config,
+    language: s.language,
+    tunnelEnabled: s.tunnel !== 'off',
+    tunnelMode: s.named.mode,
+    namedTunnelHostname: s.named.host,
+  });
+
+  function putConfig(res, patch) {
+    const bad = (code, message) => coded(res, 400, code, message);
+    if ('port' in patch && !(Number.isInteger(patch.port) && patch.port >= 1024 && patch.port <= 65535)) return bad('invalid_port', 'The port must be a number from 1024 to 65535.');
+    if (typeof patch.password === 'string' && [...patch.password].length < 8) return bad('password_too_short', 'The password must have at least 8 characters.');
+    if ('ytdlpCookies' in patch && patch.ytdlpCookies !== null) return bad('cookies_by_picker', 'Choose the cookies file in the file picker.');
+    if (typeof patch.publicUrl === 'string' && patch.publicUrl.trim() && !/^https?:\/\//.test(patch.publicUrl.trim())) return bad('invalid_public_url', 'The public address must start with http:// or https://.');
+    const restarted = ('port' in patch && patch.port !== s.config.port) || ('lanAccess' in patch && patch.lanAccess !== s.config.lanAccess);
+    for (const key of Object.keys(s.config)) {
+      if (!(key in patch)) continue;
+      s.config[key] = key === 'publicUrl' ? String(patch[key]).trim() : key === 'pixeldrainApiKey' ? (String(patch[key] ?? '').trim() || null) : patch[key];
+    }
+    if (typeof patch.password === 'string') s.config.hasPassword = true;
+    if (patch.language) s.language = patch.language;
+    if (patch.tunnelMode) s.named.mode = patch.tunnelMode;
+    if ('tunnelEnabled' in patch) s.tunnel = patch.tunnelEnabled ? 'online' : 'off';
+    return json(res, 200, { ...configView(), restarted });
+  }
+
+  const INTERVALS = [60, 120, 300, 600];
+  function settingsRoute(res, req, patch) {
+    if (req.method === 'GET') return json(res, 200, { ...s.settings, popularDomains: POPULAR });
+    if (req.method !== 'PUT') return json(res, 404, { error: 'Not Found' });
+    const fail = (code, message) => coded(res, 400, code, message);
+    const next = { ...s.settings };
+    for (const [key, value] of Object.entries(patch ?? {})) {
+      if (!(key in s.settings)) return fail('unknown_setting', `Unknown setting: ${key}`);
+      if (key === 'tickerMessages') {
+        if (!Array.isArray(value)) return fail('setting_not_list', `${key}: expected a list`);
+        const list = value.map((m) => String(m).trim()).filter(Boolean);
+        if (list.some((m) => [...m].length > 200)) return fail('ticker_message_too_long', `${key}: a message can have at most 200 characters`);
+        if (list.length > 10) return fail('ticker_too_many_messages', `${key}: at most 10 messages`);
+        next[key] = list;
+      } else if (key === 'tickerIntervalS') {
+        if (!INTERVALS.includes(value)) return fail('setting_not_one_of', `${key}: expected one of: 60, 120, 300, 600`);
+        next[key] = value;
+      } else if (key === 'allowedDomains' || key === 'blockedDomains') {
+        next[key] = value.map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]).filter(Boolean);
+      } else next[key] = value;
+    }
+    s.settings = next;
+    return json(res, 200, next);
+  }
+
+  const ENCODER_RESULT = 'h264_nvenc';
+  // Window-only routes of the Settings view; answers true when it handled the request.
+  async function desktopRoute(res, req, path, payload) {
+    const lang = req.headers['x-vrcinema-lang'];
+    const done = (status, body) => (json(res, status, body), true);
+    if (path === '/api/desktop/tools' && req.method === 'GET') {
+      return done(200, { tools: s.tools, missing: s.toolsMissing, ok: s.toolsMissing.length === 0, running: Boolean(s.toolsJob?.running) });
+    }
+    const job = path.match(/^\/api\/desktop\/tools\/(install|update|repair)$/);
+    if (job && req.method === 'POST') {
+      if (s.toolsJob?.running) return (coded(res, 409, 'tools_running', 'The tools are already being downloaded.'), true);
+      const names = job[1] === 'update' ? [payload?.tool] : ['yt-dlp', 'ffmpeg', 'deno', 'cloudflared'];
+      s.toolsJob = { running: true, done: false, names, at: 0, error: null };
+      const tick = setInterval(() => {
+        const j = s.toolsJob;
+        if (!j) return clearInterval(tick);
+        j.at += 1;
+        if (j.at >= j.names.length * 3) {
+          j.running = false;
+          j.done = true;
+          if (s.toolsFail) j.error = 'Download failed: https://example.invalid/tool.zip';
+          clearInterval(tick);
+        }
+      }, 600);
+      return done(202, { started: true });
+    }
+    if (path === '/api/desktop/tools/progress' && req.method === 'GET') {
+      const j = s.toolsJob;
+      if (!j) return done(200, { phase: null, tool: null, downloaded: 0, total: null, error: null, done: false, running: false });
+      const step = Math.min(j.at, j.names.length * 3 - 1);
+      const phase = ['download', 'verify', 'install'][step % 3];
+      return done(200, { phase, tool: j.names[Math.floor(step / 3)], downloaded: phase === 'download' ? 20000000 : 40000000, total: 40000000, error: j.done ? j.error : null, done: j.done, running: j.running });
+    }
+    if (path === '/api/desktop/encoder/detect' && req.method === 'POST') {
+      s.config.detectedEncoder = ENCODER_RESULT;
+      return done(200, { detectedEncoder: ENCODER_RESULT, encoder: ENCODER_RESULT });
+    }
+    if (path === '/api/desktop/pick-cookies' && req.method === 'POST') {
+      if (s.pickCookies) s.config.ytdlpCookies = s.pickCookies;
+      return done(200, { picked: Boolean(s.pickCookies), ytdlpCookies: s.config.ytdlpCookies });
+    }
+    if (path === '/api/desktop/log' && req.method === 'GET') {
+      const lines = lang === 'pl' ? ['VRCinema 0.2.0: start', 'Tunel: w sieci — https://proba-kanalu.trycloudflare.com'] : ['VRCinema 0.2.0: start', 'Tunnel: online — https://proba-kanalu.trycloudflare.com'];
+      return done(200, { lines });
+    }
+    if (path === '/api/desktop/update' && req.method === 'GET') return done(200, { current: '0.2.0', available: s.updateOffer });
+    if (path === '/api/desktop/update/apply' && req.method === 'POST') return done(200, { ok: true, version: s.updateOffer?.version ?? '0.2.0' });
+    if (path === '/api/desktop/restart' && req.method === 'POST') return done(200, { ok: true, port });
+    return false;
   }
 
   const server = createServer(async (req, res) => {
@@ -354,20 +533,20 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
 
     const payload = req.method === 'GET' ? null : await body(req).catch(() => null);
     requests.push({ method: req.method, path, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
+    const noWindow = s.remote || s.headless;
     if (path === '/api/desktop/info' || path === '/api/desktop/config') {
       if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
-      if (s.remote) return coded(res, 403, 'window_only', 'Window only');
-      if (req.method === 'PUT') {
-        if (payload?.language) s.language = payload.language;
-        if (payload?.tunnelMode) s.named.mode = payload.tunnelMode;
-        return json(res, 200, { restarted: false });
-      }
-      if (path === '/api/desktop/config') return json(res, 200, { language: s.language, tunnelEnabled: s.tunnel !== 'off', tunnelMode: s.named.mode, namedTunnelHostname: s.named.host });
+      if (noWindow) return coded(res, 403, 'window_only', 'Window only');
+      if (s.infoFail && path === '/api/desktop/info') return coded(res, 500, 'internal', 'boom');
+      if (req.method === 'PUT') return putConfig(res, payload);
+      if (path === '/api/desktop/config') return json(res, 200, configView());
       return json(res, 200, info());
     }
     if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
+    if (path === '/api/admin/environment') return json(res, 200, { window: !s.headless, encoder: s.encoder, tickerSlow: s.tickerSlow });
     if (path.startsWith('/api/desktop/')) {
-      if (s.remote) return coded(res, 403, 'window_only', 'Window only');
+      if (noWindow) return coded(res, 403, 'window_only', 'Window only');
+      if (await desktopRoute(res, req, path, payload)) return undefined;
       if (path === '/api/desktop/tunnel/qr') return sendQr(res);
       if (path === '/api/desktop/tunnel/restart' && req.method === 'POST') {
         if (s.tunnel === 'off') return coded(res, 409, 'tunnel_off', 'Tunnel is off');
@@ -379,6 +558,30 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       return json(res, 404, { error: 'Not Found' });
     }
     if (path === '/api/admin/qr') return sendQr(res);
+    if (path === '/api/admin/channels/main/settings') return settingsRoute(res, req, payload);
+    if (path === '/api/admin/nicks' && req.method === 'GET') return json(res, 200, { nicks: s.nicks, blocked: s.blocks });
+    const nickRoute = path.match(/^\/api\/admin\/nicks\/(.+)\/release$/);
+    if (nickRoute && req.method === 'POST') {
+      const skeleton = decodeURIComponent(nickRoute[1]);
+      if (!s.nicks.some((n) => n.skeleton === skeleton)) return coded(res, 404, 'nick_not_found', 'No such nick.');
+      s.nicks = s.nicks.filter((n) => n.skeleton !== skeleton);
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/api/admin/devices/block' && req.method === 'POST') {
+      const nick = s.nicks.find((n) => n.skeleton === payload?.skeleton);
+      if (!nick) return coded(res, 404, 'nick_not_found', 'No such nick.');
+      const id = Math.max(0, ...s.blocks.map((x) => x.id)) + 1;
+      s.blocks.unshift({ id, nick: nick.nick, badge: nick.badge, blockedAt: Date.now() });
+      nick.blocked = true;
+      nick.blockId = id;
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/api/admin/devices/unblock' && req.method === 'POST') {
+      if (!s.blocks.some((x) => x.id === payload?.id)) return coded(res, 404, 'block_not_found', 'This device is not blocked.');
+      s.blocks = s.blocks.filter((x) => x.id !== payload.id);
+      for (const n of s.nicks) if (n.blockId === payload.id) Object.assign(n, { blocked: false, blockId: null });
+      return json(res, 200, { ok: true });
+    }
     const base = '/api/admin/channels/main';
     if (path === base && req.method === 'GET') {
       if (s.panelFail) return coded(res, 500, 'internal', 'boom');

@@ -357,6 +357,12 @@ async fn every_desktop_route_is_401_without_a_session_and_403_for_a_remote_one()
         .call("GET", "/api/admin/channels/main", Some(&remote), None)
         .await;
     assert_eq!(status, StatusCode::OK);
+    // ... and tells it the program has a window (a server without one says false).
+    let (status, env) = app
+        .call("GET", "/api/admin/environment", Some(&remote), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(env["window"], true);
     app.stop().await;
 }
 

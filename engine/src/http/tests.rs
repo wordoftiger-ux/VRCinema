@@ -3284,6 +3284,31 @@ async fn the_panel_qr_route_is_open_to_a_remote_password_session_too() {
     assert_eq!(res.status, StatusCode::NOT_FOUND);
 }
 
+// ---------- environment of the panel (window or server without one) ----------
+
+const ENVIRONMENT_ROUTE: &str = "/api/admin/environment";
+
+#[tokio::test]
+async fn the_environment_route_needs_a_session() {
+    let h = Harness::new();
+    assert_eq!(
+        h.send(get(ENVIRONMENT_ROUTE)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn the_environment_route_tells_a_server_without_a_window() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let res = h.send(get(ENVIRONMENT_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let body = res.json();
+    assert_eq!(body["window"], false);
+    assert_eq!(body["tickerSlow"], false);
+    assert_eq!(body["encoder"], "libx264");
+}
+
 // ---------- nicki widzów ----------
 
 const KEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

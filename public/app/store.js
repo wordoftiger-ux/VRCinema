@@ -7,6 +7,7 @@ import { lang, loadLang } from './i18n.js';
 
 const PANEL = '/api/admin/channels/main';
 const INFO = '/api/desktop/info';
+const ENVIRONMENT = '/api/admin/environment';
 const PANEL_EVERY_MS = 1000;
 const INFO_EVERY_MS = 3000;
 // After failed reads the next one waits longer (doubling), up to this.
@@ -23,8 +24,17 @@ export const history = signal([]);
 /** The window's info (`/api/desktop/info`); null in a remote session or without a window. */
 export const info = signal(null);
 export const tunnel = computed(() => info.value?.tunnel ?? null);
-/** True in a remote session (or a server without a window): the window-only routes answer 403/404. */
-export const remote = signal(false);
+/**
+ * What the interface runs in: `unknown` until the first answer, then `window` (the program's
+ * own window: the window-only routes work), `remote` (a password session of the program on
+ * another device) or `headless` (the server without a window). Window-only parts wait for
+ * the answer: they send no window-only request while it is unknown.
+ */
+export const access = signal('unknown');
+/** True in a remote session or on a server without a window: the window-only routes answer 403. */
+export const remote = computed(() => access.value === 'remote' || access.value === 'headless');
+/** `/api/admin/environment` (open to a remote session too): `{window, encoder, tickerSlow}`. */
+export const environment = signal(null);
 /** `loading`, `ok`, or `signed_out` (no panel session). */
 export const session = signal('loading');
 /** A short message over the player bar: `{text, kind}` (`error` or `info`). */
@@ -117,19 +127,28 @@ export async function refreshInfo() {
   try {
     const data = await api('GET', INFO);
     info.value = data;
-    remote.value = false;
+    access.value = 'window';
     const current = !switchingLanguage && switches === languageSwitches;
     if (current && data?.language && data.language !== lang.value) {
       await loadLang(data.language);
     }
     return 'ok';
   } catch (e) {
-    // 403: a remote session, 404: the server without a window — no window info there.
+    // 403: a remote session; the server without a window answers 403 or 404 as well. The
+    // environment says which one it is; until it answers, the access stays unknown.
     if (e.status === 403 || e.status === 404) {
-      infoAvailable = false;
-      info.value = null;
-      remote.value = true;
-      return 'stop';
+      try {
+        const env = await api('GET', ENVIRONMENT);
+        batch(() => {
+          environment.value = env;
+          info.value = null;
+          access.value = env.window ? 'remote' : 'headless';
+        });
+        infoAvailable = false;
+        return 'stop';
+      } catch (envError) {
+        return envError.status === 401 ? 'stop' : 'fail';
+      }
     }
     return e.status === 401 ? 'stop' : 'fail';
   }
