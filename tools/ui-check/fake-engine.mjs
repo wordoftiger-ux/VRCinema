@@ -21,6 +21,7 @@
 // names: taken.example.com → dns_taken (unless overwrite), nodomain.example.com → no_domain
 // (+ helpUrl), slow.example.com → takes 2.5 s; any other works. GET /api/desktop/config
 // answers tunnelMode / namedTunnelHostname.
+// First-run wizard: GET /wizard serves public/wizard.html; scenario `firstRun` (info.firstRunCompleted is its opposite; POST /api/desktop/wizard/complete clears it), `tunnelOnEnable` (state the tunnel takes when switched on: online (default), connecting, reconnecting, error), GET /api/desktop/tunnel.
 // Stats route (GET /api/admin/channels/main/stats): scenario `stats` is 'full' (default) or
 // 'nulls' (every group null, as when nothing plays) or 'partial' (the full one with a source analysis lacking height, frame rate and length). The preview's stream (/live/main.m3u8
 // and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
@@ -154,6 +155,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       patchDelayMs: 0,
       signedOut: false,
       remote: false,
+      firstRun: false,
+      tunnelOnEnable: 'online',
       tunnel: 'online',
       tunnelUrl: 'https://proba-kanalu.trycloudflare.com',
       namedLogin: 'done',
@@ -363,6 +366,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       port,
       publicUrl: '',
       language: s.language,
+      firstRunCompleted: !s.firstRun,
       tunnelEnabled: s.tunnel !== 'off',
       tunnel: tunnelView(),
       paused: s.paused,
@@ -426,7 +430,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     if (typeof patch.password === 'string') s.config.hasPassword = true;
     if (patch.language) s.language = patch.language;
     if (patch.tunnelMode) s.named.mode = patch.tunnelMode;
-    if ('tunnelEnabled' in patch) s.tunnel = patch.tunnelEnabled ? 'online' : 'off';
+    if ('tunnelEnabled' in patch) s.tunnel = patch.tunnelEnabled ? (s.tunnelOnEnable ?? 'online') : 'off';
     return json(res, 200, { ...configView(), restarted });
   }
 
@@ -476,6 +480,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
           j.running = false;
           j.done = true;
           if (s.toolsFail) j.error = 'Download failed: https://example.invalid/tool.zip';
+          else s.toolsMissing = [];
           clearInterval(tick);
         }
       }, 600);
@@ -510,6 +515,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const path = url.pathname;
     if (path === '/app') return serveFile(res, 'app.html');
+    if (path === '/wizard') return serveFile(res, 'wizard.html');
     if (path === '/favicon.ico') {
       res.writeHead(204);
       return res.end();
@@ -548,6 +554,11 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       if (noWindow) return coded(res, 403, 'window_only', 'Window only');
       if (await desktopRoute(res, req, path, payload)) return undefined;
       if (path === '/api/desktop/tunnel/qr') return sendQr(res);
+      if (path === '/api/desktop/tunnel' && req.method === 'GET') return json(res, 200, tunnelView());
+      if (path === '/api/desktop/wizard/complete' && req.method === 'POST') {
+        s.firstRun = false;
+        return json(res, 200, { ok: true });
+      }
       if (path === '/api/desktop/tunnel/restart' && req.method === 'POST') {
         if (s.tunnel === 'off') return coded(res, 409, 'tunnel_off', 'Tunnel is off');
         s.rotations += 1;

@@ -10,7 +10,7 @@ import { info, refreshInfo } from '../../store.js';
 import { Block, Note, Row, WindowNote, saveWith, useAccess, useConfig, useNote, loadConfig } from './common.js';
 
 export const TOOL_ORDER = ['yt-dlp', 'ffmpeg', 'deno', 'cloudflared'];
-const TOOL_NAME_KEYS = {
+export const TOOL_NAME_KEYS = {
   'yt-dlp': 'settings.tools.name_ytdlp',
   ffmpeg: 'settings.tools.name_ffmpeg',
   deno: 'settings.tools.name_deno',
@@ -33,7 +33,7 @@ const ENCODER_OPTIONS = [
   { value: 'h264_amf', key: 'settings.tools.enc_amd' },
   { value: 'libx264', key: 'settings.tools.enc_cpu' },
 ];
-const ENCODER_RESULT_KEYS = {
+export const ENCODER_RESULT_KEYS = {
   h264_nvenc: 'settings.tools.result_nvidia',
   h264_qsv: 'settings.tools.result_intel',
   h264_amf: 'settings.tools.result_amd',
@@ -41,7 +41,7 @@ const ENCODER_RESULT_KEYS = {
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const megabytes = (bytes) => `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
+export const megabytes = (bytes) => `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
 
 /** The tools as the engine lists them; null until read. */
 const tools = signal(null);

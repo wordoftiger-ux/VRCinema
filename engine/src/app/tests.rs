@@ -757,7 +757,10 @@ async fn the_wizard_page_is_served_to_the_window_only() {
     assert_eq!(res.status(), StatusCode::OK);
     let ctype = res.headers()["content-type"].to_str().unwrap().to_string();
     assert!(ctype.starts_with("text/html"), "{ctype}");
-    assert!(res.text().await.unwrap().contains("id=\"wizard\""));
+    let page = res.text().await.unwrap();
+    assert!(page.contains("id=\"wizard\""));
+    // The new interface's wizard (Preact modules), not the old self-contained page.
+    assert!(page.contains("/static/app/wizard/main.js"));
     app.stop().await;
 }
 

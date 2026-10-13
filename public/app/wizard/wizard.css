@@ -1,0 +1,146 @@
+/* The first-run wizard: one centered column on the interface's theme. */
+
+html,
+body {
+  overflow: auto;
+}
+
+#wizard {
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  padding: 40px 20px;
+}
+
+.wz {
+  width: 100%;
+  max-width: 560px;
+}
+
+.wz-steps {
+  display: flex;
+  gap: 6px;
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.wz-steps li {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-control);
+}
+
+.wz-steps li.done {
+  background: var(--amber-deep);
+}
+
+.wz-steps li.current {
+  background: var(--amber);
+}
+
+.wz-no {
+  margin: 0 0 18px;
+  color: var(--text-mute);
+}
+
+.wz h1 {
+  margin: 0 0 12px;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-strong);
+  outline: none;
+}
+
+.wz h2 {
+  margin: 20px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.wz p {
+  margin: 0 0 10px;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
+.wz .wz-hint {
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.wz-langs {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.wz-lang {
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+}
+
+.wz-lang:hover {
+  background: var(--hover);
+}
+
+.wz-lang[aria-checked="true"] {
+  border-color: var(--amber);
+  background: var(--amber-bg);
+  color: var(--text-strong);
+}
+
+.wz-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.wz-note {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.wz-note.ok {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.wz-note.err {
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+
+.wz-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.wz-result span {
+  color: var(--text-dim);
+}
+
+.wz-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wz-qr {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}

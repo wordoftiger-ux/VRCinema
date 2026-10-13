@@ -564,7 +564,7 @@ fn every_code_of_the_permanent_link_wizard_has_a_message() {
 // ---------- Keys used by the new interface (public/app) ----------
 
 /// Namespaces of the interface's own keys: a literal `"<namespace>.…"` in its code is a key.
-const UI_NAMESPACES: [&str; 12] = [
+const UI_NAMESPACES: [&str; 13] = [
     "drop",
     "history",
     "nav",
@@ -577,6 +577,7 @@ const UI_NAMESPACES: [&str; 12] = [
     "shortcuts",
     "titlebar",
     "ui",
+    "wizard",
 ];
 
 /// The string literals of a JavaScript source (quotes, apostrophes and backticks), comments

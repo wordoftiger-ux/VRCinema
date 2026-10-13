@@ -653,7 +653,7 @@ async fn named_delete(
     named_done(&core, result, lang)
 }
 
-/// The first-run wizard page (`public/wizard.html`); like the API it needs the window session.
+/// The first-run wizard page (`public/wizard.html`, its modules in `public/app/wizard`); like the API it needs the window session.
 async fn wizard_page(_: DesktopSession) -> Response {
     asset_response("wizard.html").unwrap_or_else(|| {
         ApiError::coded(StatusCode::NOT_FOUND, "page_not_found", &[]).into_response()
