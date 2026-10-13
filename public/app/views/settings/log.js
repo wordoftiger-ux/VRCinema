@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { lang, t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
+import { appRoute } from '../../store.js';
 import { copyText } from '../../components/playerbar.js';
 import { Note, WindowNote, useAccess, useNote } from './common.js';
 
@@ -15,14 +16,14 @@ const SHOWN = 200;
 const lines = signal(null);
 
 export function Log() {
-  const { windowed } = useAccess();
+  const { managed } = useAccess();
   const [note, say] = useNote();
   const [copied, setCopied] = useState(false);
   const view = useRef(null);
 
   const load = async () => {
     try {
-      const r = await api('GET', '/api/desktop/log');
+      const r = await api('GET', appRoute('/log'));
       lines.value = r.lines.slice(-SHOWN);
       say(null);
     } catch (e) {
@@ -32,8 +33,8 @@ export function Log() {
 
   // Read on entering and again when the language changes (the engine writes the log per language).
   useEffect(() => {
-    if (windowed) load();
-  }, [windowed, lang.value]);
+    if (managed) load();
+  }, [managed, lang.value]);
   useEffect(() => {
     if (view.current) view.current.scrollTop = view.current.scrollHeight;
   }, [lines.value]);
@@ -48,14 +49,14 @@ export function Log() {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const shown = windowed ? lines.value : null;
+  const shown = managed ? lines.value : null;
   return html`
     <div class="set-rows">
       <${WindowNote} />
       <pre class="log" ref=${view} tabindex="0" aria-label=${t('settings.log.label')} data-log>${shown ? (shown.join('\n') || t('settings.log.empty')) : ''}</pre>
       <div class="pl-actions">
-        <button type="button" class="btn" disabled=${!windowed} onClick=${load}>${t('settings.log.refresh')}</button>
-        <button type="button" class="btn" disabled=${!windowed || !shown?.length} onClick=${copy}>
+        <button type="button" class="btn" disabled=${!managed} onClick=${load}>${t('settings.log.refresh')}</button>
+        <button type="button" class="btn" disabled=${!managed || !shown?.length} onClick=${copy}>
           <span aria-live="polite">${copied ? t('share.copied') : t('settings.log.copy')}</span></button>
       </div>
       <${Note} note=${note} />

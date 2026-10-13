@@ -1,15 +1,15 @@
 // Settings → General: the program's language (outside the window also the panel's language in
-// this browser), starting with Windows, access from the home network and the port. A new port
-// or network access restarts the server.
+// this browser and signing out), starting with Windows, access from the home network and the
+// port (those two stay in the window). A new port or network access restarts the server.
 
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { lang, t } from '../../i18n.js';
-import { choosePanelLanguage, setLanguage } from '../../store.js';
+import { choosePanelLanguage, setLanguage, signOut } from '../../store.js';
 import { LanguageOptions, Note, Row, Switch, WindowNote, saveWith, useAccess, useConfig, useNote } from './common.js';
 
 export function General() {
-  const { mode, windowed } = useAccess();
+  const { mode, windowed, managed } = useAccess();
   const cfg = useConfig();
   const [note, say] = useNote();
   const [port, setPort] = useState('');
@@ -35,7 +35,7 @@ export function General() {
         ? html`<${Row} title=${t('settings.general.language')} hint=${t('settings.general.language_env')} />`
         : html`<${Row} title=${t('settings.general.language')} hint=${t('settings.general.language_hint')}>
             <select class="sel" aria-label=${t('settings.general.language')} value=${lang.value}
-              disabled=${!windowed} onChange=${(e) => setLanguage(e.target.value)}>
+              disabled=${!managed} onChange=${(e) => setLanguage(e.target.value)}>
               <${LanguageOptions} />
             </select>
           <//>`}
@@ -51,17 +51,22 @@ export function General() {
         <${Switch} label=${t('settings.general.autostart')} checked=${Boolean(cfg?.autostart)} disabled=${!cfg}
           onChange=${(on) => saveWith(say, { autostart: on }, on ? t('settings.general.autostart_on') : t('settings.general.autostart_off'))} />
       <//>
-      <${Row} title=${t('settings.general.lan')} hint=${t('settings.general.lan_hint')}>
-        <${Switch} label=${t('settings.general.lan')} checked=${Boolean(cfg?.lanAccess)} disabled=${!cfg}
+      <${Row} title=${t('settings.general.lan')} hint=${t('settings.general.lan_hint')} windowOnly>
+        <${Switch} label=${t('settings.general.lan')} checked=${Boolean(cfg?.lanAccess)} disabled=${!cfg || !windowed}
           onChange=${(on) => saveWith(say, { lanAccess: on }, on ? t('settings.general.lan_on') : t('settings.general.lan_off'))} />
       <//>
-      <${Row} title=${t('settings.general.port')} hint=${t('settings.general.port_hint')}>
+      <${Row} title=${t('settings.general.port')} hint=${t('settings.general.port_hint')} windowOnly>
         <form class="inline" onSubmit=${savePort}>
           <input type="number" class="num" min="1024" max="65535" step="1" required aria-label=${t('settings.general.port')}
-            value=${port} disabled=${!cfg} onInput=${(e) => setPort(e.target.value)} />
-          <button type="submit" class="btn" disabled=${!cfg}>${t('settings.general.port_save')}</button>
+            value=${port} disabled=${!cfg || !windowed} onInput=${(e) => setPort(e.target.value)} />
+          <button type="submit" class="btn" disabled=${!cfg || !windowed}>${t('settings.general.port_save')}</button>
         </form>
       <//>
+      ${mode === 'remote' || mode === 'headless'
+        ? html`<${Row} title=${t('settings.general.sign_out')} hint=${t('settings.general.sign_out_hint')}>
+            <button type="button" class="btn" data-sign-out onClick=${signOut}>${t('settings.general.sign_out')}</button>
+          <//>`
+        : null}
       <${Note} note=${note} />
     </div>`;
 }

@@ -4,7 +4,7 @@ import { signal } from '/static/vendor/signals.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
-import { info, refreshInfo } from '../../store.js';
+import { appRoute, info, refreshInfo } from '../../store.js';
 import { Note, WindowNote, saveConfig, useAccess, useNote } from './common.js';
 
 /** The offer found by a check made here (`undefined`: no check yet, the info's offer counts). */
@@ -13,7 +13,7 @@ const checking = signal(false);
 const installing = signal(false);
 
 export function About() {
-  const { windowed } = useAccess();
+  const { managed } = useAccess();
   const [note, say] = useNote();
   const i = info.value;
   const offer = checked.value === undefined ? (i?.update ?? null) : checked.value;
@@ -22,7 +22,7 @@ export function About() {
     checking.value = true;
     say('info', t('settings.about.checking'));
     try {
-      const r = await api('GET', '/api/desktop/update', undefined, { timeoutMs: 30000 });
+      const r = await api('GET', appRoute('/update'), undefined, { timeoutMs: 30000 });
       checked.value = r.available;
       say(r.available ? null : 'ok', r.available ? '' : t('settings.about.latest', { version: r.current }));
       refreshInfo();
@@ -37,7 +37,7 @@ export function About() {
     installing.value = true;
     say('info', t('settings.about.installing'));
     try {
-      const r = await api('POST', '/api/desktop/update/apply', undefined, { timeoutMs: 600000 });
+      const r = await api('POST', appRoute('/update/apply'), undefined, { timeoutMs: 600000 });
       say('ok', t('settings.about.installed', { version: r.version }));
     } catch (e) {
       installing.value = false;
@@ -67,7 +67,7 @@ export function About() {
           </div>`
         : null}
       <div class="pl-actions">
-        <button type="button" class="btn" disabled=${!windowed || checking.value} onClick=${check}>${t('settings.about.check')}</button>
+        <button type="button" class="btn" disabled=${!managed || checking.value} onClick=${check}>${t('settings.about.check')}</button>
       </div>
       <${Note} note=${note} />
     </div>`;

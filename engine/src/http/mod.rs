@@ -470,6 +470,37 @@ impl FromRequestParts<AppState> for DesktopSession {
     }
 }
 
+/// Middleware of the window's routes (`/api/desktop/*`, `/wizard`): [`DesktopSession`] for
+/// every one of them, before the body is read.
+pub(crate) async fn require_window(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let (mut parts, body) = req.into_parts();
+    if let Err(e) = DesktopSession::from_request_parts(&mut parts, &state).await {
+        return e.into_response();
+    }
+    next.run(Request::from_parts(parts, body)).await
+}
+
+/// The kind of the admin session of a panel route (window or remote); no session is 401.
+pub(crate) struct PanelSession(pub SessionKind);
+
+impl FromRequestParts<AppState> for PanelSession {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        state
+            .session(&parts.headers)
+            .map(Self)
+            .ok_or_else(|| ApiError::coded(StatusCode::UNAUTHORIZED, "login_required", &[]))
+    }
+}
+
 // ---------- Language of the request ----------
 
 /// Header the panel and the request page send with the language shown (spec section 6).
@@ -963,13 +994,20 @@ pub(crate) fn control_json(state: &ChannelState) -> Value {
 
 pub fn build_router(state: AppState) -> Router {
     let log = Arc::clone(&state.log);
-    let admin = routes_admin::router().route_layer(middleware::from_fn_with_state(
+    // Only in the desktop app: the headless server keeps answering 404 there, as in stage 1
+    // (the program's routes for the window, and the same ones for the remote panel).
+    let app = state.desktop.is_some();
+    let admin = if app {
+        routes_admin::router().merge(routes_desktop::panel_router())
+    } else {
+        routes_admin::router()
+    }
+    .route_layer(middleware::from_fn_with_state(
         state.clone(),
         routes_admin::require_admin,
     ));
-    // Only in the desktop app: the headless server keeps answering 404 there, as in stage 1.
-    let desktop = if state.desktop.is_some() {
-        routes_desktop::router()
+    let desktop = if app {
+        routes_desktop::router(state.clone())
     } else {
         Router::new()
     };

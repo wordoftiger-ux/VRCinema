@@ -6,7 +6,7 @@ import { useEffect } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
-import { info, refreshInfo } from '../../store.js';
+import { appRoute, info, refreshInfo } from '../../store.js';
 import { Block, Note, Row, WindowNote, saveWith, useAccess, useConfig, useNote, loadConfig } from './common.js';
 
 export const TOOL_ORDER = ['yt-dlp', 'ffmpeg', 'deno', 'cloudflared'];
@@ -51,7 +51,7 @@ const job = signal(null);
 async function loadTools() {
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     try {
-      tools.value = await api('GET', '/api/desktop/tools');
+      tools.value = await api('GET', appRoute('/tools'));
       return;
     } catch (e) {
       if (e.code !== 'network' && e.status !== 503) return;
@@ -84,7 +84,7 @@ async function runJob(kind, tool) {
   const names = kind === 'update' ? [tool] : kind === 'install' ? missing : TOOL_ORDER;
   job.value = { names, progress: {}, note: null, finished: false };
   const set = (patch) => (job.value = { ...job.value, ...patch });
-  const route = { update: '/api/desktop/tools/update', install: '/api/desktop/tools/install', repair: '/api/desktop/tools/repair' }[kind];
+  const route = appRoute(`/tools/${kind}`);
   try {
     try {
       await api('POST', route, kind === 'update' ? { tool } : undefined);
@@ -96,7 +96,7 @@ async function runJob(kind, tool) {
       await sleep(500);
       let p;
       try {
-        p = await api('GET', '/api/desktop/tools/progress');
+        p = await api('GET', appRoute('/tools/progress'));
         bad = 0;
       } catch (e) {
         // After an installation the server restarts: short gaps do not end the watching.
@@ -154,7 +154,7 @@ function ChannelState({ say }) {
   const restart = async () => {
     say(null);
     try {
-      await api('POST', '/api/desktop/restart');
+      await api('POST', appRoute('/restart'));
       say('ok', t('settings.tools.restarted'));
     } catch (e) {
       say('err', errorText(e));
@@ -177,12 +177,12 @@ function ChannelState({ say }) {
 }
 
 export function Tools() {
-  const { windowed } = useAccess();
+  const { managed } = useAccess();
   const cfg = useConfig();
   const [note, say] = useNote();
   useEffect(() => {
-    if (windowed) loadTools();
-  }, [windowed]);
+    if (managed) loadTools();
+  }, [managed]);
 
   const list = tools.value;
   const busy = Boolean(job.value && !job.value.finished) || Boolean(list?.running);
@@ -192,7 +192,7 @@ export function Tools() {
     button.disabled = true;
     say('info', t('settings.tools.detecting'));
     try {
-      const r = await api('POST', '/api/desktop/encoder/detect', undefined, { timeoutMs: 60000 });
+      const r = await api('POST', appRoute('/encoder/detect'), undefined, { timeoutMs: 60000 });
       say('ok', t('settings.tools.detected_now', { result: t(ENCODER_RESULT_KEYS[r.detectedEncoder] ?? 'settings.tools.result_cpu') }));
       await Promise.all([loadConfig(), refreshInfo()]);
     } catch (err) {
@@ -205,14 +205,14 @@ export function Tools() {
   return html`
     <div class="set-rows">
       <${WindowNote} />
-      ${windowed ? html`<${ChannelState} say=${say} />` : null}
+      ${managed ? html`<${ChannelState} say=${say} />` : null}
       <${Block} title=${t('settings.tools.title')} hint=${t('settings.tools.hint')}>
         <div class="tools-list">
-          ${TOOL_ORDER.map((name) => html`<${ToolRow} key=${name} name=${name} tool=${list?.tools?.find((x) => x.name === name)} busy=${busy || !windowed} />`)}
+          ${TOOL_ORDER.map((name) => html`<${ToolRow} key=${name} name=${name} tool=${list?.tools?.find((x) => x.name === name)} busy=${busy || !managed} />`)}
         </div>
         <${Progress} />
         <div class="pl-actions">
-          <button type="button" class="btn" disabled=${busy || !windowed} onClick=${() => runJob('repair')}>${t('settings.tools.repair')}</button>
+          <button type="button" class="btn" disabled=${busy || !managed} onClick=${() => runJob('repair')}>${t('settings.tools.repair')}</button>
         </div>
       <//>
       <${Block} title=${t('settings.tools.gpu')}>

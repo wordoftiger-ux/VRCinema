@@ -211,9 +211,11 @@ try {
   check(!remoteReqs.some((r) => r.path === '/api/desktop/tunnel/qr'), 'and never the window-only one');
   // Task 15: a remote session knows the tunnel from the environment: the public link.
   check((await text(page, '[data-link="share-channel"]')) === 'https://proba-kanalu.trycloudflare.com/live/main.m3u8', 'remote: the channel link is the public one (from the environment)', await text(page, '[data-link="share-channel"]'));
-  const windowOnly = await text(page, '.window-only');
-  check(windowOnly === 'Available in the program on the computer', 'window-only parts say so', windowOnly);
-  check(!(await hasButton(page, 'Reconnect')) && !(await hasButton(page, 'Set up a permanent link')), 'remote: no tunnel buttons');
+  // Fix round 1 (spec section 2: the remote panel is full): Reconnect works, setting up the
+  // permanent link stays in the window (Cloudflare login).
+  check(await hasButton(page, 'Reconnect'), 'remote: Reconnect is there');
+  check(await page.$eval('[aria-labelledby="share-internet"] button.pri', (b) => b.disabled && b.textContent.trim() === 'Set up a permanent link'), 'remote: setting up a permanent link is disabled');
+  check((await page.$('[data-window-only="permalink"]')) !== null, 'and says it is done on the computer');
   await page.screenshot({ path: join(shots, 'after-share-remote-en-1100x680.png') });
   check(page.__errors.filter((e) => !e.includes('403')).length === 0, 'no console errors in the remote Share', page.__errors);
   await page.close();

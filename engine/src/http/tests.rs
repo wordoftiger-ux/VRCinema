@@ -2374,17 +2374,25 @@ async fn window_key_logs_in_once_and_redirects_without_the_key() {
     let panel = a.h.send(get("/api/admin/library").cookie(&cookie)).await;
     assert_eq!(panel.status, StatusCode::OK);
 
-    // Second use of the same key.
+    // Second use of the same key: the same redirect, no session (the interface then says
+    // the window's session ended).
     let again = a.h.send(get(&format!("/desktop-login?key={key}"))).await;
-    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(again.error(), "Nieprawidłowy klucz okna.");
-    assert_eq!(again.header("set-cookie"), "");
+    assert_no_window_session(&again);
     // Nothing the key was in ends up in the log.
     assert!(a.h.logs().iter().all(|l| !l.contains(&key)));
 }
 
+/// A refused window key: the redirect to the interface, without a session or the key.
+fn assert_no_window_session(res: &Resp) {
+    assert_eq!(res.status, StatusCode::FOUND);
+    assert_eq!(res.header("location"), "/admin");
+    assert_eq!(res.header("referrer-policy"), "no-referrer");
+    assert_eq!(res.header("set-cookie"), "");
+}
+
+/// Task 15: the old pages' script-readable marker cookie is gone; only the session cookie.
 #[tokio::test]
-async fn window_login_also_sets_a_script_readable_hint_cookie() {
+async fn window_login_sets_only_the_session_cookie() {
     let (a, key) = app_harness(remote_off());
     let res = a.h.send(get(&format!("/desktop-login?key={key}"))).await;
     assert_eq!(res.status, StatusCode::FOUND);
@@ -2394,11 +2402,8 @@ async fn window_login_also_sets_a_script_readable_hint_cookie() {
         .iter()
         .map(|v| v.to_str().unwrap().to_string())
         .collect();
-    assert_eq!(all.len(), 2, "{all:?}");
-    // The session cookie stays first and HttpOnly; the hint is only a page-side marker.
+    assert_eq!(all.len(), 1, "{all:?}");
     assert!(all[0].starts_with("vrcinema_session=") && all[0].contains("HttpOnly"));
-    assert!(all[1].starts_with("vrcinema_app=1;"), "{}", all[1]);
-    assert!(!all[1].contains("HttpOnly"));
 }
 
 #[tokio::test]
@@ -2422,7 +2427,7 @@ async fn window_login_cookie_is_secure_behind_a_trusted_https_proxy() {
 }
 
 #[tokio::test]
-async fn wrong_missing_or_malformed_window_key_is_401() {
+async fn wrong_missing_or_malformed_window_key_gets_no_session() {
     let (a, key) = app_harness(remote_off());
     for url in [
         "/desktop-login".to_string(),
@@ -2433,9 +2438,7 @@ async fn wrong_missing_or_malformed_window_key_is_401() {
         format!("/desktop-login?key=%zz{key}"),
     ] {
         let res = a.h.send(get(&url)).await;
-        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{url}");
-        assert_eq!(res.error(), "Nieprawidłowy klucz okna.");
-        assert_eq!(res.header("set-cookie"), "");
+        assert_no_window_session(&res);
     }
     // A failed attempt does not burn the real key.
     assert!(!window_cookie(&a, &key).await.is_empty());
@@ -2446,7 +2449,7 @@ async fn a_rotated_window_key_replaces_the_previous_one() {
     let (a, old) = app_harness(remote_off());
     let new = a.key.rotate();
     let res = a.h.send(get(&format!("/desktop-login?key={old}"))).await;
-    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert_no_window_session(&res);
     window_cookie(&a, &new).await;
 }
 
@@ -2454,7 +2457,7 @@ async fn a_rotated_window_key_replaces_the_previous_one() {
 async fn headless_mode_has_no_usable_window_key() {
     let h = Harness::new();
     let res = h.send(get("/desktop-login?key=cokolwiek")).await;
-    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert_no_window_session(&res);
 }
 
 #[tokio::test]
@@ -3372,35 +3375,33 @@ async fn a_session_through_the_tunnel_is_told_apart() {
     assert_eq!(res.json()["sessionViaTunnel"], false);
 }
 
-/// The panel's tunnel switch (`PUT /api/admin/tunnel`): a session is needed; a server without
-/// a window has no tunnel.
+/// A server without a window has none of the program's panel routes (Fastify's 404), and
+/// the environment says why; with a session or without.
 #[tokio::test]
-async fn the_panels_tunnel_switch_needs_a_session_and_a_window() {
+async fn a_server_without_a_window_has_no_program_routes_for_the_panel() {
     let h = Harness::new();
-    let res = h
-        .send(call("PUT", "/api/admin/tunnel").json(json!({"enabled": false})))
-        .await;
-    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
     let cookie = h.login().await;
-    let res = h
-        .send(
-            call("PUT", "/api/admin/tunnel")
-                .cookie(&cookie)
-                .json(json!({"enabled": "nie"})),
-        )
-        .await;
-    assert_eq!(res.status, StatusCode::BAD_REQUEST);
-    assert_eq!(res.json()["code"], "field_not_boolean");
-    let res = h
-        .send(
-            call("PUT", "/api/admin/tunnel")
-                .cookie(&cookie)
-                .json(json!({"enabled": false})),
-        )
-        .await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND);
-    assert_eq!(res.json()["code"], "no_tunnel");
-    assert_eq!(res.error(), "Ten serwer nie ma wbudowanego tunelu.");
+    for (method, path) in [
+        ("GET", "/api/admin/info"),
+        ("GET", "/api/admin/config"),
+        ("PUT", "/api/admin/config"),
+        ("GET", "/api/admin/tools"),
+        ("POST", "/api/admin/tunnel/restart"),
+        ("GET", "/api/admin/log"),
+    ] {
+        let res = h
+            .send(
+                call(method, path)
+                    .cookie(&cookie)
+                    .json(json!({"tunnelEnabled": false})),
+            )
+            .await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{method} {path}");
+        assert_eq!(res.json()["statusCode"], 404, "{method} {path}");
+    }
+    let env = h.send(get(ENVIRONMENT_ROUTE).cookie(&cookie)).await.json();
+    assert_eq!(env["window"], false);
+    assert_eq!(env["restarting"], Value::Null);
 }
 
 // ---------- nicki widzów ----------

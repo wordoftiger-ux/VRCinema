@@ -331,9 +331,9 @@ async fn the_slates_follow_the_tunnel_address() {
     app.stop().await;
 }
 
-/// Spec sections 2 and 10: the remote panel may switch the tunnel (with a confirmation when the
-/// session came through it, which the environment route tells); the program's language and the
-/// tunnel's state reach a remote session there (the window's info is 403 for it).
+/// Spec sections 2 and 10: the remote panel switches and reconnects the tunnel (the panel asks
+/// first when the session came through it, which the environment and the panel's info tell);
+/// the program's language and the tunnel's state reach a remote session.
 #[tokio::test]
 async fn a_remote_session_sees_the_tunnel_switches_it_and_knows_it_came_through_it() {
     let app = start(Setup::default()).await.unwrap();
@@ -367,22 +367,48 @@ async fn a_remote_session_sees_the_tunnel_switches_it_and_knows_it_came_through_
     assert_eq!(through["tunnel"]["state"], "online");
     assert_eq!(through["tunnel"]["url"], format!("https://{QUICK_HOST}"));
     assert_eq!(through["channelRunning"], false);
+    assert_eq!(through["restarting"], false);
     assert_eq!(env(false).await["sessionViaTunnel"], false);
     // The window's info says the same for the window: never through the tunnel.
     let info = app.get("/api/desktop/info", &window).await;
     assert_eq!(info["sessionViaTunnel"], false);
+    // The panel's info (the same as the window's) tells a remote session too.
+    let info = app
+        .http
+        .get(app.url("/api/admin/info"))
+        .header("cookie", &remote)
+        .header("cf-connecting-ip", "203.0.113.7")
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(info["sessionViaTunnel"], true, "{info}");
+    assert_eq!(info["tunnel"]["state"], "online");
+
+    // Reconnecting from the panel: a new cloudflared, online again.
+    let (status, res) = app
+        .call("POST", "/api/admin/tunnel/restart", Some(&remote), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    wait_online(&app, &window).await;
+    assert_eq!(fake_starts(&app.home).len(), 2);
 
     let (status, res) = app
         .call(
             "PUT",
-            "/api/admin/tunnel",
+            "/api/admin/config",
             Some(&remote),
-            Some(json!({"enabled": false})),
+            Some(json!({"tunnelEnabled": false})),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["tunnelEnabled"], false);
-    assert_eq!(res["tunnel"]["state"], "off");
+    assert_eq!(
+        app.get("/api/desktop/tunnel", &window).await["state"],
+        "off"
+    );
     assert_eq!(app.saved()["tunnelEnabled"], false);
     assert!(!fake_running(&app.home), "cloudflared still runs");
     // Without the tunnel the header proves nothing.
@@ -391,9 +417,9 @@ async fn a_remote_session_sees_the_tunnel_switches_it_and_knows_it_came_through_
     let (status, res) = app
         .call(
             "PUT",
-            "/api/admin/tunnel",
+            "/api/admin/config",
             Some(&remote),
-            Some(json!({"enabled": true})),
+            Some(json!({"tunnelEnabled": true})),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");

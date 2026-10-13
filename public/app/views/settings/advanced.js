@@ -1,14 +1,16 @@
 // Settings → Advanced: the cookies file for yt-dlp (videos that need a login) and the pixeldrain
 // key. The address typed by hand and the trust in Cloudflare are in Internet (they only matter
-// while the tunnel is off).
+// while the tunnel is off). Choosing the cookies file stays in the window (the file dialog opens
+// on the computer); a remote panel can clear it and set the key.
 
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
-import { Note, Row, WindowNote, loadConfig, saveWith, useConfig, useNote } from './common.js';
+import { Note, Row, WindowNote, loadConfig, saveWith, useAccess, useConfig, useNote } from './common.js';
 
 export function Advanced() {
+  const { windowed } = useAccess();
   const cfg = useConfig();
   const [note, say] = useNote();
   const [key, setKey] = useState('');
@@ -30,10 +32,10 @@ export function Advanced() {
   return html`
     <div class="set-rows">
       <${WindowNote} />
-      <${Row} title=${t('settings.advanced.cookies')} hint=${t('settings.advanced.cookies_hint')} block>
+      <${Row} title=${t('settings.advanced.cookies')} hint=${t('settings.advanced.cookies_hint')} block windowOnly>
         <p class="path-value" data-cookies-path>${cfg?.ytdlpCookies ?? t('settings.advanced.cookies_unset')}</p>
         <div class="pl-actions">
-          <button type="button" class="btn" disabled=${!cfg} onClick=${pick}>${t('settings.advanced.cookies_pick')}</button>
+          <button type="button" class="btn" disabled=${!cfg || !windowed} onClick=${pick}>${t('settings.advanced.cookies_pick')}</button>
           ${cfg?.ytdlpCookies
             ? html`<button type="button" class="btn" onClick=${() => saveWith(say, { ytdlpCookies: null }, t('settings.advanced.cookies_cleared'))}>
                 ${t('settings.advanced.cookies_clear')}</button>`

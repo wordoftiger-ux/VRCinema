@@ -4,7 +4,7 @@ import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
-import { focusOnMount } from './focus.js';
+import { focusOnMount } from '../focus.js';
 import { TOOL_NAME_KEYS, TOOL_ORDER, rowState } from '../views/settings/tools.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -322,6 +322,131 @@ async fn without_tools_the_server_starts_and_the_settings_are_saved_at_once() {
 
 // ---------- Access ----------
 
+/// The program's routes for the remote panel (spec section 2: the panel is the same interface).
+const PANEL_ROUTES: [(&str, &str); 17] = [
+    ("GET", "/api/admin/info"),
+    ("GET", "/api/admin/config"),
+    ("PUT", "/api/admin/config"),
+    ("GET", "/api/admin/tools"),
+    ("POST", "/api/admin/tools/install"),
+    ("POST", "/api/admin/tools/update"),
+    ("POST", "/api/admin/tools/repair"),
+    ("GET", "/api/admin/tools/progress"),
+    ("POST", "/api/admin/encoder/detect"),
+    ("GET", "/api/admin/log"),
+    ("GET", "/api/admin/update"),
+    ("POST", "/api/admin/update/apply"),
+    ("POST", "/api/admin/restart"),
+    ("GET", "/api/admin/tunnel"),
+    ("POST", "/api/admin/tunnel/restart"),
+    ("GET", "/api/admin/tunnel/named/progress"),
+    ("POST", "/api/admin/tunnel/named/quick"),
+];
+
+/// Spec section 2: a remote session reaches the program's settings, tools, log, update and
+/// tunnel through `/api/admin/*` — but not the port, the home network access, the password or
+/// the remote panel itself, and not the window-only routes (Cloudflare login, cookies picker,
+/// wizard).
+#[tokio::test]
+async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
+    let app = App::start().await;
+    let window = app.window_cookie().await;
+    let (status, _) = app
+        .put_config(
+            &window,
+            json!({"remoteAdmin": true, "password": "haslo-zdalne-1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, remote) = app.remote_login("haslo-zdalne-1").await;
+    // Without a session: 401 before anything runs.
+    for (method, path) in PANEL_ROUTES {
+        let (status, body) = app.call(method, path, None, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
+        assert_eq!(body["code"], "login_required", "{method} {path}");
+    }
+    // Reading: the same answers as the window's routes.
+    for path in [
+        "/api/admin/info",
+        "/api/admin/config",
+        "/api/admin/tools",
+        "/api/admin/tools/progress",
+        "/api/admin/log",
+        "/api/admin/tunnel",
+        "/api/admin/tunnel/named/progress",
+    ] {
+        let (status, body) = app.call("GET", path, Some(&remote), None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    let info = app.get("/api/admin/info", &remote).await;
+    assert_eq!(info["version"], "0.2.0");
+    assert_eq!(info["sessionViaTunnel"], false);
+    // Settings: everything but the four window-only ones.
+    let (status, body) = app
+        .call(
+            "PUT",
+            "/api/admin/config",
+            Some(&remote),
+            Some(json!({"pixeldrainApiKey": "klucz-zdalny", "language": "de", "pauseWhenNoViewers": true})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["pixeldrainApiKey"], "klucz-zdalny");
+    assert_eq!(app.saved()["language"], "de");
+    // The same validation as the window's.
+    let (status, body) = app
+        .call(
+            "PUT",
+            "/api/admin/config",
+            Some(&remote),
+            Some(json!({"videoEncoder": "zly"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    for patch in [
+        json!({"port": 9999}),
+        json!({"lanAccess": true}),
+        json!({"remoteAdmin": false}),
+        json!({"password": "inne-haslo-123"}),
+        json!({"pixeldrainApiKey": "x", "password": "inne-haslo-123"}),
+    ] {
+        let before = app.saved();
+        let (status, body) = app
+            .call(
+                "PUT",
+                "/api/admin/config",
+                Some(&remote),
+                Some(patch.clone()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{patch}");
+        assert_eq!(body["code"], "window_only", "{patch}");
+        assert_eq!(app.saved(), before, "nothing saved for {patch}");
+    }
+    // The window's session may use the panel route for them too.
+    let (status, body) = app
+        .call(
+            "PUT",
+            "/api/admin/config",
+            Some(&window),
+            Some(json!({"lanAccess": false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // What stays in the window has no panel route, and its window route refuses the session.
+    for (method, path) in [
+        ("POST", "/api/admin/tunnel/named/login"),
+        ("POST", "/api/admin/tunnel/named/create"),
+        ("POST", "/api/admin/tunnel/named/delete"),
+        ("POST", "/api/admin/pick-cookies"),
+        ("POST", "/api/admin/wizard/complete"),
+    ] {
+        let (status, _) = app.call(method, path, Some(&remote), Some(json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn every_desktop_route_is_401_without_a_session_and_403_for_a_remote_one() {
     let app = App::start().await;

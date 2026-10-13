@@ -1,7 +1,11 @@
-//! Routes only the app window may use (`/api/desktop/*`, spec 9): settings, tools, encoder
-//! test, cookies picker, log, program updates, the first-run wizard, the tunnel and its
-//! permanent-link wizard. Every handler takes [`DesktopSession`] first: no session is 401, a
-//! remote session 403.
+//! The program's own routes (spec 9): settings, tools, encoder test, cookies picker, log,
+//! program updates, the first-run wizard, the tunnel and its permanent-link wizard. The window
+//! has them all under `/api/desktop/*` ([`router`]: no session is 401, a remote session 403).
+//! The remote panel is the same interface (spec section 2): [`panel_router`] gives it the same
+//! handlers under `/api/admin/*` (any admin session) — all but what stays in the window:
+//! the Cloudflare login and what needs it (create, delete), the cookies file picker (a dialog
+//! on the computer), the first-run wizard, and in the settings the port, the home network
+//! access, the password and the remote panel itself ([`put_panel_config`]).
 
 use axum::Router;
 use axum::extract::State;
@@ -10,8 +14,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Map, Value, json};
 
+use super::auth::SessionKind;
 use super::{
-    ApiError, ApiResult, AppState, Ctx, DesktopSession, JsonBody, ReqLang, asset_response, json_ok,
+    ApiError, ApiResult, AppState, Ctx, JsonBody, PanelSession, ReqLang, asset_response, json_ok,
     json_response,
 };
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
@@ -24,7 +29,12 @@ use crate::tunnel::named::{ADD_DOMAIN_HELP, ErrorCode, NamedError, Phase};
 const ENCODERS: [&str; 5] = ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf"];
 const MIN_PASSWORD_CHARS: usize = 8;
 
-pub(super) fn router() -> Router<AppState> {
+/// Settings a remote session may not change (spec section 2): they decide who and what can
+/// reach the panel at all.
+const WINDOW_ONLY_SETTINGS: [&str; 4] = ["port", "lanAccess", "remoteAdmin", "password"];
+
+/// The window's routes; every one needs the window's session ([`super::require_window`]).
+pub(super) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/wizard", get(wizard_page))
         .route("/api/desktop/info", get(info))
@@ -49,6 +59,33 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/desktop/tunnel/named/create", post(named_create))
         .route("/api/desktop/tunnel/named/quick", post(named_quick))
         .route("/api/desktop/tunnel/named/delete", post(named_delete))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            super::require_window,
+        ))
+}
+
+/// The same handlers for the panel (`/api/admin/*`, behind the admin session of the admin
+/// router): everything but the window-only parts listed above. Only in the app (a server
+/// without a window has none of this).
+pub(super) fn panel_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/admin/info", get(info))
+        .route("/api/admin/config", get(get_config).put(put_panel_config))
+        .route("/api/admin/tools", get(tools_status))
+        .route("/api/admin/tools/install", post(tools_install))
+        .route("/api/admin/tools/update", post(tools_update))
+        .route("/api/admin/tools/repair", post(tools_repair))
+        .route("/api/admin/tools/progress", get(tools_progress))
+        .route("/api/admin/encoder/detect", post(encoder_detect))
+        .route("/api/admin/log", get(log))
+        .route("/api/admin/update", get(update_check))
+        .route("/api/admin/update/apply", post(update_apply))
+        .route("/api/admin/restart", post(restart))
+        .route("/api/admin/tunnel", get(tunnel))
+        .route("/api/admin/tunnel/restart", post(tunnel_restart))
+        .route("/api/admin/tunnel/named/progress", get(named_progress))
+        .route("/api/admin/tunnel/named/quick", post(named_quick))
 }
 
 impl From<OpError> for ApiError {
@@ -113,12 +150,7 @@ pub(super) fn tunnel_view(core: &AppCore, lang: Lang) -> Value {
     })
 }
 
-async fn info(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ctx: Ctx,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn info(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     let s = core.settings();
     let update = core
@@ -153,7 +185,7 @@ async fn info(
     })))
 }
 
-async fn get_config(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn get_config(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     Ok(json_ok(&Value::Object(config_view(&core))))
 }
@@ -307,11 +339,7 @@ fn is_hostname(host: &str) -> bool {
 /// Partial update: only the fields present change. Only a new port or network access restarts
 /// the server (the answer has the new port); everything else applies to the next request,
 /// resolve or clip; a new public address also redraws the slates in the background.
-async fn put_config(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    JsonBody(body): JsonBody,
-) -> ApiResult {
+async fn put_config(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
     let core = state.desktop()?;
     let patch = parse_patch(&body)?;
     let restarted = core.apply_config(patch).await?;
@@ -320,7 +348,21 @@ async fn put_config(
     Ok(json_ok(&Value::Object(view)))
 }
 
-async fn tools_status(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+/// [`put_config`] for the panel: a remote session changes everything but
+/// [`WINDOW_ONLY_SETTINGS`] (403 `window_only`, nothing saved); the window's session anything.
+async fn put_panel_config(
+    PanelSession(kind): PanelSession,
+    state: State<AppState>,
+    JsonBody(body): JsonBody,
+) -> ApiResult {
+    let window_only = WINDOW_ONLY_SETTINGS.iter().any(|f| body.get(f).is_some());
+    if kind == SessionKind::Remote && window_only {
+        return Err(ApiError::coded(StatusCode::FORBIDDEN, "window_only", &[]));
+    }
+    put_config(state, JsonBody(body)).await
+}
+
+async fn tools_status(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     let status = core.tools.status();
     let tools: Vec<Value> = status
@@ -354,20 +396,16 @@ fn start_job(state: &AppState, job: ToolsJob) -> ApiResult {
     ))
 }
 
-async fn tools_install(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn tools_install(State(state): State<AppState>) -> ApiResult {
     start_job(&state, ToolsJob::Install)
 }
 
-async fn tools_repair(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn tools_repair(State(state): State<AppState>) -> ApiResult {
     start_job(&state, ToolsJob::Repair)
 }
 
 /// `{"tool": "yt-dlp" | "ffmpeg" | "deno"}`
-async fn tools_update(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    JsonBody(body): JsonBody,
-) -> ApiResult {
+async fn tools_update(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
     let name = body.get("tool").and_then(Value::as_str).unwrap_or("");
     let tool = Tool::ALL
         .into_iter()
@@ -378,11 +416,7 @@ async fn tools_update(
     start_job(&state, ToolsJob::Update(tool))
 }
 
-async fn tools_progress(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn tools_progress(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     let p = core.tools.progress().borrow().clone();
     Ok(json_ok(&json!({
@@ -396,7 +430,7 @@ async fn tools_progress(
     })))
 }
 
-async fn encoder_detect(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn encoder_detect(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     let found = core.detect_encoder().await?;
     Ok(json_ok(&json!({
@@ -405,7 +439,7 @@ async fn encoder_detect(_: DesktopSession, State(state): State<AppState>) -> Api
     })))
 }
 
-async fn pick_cookies(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn pick_cookies(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     let picked = core.pick_cookies().await?;
     let current = core
@@ -418,17 +452,13 @@ async fn pick_cookies(_: DesktopSession, State(state): State<AppState>) -> ApiRe
     })))
 }
 
-async fn log(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn log(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     Ok(json_ok(&json!({ "lines": core.log.tail(lang) })))
 }
 
 /// Checks GitHub now. A failure (no network, private repository) only goes to the log.
-async fn update_check(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn update_check(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     let info = core.check_update().await;
     let available = info
@@ -441,7 +471,7 @@ async fn update_check(_: DesktopSession, State(state): State<AppState>) -> ApiRe
 }
 
 /// Installs the release found by the last check; the shell then restarts the program.
-async fn update_apply(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn update_apply(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     let version = core.apply_update().await?;
     Ok(json_ok(
@@ -449,14 +479,14 @@ async fn update_apply(_: DesktopSession, State(state): State<AppState>) -> ApiRe
     ))
 }
 
-async fn wizard_complete(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn wizard_complete(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     core.complete_wizard().await?;
     Ok(json_ok(&json!({ "ok": true })))
 }
 
 /// "Uruchom ponownie kanał": the owner decides when the stream is interrupted.
-async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn restart(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     core.restart_server().await.map_err(|e| {
         ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "restart_failed", &[])
@@ -467,28 +497,20 @@ async fn restart(_: DesktopSession, State(state): State<AppState>) -> ApiResult 
 
 /// The tunnel's state, address, mode and host name (`warning`: the named mode fell back to
 /// quick).
-async fn tunnel(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn tunnel(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     Ok(json_ok(&tunnel_view(&core, lang)))
 }
 
 /// The QR code (PNG) of the request page at the public address in effect, for the wizard; 404
 /// while there is no address.
-async fn tunnel_qr(_: DesktopSession, State(state): State<AppState>) -> ApiResult {
+async fn tunnel_qr(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     super::request_qr_response(&core.live_settings.public_url.get())
 }
 
 /// A new cloudflared (a quick tunnel gets a new address); 409 while the tunnel is off.
-async fn tunnel_restart(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn tunnel_restart(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     if !core.restart_tunnel().await {
         return Err(ApiError::coded(StatusCode::CONFLICT, "tunnel_off", &[]));
@@ -560,7 +582,6 @@ fn named_progress_view(core: &AppCore, lang: Lang) -> Value {
 /// running login instead (200 with the progress, `state` "cancelled"); "Spróbuj ponownie" is
 /// another plain POST once it ended.
 async fn named_login(
-    _: DesktopSession,
     State(state): State<AppState>,
     ReqLang(lang): ReqLang,
     JsonBody(body): JsonBody,
@@ -584,11 +605,7 @@ async fn named_login(
     }
 }
 
-async fn named_progress(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn named_progress(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     Ok(json_ok(&named_progress_view(&core, lang)))
 }
@@ -609,7 +626,6 @@ fn named_done(core: &AppCore, result: Result<Msg, NamedError>, lang: Lang) -> Ap
 /// reuses) the tunnel `vrcinema`, routes the host name to it (`overwrite`: replace another DNS
 /// record of that name, after a `dns_taken`) and switches to the permanent link.
 async fn named_create(
-    _: DesktopSession,
     State(state): State<AppState>,
     ReqLang(lang): ReqLang,
     JsonBody(body): JsonBody,
@@ -634,29 +650,21 @@ async fn named_create(
 }
 
 /// "Wróć do szybkiego tunelu": the permanent link's files stay.
-async fn named_quick(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn named_quick(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     let result = core.named_to_quick().await;
     named_done(&core, result, lang)
 }
 
 /// "Usuń stały link": the tunnel in Cloudflare, then its files here; the quick tunnel runs.
-async fn named_delete(
-    _: DesktopSession,
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-) -> ApiResult {
+async fn named_delete(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.desktop()?;
     let result = core.delete_named().await;
     named_done(&core, result, lang)
 }
 
 /// The first-run wizard page (`public/wizard.html`, its modules in `public/app/wizard`); like the API it needs the window session.
-async fn wizard_page(_: DesktopSession) -> Response {
+async fn wizard_page() -> Response {
     asset_response("wizard.html").unwrap_or_else(|| {
         ApiError::coded(StatusCode::NOT_FOUND, "page_not_found", &[]).into_response()
     })

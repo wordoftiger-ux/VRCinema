@@ -1,14 +1,15 @@
 // Shared parts of the Settings sections: rows, switches, segmented choices, notes, and the
-// program's settings (`/api/desktop/config`, window only) that several sections read and save.
+// program's settings that several sections read and save (`/api/desktop/config` in the window,
+// `/api/admin/config` for a remote panel — the same settings but the window-only ones).
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { lang, t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
-import { access, refreshInfo } from '../../store.js';
+import { access, appRoute, refreshInfo } from '../../store.js';
 
-const CONFIG = '/api/desktop/config';
+const config_ = () => appRoute('/config');
 
 /** The program's settings as the window sees them; null until read. */
 export const config = signal(null);
@@ -22,7 +23,7 @@ const restarting = (e) => e.code === 'network' || e.status === 503;
 export async function loadConfig() {
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     try {
-      config.value = await api('GET', CONFIG);
+      config.value = await api('GET', config_());
       return config.value;
     } catch (e) {
       if (!restarting(e)) return null;
@@ -33,7 +34,7 @@ export async function loadConfig() {
 }
 
 /**
- * Saves a part of the settings: `{ok: true, data}`, `{ok: false, error}` (the view goes back to
+ * Saves a part of the settings: `{ok: true, data}`, `{ok: false, error, cause}` (the view goes back to
  * the saved values) or `{ok: false, restarting: true}` (the engine restarts for a new port or
  * network access; the settings are read again once it answers).
  */
@@ -42,7 +43,7 @@ export async function saveConfig(patch) {
   // connection is an ordinary error.
   const restarts = 'port' in patch || 'lanAccess' in patch;
   try {
-    const data = await api('PUT', CONFIG, patch);
+    const data = await api('PUT', config_(), patch);
     config.value = data;
     refreshInfo();
     return { ok: true, data };
@@ -53,23 +54,32 @@ export async function saveConfig(patch) {
       return { ok: false, restarting: true };
     }
     await loadConfig();
-    return { ok: false, error: errorText(e) };
+    return { ok: false, error: errorText(e), cause: e };
   }
 }
 
-/** What the section may do: window-only parts work in the window only (not while unknown). */
+/**
+ * What the section may do: `managed` — the program's settings, tools, log… (the window and a
+ * remote panel alike, spec section 2); `windowed` — the window-only parts (port, home network,
+ * password, remote panel, Cloudflare login, cookies picker). Nothing while unknown.
+ */
 export function useAccess() {
   const mode = access.value;
-  return { mode, windowed: mode === 'window', known: mode !== 'unknown' };
+  return {
+    mode,
+    windowed: mode === 'window',
+    managed: mode === 'window' || mode === 'remote',
+    known: mode !== 'unknown',
+  };
 }
 
-/** The program's settings for a window-only section: read on mount, null until then. */
+/** The program's settings: read on mount (window or remote panel), null until then. */
 export function useConfig() {
-  const { windowed } = useAccess();
+  const { managed, mode } = useAccess();
   useEffect(() => {
-    if (windowed) loadConfig();
-  }, [windowed]);
-  return windowed ? config.value : null;
+    if (managed) loadConfig();
+  }, [managed, mode]);
+  return managed ? config.value : null;
 }
 
 /** A note under a control: `[note, say]`; `say(kind, text)` with `ok`, `info` or `err`, `say(null)` clears. */
@@ -102,13 +112,17 @@ export async function saveWith(say, patch, okText) {
   return null;
 }
 
-/** A line of a section: title and hint on the left, the control on the right. */
-export function Row({ title, hint, id, block = false, children }) {
+/**
+ * A line of a section: title and hint on the left, the control on the right. `windowOnly`: the
+ * control stays in the program's window (a remote panel says so under the title).
+ */
+export function Row({ title, hint, id, block = false, windowOnly = false, children }) {
   return html`
     <div class=${block ? 'row2 block' : 'row2'}>
       <div class="row2-text">
         <b id=${id}>${title}</b>
         ${hint ? html`<small>${hint}</small>` : null}
+        ${windowOnly ? html`<${WindowOnlyHint} />` : null}
       </div>
       ${children}
     </div>`;
@@ -132,10 +146,20 @@ export function Segmented({ value, options, onChange, disabled = false, label })
     </div>`;
 }
 
-/** The note that a part works in the program's window only (shown outside it, once known). */
-export function WindowNote() {
-  const { windowed, known } = useAccess();
-  return known && !windowed ? html`<p class="window-only set-window-only">${t('ui.window_only')}</p>` : null;
+/**
+ * The note that a section works in the program's window only: on a server without a window
+ * always (there is no program to manage), in a remote panel for the sections that stay in the
+ * window (`all`).
+ */
+export function WindowNote({ all = false }) {
+  const { mode } = useAccess();
+  const shown = mode === 'headless' || (all && mode === 'remote');
+  return shown ? html`<p class="window-only set-window-only">${t('ui.window_only')}</p>` : null;
+}
+
+/** The same under one control that stays in the window (shown in a remote panel). */
+export function WindowOnlyHint() {
+  return access.value === 'remote' ? html`<small class="window-only-hint">${t('ui.window_only')}</small>` : null;
 }
 
 /** A group of rows with a heading. */

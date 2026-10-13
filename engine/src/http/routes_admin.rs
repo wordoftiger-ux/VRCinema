@@ -8,7 +8,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{get, patch, post, put};
+use axum::routing::{get, patch, post};
 use serde_json::{Value, json};
 
 use super::{
@@ -50,7 +50,6 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/channels/main/stats", get(stats))
         .route("/api/admin/qr", get(qr))
         .route("/api/admin/environment", get(environment))
-        .route("/api/admin/tunnel", put(set_tunnel))
         .route("/api/admin/channels/main/play-now", post(play_now))
         .route(
             "/api/admin/channels/main/settings",
@@ -668,7 +667,7 @@ async fn stats(State(state): State<AppState>) -> ApiResult {
 /// ticker makes the computer fall behind, the program's language (the panel's language until
 /// the browser picks one), whether this session came through the built-in tunnel, and — in
 /// the app — the tunnel and the channel's state (`null` without a window). Open to a remote
-/// session too (the window-only routes, `/api/desktop/info` among them, are not).
+/// session too; in the app a remote panel reads the whole info at `/api/admin/info`.
 async fn environment(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -> ApiResult {
     let core = state.app_core();
     let settings = core.as_ref().map(|c| c.settings());
@@ -685,38 +684,7 @@ async fn environment(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): Req
         "tunnel": core.as_ref().map(|c| super::routes_desktop::tunnel_view(c, lang)),
         "channelRunning": core.as_ref().map(|c| c.channel_running()),
         "channelError": core.as_ref().and_then(|c| c.channel_error()).map(|m| m.render(lang)),
-    })))
-}
-
-/// Switches the built-in tunnel on or off (`{"enabled": bool}`): the one setting of the
-/// internet a remote session may change (spec section 2; the panel asks first when the session
-/// came through the tunnel). Answers the tunnel's state; 404 on a server without a window.
-async fn set_tunnel(
-    State(state): State<AppState>,
-    ReqLang(lang): ReqLang,
-    JsonBody(body): JsonBody,
-) -> ApiResult {
-    let enabled = match body.get("enabled") {
-        Some(Value::Bool(b)) => *b,
-        _ => {
-            return Err(ApiError::coded(
-                StatusCode::BAD_REQUEST,
-                "field_not_boolean",
-                &[("field", "enabled")],
-            ));
-        }
-    };
-    let Some(core) = state.app_core() else {
-        return Err(ApiError::coded(StatusCode::NOT_FOUND, "no_tunnel", &[]));
-    };
-    core.apply_config(crate::app::ConfigPatch {
-        tunnel_enabled: Some(enabled),
-        ..Default::default()
-    })
-    .await?;
-    Ok(json_ok(&json!({
-        "tunnelEnabled": core.settings().tunnel_enabled,
-        "tunnel": super::routes_desktop::tunnel_view(&core, lang),
+        "restarting": core.as_ref().map(|c| c.restarting()),
     })))
 }
 

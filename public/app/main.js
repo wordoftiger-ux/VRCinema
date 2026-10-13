@@ -7,12 +7,14 @@ import { browserLang, chosenLang, loadLang, t } from './i18n.js';
 import { Icon } from './icons.js';
 import {
   abilities,
+  access,
   environment,
   firstInfo,
   netStatus,
   restart,
   seekBy,
   session,
+  signOut,
   skip,
   startPolling,
   toast,
@@ -144,14 +146,22 @@ const NET_KEYS = {
   local: 'net.local',
 };
 
-/** The top of the screen on a phone (no title bar there): the name and the internet status. */
+/**
+ * The top of the screen on a phone (no title bar there): the name, the internet status and, for
+ * a password session, signing out.
+ */
 function PhoneTop() {
   const net = netStatus.value;
+  const password = access.value === 'remote' || access.value === 'headless';
   return html`
     <header class="ptop">
       <span class="tb-logo" aria-hidden="true"><${Icon} name="play" size=${11} /></span>
       <b class="ptop-title">VRCinema</b>
       ${net ? html`<span class=${`pill net-${net}`} role="status"><span class="dot" aria-hidden="true"></span>${t(NET_KEYS[net])}</span>` : null}
+      ${password
+        ? html`<button type="button" class="icon-button ptop-out" data-sign-out aria-label=${t('settings.general.sign_out')}
+            title=${t('settings.general.sign_out')} onClick=${signOut}><${Icon} name="logout" size=${20} /></button>`
+        : null}
     </header>`;
 }
 
@@ -201,7 +211,7 @@ async function start() {
   // browser's.
   const info = await firstInfo();
   // The window's first run goes through the wizard first.
-  if (info && info.firstRunCompleted === false) {
+  if (info && access.value === 'window' && info.firstRunCompleted === false) {
     location.replace('/wizard');
     return;
   }

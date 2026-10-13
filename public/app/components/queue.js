@@ -66,6 +66,7 @@ function QueueList({ items }) {
   const list = useRef(null);
   const press = useRef(null); // a row pressed with the mouse: {id, x, y, active}
   const touch = useRef(null); // a row held on a touch screen: {x, y, timer}
+  const longPressAt = useRef(-Infinity); // when a long press last opened a menu
   const refocus = useRef(null); // the row to give focus back to after a keyboard move
   const [drag, setDrag] = useState(null); // {id, to} while a row is being dragged
 
@@ -114,6 +115,7 @@ function QueueList({ items }) {
       const row = e.currentTarget;
       const timer = setTimeout(() => {
         touch.current = null;
+        longPressAt.current = performance.now();
         openMenu(row, 'queue.menu', menuFor(item, index, items.length));
       }, LONG_PRESS_MS);
       touch.current = { x: e.clientX, y: e.clientY, timer };
@@ -147,6 +149,17 @@ function QueueList({ items }) {
     const from = items.findIndex((i) => i.id === p.id);
     const to = targetFor(p.id, e.clientY);
     if (from >= 0 && to !== from) moveItem(p.id, to);
+  };
+
+  // A touch browser may open its own long-press gesture (`contextmenu`) too: whichever comes
+  // first opens the menu, the other one is dropped.
+  const onContextMenu = (e, item, index) => {
+    if (touch.current) endTouch();
+    else if (performance.now() - longPressAt.current < LONG_PRESS_MS * 3) {
+      e.preventDefault();
+      return;
+    }
+    contextMenuHandlers('queue.menu', () => menuFor(item, index, items.length)).onContextMenu(e);
   };
 
   const onKeyDown = (e, item, index) => {
@@ -183,7 +196,7 @@ function QueueList({ items }) {
             onPointerDown=${(e) => onPointerDown(e, item, index)} onPointerMove=${onPointerMove}
             onPointerUp=${(e) => finish(e, true)} onPointerCancel=${(e) => finish(e, false)}
             onKeyDown=${(e) => onKeyDown(e, item, index)}
-            ...${contextMenuHandlers('queue.menu', () => menuFor(item, index, items.length))}>
+            onContextMenu=${(e) => onContextMenu(e, item, index)}>
             <${Thumb} id=${item.id} />
             <${ItemText} item=${item} />
             <button type="button" class="icon-button qi-more" aria-label=${t('queue.more', { title: videoTitle(item.title) })}

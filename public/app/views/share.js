@@ -5,8 +5,9 @@ import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
-import { api, errorText } from '../api.js';
+import { errorText } from '../api.js';
 import { NamedLink } from '../components/named-wizard.js';
+import { reconnectTunnel } from '../components/tunnel-actions.js';
 import { copyText } from '../components/playerbar.js';
 import {
   access,
@@ -14,7 +15,6 @@ import {
   info,
   netStatus,
   publicAddress,
-  refreshInfo,
   requestLink,
   showToast,
   tunnel,
@@ -57,28 +57,22 @@ function LinkCard({ id, title, hint, link, children }) {
 const reconnecting = signal(false);
 async function reconnect() {
   reconnecting.value = true;
-  try {
-    await api('POST', '/api/desktop/tunnel/restart');
-    showToast(t('share.reconnected'), 'info');
-    await refreshInfo();
-  } catch (e) {
-    showToast(errorText(e));
-  } finally {
-    reconnecting.value = false;
-  }
+  await reconnectTunnel((kind, text) => kind && showToast(text, kind === 'err' ? 'error' : 'info'));
+  reconnecting.value = false;
 }
 
 function InternetCard() {
   const net = netStatus.value;
   const tun = tunnel.value;
-  const windowed = access.value === 'window';
+  // The window and a remote panel manage the tunnel; a server without a window has none.
+  const managed = access.value === 'window' || access.value === 'remote';
   const known = access.value !== 'unknown';
   return html`
     <section class="card2" aria-labelledby="share-internet">
       <h2 id="share-internet">${t('share.internet_title')}
         ${net ? html`<span class=${`pill net-${net}`} role="status"><span class="dot" aria-hidden="true"></span>${t(NET_KEYS[net])}</span>` : null}
       </h2>
-      ${windowed
+      ${managed
         ? html`
             ${tun?.state === 'error' && tun.message ? html`<p class="pl-small">${t('share.reason', { reason: tun.message })}</p>` : null}
             ${info.value && !info.value.tunnelEnabled ? html`<p>${t('share.tunnel_off')}</p>` : html`<${NamedLink} />`}

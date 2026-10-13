@@ -1,12 +1,13 @@
 // The state of the channel as the interface sees it: signals filled by polling the engine
-// (the panel every second, the window's info every 3 s) and the owner's controls.
+// (the panel every second, the program's info every 3 s) and the owner's controls.
 
 import { signal, computed, batch } from '/static/vendor/signals.mjs';
 import { api, errorText } from './api.js';
 import { chosenLang, lang, loadLang, rememberLang } from './i18n.js';
 
 const PANEL = '/api/admin/channels/main';
-const INFO = '/api/desktop/info';
+const WINDOW_INFO = '/api/desktop/info';
+const PANEL_INFO = '/api/admin/info';
 const ENVIRONMENT = '/api/admin/environment';
 const PANEL_EVERY_MS = 1000;
 const INFO_EVERY_MS = 3000;
@@ -21,7 +22,10 @@ export const control = signal(null);
 export const controlAt = signal(0);
 export const queue = signal([]);
 export const history = signal([]);
-/** The window's info (`/api/desktop/info`); null in a remote session or without a window. */
+/**
+ * The program's info: the window's (`/api/desktop/info`), or the same for a remote session
+ * (`/api/admin/info`); null on a server without a window.
+ */
 export const info = signal(null);
 /**
  * What the interface runs in: `unknown` until the first answer, then `window` (the program's
@@ -35,7 +39,7 @@ export const remote = computed(() => access.value === 'remote' || access.value =
 /**
  * `/api/admin/environment` (open to a remote session too): `{window, encoder, tickerSlow,
  * language, sessionViaTunnel, publicUrl, tunnelEnabled, tunnel, channelRunning, channelError}`
- * (the last four `null` without a window). Polled outside the window instead of the info.
+ * (`null` without a window). Polled on a server without a window instead of the info.
  */
 export const environment = signal(null);
 /** Where the internet state comes from: the window's info, else the environment. */
@@ -52,7 +56,9 @@ export const previewDelayS = signal(null);
 /** Raised by every successful seek: the preview shows a bubble for a few seconds. */
 export const seekBubble = signal(0);
 
-let infoAvailable = true;
+// Where the info is read: the window's route, the panel's (a remote session), or nowhere (a
+// server without a window: the environment instead).
+let infoRoute = WINDOW_INFO;
 // Panel changes made here (move, remove, approve) that have not finished, and when the last
 // one did: a read that started before that shows the old state and must not overwrite ours.
 let mutating = 0;
@@ -73,7 +79,8 @@ export function showToast(text, kind = 'error') {
 let lastControlAnswer = 0;
 
 function applyPanel(data, startedAt) {
-  if (mutating > 0 || startedAt < lastMutationEnd) return;
+  // A read that was under way when the owner signed out does not bring the panel back.
+  if (session.value === 'signed_out' || mutating > 0 || startedAt < lastMutationEnd) return;
   const { control: c, queue: q, history: h, ...rest } = data;
   batch(() => {
     channel.value = rest;
@@ -130,33 +137,46 @@ export function refreshPanel() {
 }
 
 export async function refreshInfo() {
-  if (!infoAvailable) return refreshEnvironment();
+  if (infoRoute === null) return refreshEnvironment();
+  const route = infoRoute;
   const switches = languageSwitches;
   try {
-    const data = await api('GET', INFO);
-    info.value = data;
-    access.value = 'window';
+    const data = await api('GET', route);
+    if (session.value === 'signed_out') return 'stop';
+    const inWindow = route === WINDOW_INFO;
+    batch(() => {
+      info.value = data;
+      access.value = inWindow ? 'window' : 'remote';
+    });
+    // The window speaks the program's language; a remote panel too unless this browser picked one.
+    const wanted = inWindow ? data?.language : (chosenLang() ?? data?.language);
     const current = !switchingLanguage && switches === languageSwitches;
-    if (current && data?.language && data.language !== lang.value) {
-      await loadLang(data.language);
-    }
+    if (current && wanted && wanted !== lang.value) await loadLang(wanted);
     return 'ok';
   } catch (e) {
-    // 403: a remote session; the server without a window answers 403 or 404 as well. The
-    // environment says which one it is (and is read from now on instead); until it answers,
-    // the access stays unknown.
-    if (e.status === 403 || e.status === 404) {
-      const result = await refreshEnvironment();
-      if (result === 'ok') infoAvailable = false;
-      return result;
+    if (e.status === 401) return 'stop';
+    // 403 from the window's route: a remote session (the panel's route next). 404: a server
+    // without a window (the environment says so); until one answers, the access stays unknown.
+    if (route === WINDOW_INFO && e.status === 403) {
+      infoRoute = PANEL_INFO;
+      return refreshInfo();
     }
-    return e.status === 401 ? 'stop' : 'fail';
+    if (e.status === 403 || e.status === 404) {
+      infoRoute = null;
+      return refreshEnvironment();
+    }
+    return 'fail';
   }
 }
 
+/** `/api/desktop` + `path` in the window, `/api/admin` + `path` for a remote panel. */
+export function appRoute(path) {
+  return `${access.value === 'window' ? '/api/desktop' : '/api/admin'}${path}`;
+}
+
 /**
- * One read of the environment outside the window. The panel follows the program's language
- * unless a language was picked in this browser.
+ * One read of the environment on a server without a window. The panel follows the server's
+ * language unless a language was picked in this browser.
  */
 async function refreshEnvironment() {
   const switches = languageSwitches;
@@ -165,7 +185,7 @@ async function refreshEnvironment() {
     batch(() => {
       environment.value = env;
       info.value = null;
-      access.value = env.window ? 'remote' : 'headless';
+      access.value = 'headless';
     });
     const current = !switchingLanguage && switches === languageSwitches;
     if (current && !chosenLang() && env.language && env.language !== lang.value) {
@@ -217,7 +237,7 @@ export function startPolling() {
  */
 export function resumePolling() {
   session.value = 'loading';
-  infoAvailable = true;
+  infoRoute = WINDOW_INFO;
   loops?.panel.restart();
   loops?.info.restart();
 }
@@ -337,14 +357,17 @@ export async function addLink(url) {
   }
 }
 
-/** Changes the program's language (window only) and switches the interface at once. */
+/**
+ * Changes the program's language and switches the interface at once (a remote panel only when
+ * this browser did not pick a language of its own).
+ */
 export async function setLanguage(code) {
   switchingLanguage = true;
   languageSwitches += 1;
   try {
-    await api('PUT', '/api/desktop/config', { language: code });
+    await api('PUT', appRoute('/config'), { language: code });
     if (info.value) info.value = { ...info.value, language: code };
-    await loadLang(code);
+    if (access.value === 'window' || !chosenLang()) await loadLang(code);
   } catch (e) {
     showToast(errorText(e));
   } finally {
@@ -359,16 +382,23 @@ export async function choosePanelLanguage(code) {
   await loadLang(code);
 }
 
-/**
- * Switches the built-in tunnel from the panel (`PUT /api/admin/tunnel`, also in a remote
- * session). Resolves to true when it was saved; a failure is thrown as `ApiError`.
- */
-export async function setTunnelEnabled(enabled) {
-  const r = await api('PUT', '/api/admin/tunnel', { enabled });
-  const env = environment.value;
-  if (env) environment.value = { ...env, tunnelEnabled: r.tunnelEnabled, tunnel: r.tunnel };
-  refreshInfo();
-  return true;
+/** Signs a password session out (remote panel, server without a window): the sign-in screen. */
+export async function signOut() {
+  try {
+    await api('POST', '/api/admin/logout');
+  } catch (e) {
+    showToast(errorText(e));
+    return;
+  }
+  batch(() => {
+    session.value = 'signed_out';
+    info.value = null;
+    environment.value = null;
+    channel.value = null;
+    queue.value = [];
+    history.value = [];
+    access.value = 'unknown';
+  });
 }
 
 // ---------- Derived values ----------

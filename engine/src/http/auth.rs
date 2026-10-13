@@ -215,19 +215,6 @@ pub fn parse_cookies(header: Option<&str>) -> HashMap<String, String> {
     out
 }
 
-/// Page-side marker "this browser is the app window" (set next to the window session). Not a
-/// credential: the pages use it only to decide whether to ask `/api/desktop/*` anything, so the
-/// plain browser never probes routes that do not exist for it.
-pub const APP_HINT_COOKIE: &str = "vrcinema_app";
-
-pub fn app_hint_cookie(secure: bool, max_age_s: u64) -> String {
-    let mut cookie = format!("{APP_HINT_COOKIE}=1; Path=/; SameSite=Lax; Max-Age={max_age_s}");
-    if secure {
-        cookie.push_str("; Secure");
-    }
-    cookie
-}
-
 pub fn session_cookie(token: &str, secure: bool, max_age_s: u64) -> String {
     let mut parts = vec![
         format!("{SESSION_COOKIE}={token}"),

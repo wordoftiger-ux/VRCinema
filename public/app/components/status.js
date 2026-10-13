@@ -16,9 +16,10 @@ const dismissed = signal(new Set());
 
 /**
  * The notices for the state of `i` (the window's info) or `env` (the environment elsewhere):
- * `{kind, id, text, href, linkKey, level}`. Window-only places are linked from the window only.
+ * `{kind, id, text, href, linkKey, level}`. Settings are linked where the program can be managed
+ * (the window or a remote panel; a server without a window has no tools to fix).
  */
-export function notices({ i, env, tun, windowed }) {
+export function notices({ i, env, tun, managed }) {
   const out = [];
   const add = (kind, content, text, href, linkKey, level = 'warn') =>
     out.push({ kind, id: `${kind}:${content}`, text, href, linkKey, level });
@@ -34,7 +35,7 @@ export function notices({ i, env, tun, windowed }) {
       'channel_down',
       reason,
       reason ? t('banner.channel_down_reason', { reason }) : t('banner.channel_down'),
-      windowed ? '#/settings/tools' : null,
+      managed ? '#/settings/tools' : null,
       'banner.go_tools',
       'err',
     );
@@ -64,7 +65,7 @@ export function StatusStrip() {
     i: info.value,
     env: environment.value,
     tun: tunnel.value,
-    windowed: access.value === 'window',
+    managed: access.value === 'window' || access.value === 'remote',
   }).filter((n) => !dismissed.value.has(n.id) && n.href !== here);
   if (!all.length) return null;
   const dismiss = (id) => (dismissed.value = new Set([...dismissed.value, id]));

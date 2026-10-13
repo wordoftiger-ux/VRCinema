@@ -640,29 +640,55 @@ try {
   }
   await page.close();
 
-  // ---------- A remote session ----------
+  // ---------- A remote session (fix round 1: the remote panel is full, spec section 2) ----------
   await reset();
   await scenario({ remote: true });
   page = await openApp('#/settings/general');
-  await page.waitForSelector('.set-window-only');
-  check((await text(page, '.set-window-only')) === 'Available in the program on the computer', 'a remote session sees the window-only note');
-  const disabledAll = await page.$$eval('#view .row2 select, #view .row2 button, #view .row2 input', (els) => els.filter((e) => !e.matches('[data-panel-language]')).every((e) => e.disabled));
-  check(disabledAll, 'and its window-only controls are disabled');
-  check(await page.$eval('[data-panel-language]', (e) => !e.disabled), 'only the language of this panel can be chosen (kept in the browser)');
+  await page.waitForSelector('[data-sign-out]');
+  const enabledIn = (sel) => page.$$eval(sel, (els) => els.filter((e) => !e.disabled).length);
+  check(await page.$eval('select[aria-label="Language"]', (e) => !e.disabled), 'remote: the program language can be changed');
+  check(await page.$eval(sw('Start VRCinema with Windows'), (e) => !e.disabled), 'remote: starting with Windows can be changed');
+  check(await page.$eval(sw('Allow opening the page from other devices on the home network'), (e) => e.disabled), 'remote: home network access stays in the window');
+  check(await page.$eval('input[aria-label="Server port"]', (e) => e.disabled), 'remote: the port stays in the window');
+  check((await page.$$('.window-only-hint')).length === 2, 'and both say so under their title');
+  check((await page.$('.set-window-only')) === null, 'no whole-section window-only note');
+  m = await mark();
+  await page.selectOption('select[aria-label="Language"]', 'pl');
+  a = await actions(m, 'remote program language');
+  check(a[0].path === '/api/admin/config' && JSON.stringify(a[0].body) === '{"language":"pl"}', 'the program language goes to PUT /api/admin/config', a[0]);
+  await page.waitForFunction(() => document.documentElement.lang === 'pl');
+  check(true, 'with no language picked in this browser the panel follows it');
+  await page.selectOption('select[aria-label="Język"]', 'en');
+  await page.waitForFunction(() => document.documentElement.lang === 'en');
   await shot(page, 'after-settings-general-remote-en.png');
-  for (const section of ['internet', 'tools', 'remote', 'advanced', 'log', 'about']) {
-    await goto(page, section);
-    await page.waitForSelector('.set-window-only');
-    // Task 15 (spec section 2): the tunnel switch works in a remote session too.
-    const tunnelSwitch = await page.$('[role=switch][aria-label^="Share the channel on the internet"]');
-    const enabled = await page.$$eval('#view .sform button, #view .sform select, #view .sform input', (els) => els.filter((e) => !e.disabled && !e.closest('.snav') && !e.matches('[role=switch][aria-label^="Share the channel on the internet"]')).map((e) => e.outerHTML.slice(0, 80)));
-    check(enabled.length === 0, `${section}: nothing else is enabled in a remote session`, enabled);
-    if (section === 'internet') check(tunnelSwitch && !(await tunnelSwitch.evaluate((e) => e.disabled)), 'internet: the tunnel switch is enabled in a remote session');
-  }
+  await goto(page, 'internet');
+  await page.waitForFunction(() => !document.querySelector('#view [role=switch]')?.disabled);
+  check(await page.$eval('#view .kv button', (b) => !b.disabled), 'internet: Reconnect works remotely');
+  check(await page.$eval(sw('Pause when the internet is gone'), (e) => !e.disabled), 'internet: the pauses work remotely');
+  m = await mark();
+  await page.click(sw('Pause when nobody is watching'));
+  a = await actions(m, 'remote pause setting');
+  check(a[0].path === '/api/admin/config' && JSON.stringify(a[0].body) === '{"pauseWhenNoViewers":true}', 'a pause setting → PUT /api/admin/config', a[0]);
+  check(await page.$eval('.named-link button.pri', (b) => b.disabled), 'internet: setting up a permanent link stays in the window');
+  await goto(page, 'tools');
+  await page.waitForFunction(() => document.querySelectorAll('#view .kv.tool button:not([disabled])').length === 4);
+  check(await page.$eval('#view .sform .pl-actions button', (b) => !b.disabled), 'tools: update, repair and the GPU test work remotely');
+  await goto(page, 'remote');
+  await page.waitForSelector('.set-window-only');
+  check((await enabledIn('#view .sform button, #view .sform input')) === 0, 'remote panel: password and switch stay in the window');
+  await goto(page, 'advanced');
+  await page.waitForSelector('[data-cookies-path]');
+  check(await page.$eval('[data-cookies-path] + .pl-actions button', (b) => b.disabled), 'advanced: choosing the cookies file stays in the window (a dialog on the computer)');
+  check(await page.$eval('input[aria-label^="pixeldrain API key"]', (e) => !e.disabled), 'advanced: the pixeldrain key works remotely');
+  await goto(page, 'log');
+  await page.waitForFunction(() => document.querySelector('[data-log]')?.textContent.includes('VRCinema'));
+  check(true, 'log: read remotely');
+  await goto(page, 'about');
+  check(await page.$eval('#view .sform .pl-actions button', (b) => !b.disabled), 'about: checking for an update works remotely');
   let all = await requests();
   const windowCalls = all.filter((r) => r.path.startsWith('/api/desktop/') && r.path !== '/api/desktop/info');
-  check(windowCalls.length === 0, 'no window-only request was made beyond the first info (403)', windowCalls.map((r) => r.path));
-  check(all.some((r) => r.path === '/api/admin/environment'), 'the environment told it is a remote session of the program');
+  check(windowCalls.length === 0, 'no window route was asked beyond the first info (403)', windowCalls.map((r) => r.path));
+  check(['/api/admin/info', '/api/admin/config', '/api/admin/tools', '/api/admin/log'].every((r) => all.some((x) => x.path === r)), 'the panel routes were used');
   await goto(page, 'channel');
   await page.waitForSelector('.domains[data-list="allowed"]');
   m = await mark();

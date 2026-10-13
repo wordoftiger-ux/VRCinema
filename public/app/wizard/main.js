@@ -7,10 +7,10 @@ import { signal } from '/static/vendor/signals.mjs';
 import { html } from '../html.js';
 import { browserLang, lang, loadLang, t } from '../i18n.js';
 import { api } from '../api.js';
-import { firstInfo, setLanguage, toast } from '../store.js';
+import { access, firstInfo, setLanguage, toast } from '../store.js';
 import { Icon } from '../icons.js';
 import { Titlebar, inWindow } from '../components/titlebar.js';
-import { focusOnMount } from './focus.js';
+import { focusOnMount } from '../focus.js';
 import { LANGUAGES, LANGUAGE_NAME_KEYS } from '../views/settings/common.js';
 import { ToolsStep } from './tools-step.js';
 import { EncoderStep } from './encoder-step.js';
@@ -93,7 +93,7 @@ async function readInfo() {
 
 async function start() {
   const info = await readInfo();
-  if (!info) {
+  if (!info || access.value !== 'window') {
     // Not the program's window (or the session is gone): the panel signs in or says so.
     location.replace('/admin');
     return;

@@ -12,8 +12,8 @@ use axum::routing::{get, post};
 use serde_json::{Value, json};
 
 use super::auth::{
-    AdminAuth, SESSION_TTL_MS, app_hint_cookie, check_password, create_desktop_session_token,
-    create_session_token, session_cookie, verify_password,
+    AdminAuth, SESSION_TTL_MS, check_password, create_desktop_session_token, create_session_token,
+    session_cookie, verify_password,
 };
 use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, asset_response, json_ok, json_response, num_json,
@@ -332,7 +332,9 @@ async fn login(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
 }
 
 /// One-time login of the app window. Neither the key nor the query string is logged, and the
-/// redirect target does not carry the key.
+/// redirect target does not carry the key. A wrong, used or missing key gets no session but
+/// the same redirect: the window then shows the interface's "session ended" card (with its
+/// title bar — the window has no frame) instead of a bare error.
 async fn desktop_login(
     State(state): State<AppState>,
     ctx: Ctx,
@@ -343,26 +345,19 @@ async fn desktop_login(
             .find(|(k, _)| k == "key")
             .map(|(_, v)| v.into_owned())
     });
-    if !key.is_some_and(|k| state.desktop_key().redeem(&k)) {
-        let mut res =
-            ApiError::coded(StatusCode::UNAUTHORIZED, "invalid_window_key", &[]).into_response();
-        res.headers_mut()
-            .insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-        return res;
-    }
-    let now = crate::db::now_ms().max(0) as u64;
-    let token = create_desktop_session_token(&state.config.session_secret, SESSION_TTL_MS, now);
-    let cookie = session_cookie(&token, ctx.https, SESSION_TTL_MS / 1000);
     let mut res = StatusCode::FOUND.into_response();
     let headers = res.headers_mut();
     headers.insert(LOCATION, HeaderValue::from_static("/admin"));
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    if let Ok(value) = HeaderValue::from_str(&cookie) {
-        headers.insert(SET_COOKIE, value);
+    if !key.is_some_and(|k| state.desktop_key().redeem(&k)) {
+        return res;
     }
-    if let Ok(value) = HeaderValue::from_str(&app_hint_cookie(ctx.https, SESSION_TTL_MS / 1000)) {
-        headers.append(SET_COOKIE, value);
+    let now = crate::db::now_ms().max(0) as u64;
+    let token = create_desktop_session_token(&state.config.session_secret, SESSION_TTL_MS, now);
+    let cookie = session_cookie(&token, ctx.https, SESSION_TTL_MS / 1000);
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        res.headers_mut().insert(SET_COOKIE, value);
     }
     res
 }

@@ -10,7 +10,7 @@ import { Icon } from '../icons.js';
 import { api, errorText } from '../api.js';
 import { choosePanelLanguage, resumePolling } from '../store.js';
 import { inWindow } from '../components/titlebar.js';
-import { focusOnMount } from '../wizard/focus.js';
+import { focusOnMount } from '../focus.js';
 import { LanguageOptions } from './settings/common.js';
 
 function Brand() {

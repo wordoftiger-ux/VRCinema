@@ -26,6 +26,7 @@ const PATHS = {
   down: 'M12 19l-7-7 1.4-1.4 4.6 4.6V5h2v10.2l4.6-4.6L19 12z',
   more: 'M12 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm0 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm0 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4z',
   warning: 'M12 3l10 18H2zm-1 7v5h2v-5zm0 7v2h2v-2z',
+  logout: 'M4 4h9v2H6v12h7v2H4zm11.6 3.6L20 12l-4.4 4.4-1.4-1.4 2-2H9v-2h7.2l-2-2z',
   keyboard: 'M3 6h18v12H3zm2 2v8h14V8zm1 1h2v2H6zm3 0h2v2H9zm3 0h2v2h-2zm3 0h3v2h-3zM7 13h10v2H7z',
 };
 

@@ -1,50 +1,17 @@
 // Settings → Internet: the built-in tunnel (on/off, quick or permanent link with the wizard),
 // the pauses, and — only while the tunnel is off — the address typed by hand and the trust in
-// Cloudflare's headers. A remote session may switch the tunnel (spec section 2) — and is asked
-// first when it came through the tunnel, which switching it off would end; the rest is the
-// window's.
+// Cloudflare's headers. A remote panel does all of it (spec section 2) but setting up or
+// deleting the permanent link (the Cloudflare login happens on the computer); a session that
+// came through the tunnel is asked first when an action ends its connection.
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
-import { api, errorText } from '../../api.js';
 import { NamedLink } from '../../components/named-wizard.js';
-import { openDialog } from '../../components/dialog.js';
-import { environment, refreshInfo, sessionViaTunnel, setTunnelEnabled, tunnel } from '../../store.js';
+import { reconnectTunnel, switchTunnel } from '../../components/tunnel-actions.js';
+import { sessionViaTunnel, tunnel } from '../../store.js';
 import { Block, Note, Row, Switch, WindowNote, saveWith, useAccess, useConfig, useNote } from './common.js';
-
-/** Asks before the tunnel goes off under a session that came through it; resolves to the answer. */
-export function confirmLosingAccess() {
-  return new Promise((resolve) => {
-    openDialog({
-      title: () => t('settings.internet.lose_access_title'),
-      body: () => html`<p class="dialog-intro" data-lose-access>${t('settings.internet.lose_access')}</p>`,
-      buttons: [
-        { key: 'settings.internet.lose_access_cancel', action: () => resolve(false) },
-        { key: 'settings.internet.lose_access_yes', danger: true, action: () => resolve(true) },
-      ],
-      onClose: () => resolve(false),
-    });
-  });
-}
-
-/** Switches the tunnel from here: the window saves its settings, a remote session the switch. */
-async function switchTunnel(on, { windowed, say }) {
-  if (!on && sessionViaTunnel.value && !(await confirmLosingAccess())) return;
-  const okText = on ? t('settings.internet.tunnel_on') : t('settings.internet.tunnel_off');
-  if (windowed) {
-    await saveWith(say, { tunnelEnabled: on }, okText);
-    return;
-  }
-  say(null);
-  try {
-    await setTunnelEnabled(on);
-    say('ok', okText);
-  } catch (e) {
-    say('err', errorText(e));
-  }
-}
 
 const STATE_KEYS = {
   off: 'settings.internet.state_off',
@@ -57,50 +24,37 @@ const STATE_KEYS = {
 const reconnecting = signal(false);
 
 export function Internet() {
-  const { windowed, mode } = useAccess();
+  const { managed } = useAccess();
   const cfg = useConfig();
-  const env = environment.value;
   const tun = tunnel.value;
   const [note, say] = useNote();
   const [address, setAddress] = useState('');
   useEffect(() => {
     if (cfg) setAddress(cfg.publicUrl ?? '');
   }, [cfg?.publicUrl]);
-  // The window reads its settings; a remote session the environment (a server without a
-  // window has no tunnel).
-  const remoteSwitch = mode === 'remote' && typeof env?.tunnelEnabled === 'boolean';
-  const on = windowed ? Boolean(cfg?.tunnelEnabled) : Boolean(remoteSwitch && env.tunnelEnabled);
-  const canSwitch = windowed ? Boolean(cfg) : remoteSwitch;
+  const on = Boolean(cfg?.tunnelEnabled);
 
   const reconnect = async () => {
     reconnecting.value = true;
-    say(null);
-    try {
-      await api('POST', '/api/desktop/tunnel/restart');
-      say('ok', t('share.reconnected'));
-      await refreshInfo();
-    } catch (e) {
-      say('err', errorText(e));
-    } finally {
-      reconnecting.value = false;
-    }
+    await reconnectTunnel(say);
+    reconnecting.value = false;
   };
 
   return html`
     <div class="set-rows">
+      <${WindowNote} />
       <${Row} title=${t('settings.internet.tunnel')} hint=${t('settings.internet.tunnel_hint')}>
-        <${Switch} label=${t('settings.internet.tunnel')} checked=${on} disabled=${!canSwitch}
-          onChange=${(v) => switchTunnel(v, { windowed, say })} />
+        <${Switch} label=${t('settings.internet.tunnel')} checked=${on} disabled=${!cfg}
+          onChange=${(v) => switchTunnel(v, say)} />
       <//>
       ${on && sessionViaTunnel.value ? html`<p class="set-sub" data-via-tunnel>${t('settings.internet.via_tunnel')}</p>` : null}
-      <${WindowNote} />
       ${on && tun?.warning ? html`<p class="set-note err" role="alert">${tun.warning}</p>` : null}
       ${on
         ? html`
             <${Block}>
               <div class="kv" data-tunnel-state=${tun?.state ?? 'off'}>
                 <span class="name">${t(STATE_KEYS[tun?.state ?? 'off'] ?? STATE_KEYS.off)}</span>
-                <button type="button" class="btn" disabled=${!windowed || reconnecting.value} onClick=${reconnect}>
+                <button type="button" class="btn" disabled=${!managed || reconnecting.value} onClick=${reconnect}>
                   ${reconnecting.value ? t('share.reconnecting') : t('share.reconnect')}</button>
               </div>
               ${tun?.url
@@ -109,11 +63,9 @@ export function Internet() {
                   ? html`<p class="set-sub">${t('share.reason', { reason: tun.message })}</p>`
                   : null}
             <//>
-            ${windowed
-              ? html`<${Block} title=${t('settings.internet.link_type')}>
-                  <${NamedLink} />
-                <//>`
-              : null}
+            <${Block} title=${t('settings.internet.link_type')}>
+              <${NamedLink} />
+            <//>
             <${Block} title=${t('settings.internet.pauses')} hint=${t('settings.internet.pauses_hint')}>
               <${Row} title=${t('settings.internet.pause_loss')}>
                 <${Switch} label=${t('settings.internet.pause_loss')} checked=${Boolean(cfg?.pauseOnTunnelLoss)} disabled=${!cfg}

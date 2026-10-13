@@ -30,9 +30,13 @@
 // Sign-in (task 15): POST /api/admin/login with the password `tajne-haslo` signs in (clears
 // `signedOut`; a wrong one 401 `wrong_password`, scenario `remotePanelOff` 403
 // `remote_panel_off`, messages in the request's language for en/pl); POST /api/admin/logout signs
-// out. PUT /api/admin/tunnel {enabled} switches the tunnel (also remote; 404 `no_tunnel` headless).
-// Scenario `sessionViaTunnel` (environment flag), `channelDown` (channelRunning false with an
-// error), `restarting`.
+// out. The program's routes for the remote panel (fix round 1): /api/admin/{info, config, tools…,
+// encoder/detect, log, update…, restart, tunnel, tunnel/restart, tunnel/named/progress|quick}
+// answer like the window's (a remote session may not PUT port/lanAccess/remoteAdmin/password:
+// 403 `window_only`; a server without a window: Fastify's 404). Scenario `sessionViaTunnel`
+// (the session came through the tunnel: switching it off, reconnecting or changing the link
+// type through the panel routes applies the change and then drops the connection, as the real
+// tunnel would), `channelDown` (channelRunning false with an error).
 // Settings view: GET /api/admin/environment ({window, encoder, tickerSlow, language,
 // sessionViaTunnel, publicUrl, tunnelEnabled, tunnel, channelRunning, channelError}; scenario `headless`: no window — the window routes answer 403 like for a remote session, window false; `tickerSlow`, `encoder`), GET/PUT /api/desktop/config (validated like the engine; a new port or lanAccess answers restarted: true), tools (GET /api/desktop/tools, POST install|update|repair then GET progress; scenario `toolsMissing`), POST encoder/detect, pick-cookies (scenario `pickCookies`), GET log, GET update (scenario `updateOffer` {version, notes}, `toolsFail`, `infoFail`: the info route answers 500), POST update/apply, POST restart; GET/PUT /api/admin/channels/main/settings (validated like the engine: ticker messages <= 10 x <= 200 chars, intervals 60/120/300/600), GET /api/admin/nicks and POST nicks/{skeleton}/release, devices/block, devices/unblock.
 
@@ -564,13 +568,41 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       s.signedOut = true;
       return json(res, 200, { ok: true });
     }
-    if (path === '/api/desktop/info' || path === '/api/desktop/config') {
+    // The program's routes for the remote panel: the window's, under /api/admin.
+    const MIRRORED = ['info', 'config', 'tools', 'tools/install', 'tools/update', 'tools/repair', 'tools/progress', 'encoder/detect', 'log', 'update', 'update/apply', 'restart', 'tunnel', 'tunnel/restart', 'tunnel/named/progress', 'tunnel/named/quick'];
+    const mirror = path.startsWith('/api/admin/') && MIRRORED.includes(path.slice('/api/admin/'.length));
+    if (mirror && s.signedOut) return coded(res, 401, 'login_required', 'Log in.');
+    if (mirror && s.headless) return json(res, 404, { message: `Route ${req.method}:${path} not found`, error: 'Not Found', statusCode: 404 });
+    const viaTunnel = mirror && s.remote && s.sessionViaTunnel && s.tunnel !== 'off';
+    const route = mirror ? path.replace('/api/admin/', '/api/desktop/') : path;
+    const endsConnection =
+      viaTunnel &&
+      ((route === '/api/desktop/config' && req.method === 'PUT' && payload?.tunnelEnabled === false) ||
+        route === '/api/desktop/tunnel/restart' ||
+        route === '/api/desktop/tunnel/named/quick');
+    // The browser sends an idempotent request (PUT) again on a dropped keep-alive connection:
+    // that second try is dropped as well (the tunnel is gone for it too).
+    const key = `${req.method} ${path}`;
+    if (s.lastDrop?.key === key && Date.now() - s.lastDrop.at < 3000) return req.socket.destroy();
+    if (endsConnection) {
+      // The change is made; the answer never arrives (the tunnel carried this connection).
+      s.lastDrop = { key, at: Date.now() };
+      if (route === '/api/desktop/config') s.tunnel = 'off';
+      if (route === '/api/desktop/tunnel/restart') s.tunnelUrl = `https://proba-kanalu-${(s.rotations += 1)}.trycloudflare.com`;
+      if (route === '/api/desktop/tunnel/named/quick') s.named.mode = 'quick';
+      return req.socket.destroy();
+    }
+    if (route === '/api/desktop/info' || route === '/api/desktop/config') {
       if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
-      if (noWindow) return coded(res, 403, 'window_only', 'Window only');
-      if (s.infoFail && path === '/api/desktop/info') return coded(res, 500, 'internal', 'boom');
-      if (req.method === 'PUT') return putConfig(res, payload);
-      if (path === '/api/desktop/config') return json(res, 200, configView());
-      return json(res, 200, info());
+      if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
+      if (s.infoFail && route === '/api/desktop/info') return coded(res, 500, 'internal', 'boom');
+      if (req.method === 'PUT') {
+        const windowOnly = ['port', 'lanAccess', 'remoteAdmin', 'password'].some((k) => k in (payload ?? {}));
+        if (mirror && s.remote && windowOnly) return coded(res, 403, 'window_only', 'This feature is only available in the app window.');
+        return putConfig(res, payload);
+      }
+      if (route === '/api/desktop/config') return json(res, 200, configView());
+      return json(res, 200, { ...info(), sessionViaTunnel: viaTunnel });
     }
     if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
     if (path === '/api/admin/environment') {
@@ -586,30 +618,25 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
         tunnel: app ? tunnelView() : null,
         channelRunning: app ? !s.channelDown : null,
         channelError: app && s.channelDown ? 'ffmpeg exited (code 1)' : null,
+        restarting: app ? false : null,
       });
     }
-    if (path === '/api/admin/tunnel' && req.method === 'PUT') {
-      if (typeof payload?.enabled !== 'boolean') return coded(res, 400, 'field_not_boolean', 'The field enabled must be true or false.');
-      if (s.headless) return coded(res, 404, 'no_tunnel', 'This server has no built-in tunnel.');
-      s.tunnel = payload.enabled ? (s.tunnelOnEnable ?? 'online') : 'off';
-      return json(res, 200, { tunnelEnabled: s.tunnel !== 'off', tunnel: tunnelView() });
-    }
-    if (path.startsWith('/api/desktop/')) {
-      if (noWindow) return coded(res, 403, 'window_only', 'Window only');
-      if (await desktopRoute(res, req, path, payload)) return undefined;
-      if (path === '/api/desktop/tunnel/qr') return sendQr(res);
-      if (path === '/api/desktop/tunnel' && req.method === 'GET') return json(res, 200, tunnelView());
-      if (path === '/api/desktop/wizard/complete' && req.method === 'POST') {
+    if (route.startsWith('/api/desktop/')) {
+      if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
+      if (await desktopRoute(res, req, route, payload)) return undefined;
+      if (route === '/api/desktop/tunnel/qr') return sendQr(res);
+      if (route === '/api/desktop/tunnel' && req.method === 'GET') return json(res, 200, tunnelView());
+      if (route === '/api/desktop/wizard/complete' && req.method === 'POST') {
         s.firstRun = false;
         return json(res, 200, { ok: true });
       }
-      if (path === '/api/desktop/tunnel/restart' && req.method === 'POST') {
+      if (route === '/api/desktop/tunnel/restart' && req.method === 'POST') {
         if (s.tunnel === 'off') return coded(res, 409, 'tunnel_off', 'Tunnel is off');
         s.rotations += 1;
         s.tunnelUrl = `https://proba-kanalu-${s.rotations}.trycloudflare.com`;
         return json(res, 200, tunnelView());
       }
-      if (path.startsWith('/api/desktop/tunnel/named/')) return namedRoute(res, path.slice('/api/desktop/tunnel/named/'.length), req, payload);
+      if (route.startsWith('/api/desktop/tunnel/named/')) return namedRoute(res, route.slice('/api/desktop/tunnel/named/'.length), req, payload);
       return json(res, 404, { error: 'Not Found' });
     }
     if (path === '/api/admin/qr') return sendQr(res);

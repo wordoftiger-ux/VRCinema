@@ -210,7 +210,7 @@ try {
   check(page.__errors.length === 0, 'no console errors (headless)', page.__errors);
   await page.close();
 
-  // ---------- The tunnel switch of a remote session and the "lose access" question ----------
+  // ---------- The tunnel in a remote session and the "lose access" question ----------
   const internet = async (s, opts = {}) => {
     await reset();
     await scenario(s);
@@ -220,14 +220,17 @@ try {
     return p;
   };
   const SWITCH = '#view [role=switch][aria-label^="Share the channel"]';
+  const RECONNECT = '#view .kv button';
+  const noteText = (p) => p.$eval('#view .set-note', (e) => e.textContent.trim()).catch(() => null);
   page = await internet({ remote: true, sessionViaTunnel: true });
-  check((await page.$eval(SWITCH, (e) => e.getAttribute('aria-checked'))) === 'true', 'remote: the switch shows the tunnel on (from the environment)');
+  check((await page.$eval(SWITCH, (e) => e.getAttribute('aria-checked'))) === 'true', 'remote: the switch shows the tunnel on');
   check((await page.$('[data-via-tunnel]')) !== null, 'remote through the tunnel: it says so under the switch');
   m = await mark();
   await page.click(SWITCH);
-  await page.waitForSelector('.dialog [data-lose-access]');
+  await page.waitForSelector('.dialog [data-lose-access="off"]');
   check((await text(page, '#dialog-title')) === 'Switch the tunnel off?', 'switching off asks first', await text(page, '#dialog-title'));
-  check((await text(page, '[data-lose-access]')).includes('you will lose access to this panel'), 'and says the panel will be lost');
+  const offText = await text(page, '[data-lose-access]');
+  check(offText.includes('you will lose access to this panel') && offText.includes('a quick link gets a new address'), 'and says the panel will be lost and a quick address changes', offText);
   check(await page.evaluate(() => document.activeElement?.textContent.trim() === 'Keep it on'), 'the safe answer has the focus');
   await shot(page, 'after-remote-lose-access-en-1100x680.png');
   await page.keyboard.press('Enter');
@@ -239,27 +242,50 @@ try {
   await page.keyboard.press('Escape');
   await sleep(300);
   check((await actionsSince(m)).length === 0, 'Esc cancels too');
+  // Reconnecting asks too (a quick link gets a new address); the connection then ends.
+  await page.click(RECONNECT);
+  await page.waitForSelector('.dialog [data-lose-access="reconnect"]');
+  check((await text(page, '[data-lose-access]')).includes('a quick link gets a new address'), 'reconnecting asks and names the new quick address');
+  await page.click('.dialog .btn.danger');
+  const rec = await waitFor(async () => (await actionsSince(m)).find((r) => r.path === '/api/admin/tunnel/restart'), 'the reconnect request');
+  check(rec.method === 'POST', 'confirmed: POST /api/admin/tunnel/restart', rec);
+  await waitFor(async () => (await noteText(page)) !== null, 'the reconnect note', 9000);
+  check((await noteText(page)).startsWith('Done — the connection of this panel ended'), 'the dropped connection is reported as such, not as an error', await noteText(page));
+  // Back to a quick link from the permanent one changes the address: asked too.
+  await scenario({ named: { mode: 'named', host: 'kanal.example.com', loggedIn: true, progress: { operation: null, state: 'idle', running: false } } });
+  await page.waitForSelector('.named-link[data-mode="named"] .pl-actions button:not(.danger)', { timeout: 8000 });
+  await page.click('.named-link[data-mode="named"] .pl-actions button:not(.danger)');
+  await page.waitForSelector('.dialog [data-lose-access="mode"]');
+  check((await text(page, '#dialog-title')) === 'Change the link?', 'back to a quick link asks first');
+  await page.keyboard.press('Escape');
+  check(await page.$eval('.named-link .btn.danger', (b) => b.disabled), 'deleting the permanent link stays in the window');
+  m = await mark();
   await page.click(SWITCH);
   await page.click('.dialog .btn.danger');
-  const off = await waitFor(async () => (await actionsSince(m)).find((r) => r.path === '/api/admin/tunnel'), 'the switch request');
-  check(off.method === 'PUT' && JSON.stringify(off.body) === '{"enabled":false}', 'confirmed: PUT /api/admin/tunnel {enabled: false}', off);
+  const off = await waitFor(async () => (await actionsSince(m)).find((r) => r.method === 'PUT'), 'the switch request');
+  check(off.path === '/api/admin/config' && JSON.stringify(off.body) === '{"tunnelEnabled":false}', 'confirmed: PUT /api/admin/config {tunnelEnabled: false}', off);
   check(!(await actionsSince(m)).some((r) => r.path.startsWith('/api/desktop/')), 'and no window-only request');
+  await waitFor(async () => (await noteText(page))?.startsWith('Done — the connection'), 'the switch-off note', 12000);
+  check(true, 'switching off through the tunnel: "connection ended", not an error');
   await page.waitForFunction((sel) => document.querySelector(sel).getAttribute('aria-checked') === 'false', SWITCH);
   check(true, 'the switch shows the tunnel off');
   m = await mark();
   await page.click(SWITCH);
-  await waitFor(async () => (await actionsSince(m)).find((r) => r.path === '/api/admin/tunnel'), 'switching on');
-  check((await page.$('.dialog')) === null, 'switching on never asks');
+  const on = await waitFor(async () => (await actionsSince(m)).find((r) => r.method === 'PUT'), 'switching on');
+  check((await page.$('.dialog')) === null && JSON.stringify(on.body) === '{"tunnelEnabled":true}', 'switching on never asks');
+  check(page.__errors.filter((e) => !/ERR_EMPTY_RESPONSE|Failed to fetch|net::/.test(e)).length === 0, 'no console errors but the dropped connections', page.__errors);
   await page.close();
 
   page = await internet({ remote: true, sessionViaTunnel: false });
   check((await page.$('[data-via-tunnel]')) === null, 'remote from the home network: no note');
-  check(await page.$eval('#view .kv button', (b) => b.disabled), 'remote: "Reconnect" stays window-only');
-  check((await page.$('.named-link')) === null, 'remote: no permanent link wizard (window only)');
+  m = await mark();
+  await page.click(RECONNECT);
+  await waitFor(async () => (await actionsSince(m)).find((r) => r.path === '/api/admin/tunnel/restart'), 'reconnect from the LAN');
+  check((await page.$('.dialog')) === null, 'a session not through the tunnel reconnects without the question');
   m = await mark();
   await page.click(SWITCH);
-  const direct = await waitFor(async () => (await actionsSince(m)).find((r) => r.path === '/api/admin/tunnel'), 'switching off from the LAN');
-  check((await page.$('.dialog')) === null && JSON.stringify(direct.body) === '{"enabled":false}', 'a session not through the tunnel switches it off without the question');
+  const direct = await waitFor(async () => (await actionsSince(m)).find((r) => r.method === 'PUT'), 'switching off from the LAN');
+  check((await page.$('.dialog')) === null && direct.path === '/api/admin/config' && JSON.stringify(direct.body) === '{"tunnelEnabled":false}', 'and switches it off without the question', direct);
   await page.close();
 
   page = await internet({}, { inWindow: true });
@@ -267,6 +293,28 @@ try {
   await page.click(SWITCH);
   const win = await waitFor(async () => (await actionsSince(m)).find((r) => r.method === 'PUT'), 'switching off in the window');
   check((await page.$('.dialog')) === null && win.path === '/api/desktop/config' && JSON.stringify(win.body) === '{"tunnelEnabled":false}', 'the window saves its settings, no question', win);
+  await page.close();
+
+  // ---------- Signing out (a password session) ----------
+  await reset();
+  await scenario({ remote: true });
+  page = await open('/admin#/settings/general');
+  await page.waitForSelector('#view [data-sign-out]');
+  m = await mark();
+  await page.click('#view [data-sign-out]');
+  await page.waitForSelector('.login-card input[type=password]');
+  check((await actionsSince(m)).some((r) => r.method === 'POST' && r.path === '/api/admin/logout'), 'Settings → General: Sign out → POST /api/admin/logout and the sign-in screen');
+  await sleep(1500);
+  check((await page.$('.rail')) === null, 'the panel does not come back after signing out');
+  await page.fill('.login-card input[type=password]', 'tajne-haslo');
+  await page.click('.login-submit');
+  await page.waitForSelector('.player .play');
+  check(true, 'signing in again opens the panel');
+  await page.close();
+  await reset();
+  page = await open('/admin#/settings/general', { inWindow: true });
+  await page.waitForSelector('#view[data-section="general"] select');
+  check((await page.$('[data-sign-out]')) === null, 'the window has no sign out (its session comes from the tray)');
   await page.close();
 
   // ---------- Status strip ----------
@@ -292,13 +340,14 @@ try {
   check((await text(page, '[data-status="channel_down"] .status-text')) === 'The channel is not running: ffmpeg exited (code 1)', 'the channel down with its reason');
   check((await page.$eval('[data-status="tunnel_error"] a', (a) => a.getAttribute('href'))) === '#/settings/internet', 'a tunnel error links to Internet');
   await page.close();
-  // A remote session: what the environment knows (no tools, no update offer).
+  // A remote session (fix round 1: the full info, as in the window): tools linked too.
   await reset();
   await scenario({ remote: true, tunnel: 'error', tickerSlow: true, toolsMissing: ['ffmpeg'] });
   page = await open('/admin');
   await page.waitForSelector('[data-status="tunnel_error"]');
   const remoteKinds = await page.$$eval('.status-note', (els) => els.map((e) => e.dataset.status));
-  check(JSON.stringify(remoteKinds) === '["tunnel_error","ticker_slow"]', 'remote: the strip shows the tunnel and the ticker from the environment', remoteKinds);
+  check(JSON.stringify(remoteKinds) === '["tools_missing","tunnel_error","ticker_slow"]', 'remote: the strip shows tools, tunnel and ticker', remoteKinds);
+  check((await page.$eval('[data-status="tools_missing"] a', (a) => a.getAttribute('href'))) === '#/settings/tools', 'remote: the tools notice links to Tools (they can be fixed remotely)');
   await page.close();
 
   // ---------- The first run and the wizard's title bar ----------
@@ -364,6 +413,14 @@ try {
   check(touchItems.includes('Move up') && touchItems.includes('Move down'), 'a long press opens the row menu with Move up / Move down', touchItems);
   check(await page.$$eval('.menu [role=menuitem]', (els) => els.every((e) => e.getBoundingClientRect().height >= 44)), 'menu items are 44 px tall');
   await shot(page, 'after-phone-longpress-menu-en-390x844.png');
+  // The browser's own long-press gesture (contextmenu) right after ours: dropped, the menu stays.
+  const before = await page.$eval('.menu', (e) => e.style.left + '/' + e.style.top);
+  const kept = await page.$eval('.qi[data-id="9"]', (row) => {
+    const r = row.getBoundingClientRect();
+    return row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.right - 60, clientY: r.top + 5 }));
+  });
+  await sleep(150);
+  check(kept === false && (await page.$eval('.menu', (e) => e.style.left + '/' + e.style.top)) === before, 'a native contextmenu after the long press opens no second menu', { kept, before });
   m = await mark();
   await page.click('.menu [role=menuitem]:has-text("Move down")');
   const moved = await waitFor(async () => (await actionsSince(m)).find((r) => r.method === 'PATCH'), 'move down');
@@ -372,6 +429,20 @@ try {
   await page.click('.qi[data-id="8"] .qi-more');
   await page.waitForSelector('.menu');
   check((await page.$eval('.menu', (e) => e.getAttribute('aria-label'))) === 'Video menu', '⋮ opens the row menu');
+  await page.keyboard.press('Escape');
+  // The browser's gesture first (during the hold): its menu stays, ours does not follow.
+  await page.$eval('.qi[data-id="10"]', (e) => e.scrollIntoView({ block: 'center' }));
+  const pt = await page.$eval('.qi[data-id="10"] .qi-text', (e) => {
+    const r = e.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: pt.x, y: pt.y }] });
+  await sleep(200);
+  await page.$eval('.qi[data-id="10"]', (row, p) => row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y })), pt);
+  await sleep(700);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  const left = await page.$eval('.menu', (e) => parseFloat(e.style.left));
+  check(Math.abs(left - Math.min(pt.x, 390 - 4 - (await page.$eval('.menu', (e) => e.getBoundingClientRect().width)))) < 2, 'a native contextmenu first: one menu at its place, the long-press timer dropped', { left, pt });
   await page.keyboard.press('Escape');
   check(page.__errors.length === 0, 'no console errors on the phone Channel', page.__errors);
 
@@ -406,6 +477,11 @@ try {
   await page.waitForSelector('#view[data-view="channel"] .player');
   check(true, 'back to Channel from its tab');
   check(page.__errors.length === 0, 'no console errors on the phone', page.__errors);
+  // Signing out from the phone's top bar.
+  m = await mark();
+  await page.click('.ptop [data-sign-out]');
+  await page.waitForSelector('.login-card input[type=password]');
+  check((await actionsSince(m)).some((r) => r.path === '/api/admin/logout'), 'the phone top bar signs out');
   await page.close();
 
   // The sign-in screen on a phone.

@@ -1,6 +1,9 @@
 // The permanent link (a named Cloudflare tunnel): what mode the channel is in, the buttons
 // that switch or delete it, and the two-step wizard that sets it up (log in to Cloudflare,
-// choose the address). Window only: its routes are /api/desktop/*.
+// choose the address). Setting it up and deleting it stay in the window (the Cloudflare login
+// happens in the computer's browser); switching between the quick and the permanent link works
+// in a remote panel too (`/api/admin/*`, spec section 2), after the lose-access question for a
+// session that came through the tunnel.
 //
 // The wizard's state lives in this module, not in the component: leaving the view (and so
 // unmounting) stops the polling but not the work on the engine, and coming back picks up
@@ -11,10 +14,11 @@ import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
-import { info, refreshInfo } from '../store.js';
+import { access, appRoute, refreshInfo, tunnel } from '../store.js';
+import { confirmLosingAccess } from './tunnel-actions.js';
 
-const PROGRESS = '/api/desktop/tunnel/named/progress';
-const CONFIG = '/api/desktop/config';
+const PROGRESS = () => appRoute('/tunnel/named/progress');
+const CONFIG = () => appRoute('/config');
 
 /** `{tunnelMode, namedTunnelHostname}` of the window's settings; null until read. */
 const config = signal(null);
@@ -39,7 +43,7 @@ const go = (step, extra = {}) => (wizard.value = { step, ...extra });
 
 export async function loadConfig() {
   try {
-    config.value = await api('GET', CONFIG);
+    config.value = await api('GET', CONFIG());
   } catch {
     // the next change of the tunnel reads it again
   }
@@ -49,7 +53,7 @@ export async function loadConfig() {
 async function readProgress() {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await api('GET', PROGRESS);
+      return await api('GET', PROGRESS());
     } catch (e) {
       if ((e.code !== 'network' && e.status !== 503) || attempt >= 12) throw e;
       await sleep(700);
@@ -117,7 +121,7 @@ async function watchLogin(r) {
     if (r !== run) return;
     let p;
     try {
-      p = await api('GET', PROGRESS);
+      p = await api('GET', PROGRESS());
       bad = 0;
     } catch (e) {
       bad += 1;
@@ -171,7 +175,7 @@ async function createNamed(r, hostname, overwrite) {
     while (working && r === run) {
       await sleep(1000);
       try {
-        const p = await api('GET', PROGRESS);
+        const p = await api('GET', PROGRESS());
         if (working && r === run && p.running && p.message) say(p.message, 'ok');
       } catch {
         // no answer for a moment
@@ -201,7 +205,7 @@ async function watchCreate(r) {
     if (r !== run) return;
     let p;
     try {
-      p = await api('GET', PROGRESS);
+      p = await api('GET', PROGRESS());
     } catch {
       continue;
     }
@@ -248,11 +252,12 @@ async function refreshAll() {
 
 /** "Back to quick tunnel" (`quick`) and "Delete permanent link" (`delete`). */
 async function namedAction(kind) {
+  if (kind === 'quick' && !(await confirmLosingAccess('mode'))) return;
   switching.value = true;
   close(); // an open wizard has nothing left to do
   say(kind === 'delete' ? t('permalink.deleting') : t('permalink.switching'), 'ok');
   try {
-    const result = await api('POST', `/api/desktop/tunnel/named/${kind}`);
+    const result = await api('POST', kind === 'quick' ? appRoute('/tunnel/named/quick') : '/api/desktop/tunnel/named/delete');
     say(result.message, 'ok');
   } catch (e) {
     say(errorText(e), 'err');
@@ -263,9 +268,10 @@ async function namedAction(kind) {
 }
 
 async function backToNamed() {
+  if (!(await confirmLosingAccess('mode'))) return;
   switching.value = true;
   try {
-    await api('PUT', CONFIG, { tunnelMode: 'named' });
+    await api('PUT', CONFIG(), { tunnelMode: 'named' });
     say(t('permalink.named_running'), 'ok');
   } catch (e) {
     say(errorText(e), 'err');
@@ -351,12 +357,13 @@ function Wizard() {
 
 /** The permanent link block: mode text, buttons and the wizard. */
 export function NamedLink() {
-  const tunnel = info.value?.tunnel ?? null;
+  const windowed = access.value === 'window';
+  const tun = tunnel.value;
   const cfg = config.value;
-  const mode = tunnel?.mode ?? cfg?.tunnelMode ?? 'quick';
+  const mode = tun?.mode ?? cfg?.tunnelMode ?? 'quick';
   const saved = cfg?.namedTunnelHostname ?? null;
   const named = mode === 'named';
-  const host = named ? (tunnel?.hostname ?? saved) : saved;
+  const host = named ? (tun?.hostname ?? saved) : saved;
   const busy = switching.value;
   const open_ = wizard.value !== null;
 
@@ -370,7 +377,7 @@ export function NamedLink() {
   }, []);
 
   // The settings change under the wizard (a creation finished, the mode switched).
-  const key = `${tunnel?.mode}|${tunnel?.hostname}`;
+  const key = `${tun?.mode}|${tun?.hostname}`;
   useEffect(() => {
     loadConfig();
   }, [key]);
@@ -387,10 +394,10 @@ export function NamedLink() {
     } else if (saved) {
       actions.push(html`<button type="button" class="btn pri" disabled=${busy} onClick=${backToNamed}>${t('permalink.back_named', { host: saved })}</button>`);
     } else if (!open_) {
-      actions.push(html`<button type="button" class="btn pri" onClick=${open}>${t('permalink.setup')}</button>`);
+      actions.push(html`<button type="button" class="btn pri" disabled=${!windowed} onClick=${open}>${t('permalink.setup')}</button>`);
     }
     if (saved) {
-      actions.push(html`<button type="button" class="btn danger" disabled=${busy} onClick=${() => (confirmingDelete.value = true)}>${t('permalink.delete')}</button>`);
+      actions.push(html`<button type="button" class="btn danger" disabled=${busy || !windowed} onClick=${() => (confirmingDelete.value = true)}>${t('permalink.delete')}</button>`);
     }
   }
 
@@ -398,6 +405,7 @@ export function NamedLink() {
     <div class="named-link" data-mode=${mode}>
       <p class="pl-mode">${named && host ? t('permalink.mode_named', { host }) : t('permalink.mode_quick')}</p>
       <div class="pl-actions">${actions}</div>
+      ${windowed ? null : html`<small class="window-only-hint" data-window-only="permalink">${t('permalink.window_only')}</small>`}
       <${Notice} />
       <${Wizard} />
     </div>`;
