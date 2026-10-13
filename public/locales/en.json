@@ -9,6 +9,7 @@
   "errors.archive_lacks_file": "The downloaded archive has no {file}.",
   "errors.autostart_failed": "Could not change starting with Windows: {detail}",
   "errors.backup_dir_failed": "Cannot create a backup folder in {path}.",
+  "errors.bad_address": "The address contains characters that are not allowed.",
   "errors.bad_request": "Invalid request.",
   "errors.bad_scheme": "Only http and https links are allowed.",
   "errors.block_not_found": "This device is not blocked (already unblocked).",

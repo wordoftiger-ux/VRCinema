@@ -9,6 +9,7 @@
   "errors.archive_lacks_file": "W pobranym archiwum brak pliku {file}.",
   "errors.autostart_failed": "Nie udało się zmienić autostartu: {detail}",
   "errors.backup_dir_failed": "Nie można utworzyć folderu kopii zapasowej w {path}.",
+  "errors.bad_address": "Adres zawiera niedozwolone znaki.",
   "errors.bad_request": "Niepoprawne żądanie.",
   "errors.bad_scheme": "Dozwolone są tylko linki http i https.",
   "errors.block_not_found": "To urządzenie nie jest zablokowane (już odblokowane).",

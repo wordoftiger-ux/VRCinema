@@ -64,6 +64,8 @@ pub enum LinkError {
     LocalAddress,
     /// Not `http` or `https` (or not a plain address that every program reads the same way).
     BadScheme,
+    /// Not a plain address (a backslash, a space, a control character, or not an address at all).
+    BadAddress,
     /// The name could not be looked up in time: refused rather than guessed.
     LookupFailed,
 }
@@ -75,6 +77,7 @@ impl LinkError {
             Self::DomainNotAllowed => "domain_not_allowed",
             Self::LocalAddress => "local_address",
             Self::BadScheme => "bad_scheme",
+            Self::BadAddress => "bad_address",
             Self::LookupFailed => "lookup_failed",
         }
     }
@@ -235,9 +238,9 @@ pub async fn check_media_url(raw: &str, resolver: &dyn HostResolver) -> Result<S
         .chars()
         .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
     {
-        return Err(LinkError::BadScheme);
+        return Err(LinkError::BadAddress);
     }
-    let url = Url::parse(raw).map_err(|_| LinkError::BadScheme)?;
+    let url = Url::parse(raw).map_err(|_| LinkError::BadAddress)?;
     check_scheme_and_host(&url)?;
     check_host_resolves_public(&url, resolver).await?;
     Ok(url.to_string())
@@ -941,7 +944,7 @@ mod tests {
         );
         assert_eq!(
             check_media_url("C:\\secret.mp4", &r).await,
-            Err(LinkError::BadScheme)
+            Err(LinkError::BadAddress)
         );
     }
 
@@ -959,7 +962,7 @@ mod tests {
         ] {
             assert_eq!(
                 check_media_url(raw, &r).await,
-                Err(LinkError::BadScheme),
+                Err(LinkError::BadAddress),
                 "{raw}"
             );
         }
@@ -1039,6 +1042,7 @@ mod tests {
         assert_eq!(LinkError::DomainNotAllowed.code(), "domain_not_allowed");
         assert_eq!(LinkError::LocalAddress.code(), "local_address");
         assert_eq!(LinkError::BadScheme.code(), "bad_scheme");
+        assert_eq!(LinkError::BadAddress.code(), "bad_address");
     }
 
     #[test]

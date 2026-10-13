@@ -1135,7 +1135,10 @@ mod tests {
             let factory = factory_for_media(vec![url]);
             let err = start_error(&factory, AddedBy::Public).await;
             assert!(
-                matches!(err.code(), Some("local_address" | "bad_scheme")),
+                matches!(
+                    err.code(),
+                    Some("local_address" | "bad_scheme" | "bad_address")
+                ),
                 "{url}: {err:?}"
             );
         }

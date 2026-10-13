@@ -2719,6 +2719,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
+ "futures-util",
  "getrandom 0.4.3",
  "hmac",
  "image",

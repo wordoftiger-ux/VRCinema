@@ -1395,7 +1395,10 @@ impl Channel {
             handle.dispose();
         }
         // A refused address (the home network, not http) would be refused again.
-        let refused = matches!(error.code(), Some("local_address" | "bad_scheme"));
+        let refused = matches!(
+            error.code(),
+            Some("local_address" | "bad_scheme" | "bad_address")
+        );
         if c.attempt == 0 && !refused {
             // One retry from where it stopped (resolved anew, the old address may have expired).
             let resume_at = if c.item.is_live { 0.0 } else { c.position_s() };

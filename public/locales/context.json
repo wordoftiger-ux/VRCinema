@@ -9,6 +9,7 @@
   "errors.archive_lacks_file": "Error text (shown in the app window and written to the log). Tools install; {file} is a file name inside the archive.",
   "errors.autostart_failed": "API error (panel, request page or app window notice). Settings: switching \"start with Windows\" failed; {detail} is the system error.",
   "errors.backup_dir_failed": "Error text (shown in the app window and written to the log). Tools install; {path} is a folder.",
+  "errors.bad_address": "API error (panel, request page or app window notice). The address of the video found for a viewer link has a backslash, a space or a control character (also an item error).",
   "errors.bad_request": "API error (panel player controls): generic text of the code bad_request; answers usually carry a more specific text.",
   "errors.bad_scheme": "API error (panel, request page or app window notice). Request page: the link is not an http or https address (for example file: or ftp:).",
   "errors.block_not_found": "API error (panel). The block to lift does not exist (already lifted).",
