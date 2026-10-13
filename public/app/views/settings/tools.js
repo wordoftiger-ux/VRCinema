@@ -124,7 +124,7 @@ function ToolRow({ name, tool, busy }) {
       <span class="state">${tool?.installed
         ? t('settings.tools.version', { version: tool.version ?? t('settings.tools.version_unknown') })
         : t('settings.tools.not_installed')}</span>
-      <button type="button" class="btn" disabled=${busy || !tool} onClick=${() => runJob('update', name)}>
+      <button type="button" class="btn" disabled=${busy || !tool} onClick=${() => (tool?.installed ? runJob('update', name) : runJob('install'))}>
         ${tool?.installed ? t('settings.tools.update') : t('settings.tools.download')}</button>
     </div>`;
 }

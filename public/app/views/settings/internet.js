@@ -86,7 +86,7 @@ export function Internet() {
             <${Block} title=${t('settings.internet.manual')} hint=${t('settings.internet.manual_hint')}>
               <form class="inline wide" onSubmit=${(e) => {
                 e.preventDefault();
-                saveWith(say, { publicUrl: address }, t('settings.internet.manual_saved'));
+                saveWith(say, { publicUrl: address.trim() }, t('settings.internet.manual_saved'));
               }}>
                 <input type="url" class="txt" aria-label=${t('settings.internet.manual')} placeholder="https://example.trycloudflare.com"
                   value=${address} onInput=${(e) => setAddress(e.target.value)} />

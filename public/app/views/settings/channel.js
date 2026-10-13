@@ -90,6 +90,12 @@ function LinkModes({ settings, say }) {
       <${DomainList} id="blocked" title=${t('settings.channel.blocked')} hint=${t('settings.channel.blocked_hint')}
         domains=${settings.blockedDomains} active=${settings.linkMode === 'blocklist'}
         onChange=${(list) => save({ blockedDomains: list }, t('settings.channel.domains_saved'))} />
+      ${settings.linkMode === 'allowlist' && !settings.allowedDomains.length
+        ? html`<p class="banner warn" role="status" data-warning="allowlist_empty">${t('settings.channel.allowed_empty_warning')}</p>`
+        : null}
+      ${settings.linkMode === 'blocklist' && !settings.blockedDomains.length
+        ? html`<p class="banner warn" role="status" data-warning="blocklist_empty">${t('settings.channel.blocked_empty_warning')}</p>`
+        : null}
       <p class="set-sub">${t('settings.channel.home_network')}</p>
     <//>`;
 }
@@ -155,7 +161,7 @@ export function ChannelSettings() {
       <${Block} title=${t('settings.channel.stream')}>
         <${Row} title=${t('settings.channel.slate_language')} hint=${t('settings.channel.slate_language_hint')}>
           <select class="sel" aria-label=${t('settings.channel.slate_language')} value=${settings.slateLanguage}
-            onChange=${(e) => saveChannelWith(say, { slateLanguage: e.target.value }, t('settings.channel.slate_language_saved'))}>
+            onChange=${(e) => saveChannelWith(say, { slateLanguage: e.target.value }, settings.tickerEnabled ? t('settings.channel.slate_language_saved_restart') : t('settings.channel.slate_language_saved'))}>
             <${LanguageOptions} />
           </select>
         <//>

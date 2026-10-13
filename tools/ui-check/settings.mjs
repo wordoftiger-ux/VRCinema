@@ -177,6 +177,44 @@ try {
   check(await noRawKeys(page), 'no raw keys in General');
   check(await noOverflow(page), 'no horizontal overflow on General');
 
+  // A dropped connection is "restarting" only for a new port or network access
+  const verdict = await page.evaluate(async () => {
+    const { saveConfig } = await import('/static/app/views/settings/common.js');
+    const real = window.fetch;
+    window.fetch = (url, init) => (String(url).includes('/api/desktop/config') && init?.method === 'PUT' ? Promise.reject(new TypeError('down')) : real(url, init));
+    const t0 = performance.now();
+    const other = await saveConfig({ autostart: true });
+    const ms = performance.now() - t0;
+    window.fetch = real;
+    return { other, ms };
+  });
+  check(verdict.other.ok === false && !verdict.other.restarting && typeof verdict.other.error === 'string' && verdict.ms < 1400, 'a dropped connection on an ordinary setting is an error, not "restarting"', verdict);
+  const portVerdict = await page.evaluate(async () => {
+    const { saveConfig } = await import('/static/app/views/settings/common.js');
+    const real = window.fetch;
+    let first = true;
+    window.fetch = (url, init) => {
+      if (String(url).includes('/api/desktop/config') && init?.method === 'PUT' && first) {
+        first = false;
+        return Promise.reject(new TypeError('down'));
+      }
+      return real(url, init);
+    };
+    const r = await saveConfig({ lanAccess: false });
+    window.fetch = real;
+    return r;
+  });
+  check(portVerdict.restarting === true, 'a dropped connection on a network access change is "restarting"', portVerdict);
+
+  // Notes are text in the language they were made in: a language switch clears them
+  await page.click(sw('Start VRCinema with Windows'));
+  await page.waitForSelector('.set-note');
+  await page.selectOption('.sel[aria-label="Language"]', 'pl');
+  await page.waitForFunction(() => document.querySelector('.sform h1')?.textContent === 'Ogólne');
+  check((await page.$('.set-note')) === null, 'a note is cleared by a language switch (no stale text in the old language)');
+  await page.selectOption('.sel[aria-label="Język"]', 'en');
+  await page.waitForFunction(() => document.querySelector('.sform h1')?.textContent === 'General');
+
   // ---------- Internet ----------
   await goto(page, 'internet');
   await page.waitForSelector('.named-link');
@@ -214,7 +252,7 @@ try {
   await page.evaluate(() => document.querySelector('input[aria-label="Public address of the channel"]').form.requestSubmit());
   await page.waitForFunction(() => document.querySelector('.set-note.err'));
   check((await note(page)) === 'The public address must start with http:// or https://.', 'a bad public address shows the engine\'s message', await note(page));
-  await page.fill('input[aria-label="Public address of the channel"]', 'https://tv.example.com');
+  await page.fill('input[aria-label="Public address of the channel"]', '  https://tv.example.com  ');
   await page.evaluate(() => document.querySelector('input[aria-label="Public address of the channel"]').form.requestSubmit());
   a = await actions(m, 'public url request');
   check(putConfigs(a).at(-1).body.publicUrl === 'https://tv.example.com', 'the public address saves {publicUrl}', a);
@@ -265,6 +303,25 @@ try {
   a = await actions(m, 'blocked list request');
   check(JSON.stringify(putSettings(a)[0].body) === '{"blockedDomains":["tiktok.com"]}', 'the blocked list saves {blockedDomains}', a);
 
+  // An empty list in the mode that uses it: a warning
+  const warning = (kind) => page.$(`[data-warning=${kind}]`);
+  await page.click('input[name=linkMode][value=blocklist]');
+  await page.waitForFunction(() => document.querySelector('input[name=linkMode][value=blocklist]')?.checked);
+  check((await warning('blocklist_empty')) === null, 'a blocked list with a site raises no warning');
+  await page.click('.domains[data-list="blocked"] .chip button');
+  await page.waitForSelector('[data-warning=blocklist_empty]');
+  check((await text(page, '[data-warning=blocklist_empty]')) === 'The list of blocked sites is empty, so nothing is blocked: links from any site are accepted.', 'an empty blocked list in the blocklist mode warns that nothing is blocked');
+  await page.click('input[name=linkMode][value=allowlist]');
+  await page.waitForFunction(() => !document.querySelector('[data-warning=blocklist_empty]'));
+  check((await warning('allowlist_empty')) === null, 'an allowed list with sites raises no warning');
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).saveChannel({ allowedDomains: [] }));
+  await page.waitForSelector('[data-warning=allowlist_empty]');
+  check((await text(page, '[data-warning=allowlist_empty]')) === 'The list of allowed sites is empty, so every link from viewers will be refused.', 'an empty allowed list in the allowlist mode warns that every link is refused');
+  await page.click('input[name=linkMode][value=all]');
+  await page.waitForFunction(() => !document.querySelector('[data-warning]'));
+  check(true, 'in the "any site" mode empty lists raise no warning');
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).saveChannel({ allowedDomains: ['youtube.com'], linkMode: 'all' }));
+
   // Limits
   m = await mark();
   await page.fill('input[name=maxDurationMin]', '60');
@@ -300,6 +357,8 @@ try {
   await page.selectOption('.sel[aria-label="Language of the slates"]', 'ja');
   a = await actions(m, 'slate language request');
   check(JSON.stringify(putSettings(a)[0].body) === '{"slateLanguage":"ja"}', 'the slate language saves {slateLanguage}', a);
+  await page.waitForFunction(() => [...document.querySelectorAll('.set-note.ok')].some((n) => n.textContent === 'Language of the slates saved. The video on air starts again from where it is.'));
+  check(true, 'with the ticker on, the slate language says the video restarts from where it is');
 
   // Ticker
   check((await page.$eval('[data-ticker]', (e) => e.dataset.ticker)) === 'on', 'the ticker block shows it is on');
@@ -309,7 +368,11 @@ try {
     a = await actions(m, what);
     check(JSON.stringify(putSettings(a)[0].body) === JSON.stringify(body), what, a);
   };
+  check((await text(page, '[data-restart-note]')).includes('starts the video on air again from where it is'), 'a note by the ticker controls says structural changes restart the video');
   await tick(seg('Mode', 'continuous'), { tickerMode: 'continuous' }, 'ticker mode saves {tickerMode}');
+  const restartSaid = () => page.waitForFunction(() => [...document.querySelectorAll('.set-note.ok')].some((n) => n.textContent === 'Info ticker settings saved. The video on air starts again from where it is.'), null, { timeout: 3000 });
+  await restartSaid();
+  check(true, 'a structural change says the video restarts from where it is');
   check(await page.$eval(seg('Interval', '300'), (b) => b.disabled), 'the interval is off in the continuous mode');
   await tick(seg('Mode', 'interval'), { tickerMode: 'interval' }, 'ticker mode back to interval');
   await tick(seg('Interval', '300'), { tickerIntervalS: 300 }, 'the interval saves {tickerIntervalS}');
@@ -321,7 +384,10 @@ try {
   await page.waitForFunction((n) => /about (\d+) s/.test(document.querySelector('[data-ticker] .row2:has([aria-label="Scrolling speed"]) small').textContent) && Number(document.querySelector('[data-ticker] .row2:has([aria-label="Scrolling speed"]) small').textContent.match(/about (\d+) s/)[1]) < n, normalSeconds);
   check((await secondsOf()) < normalSeconds && normalSeconds > 10, 'the hint gives the resulting visibility in seconds (faster is shorter)', [normalSeconds, await secondsOf()]);
   await tick(seg('QR code of the request page', 'always'), { tickerQr: 'always' }, 'the QR choice saves {tickerQr}');
+  await restartSaid();
   await tick(sw('Show the next video'), { tickerShowNext: false }, 'show next saves {tickerShowNext}');
+  await page.waitForFunction(() => [...document.querySelectorAll('.set-note.ok')].some((n) => n.textContent === 'Info ticker settings saved.'));
+  check(true, 'a text-only change (next video) does not claim a restart');
   await tick(sw('Show the address of the request page'), { tickerShowAddress: true }, 'show address saves {tickerShowAddress}');
   await tick(sw('Video progress line'), { tickerProgress: false }, 'progress saves {tickerProgress}');
   await tick(sw('Show the info ticker'), { tickerEnabled: false }, 'the switch saves {tickerEnabled}');
@@ -454,6 +520,16 @@ try {
   check(a[0].path === '/api/desktop/encoder/detect', 'the test posts encoder/detect', a[0]);
   await page.waitForFunction(() => document.querySelector('[data-encoder-state]')?.textContent.includes('NVIDIA'));
   check((await text(page, '[data-encoder-state]')) === 'Result of the last test: conversion on an NVIDIA card.', 'the result is shown', await text(page, '[data-encoder-state]'));
+  await scenario({ tools: [{ name: 'yt-dlp', installed: true, version: '1', installedAt: 0 }, { name: 'ffmpeg', installed: true, version: '1', installedAt: 0 }, { name: 'deno', installed: false, version: null, installedAt: 0 }, { name: 'cloudflared', installed: true, version: '1', installedAt: 0 }] });
+  await goto(page, 'log');
+  await goto(page, 'tools');
+  await page.waitForFunction(() => document.querySelector('.tool[data-tool=deno] button')?.textContent.trim() === 'Download');
+  m = await mark();
+  await page.click('.tool[data-tool=deno] button');
+  a = await actions(m, 'download request');
+  check(a[0].path === '/api/desktop/tools/install' && a[0].body === null, 'Download of a tool that is not installed uses the install route', a[0]);
+  await page.waitForFunction(() => document.querySelector('[data-job=finished] .set-note.ok'), null, { timeout: 12000 });
+  await scenario({ tools: [{ name: 'yt-dlp', installed: true, version: '2025.10.1', installedAt: 0 }, { name: 'ffmpeg', installed: true, version: '7.1', installedAt: 0 }, { name: 'deno', installed: true, version: '2.0.0', installedAt: 0 }, { name: 'cloudflared', installed: true, version: '2025.9.0', installedAt: 0 }] });
   await scenario({ toolsMissing: ['cloudflared'] });
   await page.waitForSelector('[data-banner=tools_missing]', { timeout: 6000 });
   check((await text(page, '[data-banner=tools_missing]')).includes('cloudflared'), 'missing tools show a banner with the names');
@@ -502,7 +578,7 @@ try {
   a = await actions(m, 'clear request');
   check(JSON.stringify(putConfigs(a)[0].body) === '{"ytdlpCookies":null}', 'clearing saves {ytdlpCookies: null}', a);
   m = await mark();
-  await page.fill('input[aria-label="pixeldrain API key (optional)"]', 'abc123');
+  await page.fill('input[aria-label="pixeldrain API key (optional)"]', '  abc123  ');
   await page.evaluate(() => document.querySelector('input[aria-label="pixeldrain API key (optional)"]').form.requestSubmit());
   a = await actions(m, 'pixeldrain request');
   check(JSON.stringify(putConfigs(a)[0].body) === '{"pixeldrainApiKey":"abc123"}', 'the key saves {pixeldrainApiKey}', a);

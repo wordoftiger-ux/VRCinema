@@ -162,12 +162,13 @@ export function Ticker() {
   return html`
     <${Block} title=${t('settings.ticker.title')} hint=${t('settings.ticker.hint')}>
       <div class="ticker-block" data-ticker=${enabled ? 'on' : 'off'}>
+        <p class="set-sub" data-restart-note>${t('settings.ticker.restart_note')}</p>
         ${environment.value?.tickerSlow && enabled
           ? html`<p class="banner warn" role="alert" data-banner="ticker_slow">${t('settings.ticker.slow')}</p>`
           : null}
         <${Row} title=${t('settings.ticker.enabled')} hint=${t('settings.ticker.enabled_hint')}>
           <${Switch} label=${t('settings.ticker.enabled')} checked=${enabled}
-            onChange=${(v) => save({ tickerEnabled: v }, v ? t('settings.ticker.enabled_on') : t('settings.ticker.enabled_off'))} />
+            onChange=${(v) => save({ tickerEnabled: v }, v ? t('settings.ticker.enabled_on') : t('settings.ticker.enabled_off_restart'))} />
         <//>
         <${Row} title=${t('settings.ticker.mode')} hint=${t('settings.ticker.mode_hint')}>
           <${Segmented} label=${t('settings.ticker.mode')} value=${settings.tickerMode} disabled=${!enabled}
@@ -175,13 +176,13 @@ export function Ticker() {
               { value: 'interval', label: t('settings.ticker.mode_interval') },
               { value: 'continuous', label: t('settings.ticker.mode_continuous') },
             ]}
-            onChange=${(v) => save({ tickerMode: v }, t('settings.ticker.saved'))} />
+            onChange=${(v) => save({ tickerMode: v }, t('settings.ticker.saved_restart'))} />
         <//>
         <${Row} title=${t('settings.ticker.interval')} hint=${t('settings.ticker.interval_hint')}>
           <${Segmented} label=${t('settings.ticker.interval')} value=${settings.tickerIntervalS}
             disabled=${!enabled || settings.tickerMode !== 'interval'}
             options=${INTERVALS_S.map((s) => ({ value: s, label: t('units.minutes', { m: s / 60 }) }))}
-            onChange=${(v) => save({ tickerIntervalS: v }, t('settings.ticker.saved'))} />
+            onChange=${(v) => save({ tickerIntervalS: v }, t('settings.ticker.saved_restart'))} />
         <//>
         <${Row} title=${t('settings.ticker.speed')} hint=${t('settings.ticker.speed_hint', { seconds })}>
           <${Segmented} label=${t('settings.ticker.speed')} value=${settings.tickerSpeed} disabled=${!enabled}
@@ -190,7 +191,7 @@ export function Ticker() {
               { value: 'normal', label: t('settings.ticker.speed_normal') },
               { value: 'fast', label: t('settings.ticker.speed_fast') },
             ]}
-            onChange=${(v) => save({ tickerSpeed: v }, t('settings.ticker.saved'))} />
+            onChange=${(v) => save({ tickerSpeed: v }, t('settings.ticker.saved_restart'))} />
         <//>
         <${Row} title=${t('settings.ticker.show_next')}>
           <${Switch} label=${t('settings.ticker.show_next')} checked=${Boolean(settings.tickerShowNext)} disabled=${!enabled}
@@ -207,11 +208,11 @@ export function Ticker() {
               { value: 'with_ticker', label: t('settings.ticker.qr_with_ticker') },
               { value: 'always', label: t('settings.ticker.qr_always') },
             ]}
-            onChange=${(v) => save({ tickerQr: v }, t('settings.ticker.saved'))} />
+            onChange=${(v) => save({ tickerQr: v }, t('settings.ticker.saved_restart'))} />
         <//>
         <${Row} title=${t('settings.ticker.progress')} hint=${t('settings.ticker.progress_hint')}>
           <${Switch} label=${t('settings.ticker.progress')} checked=${Boolean(settings.tickerProgress)} disabled=${!enabled}
-            onChange=${(v) => save({ tickerProgress: v }, t('settings.ticker.saved'))} />
+            onChange=${(v) => save({ tickerProgress: v }, t('settings.ticker.saved_restart'))} />
         <//>
         <${Messages} settings=${settings} say=${say} />
         <${EncoderInfo} />

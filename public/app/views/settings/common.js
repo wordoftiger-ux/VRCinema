@@ -4,7 +4,7 @@
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
-import { t } from '../../i18n.js';
+import { lang, t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
 import { access, refreshInfo } from '../../store.js';
 
@@ -38,13 +38,16 @@ export async function loadConfig() {
  * network access; the settings are read again once it answers).
  */
 export async function saveConfig(patch) {
+  // Only a new port or network access restarts the server; for anything else a dropped
+  // connection is an ordinary error.
+  const restarts = 'port' in patch || 'lanAccess' in patch;
   try {
     const data = await api('PUT', CONFIG, patch);
     config.value = data;
     refreshInfo();
     return { ok: true, data };
   } catch (e) {
-    if (restarting(e)) {
+    if (restarts && restarting(e)) {
       await sleep(1500);
       await loadConfig();
       return { ok: false, restarting: true };
@@ -72,6 +75,8 @@ export function useConfig() {
 /** A note under a control: `[note, say]`; `say(kind, text)` with `ok`, `info` or `err`, `say(null)` clears. */
 export function useNote() {
   const [note, setNote] = useState(null);
+  // A note is text in the language it was made in: a language switch clears it.
+  useEffect(() => setNote(null), [lang.value]);
   const say = (kind, text) => setNote(kind ? { kind, text } : null);
   return [note, say];
 }

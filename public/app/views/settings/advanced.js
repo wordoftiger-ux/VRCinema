@@ -43,7 +43,7 @@ export function Advanced() {
       <${Row} title=${t('settings.advanced.pixeldrain')} hint=${t('settings.advanced.pixeldrain_hint')}>
         <form class="inline" onSubmit=${(e) => {
           e.preventDefault();
-          saveWith(say, { pixeldrainApiKey: key }, key.trim() ? t('settings.advanced.pixeldrain_saved') : t('settings.advanced.pixeldrain_removed'));
+          saveWith(say, { pixeldrainApiKey: key.trim() }, key.trim() ? t('settings.advanced.pixeldrain_saved') : t('settings.advanced.pixeldrain_removed'));
         }}>
           <input type="password" class="txt" autocomplete="off" aria-label=${t('settings.advanced.pixeldrain')}
             value=${key} disabled=${!cfg} onInput=${(e) => setKey(e.target.value)} />
