@@ -193,7 +193,7 @@ try {
   await page.evaluate(() => {
     const i = document.createElement('input');
     i.id = 'typing';
-    document.querySelector('.page').append(i);
+    document.querySelector('#view').append(i);
   });
   await page.focus('#typing');
   mark = (await requests()).length;
@@ -331,7 +331,7 @@ try {
   // engine's message in the page's language is shown.
   await page.evaluate(async () => (await import('/static/app/store.js')).seekBy(10));
   await page.waitForSelector('.toast');
-  check((await text(page, '.toast span')).includes('(pl)'), 'a refused control shows the engine message, asked in the page language', await text(page, '.toast span'));
+  check((await text(page, '.toast span')) === 'Transmisji na żywo nie można wstrzymać ani przewinąć.', 'a refused control shows the dictionary text of its error code (errors.live_item) in the page language', await text(page, '.toast span'));
   await scenario({ playing: 'none' });
   await page.waitForFunction(() => document.querySelector('.nowp-title').textContent === 'Nic nie leci');
   check(await page.$eval('.ctl .play', (b) => b.disabled), 'nothing playing: the controls are off');

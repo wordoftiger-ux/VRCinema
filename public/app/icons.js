@@ -19,6 +19,9 @@ const PATHS = {
   maximize: 'M6 6h12v12H6zm1 1v10h10V7z',
   restore: 'M8 5h11v11h-2v-1h1V6H9v1H8zM5 8h11v11H5zm1 1v9h9V9z',
   close: 'M6.7 6l5.3 5.3L17.3 6l.7.7-5.3 5.3 5.3 5.3-.7.7-5.3-5.3L6.7 18l-.7-.7 5.3-5.3L6 6.7z',
+  top: 'M5 4h14v2H5zM12 8l6.5 6.5-1.4 1.4L13 11.8V20h-2v-8.2l-4.1 4.1-1.4-1.4z',
+  check: 'M9.5 16.2L5.3 12l-1.4 1.4 5.6 5.6L20.3 7.4 18.9 6z',
+  plus: 'M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z',
   keyboard: 'M3 6h18v12H3zm2 2v8h14V8zm1 1h2v2H6zm3 0h2v2H9zm3 0h2v2h-2zm3 0h3v2h-3zM7 13h10v2H7z',
 };
 

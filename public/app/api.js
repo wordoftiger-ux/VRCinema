@@ -14,12 +14,16 @@ export class ApiError extends Error {
   }
 }
 
+/** Longest wait for an answer; a request that takes longer fails like an unreachable engine. */
+const DEFAULT_TIMEOUT_MS = 10000;
+
 /**
  * `method` `path` with an optional JSON `body`; resolves to the JSON answer (null when there
  * is none). Errors: `ApiError` with the engine's `code` (`code: "network"` when nothing
- * answered).
+ * answered within `timeoutMs`; reading the details of a link may take much longer than the
+ * default).
  */
-export async function api(method, path, body) {
+export async function api(method, path, body, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const headers = { 'X-VRCinema-Lang': lang.value };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   let res;
@@ -30,6 +34,7 @@ export async function api(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: 'same-origin',
       cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new ApiError(t('ui.no_answer'), { code: 'network' });
@@ -45,4 +50,18 @@ export async function api(method, path, body) {
     throw new ApiError(message, { status: res.status, code: data?.code ?? null, data });
   }
   return data;
+}
+
+/**
+ * The text of an error for people, in the interface's language: the dictionary's
+ * `errors.<code>` when it has the code and needs no field the answer did not bring, else the
+ * engine's own message (it was asked in the same language).
+ */
+export function errorText(e) {
+  if (e?.code) {
+    const key = `errors.${e.code}`;
+    const text = t(key, e.data);
+    if (text !== key && !/\{\w+\}/.test(text)) return text;
+  }
+  return e?.message ?? t('ui.no_answer');
 }

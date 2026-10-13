@@ -6,7 +6,10 @@
 //
 // Test hooks (not engine routes): GET /__test/requests, POST /__test/reset,
 // POST /__test/scenario {language, playing: 'film'|'live'|'none', canSeek, positionApprox,
-// pending, signedOut, remote, tunnel}.
+// pending (number of videos waiting for approval), addError (code of the error POST …/items
+// answers with), panelFail (the panel answers 500), panelDelayMs, patchDelayMs, signedOut, remote, tunnel}. The queue lives in memory: POST …/items adds,
+// PATCH /api/admin/items/{id} moves ({position}) or decides ({action}), DELETE removes.
+// GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -26,6 +29,34 @@ export function startFakeEngine(port = 8193) {
   if (port === 8080) throw new Error('never port 8080');
   let requests = [];
   let s;
+  let nextId;
+  let panelInFlight = 0;
+  let maxPanelInFlight = 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  const queued = (id, title, extra = {}) => ({
+    id,
+    title,
+    durationS: 232,
+    requesterName: 'Tomek',
+    requesterBadge: { hue: 200, shape: id % 12 },
+    isLive: false,
+    sourceUrl: `https://www.youtube.com/watch?v=${id}`,
+    status: 'queued',
+    addedBy: 'viewer',
+    error: null,
+    createdAt: 0,
+    finishedAt: null,
+    ...extra,
+  });
+  const initialQueue = () => [
+    queued(8, 'Darude — Sandstorm'),
+    queued(9, 'Shrek 2 (2004).mkv', { durationS: 6130, requesterName: null, requesterBadge: 'host', sourceUrl: 'local:0/Shrek%202.mkv', addedBy: 'admin' }),
+    queued(10, 'Lofi hip hop radio', { durationS: null, isLive: true, requesterName: 'Kasia', requesterBadge: { hue: 40, shape: 3 } }),
+    queued(11, 'Bez tytułu', { requesterName: null, requesterBadge: null }),
+  ];
+  const pendingList = (n) =>
+    Array.from({ length: n }, (_, i) => queued(20 + i, i === 0 ? 'Nyan Cat 10 godzin' : `Film do zatwierdzenia ${i}`, { status: 'pending_approval', requesterName: i === 1 ? null : 'Bartek', requesterBadge: i === 1 ? null : { hue: 300, shape: 7 } }));
 
   function reset() {
     requests = [];
@@ -35,6 +66,10 @@ export function startFakeEngine(port = 8193) {
       canSeek: true,
       positionApprox: false,
       pending: 0,
+      addError: null,
+      panelFail: false,
+      panelDelayMs: 0,
+      patchDelayMs: 0,
       signedOut: false,
       remote: false,
       tunnel: 'online',
@@ -43,6 +78,10 @@ export function startFakeEngine(port = 8193) {
       positionS: 92,
       durationS: 213,
     };
+    s.queue = initialQueue();
+    s.pendingItems = [];
+    nextId = 100;
+    maxPanelInFlight = 0;
   }
   reset();
 
@@ -76,7 +115,7 @@ export function startFakeEngine(port = 8193) {
             requesterBadge: { hue: 40, shape: 3 },
             isLive: s.playing === 'live',
           };
-    const item = (id, title) => ({ id, title, durationS: 232, requesterName: 'Tomek', requesterBadge: null, isLive: false, sourceUrl: `https://www.youtube.com/watch?v=${id}`, status: 'queued', addedBy: 'viewer', error: null, createdAt: 0, finishedAt: null });
+    const item = (id, title) => queued(id, title, { requesterBadge: null });
     return {
       status: s.playing === 'none' ? 'idle' : s.paused ? 'paused' : 'playing',
       current,
@@ -84,8 +123,8 @@ export function startFakeEngine(port = 8193) {
       pauseReasons: s.pauseReasons,
       prefetchedItemId: null,
       playing: current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : [],
-      queue: [item(8, 'Darude — Sandstorm')],
-      pending: Array.from({ length: s.pending }, (_, i) => ({ ...item(20 + i, 'Nyan Cat'), status: 'pending_approval' })),
+      queue: s.queue,
+      pending: s.pendingItems,
       history: [],
       settings: {},
       control: control(),
@@ -142,13 +181,17 @@ export function startFakeEngine(port = 8193) {
     }
     if (path.startsWith('/static/')) return serveFile(res, decodeURIComponent(path.slice('/static/'.length)));
     if (path === '/__test/requests') return json(res, 200, requests);
+    if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight });
+    if (path === '/__test/hang') return undefined;
     if (path === '/__test/reset') {
       reset();
       return json(res, 200, { ok: true });
     }
     if (path === '/__test/scenario') {
-      Object.assign(s, await body(req));
-      return json(res, 200, s);
+      const change = await body(req);
+      Object.assign(s, change);
+      if ('pending' in change) s.pendingItems = pendingList(change.pending);
+      return json(res, 200, { ...s, queue: undefined, pendingItems: undefined });
     }
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
 
@@ -165,10 +208,58 @@ export function startFakeEngine(port = 8193) {
     }
     if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
     const base = '/api/admin/channels/main';
-    if (path === base && req.method === 'GET') return json(res, 200, panel());
+    if (path === base && req.method === 'GET') {
+      if (s.panelFail) return coded(res, 500, 'internal', 'boom');
+      panelInFlight += 1;
+      maxPanelInFlight = Math.max(maxPanelInFlight, panelInFlight);
+      if (s.panelDelayMs) await sleep(s.panelDelayMs);
+      const answer = panel();
+      panelInFlight -= 1;
+      return json(res, 200, answer);
+    }
+    const itemRoute = path.match(/^\/api\/admin\/items\/(\d+)$/);
+    if (itemRoute) {
+      const id = Number(itemRoute[1]);
+      const inQueue = s.queue.findIndex((i) => i.id === id);
+      const inPending = s.pendingItems.findIndex((i) => i.id === id);
+      if (inQueue < 0 && inPending < 0) return coded(res, 404, 'no_such_item', 'No such item');
+      if (req.method === 'DELETE') {
+        s.queue = s.queue.filter((i) => i.id !== id);
+        s.pendingItems = s.pendingItems.filter((i) => i.id !== id);
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === 'PATCH') {
+        if (s.patchDelayMs) await sleep(s.patchDelayMs);
+        if (payload?.action === 'approve' || payload?.action === 'reject') {
+          if (inPending < 0) return coded(res, 409, 'not_pending', 'Not pending');
+          const [moved] = s.pendingItems.splice(inPending, 1);
+          if (payload.action === 'approve') s.queue.push({ ...moved, status: 'queued' });
+          return json(res, 200, { ok: true });
+        }
+        if (Number.isInteger(payload?.position)) {
+          if (inQueue < 0) return coded(res, 409, 'move_only_queued', 'Only queued');
+          const [moved] = s.queue.splice(inQueue, 1);
+          s.queue.splice(Math.min(payload.position, s.queue.length), 0, moved);
+          return json(res, 200, { ok: true });
+        }
+        return coded(res, 400, 'action_or_position', 'Give action or position');
+      }
+    }
     if (req.method !== 'POST') return json(res, 404, { error: 'Not Found' });
     const action = path.slice(base.length + 1);
     if (action === 'skip') return json(res, 200, { ok: true });
+    if (action === 'items') {
+      if (s.addError) {
+        const pl = req.headers['x-vrcinema-lang'] === 'pl';
+        const message = s.addError === 'domain_not_allowed'
+          ? (pl ? 'Ten serwis nie jest dozwolony. Dozwolone: youtube.com.' : 'This site is not allowed. Allowed: youtube.com.')
+          : `Refused: ${s.addError}`;
+        return coded(res, 400, s.addError, message);
+      }
+      if (!/^https?:\/\//.test(payload?.url ?? '')) return coded(res, 400, 'invalid_link', 'Invalid link');
+      s.queue.push(queued(nextId++, 'Added from ' + new URL(payload.url).hostname));
+      return json(res, 201, { added: 1, title: s.queue.at(-1).title });
+    }
     if (s.playing === 'none' && ['pause', 'seek', 'restart'].includes(action)) {
       return coded(res, 409, 'nothing_playing', `Nothing is playing (${req.headers['x-vrcinema-lang']})`);
     }

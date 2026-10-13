@@ -6,6 +6,7 @@ import { html } from './html.js';
 import { browserLang, loadLang, t } from './i18n.js';
 import { Icon } from './icons.js';
 import {
+  abilities,
   firstInfo,
   restart,
   seekBy,
@@ -20,6 +21,9 @@ import { Rail, route } from './components/rail.js';
 import { PlayerBar } from './components/playerbar.js';
 import { MenuLayer, menu } from './components/menu.js';
 import { DialogLayer, dialog, openDialog } from './components/dialog.js';
+import { DropZone } from './components/dropzone.js';
+import { pasteLink } from './components/addlink.js';
+import { ChannelView } from './views/channel.js';
 
 // ---------- Keyboard shortcuts ----------
 
@@ -74,14 +78,20 @@ function onKeyDown(e) {
   if (e.defaultPrevented || e.isComposing || menu.value || dialog.value) return;
   if (typingIn(e.target)) return;
   const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+  // The keys do what the buttons do, and only when the buttons are on (a live stream cannot
+  // be paused or seeked; nothing playing has nothing to skip).
+  const can = abilities.value;
   let action = null;
-  if (e.key === ' ' && plain && !e.shiftKey && !pressable(e.target)) action = togglePause;
-  else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && plain && !adjustable(e.target)) {
+  if (e.key === ' ' && plain && !e.shiftKey && !pressable(e.target)) {
+    if (can.canToggle) action = togglePause;
+  } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && plain && !adjustable(e.target)) {
     const step = (e.shiftKey ? 60 : 10) * (e.key === 'ArrowLeft' ? -1 : 1);
-    action = () => seekBy(step);
-  } else if (e.key === 'Home' && plain && !e.shiftKey && !adjustable(e.target)) action = restart;
-  else if ((e.key === 'n' || e.key === 'N') && plain) action = skip;
-  else if (e.key === '?' && plain) action = openShortcuts;
+    if (can.canSeek) action = () => seekBy(step);
+  } else if (e.key === 'Home' && plain && !e.shiftKey && !adjustable(e.target)) {
+    if (can.canSeek) action = restart;
+  } else if ((e.key === 'n' || e.key === 'N') && plain) {
+    if (can.current) action = skip;
+  } else if (e.key === '?' && plain) action = openShortcuts;
   if (!action) return;
   e.preventDefault();
   action();
@@ -89,8 +99,19 @@ function onKeyDown(e) {
 
 // ---------- The app ----------
 
+/** Ctrl+V outside text fields: the link on the clipboard goes to the queue. */
+function onPaste(e) {
+  if (e.defaultPrevented || menu.value || dialog.value || typingIn(e.target)) return;
+  if (session.value !== 'ok') return;
+  const text = e.clipboardData?.getData('text/plain');
+  if (!text) return;
+  e.preventDefault();
+  pasteLink(text);
+}
+
 function View() {
   const { view, section } = route.value;
+  if (view === 'channel') return html`<${ChannelView} />`;
   const titleKey = {
     channel: 'nav.channel',
     history: 'nav.history',
@@ -134,6 +155,7 @@ function App() {
         ${signedOut ? html`<${SignedOut} />` : html`<${View} />`}
       </div>
       <${Toast} />
+      <${DropZone} />
       <${PlayerBar} onShortcuts=${openShortcuts} />
       <${MenuLayer} />
       <${DialogLayer} />
@@ -146,6 +168,7 @@ async function start() {
   await loadLang(info?.language ?? browserLang());
   render(html`<${App} />`, document.getElementById('root'));
   document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('paste', onPaste);
   startPolling();
 }
 

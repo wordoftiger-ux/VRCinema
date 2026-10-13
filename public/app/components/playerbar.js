@@ -14,6 +14,7 @@ import {
   channel,
   channelLink,
   control,
+  abilities,
   controlAt,
   netStatus,
   restart,
@@ -206,7 +207,7 @@ const NET_KEYS = {
   local: 'net.local',
 };
 
-async function copyText(text) {
+export async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -246,9 +247,7 @@ export function PlayerBar({ onShortcuts }) {
   const pos = shownPosition(c, controlAt.value, status);
   const dur = c?.durationS ?? current?.durationS ?? null;
   const live = Boolean(c?.isLive ?? current?.isLive);
-  const canSeek = Boolean(current && c?.canSeek);
-  const manual = Boolean(c?.pauseReasons?.includes('manual'));
-  const canToggle = Boolean(current && c && (manual || c.canPause));
+  const { canSeek, manual, canToggle } = abilities.value;
   const net = netStatus.value;
   const videoLink = ch?.playing?.[0]?.sourceUrl ?? null;
 

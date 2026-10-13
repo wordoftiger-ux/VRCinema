@@ -2,13 +2,15 @@
 // (the panel every second, the window's info every 3 s) and the owner's controls.
 
 import { signal, computed, batch } from '/static/vendor/signals.mjs';
-import { api } from './api.js';
+import { api, errorText } from './api.js';
 import { lang, loadLang } from './i18n.js';
 
 const PANEL = '/api/admin/channels/main';
 const INFO = '/api/desktop/info';
 const PANEL_EVERY_MS = 1000;
 const INFO_EVERY_MS = 3000;
+// After failed reads the next one waits longer (doubling), up to this.
+const MAX_BACKOFF_MS = 30000;
 
 /** The panel's view of the channel (status, current, paused, pending, settings, links…). */
 export const channel = signal(null);
@@ -27,6 +29,10 @@ export const session = signal('loading');
 export const toast = signal(null);
 
 let infoAvailable = true;
+// Panel changes made here (move, remove, approve) that have not finished, and when the last
+// one did: a read that started before that shows the old state and must not overwrite ours.
+let mutating = 0;
+let lastMutationEnd = 0;
 let toastTimer = 0;
 // Raised by every language switch made here: an info read that started before it carries the
 // old language and must not switch back.
@@ -43,6 +49,7 @@ export function showToast(text, kind = 'error') {
 let lastControlAnswer = 0;
 
 function applyPanel(data, startedAt) {
+  if (mutating > 0 || startedAt < lastMutationEnd) return;
   const { control: c, queue: q, history: h, ...rest } = data;
   batch(() => {
     channel.value = rest;
@@ -60,17 +67,46 @@ function setControl(c) {
   });
 }
 
-export async function refreshPanel() {
+/** One panel read: `ok`, `fail` (try again later) or `stop` (no session: polling ends). */
+async function readPanel() {
   const startedAt = performance.now();
   try {
     applyPanel(await api('GET', PANEL), startedAt);
+    return 'ok';
   } catch (e) {
-    if (e.status === 401) session.value = 'signed_out';
+    if (e.status === 401) {
+      session.value = 'signed_out';
+      return 'stop';
+    }
+    return 'fail';
   }
 }
 
+// Reads are serialised (the polling loop and the refresh after an action share one): while
+// one runs, a request for another only marks that a fresh one must follow, so an older answer
+// never arrives after a newer one.
+let panelRun = null;
+let panelAgain = false;
+
+export function refreshPanel() {
+  if (panelRun) {
+    panelAgain = true;
+    return panelRun;
+  }
+  panelRun = (async () => {
+    let result;
+    do {
+      panelAgain = false;
+      result = await readPanel();
+    } while (panelAgain);
+    panelRun = null; // no await between the check above and this: nothing can slip in
+    return result;
+  })();
+  return panelRun;
+}
+
 export async function refreshInfo() {
-  if (!infoAvailable) return;
+  if (!infoAvailable) return 'stop';
   const switches = languageSwitches;
   try {
     const data = await api('GET', INFO);
@@ -79,30 +115,61 @@ export async function refreshInfo() {
     if (current && data?.language && data.language !== lang.value) {
       await loadLang(data.language);
     }
+    return 'ok';
   } catch (e) {
     // 403: a remote session, 404: the server without a window — no window info there.
     if (e.status === 403 || e.status === 404) {
       infoAvailable = false;
       info.value = null;
+      return 'stop';
     }
+    return e.status === 401 ? 'stop' : 'fail';
   }
 }
 
+/**
+ * Runs `fn` every `everyMs` (it answers `ok`, `fail` or `stop`): after failures the wait
+ * doubles up to MAX_BACKOFF_MS, `stop` ends the loop until `restart()`.
+ */
 function loop(fn, everyMs) {
+  let fails = 0;
+  let running = false;
   const run = async () => {
-    await fn();
-    setTimeout(run, everyMs);
+    running = true;
+    const result = await fn();
+    if (result === 'stop') {
+      running = false;
+      return;
+    }
+    fails = result === 'fail' ? fails + 1 : 0;
+    setTimeout(run, Math.min(MAX_BACKOFF_MS, everyMs * 2 ** Math.min(fails, 6)));
   };
   run();
+  return {
+    restart() {
+      if (running) return;
+      fails = 0;
+      run();
+    },
+  };
 }
 
 /** Starts polling (once). */
-let started = false;
+let loops = null;
 export function startPolling() {
-  if (started) return;
-  started = true;
-  loop(refreshPanel, PANEL_EVERY_MS);
-  loop(refreshInfo, INFO_EVERY_MS);
+  if (loops) return;
+  loops = { panel: loop(refreshPanel, PANEL_EVERY_MS), info: loop(refreshInfo, INFO_EVERY_MS) };
+}
+
+/**
+ * Takes polling up again after it stopped for lack of a session (the sign-in screen calls this
+ * once the owner has signed in).
+ */
+export function resumePolling() {
+  session.value = 'loading';
+  infoAvailable = true;
+  loops?.panel.restart();
+  loops?.info.restart();
 }
 
 /** Reads the window's info once (for the language at start); null when there is none. */
@@ -123,7 +190,7 @@ async function send(action, body) {
     refreshPanel();
     return true;
   } catch (e) {
-    showToast(e.message);
+    showToast(errorText(e));
     return false;
   }
 }
@@ -146,8 +213,68 @@ export async function skip() {
     refreshPanel();
     return true;
   } catch (e) {
-    showToast(e.message);
+    showToast(errorText(e));
     return false;
+  }
+}
+
+// ---------- The queue ----------
+
+/** Runs a change of the queue: `optimistic` shows it at once, a failure shows the error. */
+async function mutate(request, optimistic) {
+  mutating += 1;
+  optimistic?.();
+  try {
+    await request();
+    return true;
+  } catch (e) {
+    showToast(errorText(e));
+    return false;
+  } finally {
+    mutating -= 1;
+    lastMutationEnd = performance.now();
+    refreshPanel(); // the engine's state, also after a failure
+  }
+}
+
+function dropPending(id) {
+  const c = channel.value;
+  if (c?.pending) channel.value = { ...c, pending: c.pending.filter((i) => i.id !== id) };
+}
+
+/** Moves the queued item `id` to `to` (0 = first) in the list without it. */
+export function moveItem(id, to) {
+  return mutate(
+    () => api('PATCH', `/api/admin/items/${id}`, { position: to }),
+    () => {
+      const moved = queue.value.find((i) => i.id === id);
+      if (!moved) return;
+      const rest = queue.value.filter((i) => i.id !== id);
+      queue.value = [...rest.slice(0, to), moved, ...rest.slice(to)];
+    },
+  );
+}
+
+export const removeItem = (id) =>
+  mutate(
+    () => api('DELETE', `/api/admin/items/${id}`),
+    () => {
+      queue.value = queue.value.filter((i) => i.id !== id);
+      dropPending(id);
+    },
+  );
+
+const decide = (id, action) =>
+  mutate(() => api('PATCH', `/api/admin/items/${id}`, { action }), () => dropPending(id));
+export const approveItem = (id) => decide(id, 'approve');
+export const rejectItem = (id) => decide(id, 'reject');
+
+/** Adds a link (a video or a playlist): resolves to `{added, title}`, throws `ApiError`. */
+export async function addLink(url) {
+  try {
+    return await api('POST', `${PANEL}/items`, { url }, { timeoutMs: 180000 });
+  } finally {
+    refreshPanel();
   }
 }
 
@@ -160,13 +287,26 @@ export async function setLanguage(code) {
     if (info.value) info.value = { ...info.value, language: code };
     await loadLang(code);
   } catch (e) {
-    showToast(e.message);
+    showToast(errorText(e));
   } finally {
     switchingLanguage = false;
   }
 }
 
 // ---------- Derived values ----------
+
+/** What the owner's controls may do now (the keys and the buttons follow the same rules). */
+export const abilities = computed(() => {
+  const c = control.value;
+  const current = Boolean(channel.value?.current);
+  const manual = Boolean(c?.pauseReasons?.includes('manual'));
+  return {
+    current,
+    manual,
+    canSeek: Boolean(current && c?.canSeek),
+    canToggle: Boolean(current && c && (manual || c.canPause)),
+  };
+});
 
 /** The link for the VRChat player: the public one when there is one, else the local one. */
 export const channelLink = computed(() => {
