@@ -1,4 +1,4 @@
-// The left rail with the four views, and the router: `#/channel`, `#/history`, `#/share`,
+// The left rail with the four views (tabs at the bottom on a phone), and the router: `#/channel`, `#/history`, `#/share`,
 // `#/settings/<section>`.
 
 import { signal } from '/static/vendor/signals.mjs';
@@ -31,6 +31,11 @@ export function parseRoute(hash) {
 }
 
 export const route = signal(parseRoute(location.hash));
+
+/** A phone-sized screen (spec section 10: below 700 px the rail becomes tabs at the bottom). */
+const PHONE = window.matchMedia('(max-width: 699.98px)');
+export const narrow = signal(PHONE.matches);
+PHONE.addEventListener('change', (e) => (narrow.value = e.matches));
 window.addEventListener('hashchange', () => (route.value = parseRoute(location.hash)));
 
 const ITEMS = [

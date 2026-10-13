@@ -3,7 +3,7 @@
 
 import { signal, computed, batch } from '/static/vendor/signals.mjs';
 import { api, errorText } from './api.js';
-import { lang, loadLang } from './i18n.js';
+import { chosenLang, lang, loadLang, rememberLang } from './i18n.js';
 
 const PANEL = '/api/admin/channels/main';
 const INFO = '/api/desktop/info';
@@ -23,7 +23,6 @@ export const queue = signal([]);
 export const history = signal([]);
 /** The window's info (`/api/desktop/info`); null in a remote session or without a window. */
 export const info = signal(null);
-export const tunnel = computed(() => info.value?.tunnel ?? null);
 /**
  * What the interface runs in: `unknown` until the first answer, then `window` (the program's
  * own window: the window-only routes work), `remote` (a password session of the program on
@@ -33,8 +32,17 @@ export const tunnel = computed(() => info.value?.tunnel ?? null);
 export const access = signal('unknown');
 /** True in a remote session or on a server without a window: the window-only routes answer 403. */
 export const remote = computed(() => access.value === 'remote' || access.value === 'headless');
-/** `/api/admin/environment` (open to a remote session too): `{window, encoder, tickerSlow}`. */
+/**
+ * `/api/admin/environment` (open to a remote session too): `{window, encoder, tickerSlow,
+ * language, sessionViaTunnel, publicUrl, tunnelEnabled, tunnel, channelRunning, channelError}`
+ * (the last four `null` without a window). Polled outside the window instead of the info.
+ */
 export const environment = signal(null);
+/** Where the internet state comes from: the window's info, else the environment. */
+const net = computed(() => info.value ?? environment.value ?? null);
+export const tunnel = computed(() => net.value?.tunnel ?? null);
+/** This session came through the built-in tunnel: switching it off ends the session. */
+export const sessionViaTunnel = computed(() => Boolean(net.value?.sessionViaTunnel));
 /** `loading`, `ok`, or `signed_out` (no panel session). */
 export const session = signal('loading');
 /** A short message over the player bar: `{text, kind}` (`error` or `info`). */
@@ -122,7 +130,7 @@ export function refreshPanel() {
 }
 
 export async function refreshInfo() {
-  if (!infoAvailable) return 'stop';
+  if (!infoAvailable) return refreshEnvironment();
   const switches = languageSwitches;
   try {
     const data = await api('GET', INFO);
@@ -135,21 +143,36 @@ export async function refreshInfo() {
     return 'ok';
   } catch (e) {
     // 403: a remote session; the server without a window answers 403 or 404 as well. The
-    // environment says which one it is; until it answers, the access stays unknown.
+    // environment says which one it is (and is read from now on instead); until it answers,
+    // the access stays unknown.
     if (e.status === 403 || e.status === 404) {
-      try {
-        const env = await api('GET', ENVIRONMENT);
-        batch(() => {
-          environment.value = env;
-          info.value = null;
-          access.value = env.window ? 'remote' : 'headless';
-        });
-        infoAvailable = false;
-        return 'stop';
-      } catch (envError) {
-        return envError.status === 401 ? 'stop' : 'fail';
-      }
+      const result = await refreshEnvironment();
+      if (result === 'ok') infoAvailable = false;
+      return result;
     }
+    return e.status === 401 ? 'stop' : 'fail';
+  }
+}
+
+/**
+ * One read of the environment outside the window. The panel follows the program's language
+ * unless a language was picked in this browser.
+ */
+async function refreshEnvironment() {
+  const switches = languageSwitches;
+  try {
+    const env = await api('GET', ENVIRONMENT);
+    batch(() => {
+      environment.value = env;
+      info.value = null;
+      access.value = env.window ? 'remote' : 'headless';
+    });
+    const current = !switchingLanguage && switches === languageSwitches;
+    if (current && !chosenLang() && env.language && env.language !== lang.value) {
+      await loadLang(env.language);
+    }
+    return 'ok';
+  } catch (e) {
     return e.status === 401 ? 'stop' : 'fail';
   }
 }
@@ -199,7 +222,10 @@ export function resumePolling() {
   loops?.info.restart();
 }
 
-/** Reads the window's info once (for the language at start); null when there is none. */
+/**
+ * Reads the window's info once (for the language at start); null when there is none (then the
+ * environment may have answered: a remote session or a server without a window).
+ */
 export async function firstInfo() {
   await refreshInfo();
   return info.value;
@@ -326,6 +352,25 @@ export async function setLanguage(code) {
   }
 }
 
+/** Picks the panel's language in this browser (remote panel, sign-in screen) and switches. */
+export async function choosePanelLanguage(code) {
+  languageSwitches += 1;
+  rememberLang(code);
+  await loadLang(code);
+}
+
+/**
+ * Switches the built-in tunnel from the panel (`PUT /api/admin/tunnel`, also in a remote
+ * session). Resolves to true when it was saved; a failure is thrown as `ApiError`.
+ */
+export async function setTunnelEnabled(enabled) {
+  const r = await api('PUT', '/api/admin/tunnel', { enabled });
+  const env = environment.value;
+  if (env) environment.value = { ...env, tunnelEnabled: r.tunnelEnabled, tunnel: r.tunnel };
+  refreshInfo();
+  return true;
+}
+
 // ---------- Derived values ----------
 
 /** What the owner's controls may do now (the keys and the buttons follow the same rules). */
@@ -343,7 +388,7 @@ export const abilities = computed(() => {
 
 /** The link for the VRChat player: the public one when there is one, else the local one. */
 export const channelLink = computed(() => {
-  const i = info.value;
+  const i = net.value;
   const local = channel.value?.channelUrl ?? null;
   if (!i) return local;
   const link = (base) => `${String(base).replace(/\/+$/, '')}/live/main.m3u8`;
@@ -354,25 +399,25 @@ export const channelLink = computed(() => {
 
 /** The page where viewers add videos: the public one when there is one, else the local one. */
 export const requestLink = computed(() => {
-  const i = info.value;
+  const i = net.value;
   const local = channel.value?.requestUrl ?? null;
   if (!i) return local;
   const base = publicAddress.value;
   return base ? `${String(base).replace(/\/+$/, '')}/` : local;
 });
 
-/** The public address of the channel in the window (tunnel or manual); null while there is none. */
+/** The public address of the channel (tunnel or manual); null while there is none or unknown. */
 export const publicAddress = computed(() => {
-  const i = info.value;
+  const i = net.value;
   if (!i) return null;
   if (i.tunnel?.state === 'online' && i.tunnel.url) return i.tunnel.url;
   if (!i.tunnelEnabled && i.publicUrl) return i.publicUrl;
   return null;
 });
 
-/** The internet status of the window: `online`, `connecting`, `offline`, `manual`, `local`. */
+/** The internet status: `online`, `connecting`, `offline`, `manual`, `local` (null: unknown). */
 export const netStatus = computed(() => {
-  const i = info.value;
+  const i = net.value;
   if (!i) return null;
   const state = i.tunnel?.state ?? 'off';
   if (state === 'online') return 'online';

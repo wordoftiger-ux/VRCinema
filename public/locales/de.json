@@ -62,7 +62,5 @@
   "titlebar.restore": "Verkleinern",
   "ui.close": "Schließen",
   "ui.error_status": "Das Programm hat mit Fehler {status} geantwortet.",
-  "ui.no_answer": "Das Programm antwortet nicht. Prüfen Sie, ob VRCinema läuft.",
-  "ui.open_panel": "Panel öffnen",
-  "ui.signed_out": "Melden Sie sich im Kanal-Panel an, um diese Seite zu nutzen."
+  "ui.no_answer": "Das Programm antwortet nicht. Prüfen Sie, ob VRCinema läuft."
 }

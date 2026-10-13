@@ -382,6 +382,19 @@ impl AppState {
             && (!self.live.cloudflare_from_loopback_only.get() || is_loopback(peer))
     }
 
+    /// The request came through the app's own tunnel: cloudflared (a loopback peer) passed it
+    /// on with Cloudflare's `CF-Connecting-IP` while the tunnel's trust is on. The program's
+    /// window (loopback, no header) and a LAN device forging the header never count.
+    fn through_tunnel(&self, peer: &str, headers: &HeaderMap) -> bool {
+        self.live.trust_cloudflare.get()
+            && self.live.cloudflare_from_loopback_only.get()
+            && is_loopback(peer)
+            && headers
+                .get("cf-connecting-ip")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| !v.trim().is_empty())
+    }
+
     fn trusted(&self, peer: &str) -> bool {
         self.trusts_cloudflare(peer) || self.config.trust_proxy
     }
@@ -780,6 +793,8 @@ pub(crate) struct Ctx {
     pub ip: String,
     pub base_url: String,
     pub https: bool,
+    /// Through the app's own tunnel (see [`AppState::through_tunnel`]).
+    pub via_tunnel: bool,
 }
 
 impl FromRequestParts<AppState> for Ctx {
@@ -833,6 +848,7 @@ impl FromRequestParts<AppState> for Ctx {
             ip,
             base_url,
             https,
+            via_tunnel: state.through_tunnel(&remote, &parts.headers),
         })
     }
 }

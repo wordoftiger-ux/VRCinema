@@ -166,16 +166,16 @@ try {
   check((await page.evaluate(() => navigator.clipboard.readText())) === channelLink, 'copy puts the channel link on the clipboard');
   await shot(page, '4-online');
   await page.click('[data-finish]');
-  await page.waitForURL(`${base}/app#/channel`);
+  await page.waitForURL(`${base}/admin#/channel`);
   check((await sent('POST', '/api/desktop/wizard/complete')).length === 1, 'finishing completes the first run');
-  check(page.url() === `${base}/app#/channel`, 'finishing opens the interface', page.url());
+  check(page.url() === `${base}/admin#/channel`, 'finishing opens the interface', page.url());
   check(page.errors.length === 0, 'no script errors', page.errors);
   await page.close();
 
   // ---------- Completed first run: /wizard goes on to the interface ----------
   page = await open();
-  await page.waitForURL(`${base}/app`);
-  check(true, 'a finished wizard redirects to /app');
+  await page.waitForURL(`${base}/admin`);
+  check(true, 'a finished wizard redirects to /admin');
   await page.close();
 
   // ---------- "I want a permanent link" opens Settings -> Internet ----------
@@ -191,7 +191,7 @@ try {
   await page.click('[data-next]');
   await waitFor(() => has(page, '[data-permanent]'), 'online');
   await page.click('[data-permanent]');
-  await page.waitForURL(`${base}/app#/settings/internet`);
+  await page.waitForURL(`${base}/admin#/settings/internet`);
   check(true, 'the permanent link button opens Settings -> Internet');
   await page.close();
 
@@ -234,7 +234,7 @@ try {
   await page.click('[data-next]');
   await waitFor(() => has(page, '[data-skip]'), 'failure', 20000);
   await page.click('[data-skip]');
-  await page.waitForURL(`${base}/app#/channel`);
+  await page.waitForURL(`${base}/admin#/channel`);
   check((await sent('POST', '/api/desktop/wizard/complete')).length === 1, 'skipping after a failed download completes the first run');
   await page.close();
 
@@ -249,7 +249,7 @@ try {
   await page.click('[data-next]');
   await waitFor(() => has(page, '[data-tunnel=connecting]'), 'connecting');
   await page.click('[data-skip]');
-  await page.waitForURL(`${base}/app#/channel`);
+  await page.waitForURL(`${base}/admin#/channel`);
   check((await sent('POST', '/api/desktop/wizard/complete')).length === 1, 'Skip while connecting completes the first run');
   await page.close();
 
@@ -300,7 +300,7 @@ try {
   await sleep(1200);
   await scenario({ infoFail: false });
   await waitFor(() => has(page, '.wz-lang'), 'the wizard appears once the engine answers', 12000);
-  check(page.url() === `${base}/wizard`, 'no redirect to /app while the engine is slow', page.url());
+  check(page.url() === `${base}/wizard`, 'no redirect to /admin while the engine is slow', page.url());
   await page.close();
 
   // ---------- Fix round 1: a failed switch-on of the tunnel stays until Retry ----------
@@ -326,7 +326,7 @@ try {
   await reset();
   await scenario({ firstRun: true, remote: true });
   page = await open();
-  await page.waitForURL(`${base}/app`);
+  await page.waitForURL(`${base}/admin`);
   check(true, 'a remote session is sent to the interface, not the wizard');
   await page.close();
 

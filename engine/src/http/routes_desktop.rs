@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use serde_json::{Map, Value, json};
 
 use super::{
-    ApiError, ApiResult, AppState, DesktopSession, JsonBody, ReqLang, asset_response, json_ok,
+    ApiError, ApiResult, AppState, Ctx, DesktopSession, JsonBody, ReqLang, asset_response, json_ok,
     json_response,
 };
 use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
@@ -94,7 +94,7 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
 
 /// The tunnel for the window: state, address, mode, host name, warning (texts in `lang`).
 /// Never the paths or contents of the named tunnel's files.
-fn tunnel_view(core: &AppCore, lang: Lang) -> Value {
+pub(super) fn tunnel_view(core: &AppCore, lang: Lang) -> Value {
     let info = core.tunnel_info();
     let (state, url, message) = match info.state {
         TunnelState::Off => ("off", None, None),
@@ -116,6 +116,7 @@ fn tunnel_view(core: &AppCore, lang: Lang) -> Value {
 async fn info(
     _: DesktopSession,
     State(state): State<AppState>,
+    ctx: Ctx,
     ReqLang(lang): ReqLang,
 ) -> ApiResult {
     let core = state.desktop()?;
@@ -148,6 +149,7 @@ async fn info(
         "pauseReasons": reasons,
         "language": s.language.as_str(),
         "tickerSlow": core.ticker_slow(),
+        "sessionViaTunnel": ctx.via_tunnel,
     })))
 }
 

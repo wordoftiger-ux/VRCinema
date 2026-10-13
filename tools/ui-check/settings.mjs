@@ -81,7 +81,7 @@ async function openApp(hash) {
   // The checks send refused values on purpose: the browser logs their 400 answers.
   page.on('console', (m) => m.type() === 'error' && !/status of 400/.test(m.text()) && errors.push(m.text()));
   page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && errors.push(`${r.status()} ${r.url()}`));
-  await page.goto(`${base}/app${hash}`);
+  await page.goto(`${base}/admin${hash}`);
   await page.waitForSelector('.player .play');
   page.__errors = errors;
   return page;
@@ -646,14 +646,18 @@ try {
   page = await openApp('#/settings/general');
   await page.waitForSelector('.set-window-only');
   check((await text(page, '.set-window-only')) === 'Available in the program on the computer', 'a remote session sees the window-only note');
-  const disabledAll = await page.$$eval('#view .row2 select, #view .row2 button, #view .row2 input', (els) => els.every((e) => e.disabled));
+  const disabledAll = await page.$$eval('#view .row2 select, #view .row2 button, #view .row2 input', (els) => els.filter((e) => !e.matches('[data-panel-language]')).every((e) => e.disabled));
   check(disabledAll, 'and its window-only controls are disabled');
+  check(await page.$eval('[data-panel-language]', (e) => !e.disabled), 'only the language of this panel can be chosen (kept in the browser)');
   await shot(page, 'after-settings-general-remote-en.png');
   for (const section of ['internet', 'tools', 'remote', 'advanced', 'log', 'about']) {
     await goto(page, section);
     await page.waitForSelector('.set-window-only');
-    const enabled = await page.$$eval('#view .sform button, #view .sform select, #view .sform input', (els) => els.filter((e) => !e.disabled && !e.closest('.snav')).map((e) => e.outerHTML.slice(0, 80)));
-    check(enabled.length === 0, `${section}: nothing is enabled in a remote session`, enabled);
+    // Task 15 (spec section 2): the tunnel switch works in a remote session too.
+    const tunnelSwitch = await page.$('[role=switch][aria-label^="Share the channel on the internet"]');
+    const enabled = await page.$$eval('#view .sform button, #view .sform select, #view .sform input', (els) => els.filter((e) => !e.disabled && !e.closest('.snav') && !e.matches('[role=switch][aria-label^="Share the channel on the internet"]')).map((e) => e.outerHTML.slice(0, 80)));
+    check(enabled.length === 0, `${section}: nothing else is enabled in a remote session`, enabled);
+    if (section === 'internet') check(tunnelSwitch && !(await tunnelSwitch.evaluate((e) => e.disabled)), 'internet: the tunnel switch is enabled in a remote session');
   }
   let all = await requests();
   const windowCalls = all.filter((r) => r.path.startsWith('/api/desktop/') && r.path !== '/api/desktop/info');

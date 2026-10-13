@@ -75,7 +75,7 @@ async function openApp() {
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('response', (r) => r.status() >= 400 && errors.push(`${r.status()} ${r.url()}`));
-  await page.goto(`${base}/app`);
+  await page.goto(`${base}/admin`);
   await page.waitForSelector('.player .play');
   await page.waitForSelector('.qi');
   page.__errors = errors;

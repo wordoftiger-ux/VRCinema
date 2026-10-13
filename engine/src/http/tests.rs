@@ -2036,12 +2036,14 @@ async fn serves_the_request_page_and_the_panel() {
     );
     assert_eq!(index.header("content-type"), "text/html; charset=utf-8");
     assert_eq!(index.header("cache-control"), "public, max-age=0");
+    // Stage 4: `/admin` is the new interface (the window and the remote panel alike).
     let admin = h.send(get("/admin")).await;
+    assert_eq!(admin.status, StatusCode::OK);
     assert_eq!(admin.header("content-type"), "text/html; charset=utf-8");
     assert_eq!(admin.header("cache-control"), "public, max-age=0");
     assert_eq!(
         admin.body,
-        std::fs::read(repo_public_dir().join("admin.html")).unwrap()
+        std::fs::read(repo_public_dir().join("app.html")).unwrap()
     );
 }
 
@@ -2074,13 +2076,14 @@ async fn serves_static_files_and_favicon() {
     assert!(fav.body.is_empty());
 }
 
-/// The new player interface (stage 4) is served at `/app` until it replaces `/admin`; its
-/// modules and the bundled libraries come from `/static` with a JavaScript type (`.mjs` too:
-/// browsers refuse module scripts of any other type).
+/// The new player interface (stage 4) is served at `/admin` (the temporary `/app` is gone);
+/// its modules and the bundled libraries come from `/static` with a JavaScript type (`.mjs`
+/// too: browsers refuse module scripts of any other type).
 #[tokio::test]
 async fn serves_the_new_interface_and_its_libraries() {
     let h = Harness::new();
-    let app = h.send(get("/app")).await;
+    assert_eq!(h.send(get("/app")).await.status, StatusCode::NOT_FOUND);
+    let app = h.send(get("/admin")).await;
     assert_eq!(app.status, StatusCode::OK);
     assert_eq!(app.header("content-type"), "text/html; charset=utf-8");
     assert_eq!(
@@ -3307,6 +3310,97 @@ async fn the_environment_route_tells_a_server_without_a_window() {
     assert_eq!(body["window"], false);
     assert_eq!(body["tickerSlow"], false);
     assert_eq!(body["encoder"], "libx264");
+    // The panel's language when nobody picked one in the browser: the server's (`LANGUAGE`).
+    assert_eq!(body["language"], "pl");
+    assert_eq!(body["sessionViaTunnel"], false);
+    // No window: no tunnel and no channel state of the app.
+    assert_eq!(body["tunnelEnabled"], Value::Null);
+    assert_eq!(body["tunnel"], Value::Null);
+    assert_eq!(body["channelRunning"], Value::Null);
+    assert_eq!(body["channelError"], Value::Null);
+    assert_eq!(body["publicUrl"], "");
+}
+
+/// Spec section 10: a session that came through the built-in tunnel is told apart (the panel
+/// asks before switching the tunnel off from it). Only requests of cloudflared — a loopback
+/// peer with Cloudflare's header while the tunnel's trust is on — count as such.
+#[tokio::test]
+async fn a_session_through_the_tunnel_is_told_apart() {
+    let tunnel_live = || {
+        let settings = crate::app_settings::AppSettings {
+            trust_cloudflare: true,
+            ..crate::app_settings::AppSettings::default()
+        };
+        crate::live::LiveSettings::from_config(&crate::app_settings::app_config(
+            &settings,
+            Path::new("H"),
+        ))
+    };
+    let live = tunnel_live();
+    live.cloudflare_from_loopback_only.set(true);
+    let h = Harness::with_state(config(), move |s| s.with_live(live));
+    let cookie = h.login().await;
+    let via = |peer: &str, header: Option<&str>| {
+        let mut c = get(ENVIRONMENT_ROUTE).cookie(&cookie).ip(peer);
+        if let Some(value) = header {
+            c = c.header("cf-connecting-ip", value);
+        }
+        c
+    };
+    let flag = |res: Resp| res.json()["sessionViaTunnel"].clone();
+    assert_eq!(flag(h.send(via("127.0.0.1", Some("1.2.3.4"))).await), true);
+    assert_eq!(flag(h.send(via("::1", Some("1.2.3.4"))).await), true);
+    // The program's own window, a LAN device forging the header, an empty header.
+    assert_eq!(flag(h.send(via("127.0.0.1", None)).await), false);
+    assert_eq!(
+        flag(h.send(via("192.168.1.5", Some("1.2.3.4"))).await),
+        false
+    );
+    assert_eq!(flag(h.send(via("127.0.0.1", Some(" "))).await), false);
+
+    // The manual Cloudflare trust (tunnel off): the header may come from anywhere.
+    let manual = tunnel_live();
+    let h = Harness::with_state(config(), move |s| s.with_live(manual));
+    let cookie = h.login().await;
+    let res = h
+        .send(
+            get(ENVIRONMENT_ROUTE)
+                .cookie(&cookie)
+                .header("cf-connecting-ip", "1.2.3.4"),
+        )
+        .await;
+    assert_eq!(res.json()["sessionViaTunnel"], false);
+}
+
+/// The panel's tunnel switch (`PUT /api/admin/tunnel`): a session is needed; a server without
+/// a window has no tunnel.
+#[tokio::test]
+async fn the_panels_tunnel_switch_needs_a_session_and_a_window() {
+    let h = Harness::new();
+    let res = h
+        .send(call("PUT", "/api/admin/tunnel").json(json!({"enabled": false})))
+        .await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    let cookie = h.login().await;
+    let res = h
+        .send(
+            call("PUT", "/api/admin/tunnel")
+                .cookie(&cookie)
+                .json(json!({"enabled": "nie"})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(res.json()["code"], "field_not_boolean");
+    let res = h
+        .send(
+            call("PUT", "/api/admin/tunnel")
+                .cookie(&cookie)
+                .json(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    assert_eq!(res.json()["code"], "no_tunnel");
+    assert_eq!(res.error(), "Ten serwer nie ma wbudowanego tunelu.");
 }
 
 // ---------- nicki widzów ----------

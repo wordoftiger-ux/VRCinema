@@ -8,7 +8,7 @@ import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { Icon } from '../icons.js';
 
-/** The open dialog: `{title, body, buttons, opener}` or null. */
+/** The open dialog: `{title, body, buttons, onClose, opener}` or null. */
 export const dialog = signal(null);
 
 const FOCUSABLE =
@@ -16,18 +16,20 @@ const FOCUSABLE =
 
 /**
  * Opens a dialog. `title` and `body` are functions returning text / elements; `buttons`:
- * `{key, primary?, action?}` (a button without `action` only closes).
+ * `{key, primary?, danger?, action?}` (a button without `action` only closes). `onClose` runs
+ * when the dialog is closed without a button (Esc, the close button, a click outside).
  */
-export function openDialog({ title, body, buttons = [] }) {
+export function openDialog({ title, body, buttons = [], onClose = null }) {
   const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  dialog.value = { title, body, buttons, opener };
+  dialog.value = { title, body, buttons, onClose, opener };
 }
 
-export function closeDialog() {
+export function closeDialog({ dismissed = true } = {}) {
   const open = dialog.value;
   if (!open) return;
   dialog.value = null;
   if (open.opener?.isConnected) open.opener.focus();
+  if (dismissed) open.onClose?.();
 }
 
 export function DialogLayer() {
@@ -67,7 +69,7 @@ export function DialogLayer() {
   };
 
   const press = (button) => {
-    closeDialog();
+    closeDialog({ dismissed: !button.action });
     button.action?.();
   };
 
@@ -78,13 +80,13 @@ export function DialogLayer() {
         <header class="dialog-head">
           <h2 id="dialog-title">${open.title()}</h2>
           <button type="button" class="icon-button" aria-label=${t('ui.close')} title=${t('ui.close')}
-            onClick=${closeDialog}><${Icon} name="close" size=${18} /></button>
+            onClick=${() => closeDialog()}><${Icon} name="close" size=${18} /></button>
         </header>
         <div class="dialog-body">${open.body()}</div>
         ${open.buttons.length
           ? html`<footer class="dialog-foot">
               ${open.buttons.map(
-                (b, i) => html`<button type="button" class=${b.primary ? 'btn pri' : 'btn'}
+                (b, i) => html`<button type="button" class=${b.danger ? 'btn danger' : b.primary ? 'btn pri' : 'btn'}
                   data-autofocus=${i === 0 ? '' : undefined} onClick=${() => press(b)}>${t(b.key)}</button>`,
               )}
             </footer>`

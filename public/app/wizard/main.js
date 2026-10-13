@@ -1,5 +1,6 @@
 // The first-run wizard (window only): language, the tools, the graphics card, the internet.
 // Served at /wizard while the first run is not complete; at the end it goes to the interface.
+// The window has no frame: the wizard brings the interface's title bar.
 
 import { render } from '/static/vendor/preact.mjs';
 import { signal } from '/static/vendor/signals.mjs';
@@ -8,6 +9,7 @@ import { browserLang, lang, loadLang, t } from '../i18n.js';
 import { api } from '../api.js';
 import { firstInfo, setLanguage, toast } from '../store.js';
 import { Icon } from '../icons.js';
+import { Titlebar, inWindow } from '../components/titlebar.js';
 import { focusOnMount } from './focus.js';
 import { LANGUAGES, LANGUAGE_NAME_KEYS } from '../views/settings/common.js';
 import { ToolsStep } from './tools-step.js';
@@ -21,7 +23,7 @@ const step = signal(1);
 /** Finishes the wizard (the first run is complete) and opens the interface at `hash`. */
 export async function finish(hash = '#/channel') {
   await api('POST', '/api/desktop/wizard/complete');
-  location.href = `/app${hash}`;
+  location.href = `/admin${hash}`;
 }
 
 function LanguageStep() {
@@ -67,14 +69,17 @@ function Wizard() {
           ? html`<${EncoderStep} next=${() => (step.value = 4)} />`
           : html`<${InternetStep} finish=${finish} />`;
   return html`
-    <main class="wz" data-step=${n}>
-      <ol class="wz-steps" aria-label=${t('wizard.progress')}>
-        ${Array.from({ length: STEPS }, (_, i) => html`<li class=${i + 1 < n ? 'done' : i + 1 === n ? 'current' : ''}></li>`)}
-      </ol>
-      <p class="wz-no">${t('wizard.step', { n, total: STEPS })}</p>
-      <div class="wz-body" key=${n}>${body}</div>
-      <${Toast} />
-    </main>`;
+    ${inWindow() ? html`<${Titlebar} />` : null}
+    <div class="wz-scroll">
+      <main class="wz" data-step=${n}>
+        <ol class="wz-steps" aria-label=${t('wizard.progress')}>
+          ${Array.from({ length: STEPS }, (_, i) => html`<li class=${i + 1 < n ? 'done' : i + 1 === n ? 'current' : ''}></li>`)}
+        </ol>
+        <p class="wz-no">${t('wizard.step', { n, total: STEPS })}</p>
+        <div class="wz-body" key=${n}>${body}</div>
+        <${Toast} />
+      </main>
+    </div>`;
 }
 
 /** The window's info; the engine may still be starting, so a few tries before giving up. */
@@ -90,11 +95,11 @@ async function start() {
   const info = await readInfo();
   if (!info) {
     // Not the program's window (or the session is gone): the panel signs in or says so.
-    location.replace('/app');
+    location.replace('/admin');
     return;
   }
   if (info.firstRunCompleted) {
-    location.replace('/app');
+    location.replace('/admin');
     return;
   }
   await loadLang(info.language ?? browserLang());

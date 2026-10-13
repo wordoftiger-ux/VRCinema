@@ -1,7 +1,8 @@
 //! The panel window: opened on the engine's one-time login link, hidden instead of closed,
-//! files dropped on it go to the queue, and it follows the server to a new port. The new
-//! interface draws its own title bar (no frame); its window buttons may use Tauri's window
-//! commands from the engine's own address only. The window's place is kept in `config.json`.
+//! files dropped on it go to the queue, and it follows the server to a new port. The interface
+//! (`/admin`) and the first-run wizard (`/wizard`) draw their own title bar (no frame); their
+//! window buttons may use Tauri's window commands from those pages of the engine's own address
+//! only. The window's place is kept in `config.json`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,18 +44,22 @@ const WINDOW_CONTROLS: [&str; 6] = [
     "core:window:allow-close",
 ];
 
-/// Lets the page of the main window at `http://127.0.0.1:<port>` (the engine's own address)
-/// use [`WINDOW_CONTROLS`]. Tauri checks every request's origin against this: no other
-/// address, no other window, no other command. Permissions cannot be taken back, so after a
-/// port change the old port keeps them — the window never shows another server's page
-/// (see [`link_policy`]).
+/// The pages of the engine that draw their own title bar: the interface and the wizard.
+const UI_PAGES: [&str; 2] = ["/admin", "/wizard"];
+
+/// Lets the interface and the wizard of the main window at `http://127.0.0.1:<port>` (the
+/// engine's own address) use [`WINDOW_CONTROLS`]. Tauri checks every request's page address
+/// against this (any query or `#` route, nothing else of the path): no other page, address,
+/// window or command. Permissions cannot be taken back, so after a port change the old port
+/// keeps them — the window never shows another server's page (see [`link_policy`]).
 pub fn grant_window_controls<R: Runtime>(app: &AppHandle<R>, port: u16) -> tauri::Result<()> {
-    let capability = WINDOW_CONTROLS.iter().fold(
-        CapabilityBuilder::new(format!("window-controls-{port}"))
-            .remote(format!("http://127.0.0.1:{port}"))
-            .window(MAIN),
-        |c, permission| c.permission(*permission),
+    let capability = UI_PAGES.iter().fold(
+        CapabilityBuilder::new(format!("window-controls-{port}")).window(MAIN),
+        |c, page| c.remote(format!("http://127.0.0.1:{port}{page}")),
     );
+    let capability = WINDOW_CONTROLS
+        .iter()
+        .fold(capability, |c, permission| c.permission(*permission));
     app.add_capability(capability)
 }
 
@@ -70,9 +75,10 @@ fn allow_window_controls(app: &AppHandle, port: u16) {
     }
 }
 
-/// The new interface (`/app`) draws its own title bar; the older pages need the window's.
+/// The interface and the wizard draw their own title bar, and so does the login hop that
+/// leads to them (no frame flashing in between); any other page needs the window's.
 pub fn frameless_page(url: &Url) -> bool {
-    url.path() == "/app"
+    UI_PAGES.contains(&url.path()) || url.path() == "/desktop-login"
 }
 
 // ---------- The window's place ----------
@@ -101,6 +107,20 @@ const GRAB_W: i64 = 100;
 const GRAB_H: i64 = 24;
 /// Sizes beyond this come from a damaged or hand-edited file.
 const MAX_SIDE: u32 = 32_768;
+
+/// The place of a window with nothing saved: the default size, but never larger than the work
+/// area of the monitor (`scale`: its scale factor), centred in it. Physical pixels.
+pub fn default_place(work: Area, scale: f64) -> Area {
+    let side = |logical: f64, room: u32| ((logical * scale).round() as u32).min(room);
+    let (w, h) = (side(DEFAULT_SIZE.0, work.w), side(DEFAULT_SIZE.1, work.h));
+    let offset = |room: u32, used: u32| i32::try_from((room - used) / 2).unwrap_or(0);
+    Area {
+        x: work.x + offset(work.w, w),
+        y: work.y + offset(work.h, h),
+        w,
+        h,
+    }
+}
 
 /// The saved place to put the window at, if it can still be grabbed: enough of its title bar
 /// on one of the `monitors`. `None`: the default place (a monitor was unplugged, the
@@ -366,11 +386,26 @@ fn create(app: &AppHandle, url: Url) -> tauri::Result<()> {
         .with_engine(|e| e.window_state())
         .flatten();
     if let Some(place) = restore_place(saved, &monitors(&window)) {
-        let _ = window.set_size(PhysicalSize::new(place.w, place.h));
+        // Position first: on a monitor with another scale factor the size is then taken in
+        // that monitor's pixels (the other way round Windows rescales it on the move).
         let _ = window.set_position(PhysicalPosition::new(place.x, place.y));
+        let _ = window.set_size(PhysicalSize::new(place.w, place.h));
         if place.maximized {
             let _ = window.maximize();
         }
+    } else if let Ok(Some(monitor)) = window.current_monitor() {
+        let work = monitor.work_area();
+        let place = default_place(
+            Area {
+                x: work.position.x,
+                y: work.position.y,
+                w: work.size.width,
+                h: work.size.height,
+            },
+            monitor.scale_factor(),
+        );
+        let _ = window.set_position(PhysicalPosition::new(place.x, place.y));
+        let _ = window.set_size(PhysicalSize::new(place.w, place.h));
     }
     let _ = window.show();
     let _ = window.set_focus();
@@ -704,19 +739,70 @@ mod tests {
     }
 
     #[test]
-    fn only_the_new_interface_has_no_frame() {
+    fn the_interface_and_the_wizard_have_no_frame() {
         let url = |s: &str| Url::parse(s).unwrap();
-        assert!(frameless_page(&url("http://127.0.0.1:8181/app")));
+        assert!(frameless_page(&url("http://127.0.0.1:8181/admin")));
         assert!(frameless_page(&url(
-            "http://127.0.0.1:8181/app#/settings/tools"
+            "http://127.0.0.1:8181/admin#/settings/tools"
         )));
-        // The old panel and the wizard bring no title bar of their own yet.
-        assert!(!frameless_page(&url("http://127.0.0.1:8181/admin")));
-        assert!(!frameless_page(&url("http://127.0.0.1:8181/wizard")));
-        assert!(!frameless_page(&url(
+        assert!(frameless_page(&url("http://127.0.0.1:8181/wizard")));
+        // The login hop redirects to `/admin` (or `/wizard`): no frame flashing in between.
+        assert!(frameless_page(&url(
             "http://127.0.0.1:8181/desktop-login?key=x"
         )));
-        assert!(!frameless_page(&url("http://127.0.0.1:8181/application")));
+        // Any other page of the server brings no title bar of its own: the window's frame.
+        assert!(!frameless_page(&url("http://127.0.0.1:8181/")));
+        assert!(!frameless_page(&url("http://127.0.0.1:8181/app")));
+        assert!(!frameless_page(&url("http://127.0.0.1:8181/administrator")));
+        assert!(!frameless_page(&url(
+            "http://127.0.0.1:8181/static/app.html"
+        )));
+    }
+
+    // ---------- The default place ----------
+
+    #[test]
+    fn the_default_place_fits_the_work_area_and_is_centred_in_it() {
+        // Full HD at 100 %, taskbar at the bottom: the default size, centred.
+        let work = Area {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1040,
+        };
+        assert_eq!(
+            default_place(work, 1.0),
+            Area {
+                x: 370,
+                y: 140,
+                w: 1180,
+                h: 760
+            }
+        );
+        // 1366×768 laptop at 125 %: 1475×950 would not fit — the whole work area.
+        let small = Area {
+            x: 0,
+            y: 0,
+            w: 1366,
+            h: 728,
+        };
+        assert_eq!(default_place(small, 1.25), small);
+        // A second monitor on the left, taskbar on its left side, 150 %.
+        let left = Area {
+            x: -2560,
+            y: 0,
+            w: 2512,
+            h: 1440,
+        };
+        assert_eq!(
+            default_place(left, 1.5),
+            Area {
+                x: -2560 + (2512 - 1770) / 2,
+                y: (1440 - 1140) / 2,
+                w: 1770,
+                h: 1140
+            }
+        );
     }
 
     // ---------- Window commands: only for the engine's own address ----------
@@ -732,7 +818,7 @@ mod tests {
         const ENGINE: u16 = 8181;
 
         fn window(app: &tauri::App<MockRuntime>, label: &str) -> WebviewWindow<MockRuntime> {
-            let url = format!("http://127.0.0.1:{ENGINE}/app").parse().unwrap();
+            let url = format!("http://127.0.0.1:{ENGINE}/admin").parse().unwrap();
             WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
                 .build()
                 .unwrap()
@@ -769,23 +855,35 @@ mod tests {
                 .build(tauri::generate_context!(test = true))
                 .unwrap();
             let main = window(&app, MAIN);
-            let own = format!("http://127.0.0.1:{ENGINE}");
+            let own = format!("http://127.0.0.1:{ENGINE}/admin");
             // Nothing is allowed to a web page by default.
             assert!(!allowed(&main, &own, "plugin:window|minimize"));
 
             grant_window_controls(app.handle(), ENGINE).unwrap();
-            for cmd in CONTROLS {
-                assert!(allowed(&main, &own, cmd), "{cmd} from the engine");
+            // The interface and the wizard of the engine (with any route after #).
+            for page in [
+                own.clone(),
+                format!("http://127.0.0.1:{ENGINE}/admin#/settings/tools"),
+                format!("http://127.0.0.1:{ENGINE}/wizard"),
+            ] {
+                for cmd in CONTROLS {
+                    assert!(allowed(&main, &page, cmd), "{cmd} from {page}");
+                }
             }
             // Any other address: another local program, another name for this computer,
-            // https, a web site, a look-alike host.
+            // https, a web site, a look-alike host; and the engine's other pages.
             for origin in [
-                "http://127.0.0.1:8182",
-                "http://localhost:8181",
-                "https://127.0.0.1:8181",
-                "http://127.0.0.2:8181",
-                "https://evil.example",
-                "http://127.0.0.1.evil.example:8181",
+                "http://127.0.0.1:8182/admin",
+                "http://localhost:8181/admin",
+                "https://127.0.0.1:8181/admin",
+                "http://127.0.0.2:8181/admin",
+                "https://evil.example/admin",
+                "http://127.0.0.1.evil.example:8181/admin",
+                "http://127.0.0.1:8181/",
+                "http://127.0.0.1:8181/app",
+                "http://127.0.0.1:8181/administrator",
+                "http://127.0.0.1:8181/static/app.html",
+                "http://127.0.0.1:8181/live/main.m3u8",
             ] {
                 for cmd in CONTROLS {
                     assert!(!allowed(&main, origin, cmd), "{cmd} from {origin}");
@@ -821,13 +919,13 @@ mod tests {
             grant_window_controls(app.handle(), ENGINE).unwrap();
             assert!(!allowed(
                 &main,
-                "http://127.0.0.1:9000",
+                "http://127.0.0.1:9000/admin",
                 "plugin:window|minimize"
             ));
             grant_window_controls(app.handle(), 9000).unwrap();
             assert!(allowed(
                 &main,
-                "http://127.0.0.1:9000",
+                "http://127.0.0.1:9000/admin",
                 "plugin:window|minimize"
             ));
         }

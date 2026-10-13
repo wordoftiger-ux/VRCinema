@@ -82,7 +82,7 @@ async function openApp({ inWindow = true, width = 1100, height = 680, reducedMot
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && errors.push(`${r.status()} ${r.url()}`));
-  await page.goto(`${base}/app`);
+  await page.goto(`${base}/admin`);
   await page.waitForSelector('.player .play');
   await page.waitForFunction(() => document.querySelector('.nowp-title')?.textContent !== '');
   page.__errors = errors;
@@ -218,7 +218,7 @@ try {
   // ---------- Router ----------
   await page.click('.rail-history');
   check((await page.evaluate(() => location.hash)) === '#/history' && (await text(page, '.page h1')) === 'History', 'rail → #/history');
-  await page.goto(`${base}/app#/settings/tools`);
+  await page.goto(`${base}/admin#/settings/tools`);
   await page.waitForSelector('.view');
   check(
     (await page.$eval('.view', (e) => [e.dataset.view, e.dataset.section].join('/'))) === 'settings/tools',
@@ -344,7 +344,9 @@ try {
   await scenario({ remote: true });
   page = await openApp({ inWindow: false, reducedMotion: 'reduce' });
   check((await page.$('.titlebar')) === null, 'in a browser there is no title bar');
-  check((await page.$('.player .pill')) === null, 'without the window info there is no internet pill');
+  // Task 15: the remote panel knows the internet state from the environment.
+  await page.waitForSelector('.player .pill');
+  check((await text(page, '.player .pill')) === 'Online', 'a remote session shows the internet state from the environment', await text(page, '.player .pill'));
   const transition = await page.$eval('.track .knob', (e) => getComputedStyle(e).transitionDuration);
   check(transition === '1e-05s' || transition === '0.00001s' || parseFloat(transition) < 0.001, 'prefers-reduced-motion turns transitions off', transition);
   await page.close();
@@ -352,8 +354,8 @@ try {
   await reset();
   await scenario({ signedOut: true });
   page = await openApp({ inWindow: false });
-  await page.waitForSelector('.signed-out');
-  check((await page.$eval('.signed-out a', (a) => a.getAttribute('href'))) === '/admin', 'without a session the page points to the panel login');
+  await page.waitForSelector('.login-card input[type=password]');
+  check(true, 'without a session the browser shows the sign-in form (checked in remote-phone.mjs)');
   await page.close();
 
   console.log(`\n${passed} checks passed`);

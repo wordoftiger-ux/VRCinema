@@ -73,7 +73,7 @@ async function openApp({ width = 1100, height = 680 } = {}) {
   // The refused links of the checks below are 400s on purpose.
   page.on('console', (m) => m.type() === 'error' && !m.text().includes('status of 400') && errors.push(m.text()));
   page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && errors.push(`${r.status()} ${r.url()}`));
-  await page.goto(`${base}/app`);
+  await page.goto(`${base}/admin`);
   await page.waitForSelector('.player .play');
   await page.waitForSelector('.qi');
   page.__errors = errors;
@@ -116,9 +116,9 @@ try {
   check((await text(page, '.qi[data-id="9"] .qi-sub')) === '1:42:10 · from disk', 'a file from disk says so', await text(page, '.qi[data-id="9"] .qi-sub'));
   check((await text(page, '.qi[data-id="11"] .qi-sub')) === '3:52 · anonymous', 'a requester without a nick is "anonymous"');
   check((await page.$('.approvals')) === null, 'no "Waiting for approval" section without pending videos');
-  check((await page.$eval('.qi[data-id="9"] svg', (e) => e.dataset.badge)) === 'host', 'the owner has the host mark');
-  check((await page.$eval('.qi[data-id="10"] svg', (e) => [e.dataset.badge, e.querySelector('path').getAttribute('fill')].join(' '))) === 'shape-3 hsl(40 70% 62%)', 'a viewer badge: shape 3 tinted by hue 40');
-  check((await page.$('.qi[data-id="11"] svg')) === null, 'no badge for an anonymous requester');
+  check((await page.$eval('.qi[data-id="9"] .qi-text svg', (e) => e.dataset.badge)) === 'host', 'the owner has the host mark');
+  check((await page.$eval('.qi[data-id="10"] .qi-text svg', (e) => [e.dataset.badge, e.querySelector('path').getAttribute('fill')].join(' '))) === 'shape-3 hsl(40 70% 62%)', 'a viewer badge: shape 3 tinted by hue 40');
+  check((await page.$('.qi[data-id="11"] .qi-text svg')) === null, 'no badge for an anonymous requester');
   const shapes = await page.evaluate(async () => {
     const { SHAPES, RequesterBadge } = await import('/static/app/components/badge.js');
     const { html } = await import('/static/app/html.js');
@@ -205,7 +205,7 @@ try {
   await page.click('.qi[data-id="8"]', { button: 'right' });
   await page.waitForSelector('.menu [role=menuitem]');
   const items = await page.$$eval('.menu [role=menuitem]', (els) => els.map((e) => [e.textContent.trim(), e.getAttribute('aria-disabled')]));
-  check(JSON.stringify(items) === JSON.stringify([['Play now', 'false'], ['Move to the top', 'true'], ['Copy link', 'false'], ['Remove from the queue', 'false']]), 'right click opens the menu (the first row cannot go to the top)', items);
+  check(JSON.stringify(items) === JSON.stringify([['Play now', 'false'], ['Move to the top', 'true'], ['Move up', 'true'], ['Move down', 'false'], ['Copy link', 'false'], ['Remove from the queue', 'false']]), 'right click opens the menu (the first row cannot go to the top or up)', items);
   check((await page.$eval('.menu', (e) => e.getAttribute('aria-label'))) === 'Video menu', 'the menu has an accessible name');
   await page.screenshot({ path: join(shots, 'after-channel-menu-en.png') });
   m = await mark();
@@ -216,7 +216,7 @@ try {
   await page.focus('.qi[data-id="10"]');
   await page.keyboard.press('ContextMenu');
   await page.waitForSelector('.menu');
-  check((await page.$$('.menu [role=menuitem]')).length === 4, 'the Menu key opens the menu of the focused row');
+  check((await page.$$('.menu [role=menuitem]')).length === 6, 'the Menu key opens the menu of the focused row');
   await page.keyboard.press('Escape');
   check(await page.evaluate(() => document.activeElement?.dataset.id === '10'), 'focus returns to the row when the menu closes');
   await page.keyboard.press('Shift+F10');
@@ -232,18 +232,34 @@ try {
   // Copy link: a web video has one; a file from disk does not.
   await page.click('.qi[data-id="9"]', { button: 'right' });
   await page.waitForSelector('.menu');
-  check((await page.$$eval('.menu [role=menuitem]', (els) => els[2].getAttribute('aria-disabled'))) === 'true', 'a file from disk has no link to copy');
+  check((await page.$$eval('.menu [role=menuitem]', (els) => els[4].getAttribute('aria-disabled'))) === 'true', 'a file from disk has no link to copy');
   await page.keyboard.press('Escape');
   await page.click('.qi[data-id="8"]', { button: 'right' });
-  await page.click('.menu [role=menuitem]:nth-child(3)');
+  await page.click('.menu [role=menuitem]:nth-child(5)');
   const clip = await page.evaluate(() => navigator.clipboard.readText());
   check(clip === 'https://www.youtube.com/watch?v=8', '"Copy link" puts the video address on the clipboard', clip);
+  // Task 15: one place down / up from the menu (touch screens cannot drag).
+  m = await mark();
+  await page.click('.qi[data-id="8"]', { button: 'right' });
+  await page.click('.menu [role=menuitem]:nth-child(4)');
+  a = await lastAction(m, 'move down');
+  check(a.path === '/api/admin/items/8' && JSON.stringify(a.body) === '{"position":2}', '"Move down" → PATCH {position: index + 1}', a);
+  await waitFor(async () => JSON.stringify(await ids(page)) === '[10,9,8,11]', 'moved down');
+  m = await mark();
+  await page.click('.qi[data-id="9"]', { button: 'right' });
+  await page.click('.menu [role=menuitem]:nth-child(3)');
+  a = await lastAction(m, 'move up');
+  check(a.path === '/api/admin/items/9' && JSON.stringify(a.body) === '{"position":0}', '"Move up" → PATCH {position: index − 1}', a);
+  await waitFor(async () => JSON.stringify(await ids(page)) === '[9,10,8,11]', 'moved up');
+  await page.click('.qi[data-id="11"]', { button: 'right' });
+  check((await page.$$eval('.menu [role=menuitem]', (els) => els[3].getAttribute('aria-disabled'))) === 'true', 'the last row cannot go down');
+  await page.keyboard.press('Escape');
   m = await mark();
   await page.click('.qi[data-id="11"]', { button: 'right' });
   await page.click('.menu .danger');
   a = await lastAction(m, 'delete');
   check(a.method === 'DELETE' && a.path === '/api/admin/items/11', '"Remove from the queue" → DELETE /items/11', a);
-  await waitFor(async () => JSON.stringify(await ids(page)) === '[10,8,9]', 'removed');
+  await waitFor(async () => JSON.stringify(await ids(page)) === '[9,10,8]', 'removed');
   check(true, 'the row disappears');
 
   // ---------- Approvals ----------
@@ -486,7 +502,7 @@ try {
   await page.close();
 
   page = await ctx.newPage();
-  await page.goto(`${base}/app`);
+  await page.goto(`${base}/admin`);
   await page.waitForSelector('.player .play');
   const timed = await page.evaluate(async () => {
     const { api } = await import('/static/app/api.js');

@@ -260,8 +260,7 @@ export function PlayerBar({ onShortcuts }) {
       disabled: !videoLink,
       action: () => copyText(videoLink).catch((e) => showToast(e.message)),
     },
-    'separator',
-    { key: 'player.shortcuts', icon: 'keyboard', action: onShortcuts },
+    ...(onShortcuts ? ['separator', { key: 'player.shortcuts', icon: 'keyboard', action: onShortcuts }] : []),
   ];
 
   const ctl = (icon, labelKey, action, enabled, cls = 'ctl-button') => html`

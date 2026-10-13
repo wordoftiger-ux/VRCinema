@@ -44,6 +44,28 @@ export function browserLang() {
   return 'en';
 }
 
+// The language picked in this browser for the panel (the sign-in screen, Settings of a remote
+// panel). It never changes the program's own language.
+const CHOICE_KEY = 'vrcinema.lang';
+
+/** The panel language picked in this browser; null when none was picked (or no storage). */
+export function chosenLang() {
+  try {
+    return supported(localStorage.getItem(CHOICE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+/** Remembers `code` as this browser's panel language. */
+export function rememberLang(code) {
+  try {
+    localStorage.setItem(CHOICE_KEY, code);
+  } catch {
+    // No storage (private mode): the choice lasts until the page is closed.
+  }
+}
+
 /** Loads the dictionary of `code` (and English for the fallback) and switches to it. */
 export async function loadLang(code) {
   const wanted = supported(code) ?? 'en';

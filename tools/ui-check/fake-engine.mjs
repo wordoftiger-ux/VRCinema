@@ -1,5 +1,5 @@
 // A stand-in for the engine for browser checks of the interface (no ffmpeg, no channel): it
-// serves public/ like the engine (/static/…, /app) and answers the panel's API from a scenario
+// serves public/ like the engine (/static/…, /admin) and answers the panel's API from a scenario
 // in memory, recording every API request. Never port 8080.
 //
 //   [FAKE_HLS_DIR=<folder>] node tools/ui-check/fake-engine.mjs [port]      (default 8193)
@@ -27,7 +27,14 @@
 // and its segments) comes from `options.hlsDir` (a folder with main.m3u8 and .ts files; the
 // playlist is served without EXT-X-ENDLIST so the player treats it as live); the scenario
 // `hls: false` makes it 404.
-// Settings view: GET /api/admin/environment ({window, encoder, tickerSlow}; scenario `headless`: no window — the window routes answer 403 like for a remote session, window false; `tickerSlow`, `encoder`), GET/PUT /api/desktop/config (validated like the engine; a new port or lanAccess answers restarted: true), tools (GET /api/desktop/tools, POST install|update|repair then GET progress; scenario `toolsMissing`), POST encoder/detect, pick-cookies (scenario `pickCookies`), GET log, GET update (scenario `updateOffer` {version, notes}, `toolsFail`, `infoFail`: the info route answers 500), POST update/apply, POST restart; GET/PUT /api/admin/channels/main/settings (validated like the engine: ticker messages <= 10 x <= 200 chars, intervals 60/120/300/600), GET /api/admin/nicks and POST nicks/{skeleton}/release, devices/block, devices/unblock.
+// Sign-in (task 15): POST /api/admin/login with the password `tajne-haslo` signs in (clears
+// `signedOut`; a wrong one 401 `wrong_password`, scenario `remotePanelOff` 403
+// `remote_panel_off`, messages in the request's language for en/pl); POST /api/admin/logout signs
+// out. PUT /api/admin/tunnel {enabled} switches the tunnel (also remote; 404 `no_tunnel` headless).
+// Scenario `sessionViaTunnel` (environment flag), `channelDown` (channelRunning false with an
+// error), `restarting`.
+// Settings view: GET /api/admin/environment ({window, encoder, tickerSlow, language,
+// sessionViaTunnel, publicUrl, tunnelEnabled, tunnel, channelRunning, channelError}; scenario `headless`: no window — the window routes answer 403 like for a remote session, window false; `tickerSlow`, `encoder`), GET/PUT /api/desktop/config (validated like the engine; a new port or lanAccess answers restarted: true), tools (GET /api/desktop/tools, POST install|update|repair then GET progress; scenario `toolsMissing`), POST encoder/detect, pick-cookies (scenario `pickCookies`), GET log, GET update (scenario `updateOffer` {version, notes}, `toolsFail`, `infoFail`: the info route answers 500), POST update/apply, POST restart; GET/PUT /api/admin/channels/main/settings (validated like the engine: ticker messages <= 10 x <= 200 chars, intervals 60/120/300/600), GET /api/admin/nicks and POST nicks/{skeleton}/release, devices/block, devices/unblock.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -177,6 +184,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       toolsMissing: [],
       updateOffer: null,
       pickCookies: 'C:/cookies.txt',
+      remotePanelOff: false,
+      sessionViaTunnel: false,
+      channelDown: false,
     };
     s.queue = initialQueue();
     s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
@@ -375,9 +385,10 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       toolsOk: s.toolsMissing.length === 0,
       missingTools: s.toolsMissing,
       toolsRunning: Boolean(s.toolsJob?.running),
-      channelRunning: true,
-      channelError: null,
+      channelRunning: !s.channelDown,
+      channelError: s.channelDown ? 'ffmpeg exited (code 1)' : null,
       restarting: false,
+      sessionViaTunnel: false,
       encoder: s.encoder,
       update: s.updateOffer,
       tickerSlow: s.tickerSlow,
@@ -516,7 +527,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const path = url.pathname;
-    if (path === '/app') return serveFile(res, 'app.html');
+    if (path === '/admin') return serveFile(res, 'app.html');
     if (path === '/wizard') return serveFile(res, 'wizard.html');
     if (path === '/favicon.ico') {
       res.writeHead(204);
@@ -542,6 +553,17 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     const payload = req.method === 'GET' ? null : await body(req).catch(() => null);
     requests.push({ method: req.method, path, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
     const noWindow = s.remote || s.headless;
+    if (path === '/api/admin/login' && req.method === 'POST') {
+      const pl = req.headers['x-vrcinema-lang'] === 'pl';
+      if (s.remotePanelOff) return coded(res, 403, 'remote_panel_off', pl ? 'Panel zdalny jest wyłączony.' : 'The remote panel is switched off.');
+      if (payload?.password !== 'tajne-haslo') return coded(res, 401, 'wrong_password', pl ? 'Złe hasło.' : 'Wrong password.');
+      s.signedOut = false;
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/api/admin/logout' && req.method === 'POST') {
+      s.signedOut = true;
+      return json(res, 200, { ok: true });
+    }
     if (path === '/api/desktop/info' || path === '/api/desktop/config') {
       if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
       if (noWindow) return coded(res, 403, 'window_only', 'Window only');
@@ -551,7 +573,27 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       return json(res, 200, info());
     }
     if (s.signedOut) return coded(res, 401, 'unauthorized', 'Sign in');
-    if (path === '/api/admin/environment') return json(res, 200, { window: !s.headless, encoder: s.encoder, tickerSlow: s.tickerSlow });
+    if (path === '/api/admin/environment') {
+      const app = !s.headless;
+      return json(res, 200, {
+        window: app,
+        encoder: s.encoder,
+        tickerSlow: s.tickerSlow,
+        language: s.language,
+        sessionViaTunnel: app && s.sessionViaTunnel && s.tunnel !== 'off',
+        publicUrl: '',
+        tunnelEnabled: app ? s.tunnel !== 'off' : null,
+        tunnel: app ? tunnelView() : null,
+        channelRunning: app ? !s.channelDown : null,
+        channelError: app && s.channelDown ? 'ffmpeg exited (code 1)' : null,
+      });
+    }
+    if (path === '/api/admin/tunnel' && req.method === 'PUT') {
+      if (typeof payload?.enabled !== 'boolean') return coded(res, 400, 'field_not_boolean', 'The field enabled must be true or false.');
+      if (s.headless) return coded(res, 404, 'no_tunnel', 'This server has no built-in tunnel.');
+      s.tunnel = payload.enabled ? (s.tunnelOnEnable ?? 'online') : 'off';
+      return json(res, 200, { tunnelEnabled: s.tunnel !== 'off', tunnel: tunnelView() });
+    }
     if (path.startsWith('/api/desktop/')) {
       if (noWindow) return coded(res, 403, 'window_only', 'Window only');
       if (await desktopRoute(res, req, path, payload)) return undefined;
@@ -688,5 +730,5 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv[1])) {
   const port = Number(process.argv[2] ?? 8193);
   const { port: bound } = await startFakeEngine(port, { hlsDir: process.env.FAKE_HLS_DIR ?? null });
-  console.log(`fake engine on http://127.0.0.1:${bound}/app`);
+  console.log(`fake engine on http://127.0.0.1:${bound}/admin`);
 }

@@ -3,11 +3,13 @@
 
 import { render } from '/static/vendor/preact.mjs';
 import { html } from './html.js';
-import { browserLang, loadLang, t } from './i18n.js';
+import { browserLang, chosenLang, loadLang, t } from './i18n.js';
 import { Icon } from './icons.js';
 import {
   abilities,
+  environment,
   firstInfo,
+  netStatus,
   restart,
   seekBy,
   session,
@@ -17,7 +19,7 @@ import {
   togglePause,
 } from './store.js';
 import { Titlebar, inWindow } from './components/titlebar.js';
-import { Rail, route } from './components/rail.js';
+import { Rail, narrow, route } from './components/rail.js';
 import { PlayerBar } from './components/playerbar.js';
 import { MenuLayer, menu } from './components/menu.js';
 import { DialogLayer, dialog, openDialog } from './components/dialog.js';
@@ -28,6 +30,8 @@ import { HistoryView } from './views/history.js';
 import { ShareView } from './views/share.js';
 import { SettingsView } from './views/settings.js';
 import { toggleStats } from './components/stats.js';
+import { StatusStrip } from './components/status.js';
+import { LoginView } from './views/login.js';
 
 // ---------- Keyboard shortcuts ----------
 
@@ -116,7 +120,7 @@ function onPaste(e) {
 
 function View() {
   const { view, section } = route.value;
-  if (view === 'channel') return html`<${ChannelView} />`;
+  if (view === 'channel') return html`<${ChannelView} onShortcuts=${openShortcuts} />`;
   if (view === 'history') return html`<${HistoryView} />`;
   if (view === 'share') return html`<${ShareView} />`;
   if (view === 'settings') return html`<${SettingsView} />`;
@@ -132,14 +136,23 @@ function View() {
     </main>`;
 }
 
-function SignedOut() {
+const NET_KEYS = {
+  online: 'net.online',
+  connecting: 'net.connecting',
+  offline: 'net.offline',
+  manual: 'net.manual',
+  local: 'net.local',
+};
+
+/** The top of the screen on a phone (no title bar there): the name and the internet status. */
+function PhoneTop() {
+  const net = netStatus.value;
   return html`
-    <main class="view signed-out">
-      <div class="card2">
-        <p>${t('ui.signed_out')}</p>
-        <a class="btn pri" href="/admin">${t('ui.open_panel')}</a>
-      </div>
-    </main>`;
+    <header class="ptop">
+      <span class="tb-logo" aria-hidden="true"><${Icon} name="play" size=${11} /></span>
+      <b class="ptop-title">VRCinema</b>
+      ${net ? html`<span class=${`pill net-${net}`} role="status"><span class="dot" aria-hidden="true"></span>${t(NET_KEYS[net])}</span>` : null}
+    </header>`;
 }
 
 function Toast() {
@@ -155,25 +168,44 @@ function Toast() {
 
 function App() {
   const signedOut = session.value === 'signed_out';
+  const phone = narrow.value;
+  // Signed out: the sign-in screen alone (nothing of the panel can be read yet).
+  if (signedOut) {
+    return html`
+      <div class=${`app signed-out ${inWindow() ? 'in-window' : 'in-browser'}`}>
+        ${inWindow() ? html`<${Titlebar} />` : null}
+        <${LoginView} />
+      </div>`;
+  }
+  // On a phone the rail is a tab bar at the bottom and the player bar sits under the preview
+  // (in the Channel view).
   return html`
-    <div class=${`app ${inWindow() ? 'in-window' : 'in-browser'}`}>
-      ${inWindow() ? html`<${Titlebar} />` : null}
+    <div class=${`app ${inWindow() ? 'in-window' : 'in-browser'}${phone ? ' phone' : ''}`}>
+      ${inWindow() ? html`<${Titlebar} />` : phone ? html`<${PhoneTop} />` : null}
+      <${StatusStrip} />
       <div class="body">
         <${Rail} />
-        ${signedOut ? html`<${SignedOut} />` : html`<${View} />`}
+        <${View} />
       </div>
       <${Toast} />
       <${DropZone} />
-      <${PlayerBar} onShortcuts=${openShortcuts} />
+      ${phone ? null : html`<${PlayerBar} onShortcuts=${openShortcuts} />`}
       <${MenuLayer} />
       <${DialogLayer} />
     </div>`;
 }
 
 async function start() {
-  // The program's language in its window; elsewhere (remote panel) the browser's.
+  // The program's language in its window. Elsewhere (remote panel, a server without a window,
+  // the sign-in screen): the language picked in this browser, else the program's, else the
+  // browser's.
   const info = await firstInfo();
-  await loadLang(info?.language ?? browserLang());
+  // The window's first run goes through the wizard first.
+  if (info && info.firstRunCompleted === false) {
+    location.replace('/wizard');
+    return;
+  }
+  await loadLang(info?.language ?? chosenLang() ?? environment.value?.language ?? browserLang());
   render(html`<${App} />`, document.getElementById('root'));
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('paste', onPaste);

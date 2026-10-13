@@ -162,7 +162,6 @@ function cookieShape(setCookies) {
 // Zamierzony status każdego kroku (sprawdzany na obu serwerach niezależnie od porównania serwerów).
 const EXPECTED_STATUS = {
   "GET /": 200,
-  "GET /admin": 200,
   "GET /static/common.js": 200,
   "GET /static/style.css": 200,
   "GET /static/brak.js (404)": 404,
@@ -475,7 +474,15 @@ async function scenario(srv) {
 
   // Strony i statyczne pliki
   await c.get('GET /', '/');
-  await c.get('GET /admin', '/admin');
+  // Etap 4, zadanie 15: /admin to nowy interfejs (public/app.html); stara strona admin.html, którą
+  // serwował serwer TS, została usunięta. Sprawdzamy tylko serwer Rust, poza porównaniem.
+  if (c.srv.name === 'rust') {
+    const res = await fetch(`${c.srv.base}/admin`);
+    const page = await res.text();
+    if (res.status !== 200 || !page.includes('/static/app/main.js')) {
+      throw new Error(`rust: GET /admin -> ${res.status}, oczekiwano nowego interfejsu`);
+    }
+  }
   await c.get('GET /static/common.js', '/static/common.js');
   await c.get('GET /static/style.css', '/static/style.css');
   await c.get('GET /static/brak.js (404)', '/static/brak.js');

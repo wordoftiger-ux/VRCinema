@@ -67,7 +67,7 @@ mod tests {
         let (html, mime) = asset_from("index.html", None).unwrap();
         assert_eq!(&*html, repo_public("index.html").as_slice());
         assert_eq!(mime, "text/html; charset=utf-8");
-        assert!(asset_from("admin.html", None).is_some());
+        assert!(asset_from("app.html", None).is_some());
         assert_eq!(
             asset_from("common.js", None).unwrap().1,
             "application/javascript; charset=utf-8"
@@ -246,6 +246,104 @@ mod tests {
             let refs = external_references(text);
             assert!(refs.is_empty(), "{path} refers to {refs:?}");
         }
+    }
+
+    /// The `/static/<path>` addresses written in `text`; one built from a template (`${…}`) or
+    /// naming a placeholder (`<lang>`, in a comment) is left out.
+    fn static_references(text: &str) -> Vec<String> {
+        text.match_indices("/static/")
+            .filter_map(|(at, prefix)| {
+                let rest = &text[at + prefix.len()..];
+                let end = rest
+                    .find(|c: char| {
+                        matches!(c, '"' | '\'' | '`' | ')' | '$' | '?' | '#' | '<' | '…')
+                            || c.is_whitespace()
+                    })
+                    .unwrap_or(rest.len());
+                let templated = rest[end..].starts_with(['$', '<', '…']);
+                (end > 0 && !templated).then(|| rest[..end].to_string())
+            })
+            .collect()
+    }
+
+    /// Stage 4, task 15: the old panel (`admin.html`, `desktop.js`) is gone. Nothing in the
+    /// pages, the interface or the browser checks names it, every `/static/…` address they use
+    /// exists, and what a page imports from a shared module of `public/` is still exported there.
+    #[test]
+    fn nothing_refers_to_removed_files() {
+        let public = public_dir();
+        for gone in ["admin.html", "desktop.js"] {
+            assert!(!public.join(gone).exists(), "public/{gone} is still there");
+            assert!(asset_from(gone, None).is_none(), "{gone} is still embedded");
+        }
+        let mut files = text_files(&public.join("app"), &["js", "css", "html"], true);
+        files.extend(text_files(&public, &["html", "js", "css"], false));
+        let checks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/ui-check");
+        files.extend(text_files(&checks, &["mjs", "js"], false));
+        assert!(files.iter().any(|(p, _)| p.ends_with("fake-engine.mjs")));
+        for (path, text) in &files {
+            for gone in ["admin.html", "desktop.js", "/app#", "'/app'", "/app`"] {
+                assert!(!text.contains(gone), "{path} names {gone}");
+            }
+            if path.contains("ui-check") {
+                continue;
+            }
+            for reference in static_references(text) {
+                assert!(
+                    asset_from(&reference, None).is_some(),
+                    "{path}: /static/{reference} does not exist"
+                );
+            }
+        }
+        // `import { a, b } from '/static/common.js'` in a page: every name is exported.
+        for (path, text) in &files {
+            for (at, _) in text.match_indices("import {") {
+                let rest = &text[at + "import {".len()..];
+                let Some((names, after)) = rest.split_once('}') else {
+                    continue;
+                };
+                let Some(module) = after
+                    .trim_start()
+                    .strip_prefix("from '/static/")
+                    .and_then(|m| m.split_once('\''))
+                    .map(|(m, _)| m)
+                else {
+                    continue;
+                };
+                if module.starts_with("vendor/") {
+                    continue;
+                }
+                let source =
+                    String::from_utf8(asset_from(module, None).unwrap().0.into_owned()).unwrap();
+                for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    let exported = [
+                        format!("export function {name}("),
+                        format!("export async function {name}("),
+                        format!("export const {name} "),
+                    ]
+                    .iter()
+                    .any(|e| source.contains(e.as_str()));
+                    assert!(
+                        exported,
+                        "{path} imports {name} that {module} no longer exports"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_static_reference_scan_finds_addresses() {
+        assert_eq!(
+            static_references(
+                "<link href=\"/static/app/theme.css\"> import x from '/static/vendor/preact.mjs';"
+            ),
+            ["app/theme.css", "vendor/preact.mjs"]
+        );
+        assert_eq!(
+            static_references("fetch(`/static/locales/${code}.json`)"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

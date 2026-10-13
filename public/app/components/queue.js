@@ -1,12 +1,14 @@
 // The queue panel of the Channel view: header with the count and total length, the link
 // field, the videos waiting for approval, and the "Up next" list. The list is reordered by
-// dragging a row (pointer events: the window's native file-drop handler leaves no HTML5 drag
-// and drop to the page) or with Alt+↑/↓; the context menu (right click, Menu key, Shift+F10)
-// plays a video now, moves it to the top, copies its link or removes it.
+// dragging a row with the mouse (pointer events: the window's native file-drop handler leaves
+// no HTML5 drag and drop to the page) or with Alt+↑/↓; the context menu (right click, Menu
+// key, Shift+F10, a long press on a touch screen, or the ⋮ button on a phone) plays a video
+// now, moves it up, down or to the top, copies its link or removes it.
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
+import { Icon } from '../icons.js';
 import { t, tn, videoTitle } from '../i18n.js';
 import { ItemText, Thumb, isWeb } from './item.js';
 import { contextMenuHandlers, openMenu } from './menu.js';
@@ -20,6 +22,8 @@ import { errorText } from '../api.js';
 const DRAG_THRESHOLD_PX = 5;
 /** Near the top or bottom edge of the list a drag scrolls it. */
 const EDGE_PX = 32;
+/** A touch held this long on a row opens its menu. */
+const LONG_PRESS_MS = 500;
 
 /** Said to screen readers after a move made with the keyboard. */
 const announcement = signal('');
@@ -41,10 +45,12 @@ function summary(items) {
 
 // ---------- The list ----------
 
-function menuFor(item, index) {
+function menuFor(item, index, count) {
   return [
     { key: 'queue.play_now', icon: 'play', action: () => playNow(item.id) },
     { key: 'queue.to_top', icon: 'top', disabled: index === 0, action: () => moveItem(item.id, 0) },
+    { key: 'queue.move_up', icon: 'up', disabled: index === 0, action: () => moveItem(item.id, index - 1) },
+    { key: 'queue.move_down', icon: 'down', disabled: index >= count - 1, action: () => moveItem(item.id, index + 1) },
     {
       key: 'queue.copy_link',
       icon: 'copy',
@@ -58,7 +64,8 @@ function menuFor(item, index) {
 
 function QueueList({ items }) {
   const list = useRef(null);
-  const press = useRef(null); // a pressed row: {id, x, y, active}
+  const press = useRef(null); // a row pressed with the mouse: {id, x, y, active}
+  const touch = useRef(null); // a row held on a touch screen: {x, y, timer}
   const refocus = useRef(null); // the row to give focus back to after a keyboard move
   const [drag, setDrag] = useState(null); // {id, to} while a row is being dragged
 
@@ -93,12 +100,31 @@ function QueueList({ items }) {
     return to;
   };
 
-  const onPointerDown = (e, item) => {
+  const endTouch = () => {
+    clearTimeout(touch.current?.timer);
+    touch.current = null;
+  };
+  useEffect(() => endTouch, []);
+
+  const onPointerDown = (e, item, index) => {
     if (e.button !== 0 || e.target.closest('button, a, input')) return;
+    if (e.pointerType === 'touch') {
+      // A touch scrolls the list; held still it opens the row's menu (dragging is for the mouse).
+      endTouch();
+      const row = e.currentTarget;
+      const timer = setTimeout(() => {
+        touch.current = null;
+        openMenu(row, 'queue.menu', menuFor(item, index, items.length));
+      }, LONG_PRESS_MS);
+      touch.current = { x: e.clientX, y: e.clientY, timer };
+      return;
+    }
     press.current = { id: item.id, x: e.clientX, y: e.clientY, active: false };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e) => {
+    const held = touch.current;
+    if (held && Math.hypot(e.clientX - held.x, e.clientY - held.y) >= DRAG_THRESHOLD_PX) endTouch();
     const p = press.current;
     if (!p) return;
     if (!p.active) {
@@ -112,6 +138,7 @@ function QueueList({ items }) {
     setDrag({ id: p.id, to: targetFor(p.id, e.clientY) });
   };
   const finish = (e, commit) => {
+    endTouch();
     const p = press.current;
     press.current = null;
     if (!p) return;
@@ -125,7 +152,7 @@ function QueueList({ items }) {
   const onKeyDown = (e, item, index) => {
     if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
       e.preventDefault();
-      openMenu(e.currentTarget, 'queue.menu', menuFor(item, index));
+      openMenu(e.currentTarget, 'queue.menu', menuFor(item, index, items.length));
     } else if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
       const to = index + (e.key === 'ArrowUp' ? -1 : 1);
       e.preventDefault();
@@ -153,12 +180,16 @@ function QueueList({ items }) {
         (item, index) => html`
           <li key=${item.id} data-id=${item.id} tabindex="0" aria-describedby="queue-hint"
             class=${['qi', 'qi-queued', drag?.id === item.id ? 'dragging' : '', marks.get(item.id) ?? ''].join(' ').trim()}
-            onPointerDown=${(e) => onPointerDown(e, item)} onPointerMove=${onPointerMove}
+            onPointerDown=${(e) => onPointerDown(e, item, index)} onPointerMove=${onPointerMove}
             onPointerUp=${(e) => finish(e, true)} onPointerCancel=${(e) => finish(e, false)}
             onKeyDown=${(e) => onKeyDown(e, item, index)}
-            ...${contextMenuHandlers('queue.menu', () => menuFor(item, index))}>
+            ...${contextMenuHandlers('queue.menu', () => menuFor(item, index, items.length))}>
             <${Thumb} id=${item.id} />
             <${ItemText} item=${item} />
+            <button type="button" class="icon-button qi-more" aria-label=${t('queue.more', { title: videoTitle(item.title) })}
+              title=${t('queue.more_short')} aria-haspopup="menu"
+              onClick=${(e) => openMenu(e.currentTarget, 'queue.menu', menuFor(item, index, items.length))}>
+              <${Icon} name="more" size=${20} /></button>
           </li>`,
       )}
     </ul>`;

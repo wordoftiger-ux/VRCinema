@@ -1,10 +1,11 @@
-// Settings → General: the program's language, starting with Windows, access from the home
-// network and the port. A new port or network access restarts the server.
+// Settings → General: the program's language (outside the window also the panel's language in
+// this browser), starting with Windows, access from the home network and the port. A new port
+// or network access restarts the server.
 
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { lang, t } from '../../i18n.js';
-import { setLanguage } from '../../store.js';
+import { choosePanelLanguage, setLanguage } from '../../store.js';
 import { LanguageOptions, Note, Row, Switch, WindowNote, saveWith, useAccess, useConfig, useNote } from './common.js';
 
 export function General() {
@@ -38,6 +39,14 @@ export function General() {
               <${LanguageOptions} />
             </select>
           <//>`}
+      ${mode === 'remote' || mode === 'headless'
+        ? html`<${Row} title=${t('settings.general.panel_language')} hint=${t('settings.general.panel_language_hint')}>
+            <select class="sel" aria-label=${t('settings.general.panel_language')} value=${lang.value} data-panel-language
+              onChange=${(e) => choosePanelLanguage(e.target.value)}>
+              <${LanguageOptions} />
+            </select>
+          <//>`
+        : null}
       <${Row} title=${t('settings.general.autostart')} hint=${t('settings.general.autostart_hint')}>
         <${Switch} label=${t('settings.general.autostart')} checked=${Boolean(cfg?.autostart)} disabled=${!cfg}
           onChange=${(on) => saveWith(say, { autostart: on }, on ? t('settings.general.autostart_on') : t('settings.general.autostart_off'))} />

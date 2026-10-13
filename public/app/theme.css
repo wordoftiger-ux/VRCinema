@@ -345,19 +345,147 @@ kbd {
   padding: 16px;
 }
 
-.signed-out {
+/* ---------- Sign-in screen ---------- */
+
+.login {
   align-items: center;
   justify-content: center;
+  padding: 24px 16px;
 }
 
-.signed-out .card2 {
-  max-width: 420px;
-  text-align: center;
+.login-card {
+  width: min(400px, 100%);
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
 }
 
-.signed-out p {
-  margin: 0 0 12px;
+.login-card h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-strong);
+  outline: none;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.login-hint {
+  margin: 0;
   color: var(--text-mute);
+}
+
+.login-field,
+.login-lang {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--text-dim);
+}
+
+.login-field .txt {
+  width: 100%;
+  min-height: 44px;
+}
+
+.login-error {
+  margin: 0;
+  color: var(--red-text);
+}
+
+.login-submit {
+  justify-content: center;
+  min-height: 44px;
+}
+
+.login-lang {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+/* ---------- Status strip (what needs attention) ---------- */
+
+.status-strip {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+}
+
+.status-note {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 1px 6px 1px 14px;
+  font-size: 12.5px;
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.status-note + .status-note {
+  border-top: 1px solid var(--line);
+}
+
+.status-err {
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+
+.status-info {
+  background: var(--selected);
+  color: var(--text-soft);
+}
+
+.status-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.status-link {
+  flex: none;
+  color: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-close {
+  flex: none;
+}
+
+/* ---------- Phone: top bar (no title bar in a browser) ---------- */
+
+.ptop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 8px;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--line);
+}
+
+.ptop-title {
+  flex: 1;
+  font-size: 14px;
+}
+
+.ptop .pill {
+  font-size: 11.5px;
 }
 
 /* ---------- Player bar ---------- */
@@ -1116,6 +1244,14 @@ kbd {
 .qi-queued {
   cursor: grab;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* The row's menu as a button: on a phone only (elsewhere right click and the Menu key). */
+.qi-more {
+  display: none;
+  flex: none;
 }
 
 .qi:hover {
@@ -1480,23 +1616,6 @@ kbd {
 @media (max-width: 900px) {
   .share-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 700px) {
-  .channel {
-    flex-direction: column;
-    overflow: auto;
-  }
-
-  .q {
-    width: auto;
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
-
-  .qscroll {
-    overflow: visible;
   }
 }
 
@@ -2097,6 +2216,252 @@ kbd {
 
   .row2 {
     flex-wrap: wrap;
+  }
+}
+
+/* ---------- Phone (below 700 px, spec section 10) ----------
+   The rail becomes tabs at the bottom, the Channel view one column (preview, the player bar
+   under it, the queue), every control at least 44 px, nothing wider than the screen. */
+
+@media (max-width: 699.98px) {
+  :root {
+    --player-h: 64px; /* the tab bar: the toast stays above it */
+  }
+
+  .body {
+    flex-direction: column;
+  }
+
+  .view {
+    order: 1;
+    flex: 1;
+    min-height: 0;
+    overflow-x: hidden;
+  }
+
+  .rail {
+    order: 2;
+    width: auto;
+    flex-direction: row;
+    justify-content: space-around;
+    align-items: stretch;
+    gap: 0;
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .rail-item {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    min-height: 54px;
+    justify-content: center;
+  }
+
+  .rail-settings {
+    margin: 0;
+  }
+
+  .badge {
+    right: calc(50% - 22px);
+  }
+
+  /* Channel: one scrolling column. */
+  .channel {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .stage {
+    flex: none;
+    padding: 0;
+  }
+
+  .video {
+    flex: none;
+    aspect-ratio: 16 / 9;
+    border-radius: 0;
+  }
+
+  .stage-caption {
+    margin: 6px 16px 0;
+  }
+
+  .q {
+    width: auto;
+    flex: none;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .qscroll {
+    overflow: visible;
+  }
+
+  .qi {
+    padding: 6px 4px 6px 16px;
+  }
+
+  .qi-more {
+    display: inline-flex;
+  }
+
+  .act-button,
+  .icon-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .addf {
+    margin: 0 16px 10px;
+  }
+
+  .addf-input {
+    min-height: 44px;
+    font-size: 16px; /* no zoom on focus in mobile browsers */
+  }
+
+  /* The player bar under the preview: title, timeline, big buttons. */
+  .player {
+    height: auto;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 10px 16px 12px;
+    border-top: 0;
+    border-bottom: 1px solid var(--line-bar);
+  }
+
+  .nowp {
+    flex: none;
+    min-width: 0;
+  }
+
+  .nowp .thumb {
+    display: none;
+  }
+
+  .mid {
+    flex: none;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+    margin: 0;
+    display: flex;
+    flex-direction: column-reverse;
+  }
+
+  .ctl {
+    gap: 10px;
+    margin: 4px 0 0;
+  }
+
+  .ctl-button,
+  .ctl .sm {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .ctl .sm {
+    padding: 0 10px;
+    font-size: 13px;
+  }
+
+  .ctl .play {
+    width: 56px;
+    height: 56px;
+  }
+
+  .track-hit {
+    padding: 0;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+
+  .track-hit .track {
+    flex: 1;
+  }
+
+  .track .knob {
+    opacity: 1;
+  }
+
+  .right {
+    min-width: 0;
+    justify-content: space-between;
+  }
+
+  .right .pill,
+  .vol input[type="range"] {
+    display: none;
+  }
+
+  .copy-link {
+    min-height: 44px;
+    padding: 0 14px;
+  }
+
+  /* Everything else one can press. */
+  .btn,
+  .sel,
+  .txt,
+  .num,
+  .seg button,
+  .snav a,
+  .status-link {
+    min-height: 44px;
+  }
+
+  .status-link {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .seg button {
+    min-width: 44px;
+  }
+
+  .chip button {
+    width: 44px;
+    height: 44px;
+    margin: -10px -4px -10px 0;
+  }
+
+  label.radio {
+    min-height: 44px;
+  }
+
+  .sw {
+    width: 58px;
+    height: 44px;
+    border: 7px solid transparent;
+    border-radius: 22px;
+    background-clip: padding-box;
+  }
+
+  .sw::after {
+    top: 4px;
+    left: 4px;
+    width: 22px;
+    height: 22px;
+  }
+
+  .sw.on::after {
+    left: 18px;
+  }
+
+  .menu-item {
+    min-height: 44px;
+  }
+
+  .page {
+    padding: 16px;
+  }
+
+  .toast {
+    bottom: calc(var(--player-h) + 12px + env(safe-area-inset-bottom));
   }
 }
 

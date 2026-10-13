@@ -1,12 +1,16 @@
 /* The first-run wizard: one centered column on the interface's theme. */
 
-html,
-body {
-  overflow: auto;
+/* The title bar stays on top (the window has no frame); the steps scroll under it. */
+#wizard {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
-#wizard {
-  min-height: 100%;
+.wz-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   display: flex;
   justify-content: center;
   padding: 40px 20px;

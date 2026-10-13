@@ -22,6 +22,10 @@ const PATHS = {
   top: 'M5 4h14v2H5zM12 8l6.5 6.5-1.4 1.4L13 11.8V20h-2v-8.2l-4.1 4.1-1.4-1.4z',
   check: 'M9.5 16.2L5.3 12l-1.4 1.4 5.6 5.6L20.3 7.4 18.9 6z',
   plus: 'M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z',
+  up: 'M12 5l7 7-1.4 1.4L13 8.8V19h-2V8.8l-4.6 4.6L5 12z',
+  down: 'M12 19l-7-7 1.4-1.4 4.6 4.6V5h2v10.2l4.6-4.6L19 12z',
+  more: 'M12 4a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm0 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4zm0 6a2 2 0 1 1 0 4 2 2 0 0 1 0-4z',
+  warning: 'M12 3l10 18H2zm-1 7v5h2v-5zm0 7v2h2v-2z',
   keyboard: 'M3 6h18v12H3zm2 2v8h14V8zm1 1h2v2H6zm3 0h2v2H9zm3 0h2v2h-2zm3 0h3v2h-3zM7 13h10v2H7z',
 };
 

@@ -32,8 +32,6 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
         .route("/admin", get(admin_page))
-        // The new player interface while it is being built (it replaces `/admin` later).
-        .route("/app", get(|| async { page("app.html") }))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route("/api/channels/main/state", get(channel_state))
         .route("/api/channels/main/requests", post(post_request))
@@ -52,8 +50,9 @@ async fn index() -> Response {
     page("index.html")
 }
 
+/// The player interface: the program's window and the remote panel (which signs in there).
 async fn admin_page() -> Response {
-    page("admin.html")
+    page("app.html")
 }
 
 async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {

@@ -76,7 +76,7 @@ async function openApp(hash, { remote = false } = {}) {
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && errors.push(`${r.status()} ${r.url()}`));
-  await page.goto(`${base}/app${hash}`);
+  await page.goto(`${base}/admin${hash}`);
   await page.waitForSelector('.player .play');
   page.__errors = errors;
   page.__remote = remote;
@@ -209,7 +209,8 @@ try {
   const remoteReqs = await requests();
   check(remoteReqs.some((r) => r.path === '/api/admin/qr'), 'a remote session asks the panel route for the QR code');
   check(!remoteReqs.some((r) => r.path === '/api/desktop/tunnel/qr'), 'and never the window-only one');
-  check((await text(page, '[data-link="share-channel"]')) === `${base}/live/main.m3u8`, 'remote: the channel link comes from the panel', await text(page, '[data-link="share-channel"]'));
+  // Task 15: a remote session knows the tunnel from the environment: the public link.
+  check((await text(page, '[data-link="share-channel"]')) === 'https://proba-kanalu.trycloudflare.com/live/main.m3u8', 'remote: the channel link is the public one (from the environment)', await text(page, '[data-link="share-channel"]'));
   const windowOnly = await text(page, '.window-only');
   check(windowOnly === 'Available in the program on the computer', 'window-only parts say so', windowOnly);
   check(!(await hasButton(page, 'Reconnect')) && !(await hasButton(page, 'Set up a permanent link')), 'remote: no tunnel buttons');
