@@ -274,7 +274,11 @@ fn the_real_windows_ui_language_is_a_supported_language_or_english() {
     assert_eq!(system_lang(), system_lang_from(|| Some(id)));
 }
 
-// ---------- Completeness (strict for en and pl; es, de, fr, ja from task 17) ----------
+// ---------- Completeness (strict for the languages in STRICT; the others may miss keys) ----------
+
+/// Languages whose dictionary must be complete: every key of en.json, and every text within the
+/// length limits of context.json. Task 17 adds each language here once it is fully translated.
+const STRICT: [Lang; 3] = [Lang::En, Lang::Pl, Lang::De];
 
 /// The `{…}` fields of a text.
 fn fields(text: &str) -> BTreeSet<String> {
@@ -319,12 +323,12 @@ fn the_built_in_dictionaries_are_the_files_and_parse() {
 }
 
 #[test]
-fn english_and_polish_have_the_same_keys_fields_and_plural_forms() {
+fn the_strict_languages_have_every_key_and_all_have_the_same_fields_and_plural_forms() {
     let en = &dicts()[index(Lang::En)];
     assert!(!en.is_empty());
     for lang in Lang::ALL {
         let dict = &dicts()[index(lang)];
-        let strict = matches!(lang, Lang::En | Lang::Pl);
+        let strict = STRICT.contains(&lang);
         let keys: BTreeSet<&String> = dict.keys().collect();
         let en_keys: BTreeSet<&String> = en.keys().collect();
         let unknown: Vec<_> = keys.difference(&en_keys).collect();
@@ -363,6 +367,75 @@ fn english_and_polish_have_the_same_keys_fields_and_plural_forms() {
                         lang.as_str()
                     );
                 }
+            }
+        }
+    }
+}
+
+/// The length limit a context note gives: "Max ~12 characters", "max ~30 characters",
+/// "Max about 35 characters" (not "maximum 24 characters", which is the limit of a field).
+fn length_limit(note: &str) -> Option<usize> {
+    let lower = note.to_lowercase();
+    for lead in ["max ~", "max about "] {
+        if let Some(at) = lower.find(lead) {
+            let rest = &lower[at + lead.len()..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if rest[digits.len()..].starts_with(" characters") {
+                return digits.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn the_length_limit_is_read_from_the_note() {
+    assert_eq!(
+        length_limit("Left rail. Max ~12 characters (72 px)."),
+        Some(12)
+    );
+    assert_eq!(
+        length_limit("Impersonal, short (max ~30 characters)."),
+        Some(30)
+    );
+    assert_eq!(
+        length_limit("Menu entry. Max about 35 characters."),
+        Some(35)
+    );
+    assert_eq!(
+        length_limit("Label of the nick field (maximum 24 characters)."),
+        None
+    );
+    assert_eq!(length_limit("Keep it short."), None);
+}
+
+#[test]
+fn the_strict_languages_fit_the_length_limits_of_the_context_notes() {
+    let text = std::fs::read_to_string(locales_dir().join("context.json")).unwrap();
+    let context: BTreeMap<String, serde_json::Value> = serde_json::from_str(&text).unwrap();
+    let limits: Vec<(&String, usize)> = context
+        .iter()
+        .filter_map(|(key, note)| Some((key, length_limit(note.as_str()?)?)))
+        .collect();
+    assert!(limits.len() > 20, "only {} limits found", limits.len());
+    for lang in STRICT {
+        let dict = &dicts()[index(lang)];
+        for (key, limit) in &limits {
+            let entry = dict
+                .get(*key)
+                .unwrap_or_else(|| panic!("{}: no key {key}", lang.as_str()));
+            let texts: Vec<&String> = match entry {
+                Entry::Text(text) => vec![text],
+                Entry::Plural(forms) => forms.values().collect(),
+            };
+            for text in texts {
+                // A soft hyphen only allows a break; it is not shown.
+                let length = text.chars().filter(|&c| c != '\u{ad}').count();
+                assert!(
+                    length <= *limit,
+                    "{}: {key} has {length} characters, the limit is {limit}: {text:?}",
+                    lang.as_str()
+                );
             }
         }
     }
