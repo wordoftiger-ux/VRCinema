@@ -215,7 +215,8 @@ async function start() {
     location.replace('/wizard');
     return;
   }
-  await loadLang(info?.language ?? chosenLang() ?? environment.value?.language ?? browserLang());
+  const program = info?.language ?? environment.value?.language;
+  await loadLang(access.value === 'window' ? program : (chosenLang() ?? program ?? browserLang()));
   render(html`<${App} />`, document.getElementById('root'));
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('paste', onPaste);

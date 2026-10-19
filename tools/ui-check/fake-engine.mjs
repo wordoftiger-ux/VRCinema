@@ -31,8 +31,8 @@
 // `signedOut`; a wrong one 401 `wrong_password`, scenario `remotePanelOff` 403
 // `remote_panel_off`, messages in the request's language for en/pl); POST /api/admin/logout signs
 // out. The program's routes for the remote panel (fix round 1): /api/admin/{info, config, tools…,
-// encoder/detect, log, update…, restart, tunnel, tunnel/restart, tunnel/named/progress|quick}
-// answer like the window's (a remote session may not PUT port/lanAccess/remoteAdmin/password:
+// encoder/detect, log, update…, restart, tunnel, tunnel/restart, tunnel/named/quick}
+// answer like the window's (a remote session may PUT only the engine's allowlisted settings, else
 // 403 `window_only`; a server without a window: Fastify's 404). Scenario `sessionViaTunnel`
 // (the session came through the tunnel: switching it off, reconnecting or changing the link
 // type through the panel routes applies the change and then drops the connection, as the real
@@ -424,8 +424,10 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     }
   }
 
+  // The pixeldrain key is write-only, as in the engine: only whether there is one.
   const configView = () => ({
-    ...s.config,
+    ...Object.fromEntries(Object.entries(s.config).filter(([k]) => k !== 'pixeldrainApiKey')),
+    hasPixeldrainKey: Boolean(s.config.pixeldrainApiKey),
     language: s.language,
     tunnelEnabled: s.tunnel !== 'off',
     tunnelMode: s.named.mode,
@@ -569,7 +571,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       return json(res, 200, { ok: true });
     }
     // The program's routes for the remote panel: the window's, under /api/admin.
-    const MIRRORED = ['info', 'config', 'tools', 'tools/install', 'tools/update', 'tools/repair', 'tools/progress', 'encoder/detect', 'log', 'update', 'update/apply', 'restart', 'tunnel', 'tunnel/restart', 'tunnel/named/progress', 'tunnel/named/quick'];
+    const MIRRORED = ['info', 'config', 'tools', 'tools/install', 'tools/update', 'tools/repair', 'tools/progress', 'encoder/detect', 'log', 'update', 'update/apply', 'restart', 'tunnel', 'tunnel/restart', 'tunnel/named/quick'];
     const mirror = path.startsWith('/api/admin/') && MIRRORED.includes(path.slice('/api/admin/'.length));
     if (mirror && s.signedOut) return coded(res, 401, 'login_required', 'Log in.');
     if (mirror && s.headless) return json(res, 404, { message: `Route ${req.method}:${path} not found`, error: 'Not Found', statusCode: 404 });
@@ -577,17 +579,18 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     const route = mirror ? path.replace('/api/admin/', '/api/desktop/') : path;
     const endsConnection =
       viaTunnel &&
-      ((route === '/api/desktop/config' && req.method === 'PUT' && payload?.tunnelEnabled === false) ||
+      ((route === '/api/desktop/config' && req.method === 'PUT' && (payload?.tunnelEnabled === false || 'tunnelMode' in (payload ?? {}))) ||
         route === '/api/desktop/tunnel/restart' ||
         route === '/api/desktop/tunnel/named/quick');
     // The browser sends an idempotent request (PUT) again on a dropped keep-alive connection:
     // that second try is dropped as well (the tunnel is gone for it too).
-    const key = `${req.method} ${path}`;
+    const key = `${req.method} ${path} ${JSON.stringify(payload)}`;
     if (s.lastDrop?.key === key && Date.now() - s.lastDrop.at < 3000) return req.socket.destroy();
     if (endsConnection) {
       // The change is made; the answer never arrives (the tunnel carried this connection).
       s.lastDrop = { key, at: Date.now() };
-      if (route === '/api/desktop/config') s.tunnel = 'off';
+      if (route === '/api/desktop/config' && payload.tunnelEnabled === false) s.tunnel = 'off';
+      if (route === '/api/desktop/config' && payload.tunnelMode) s.named.mode = payload.tunnelMode;
       if (route === '/api/desktop/tunnel/restart') s.tunnelUrl = `https://proba-kanalu-${(s.rotations += 1)}.trycloudflare.com`;
       if (route === '/api/desktop/tunnel/named/quick') s.named.mode = 'quick';
       return req.socket.destroy();
@@ -597,7 +600,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
       if (s.infoFail && route === '/api/desktop/info') return coded(res, 500, 'internal', 'boom');
       if (req.method === 'PUT') {
-        const windowOnly = ['port', 'lanAccess', 'remoteAdmin', 'password'].some((k) => k in (payload ?? {}));
+        const REMOTE = ['language', 'autostart', 'publicUrl', 'trustCloudflare', 'videoEncoder', 'ytdlpCookies', 'pixeldrainApiKey', 'skippedUpdateVersion', 'tunnelEnabled', 'tunnelMode', 'pauseOnTunnelLoss', 'pauseWhenNoViewers'];
+        const windowOnly = Object.keys(payload ?? {}).some((k) => !REMOTE.includes(k));
         if (mirror && s.remote && windowOnly) return coded(res, 403, 'window_only', 'This feature is only available in the app window.');
         return putConfig(res, payload);
       }

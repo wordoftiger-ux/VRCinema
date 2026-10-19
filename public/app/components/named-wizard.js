@@ -15,7 +15,7 @@ import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
 import { access, appRoute, refreshInfo, tunnel } from '../store.js';
-import { confirmLosingAccess } from './tunnel-actions.js';
+import { tunnelAction } from './tunnel-actions.js';
 
 const PROGRESS = () => appRoute('/tunnel/named/progress');
 const CONFIG = () => appRoute('/config');
@@ -250,32 +250,47 @@ async function refreshAll() {
   await Promise.all([loadConfig(), refreshInfo()]);
 }
 
-/** "Back to quick tunnel" (`quick`) and "Delete permanent link" (`delete`). */
-async function namedAction(kind) {
-  if (kind === 'quick' && !(await confirmLosingAccess('mode'))) return;
+/** How a change of the link type reports here (see `tunnelAction`): the block's notice. */
+const report = (kind, text) => say(kind ? text : '', kind === 'err' ? 'err' : 'ok');
+
+/**
+ * A change between the quick and the permanent link: asked first for a session through the
+ * tunnel, whose dropped connection is then said to have ended (not an error).
+ */
+async function changeLink(request, okText) {
+  await tunnelAction(
+    'mode',
+    async () => {
+      switching.value = true;
+      close(); // an open wizard has nothing left to do
+      say(t('permalink.switching'), 'ok');
+      return request();
+    },
+    okText,
+    report,
+  );
+  await refreshAll();
+  switching.value = false;
+}
+
+/** "Back to quick tunnel". */
+const backToQuick = () => changeLink(() => api('POST', appRoute('/tunnel/named/quick')), (r) => r.message);
+
+/** "Back to the permanent link" (its files are still there). */
+const backToNamed = () => changeLink(() => api('PUT', CONFIG(), { tunnelMode: 'named' }), t('permalink.named_running'));
+
+/** "Delete permanent link" (window only: it needs the Cloudflare login). */
+async function deleteNamed() {
   switching.value = true;
-  close(); // an open wizard has nothing left to do
-  say(kind === 'delete' ? t('permalink.deleting') : t('permalink.switching'), 'ok');
+  close();
+  say(t('permalink.deleting'), 'ok');
   try {
-    const result = await api('POST', kind === 'quick' ? appRoute('/tunnel/named/quick') : '/api/desktop/tunnel/named/delete');
+    const result = await api('POST', '/api/desktop/tunnel/named/delete');
     say(result.message, 'ok');
   } catch (e) {
     say(errorText(e), 'err');
   }
   confirmingDelete.value = false;
-  await refreshAll();
-  switching.value = false;
-}
-
-async function backToNamed() {
-  if (!(await confirmLosingAccess('mode'))) return;
-  switching.value = true;
-  try {
-    await api('PUT', CONFIG(), { tunnelMode: 'named' });
-    say(t('permalink.named_running'), 'ok');
-  } catch (e) {
-    say(errorText(e), 'err');
-  }
   await refreshAll();
   switching.value = false;
 }
@@ -386,11 +401,11 @@ export function NamedLink() {
   if (confirmingDelete.value) {
     actions.push(html`
       <p class="pl-small pl-confirm">${t('permalink.delete_confirm')}</p>
-      <button type="button" class="btn danger" disabled=${busy} onClick=${() => namedAction('delete')}>${t('permalink.delete_yes')}</button>
+      <button type="button" class="btn danger" disabled=${busy} onClick=${deleteNamed}>${t('permalink.delete_yes')}</button>
       <button type="button" class="btn" onClick=${() => (confirmingDelete.value = false)}>${t('permalink.cancel')}</button>`);
   } else {
     if (named) {
-      actions.push(html`<button type="button" class="btn" disabled=${busy} onClick=${() => namedAction('quick')}>${t('permalink.back_quick')}</button>`);
+      actions.push(html`<button type="button" class="btn" disabled=${busy} onClick=${backToQuick}>${t('permalink.back_quick')}</button>`);
     } else if (saved) {
       actions.push(html`<button type="button" class="btn pri" disabled=${busy} onClick=${backToNamed}>${t('permalink.back_named', { host: saved })}</button>`);
     } else if (!open_) {

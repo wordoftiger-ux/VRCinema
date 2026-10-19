@@ -4,8 +4,9 @@
 //! The remote panel is the same interface (spec section 2): [`panel_router`] gives it the same
 //! handlers under `/api/admin/*` (any admin session) — all but what stays in the window:
 //! the Cloudflare login and what needs it (create, delete), the cookies file picker (a dialog
-//! on the computer), the first-run wizard, and in the settings the port, the home network
-//! access, the password and the remote panel itself ([`put_panel_config`]).
+//! on the computer), the first-run wizard, and in the settings everything but
+//! [`REMOTE_SETTINGS`] ([`put_panel_config`]): the port, the home network access, the
+//! password and the remote panel itself among them.
 
 use axum::Router;
 use axum::extract::State;
@@ -29,9 +30,24 @@ use crate::tunnel::named::{ADD_DOMAIN_HELP, ErrorCode, NamedError, Phase};
 const ENCODERS: [&str; 5] = ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf"];
 const MIN_PASSWORD_CHARS: usize = 8;
 
-/// Settings a remote session may not change (spec section 2): they decide who and what can
-/// reach the panel at all.
-const WINDOW_ONLY_SETTINGS: [&str; 4] = ["port", "lanAccess", "remoteAdmin", "password"];
+/// The settings a remote session may change (spec section 2). An allowlist: anything else —
+/// the port, the home network access, the password and the remote panel (they decide who can
+/// reach the panel at all), read-only and unknown fields, and any field added later — stays
+/// with the window until it is added here.
+const REMOTE_SETTINGS: [&str; 12] = [
+    "language",
+    "autostart",
+    "publicUrl",
+    "trustCloudflare",
+    "videoEncoder",
+    "ytdlpCookies",
+    "pixeldrainApiKey",
+    "skippedUpdateVersion",
+    "tunnelEnabled",
+    "tunnelMode",
+    "pauseOnTunnelLoss",
+    "pauseWhenNoViewers",
+];
 
 /// The window's routes; every one needs the window's session ([`super::require_window`]).
 pub(super) fn router(state: AppState) -> Router<AppState> {
@@ -84,7 +100,6 @@ pub(super) fn panel_router() -> Router<AppState> {
         .route("/api/admin/restart", post(restart))
         .route("/api/admin/tunnel", get(tunnel))
         .route("/api/admin/tunnel/restart", post(tunnel_restart))
-        .route("/api/admin/tunnel/named/progress", get(named_progress))
         .route("/api/admin/tunnel/named/quick", post(named_quick))
 }
 
@@ -110,7 +125,8 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
         "videoEncoder": s.video_encoder,
         "detectedEncoder": s.detected_encoder,
         "ytdlpCookies": s.ytdlp_cookies.as_ref().map(|p| p.to_string_lossy().into_owned()),
-        "pixeldrainApiKey": s.pixeldrain_api_key,
+        // Write-only: a new key or `null` (clear) can be sent, the key itself never comes back.
+        "hasPixeldrainKey": s.pixeldrain_api_key.is_some(),
         "autostart": s.autostart,
         "trustCloudflare": s.trust_cloudflare,
         "firstRunCompleted": s.first_run_completed,
@@ -348,14 +364,16 @@ async fn put_config(State(state): State<AppState>, JsonBody(body): JsonBody) -> 
     Ok(json_ok(&Value::Object(view)))
 }
 
-/// [`put_config`] for the panel: a remote session changes everything but
-/// [`WINDOW_ONLY_SETTINGS`] (403 `window_only`, nothing saved); the window's session anything.
+/// [`put_config`] for the panel: a remote session changes only [`REMOTE_SETTINGS`] (any other
+/// field: 403 `window_only`, nothing saved); the window's session anything.
 async fn put_panel_config(
     PanelSession(kind): PanelSession,
     state: State<AppState>,
     JsonBody(body): JsonBody,
 ) -> ApiResult {
-    let window_only = WINDOW_ONLY_SETTINGS.iter().any(|f| body.get(f).is_some());
+    let window_only = body
+        .as_object()
+        .is_some_and(|map| map.keys().any(|k| !REMOTE_SETTINGS.contains(&k.as_str())));
     if kind == SessionKind::Remote && window_only {
         return Err(ApiError::coded(StatusCode::FORBIDDEN, "window_only", &[]));
     }

@@ -1,9 +1,11 @@
 // Settings → Advanced: the cookies file for yt-dlp (videos that need a login) and the pixeldrain
 // key. The address typed by hand and the trust in Cloudflare are in Internet (they only matter
 // while the tunnel is off). Choosing the cookies file stays in the window (the file dialog opens
-// on the computer); a remote panel can clear it and set the key.
+// on the computer); a remote panel can clear it and set the key. The pixeldrain key is
+// write-only: the engine only says whether one is saved; a new one replaces it, "Remove"
+// clears it.
 
-import { useEffect, useState } from '/static/vendor/hooks.mjs';
+import { useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
@@ -14,9 +16,10 @@ export function Advanced() {
   const cfg = useConfig();
   const [note, say] = useNote();
   const [key, setKey] = useState('');
-  useEffect(() => {
-    if (cfg) setKey(cfg.pixeldrainApiKey ?? '');
-  }, [cfg?.pixeldrainApiKey]);
+  const hasKey = Boolean(cfg?.hasPixeldrainKey);
+  const saveKey = async (value, okText) => {
+    if (await saveWith(say, { pixeldrainApiKey: value }, okText)) setKey('');
+  };
 
   const pick = async () => {
     say('info', t('settings.advanced.cookies_picking'));
@@ -45,11 +48,16 @@ export function Advanced() {
       <${Row} title=${t('settings.advanced.pixeldrain')} hint=${t('settings.advanced.pixeldrain_hint')}>
         <form class="inline" onSubmit=${(e) => {
           e.preventDefault();
-          saveWith(say, { pixeldrainApiKey: key.trim() }, key.trim() ? t('settings.advanced.pixeldrain_saved') : t('settings.advanced.pixeldrain_removed'));
+          if (key.trim()) saveKey(key.trim(), t('settings.advanced.pixeldrain_saved'));
         }}>
           <input type="password" class="txt" autocomplete="off" aria-label=${t('settings.advanced.pixeldrain')}
+            placeholder=${hasKey ? t('settings.advanced.pixeldrain_placeholder_saved') : ''} data-key-saved=${hasKey ? 'yes' : 'no'}
             value=${key} disabled=${!cfg} onInput=${(e) => setKey(e.target.value)} />
-          <button type="submit" class="btn" disabled=${!cfg}>${t('settings.save')}</button>
+          <button type="submit" class="btn" disabled=${!cfg || !key.trim()}>${hasKey ? t('settings.advanced.pixeldrain_replace') : t('settings.save')}</button>
+          ${hasKey
+            ? html`<button type="button" class="btn" data-remove-key onClick=${() => saveKey(null, t('settings.advanced.pixeldrain_removed'))}>
+                ${t('settings.advanced.pixeldrain_remove')}</button>`
+            : null}
         </form>
       <//>
       <${Note} note=${note} />

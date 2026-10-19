@@ -323,7 +323,7 @@ async fn without_tools_the_server_starts_and_the_settings_are_saved_at_once() {
 // ---------- Access ----------
 
 /// The program's routes for the remote panel (spec section 2: the panel is the same interface).
-const PANEL_ROUTES: [(&str, &str); 17] = [
+const PANEL_ROUTES: [(&str, &str); 16] = [
     ("GET", "/api/admin/info"),
     ("GET", "/api/admin/config"),
     ("PUT", "/api/admin/config"),
@@ -339,7 +339,6 @@ const PANEL_ROUTES: [(&str, &str); 17] = [
     ("POST", "/api/admin/restart"),
     ("GET", "/api/admin/tunnel"),
     ("POST", "/api/admin/tunnel/restart"),
-    ("GET", "/api/admin/tunnel/named/progress"),
     ("POST", "/api/admin/tunnel/named/quick"),
 ];
 
@@ -373,7 +372,6 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
         "/api/admin/tools/progress",
         "/api/admin/log",
         "/api/admin/tunnel",
-        "/api/admin/tunnel/named/progress",
     ] {
         let (status, body) = app.call("GET", path, Some(&remote), None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {body}");
@@ -391,8 +389,19 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["pixeldrainApiKey"], "klucz-zdalny");
+    // The key is write-only: saved, never sent back (fix round 2).
+    assert_eq!(body["hasPixeldrainKey"], true);
+    assert!(!body.to_string().contains("klucz-zdalny"), "{body}");
+    assert_eq!(app.saved()["pixeldrainApiKey"], "klucz-zdalny");
     assert_eq!(app.saved()["language"], "de");
+    for path in [
+        "/api/admin/config",
+        "/api/admin/info",
+        "/api/admin/environment",
+    ] {
+        let (_, body) = app.call("GET", path, Some(&remote), None).await;
+        assert!(!body.to_string().contains("klucz-zdalny"), "{path}: {body}");
+    }
     // The same validation as the window's.
     let (status, body) = app
         .call(
@@ -403,12 +412,42 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // An allowlist (fix round 2): what a remote session may change; anything else — the
+    // window-only settings, read-only and unknown fields — is 403 and saves nothing.
+    for patch in [
+        json!({"language": "en"}),
+        json!({"autostart": true}),
+        json!({"publicUrl": "https://tv.example.com"}),
+        json!({"trustCloudflare": true}),
+        json!({"videoEncoder": "libx264"}),
+        json!({"ytdlpCookies": null}),
+        json!({"pixeldrainApiKey": null}),
+        json!({"skippedUpdateVersion": "0.3.0"}),
+        json!({"tunnelEnabled": false}),
+        json!({"tunnelMode": "quick"}),
+        json!({"pauseOnTunnelLoss": true}),
+        json!({"pauseWhenNoViewers": false}),
+    ] {
+        let (status, body) = app
+            .call(
+                "PUT",
+                "/api/admin/config",
+                Some(&remote),
+                Some(patch.clone()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{patch}: {body}");
+    }
     for patch in [
         json!({"port": 9999}),
         json!({"lanAccess": true}),
         json!({"remoteAdmin": false}),
         json!({"password": "inne-haslo-123"}),
         json!({"pixeldrainApiKey": "x", "password": "inne-haslo-123"}),
+        json!({"hasPassword": true}),
+        json!({"firstRunCompleted": true}),
+        json!({"namedTunnelHostname": "kanal.example.com"}),
+        json!({"jakiesNowePole": 1}),
     ] {
         let before = app.saved();
         let (status, body) = app
@@ -436,6 +475,7 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
     // What stays in the window has no panel route, and its window route refuses the session.
     for (method, path) in [
         ("POST", "/api/admin/tunnel/named/login"),
+        ("GET", "/api/admin/tunnel/named/progress"),
         ("POST", "/api/admin/tunnel/named/create"),
         ("POST", "/api/admin/tunnel/named/delete"),
         ("POST", "/api/admin/pick-cookies"),
@@ -643,9 +683,15 @@ async fn put_config_saves_valid_values_and_never_shows_secrets() {
     assert_eq!(saved["videoEncoder"], "libx264");
     assert_eq!(saved["firstRunCompleted"], false);
 
+    // The pixeldrain key is write-only (fix round 2): only whether there is one.
+    assert!(!res.to_string().contains("klucz-pd"), "{res}");
+    assert_eq!(res["hasPixeldrainKey"], true);
     let view = app.get("/api/desktop/config", &cookie).await;
     assert_eq!(view["hasPassword"], false);
-    assert_eq!(view["pixeldrainApiKey"], "klucz-pd");
+    assert_eq!(view["hasPixeldrainKey"], true);
+    assert!(!view.to_string().contains("klucz-pd"), "{view}");
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert!(!info.to_string().contains("klucz-pd"), "{info}");
     for secret in ["adminPasswordHash", "sessionSecret", "remoteSessionEpoch"] {
         assert!(view.get(secret).is_none(), "{secret} leaked: {view}");
     }
@@ -666,6 +712,10 @@ async fn put_config_saves_valid_values_and_never_shows_secrets() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(app.saved()["pixeldrainApiKey"], Value::Null);
+    assert_eq!(
+        app.get("/api/desktop/config", &cookie).await["hasPixeldrainKey"],
+        false
+    );
     assert_eq!(app.saved()["skippedUpdateVersion"], Value::Null);
     app.stop().await;
 }

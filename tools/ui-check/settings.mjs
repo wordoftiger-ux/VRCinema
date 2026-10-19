@@ -582,6 +582,22 @@ try {
   await page.evaluate(() => document.querySelector('input[aria-label="pixeldrain API key (optional)"]').form.requestSubmit());
   a = await actions(m, 'pixeldrain request');
   check(JSON.stringify(putConfigs(a)[0].body) === '{"pixeldrainApiKey":"abc123"}', 'the key saves {pixeldrainApiKey}', a);
+  // Fix round 2: the key is write-only — the field empties, says a key is saved, never shows it.
+  const PD = 'input[aria-label="pixeldrain API key (optional)"]';
+  await page.waitForSelector(`${PD}[data-key-saved="yes"]`);
+  check((await page.$eval(PD, (e) => [e.value, e.placeholder].join('|'))) === '|•••• saved — type a new key to replace it', 'a saved key: empty field with the "saved" placeholder', await page.$eval(PD, (e) => [e.value, e.placeholder].join('|')));
+  check(!(await page.content()).includes('abc123'), 'the key is nowhere in the page');
+  const cfgAnswers = (await requests()).filter((r) => r.path.endsWith('/config'));
+  check(cfgAnswers.length > 0, 'the settings were read again');
+  const cfgNow = await (await fetch(`${base}/api/desktop/config`)).json();
+  check(cfgNow.hasPixeldrainKey === true && !JSON.stringify(cfgNow).includes('abc123'), 'GET config says only hasPixeldrainKey', cfgNow);
+  check(await page.$eval('#view .sform form.inline button[type=submit]', (b) => b.disabled && b.textContent.trim() === 'Replace'), 'Replace waits for a new key');
+  m = await mark();
+  await page.click('[data-remove-key]');
+  a = await actions(m, 'remove key');
+  check(JSON.stringify(putConfigs(a)[0].body) === '{"pixeldrainApiKey":null}', 'Remove key saves {pixeldrainApiKey: null}', a);
+  await page.waitForSelector(`${PD}[data-key-saved="no"]`);
+  check((await page.$('[data-remove-key]')) === null, 'no key: nothing to remove');
   check(await noRawKeys(page), 'no raw keys in Advanced');
 
   // ---------- Log ----------

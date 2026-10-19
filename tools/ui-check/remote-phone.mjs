@@ -170,6 +170,26 @@ try {
   check(!(await requests()).some((r) => r.path.startsWith('/api/desktop/') && r.path !== '/api/desktop/info'), 'a remote session asks no window-only route but the info');
   await page.close();
 
+  // Fix round 2: a remote panel with a language picked in this browser opens in it — never
+  // in the program's language first.
+  await reset();
+  await scenario({ remote: true, language: 'pl' });
+  {
+    const p = await ctx.newPage();
+    await p.addInitScript(() => {
+      window.__langs = [];
+      // The document itself: the root element the parser makes comes after this script.
+      new MutationObserver((list) => list.forEach((m) => window.__langs.push(m.target.getAttribute('lang')))).observe(document, { subtree: true, attributes: true, attributeFilter: ['lang'] });
+    });
+    await p.addInitScript(() => localStorage.setItem('vrcinema.lang', 'en'));
+    await p.goto(`${base}/admin`);
+    await p.waitForSelector('.player .play');
+    await sleep(3500); // two info reads (program language pl) came and went
+    const langs = await p.evaluate(() => window.__langs);
+    check(langs.includes('en') && !langs.includes('pl') && (await p.evaluate(() => document.documentElement.lang)) === 'en', 'remote with a picked language: never the program language first', langs);
+    await p.close();
+  }
+
   // The remote panel switched off.
   await reset();
   await scenario({ remote: true, signedOut: true, remotePanelOff: true });
@@ -259,6 +279,23 @@ try {
   check((await text(page, '#dialog-title')) === 'Change the link?', 'back to a quick link asks first');
   await page.keyboard.press('Escape');
   check(await page.$eval('.named-link .btn.danger', (b) => b.disabled), 'deleting the permanent link stays in the window');
+  // Fix round 2: confirmed, the dropped connection of a link change is "connection ended" too.
+  m = await mark();
+  await page.click('.named-link[data-mode="named"] .pl-actions button:not(.danger)');
+  await page.click('.dialog .btn.danger');
+  await waitFor(async () => (await actionsSince(m)).some((r) => r.path === '/api/admin/tunnel/named/quick'), 'back to quick request');
+  await waitFor(async () => (await page.$eval('.pl-notice', (e) => e.textContent).catch(() => ''))?.startsWith('Done — the connection'), 'the link change note', 9000);
+  check(true, 'back to a quick link through the tunnel: "connection ended", not an error');
+  // And back to the permanent link (its files are still there): asked, then the same.
+  await page.waitForSelector('.named-link[data-mode="quick"] .pl-actions button.pri:not([disabled])', { timeout: 8000 });
+  m = await mark();
+  await page.click('.named-link[data-mode="quick"] .pl-actions button.pri');
+  await page.waitForSelector('.dialog [data-lose-access="mode"]');
+  await page.click('.dialog .btn.danger');
+  const named = await waitFor(async () => (await actionsSince(m)).find((r) => r.method === 'PUT'), 'back to named request');
+  check(named.path === '/api/admin/config' && JSON.stringify(named.body) === '{"tunnelMode":"named"}', 'back to the permanent link → PUT /api/admin/config {tunnelMode: named}', named);
+  await waitFor(async () => (await page.$eval('.pl-notice', (e) => e.textContent).catch(() => ''))?.startsWith('Done — the connection'), 'the back-to-named note', 9000);
+  check(true, 'and its dropped connection is "connection ended" too');
   m = await mark();
   await page.click(SWITCH);
   await page.click('.dialog .btn.danger');
