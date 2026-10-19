@@ -98,7 +98,11 @@ async function waitReady(srv) {
 
 // ---------- Klient ----------
 
-const TIMING_FIELDS = new Set(['createdAt', 'startedAt', 'finishedAt', 'positionS']);
+// Etap 4, zadanie 16: serwer Rust wymaga klucza urządzenia przy każdym zgłoszeniu z nickiem
+// (strona go zawsze wysyła); serwer TS pole ignoruje, więc różnic nie ma.
+const DEVICE_KEY = '0123456789abcdef0123456789abcdef';
+
+const TIMING_FIELDS =new Set(['createdAt', 'startedAt', 'finishedAt', 'positionS']);
 
 function stripTiming(v, topLevelChannel) {
   if (Array.isArray(v)) return v.map((x) => stripTiming(x, false));
@@ -162,8 +166,8 @@ function cookieShape(setCookies) {
 // Zamierzony status każdego kroku (sprawdzany na obu serwerach niezależnie od porównania serwerów).
 const EXPECTED_STATUS = {
   "GET /": 200,
-  "GET /static/common.js": 200,
-  "GET /static/style.css": 200,
+  "GET /static/app/viewer/main.js": 200,
+  "GET /static/app/theme.css": 200,
   "GET /static/brak.js (404)": 404,
   "GET /favicon.ico": 204,
   "GET /nie-ma (404)": 404,
@@ -483,8 +487,8 @@ async function scenario(srv) {
       throw new Error(`rust: GET /admin -> ${res.status}, oczekiwano nowego interfejsu`);
     }
   }
-  await c.get('GET /static/common.js', '/static/common.js');
-  await c.get('GET /static/style.css', '/static/style.css');
+  await c.get('GET /static/app/viewer/main.js', '/static/app/viewer/main.js');
+  await c.get('GET /static/app/theme.css', '/static/app/theme.css');
   await c.get('GET /static/brak.js (404)', '/static/brak.js');
   await c.get('GET /favicon.ico', '/favicon.ico');
   await c.get('GET /nie-ma (404)', '/nie-ma');
@@ -509,7 +513,7 @@ async function scenario(srv) {
   await c.get('admin panel (pusty)', adminPanel, { channelBody: true });
 
   // Zgłoszenia publiczne: poprawne, błędy resolvera, limity
-  const ok1 = await request('request: poprawne (ok1)', yt('ok1'), { name: '  Ala\u0001 ma kota  ' });
+  const ok1 = await request('request: poprawne (ok1)', yt('ok1'), { name: '  Ala\u0001 ma kota  ', deviceKey: DEVICE_KEY });
   await waitPlaying(c);
   await request('request: błąd resolvera', yt('err'));
   await request('request: za długi', yt('long'));
@@ -525,7 +529,7 @@ async function scenario(srv) {
   await request('request: playlista', 'https://www.youtube.com/playlist?list=pl');
   await request('request: local: (niepoprawny link)', 'local:0/movie1.mp4');
   await request('request: nieznany URL', 'https://www.youtube.com/watch?v=nieznany');
-  await request('request: ok2', yt('ok2'), { name: 'x'.repeat(50) });
+  await request('request: ok2', yt('ok2'), { name: 'x'.repeat(50), deviceKey: DEVICE_KEY });
   await request('request: ok4 (limit aktywnych?)', 'https://youtu.be/ok4');
   await request('request: ok3 (limit aktywnych?)', yt('ok3'));
   await request('request: limit aktywnych (429)', yt('ok1'));

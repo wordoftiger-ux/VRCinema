@@ -381,7 +381,8 @@ impl Harness {
     /// Public request of a film (like the `request()` helper of the TS test).
     async fn request(&self, url: &str, ip: &str, name: Option<&str>) -> Resp {
         let body = match name {
-            Some(n) => json!({"url": url, "name": n}),
+            // A nick always comes with a device key (the page sends both).
+            Some(n) => json!({"url": url, "name": n, "deviceKey": KEY_A}),
             None => json!({"url": url}),
         };
         self.send(
@@ -560,8 +561,12 @@ async fn adds_a_film_to_the_end_of_the_queue_with_a_nickname() {
         .await;
     assert_eq!(res.status, StatusCode::CREATED);
     assert_eq!(res.json()["status"], "queued");
+    // The helper sends a device key with a nick, so the item has an icon (shape checked elsewhere).
+    let mut item = res.json()["item"].clone();
+    assert!(item["requesterBadge"].is_object());
+    item["requesterBadge"] = Value::Null;
     assert_eq!(
-        res.json()["item"],
+        item,
         json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false})
     );
     let items = h.list(ItemStatus::Queued);
@@ -906,8 +911,11 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
     assert!(res.header("content-type").starts_with("application/json"));
     let body = res.json();
     assert_eq!(body["queue"].as_array().unwrap().len(), 1);
+    let mut first = body["queue"][0].clone();
+    assert!(first["requesterBadge"].is_object());
+    first["requesterBadge"] = Value::Null;
     assert_eq!(
-        body["queue"][0],
+        first,
         json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false})
     );
     assert!(!res.text().contains("1.1.1.1"));
@@ -2050,11 +2058,11 @@ async fn serves_the_request_page_and_the_panel() {
 #[tokio::test]
 async fn serves_static_files_and_favicon() {
     let h = Harness::new();
-    let css = h.send(get("/static/style.css")).await;
+    let css = h.send(get("/static/app/theme.css")).await;
     assert_eq!(css.status, StatusCode::OK);
     assert_eq!(css.header("content-type"), "text/css; charset=utf-8");
     assert_eq!(css.header("cache-control"), "public, max-age=0");
-    let js = h.send(get("/static/common.js")).await;
+    let js = h.send(get("/static/app/viewer/main.js")).await;
     assert_eq!(
         js.header("content-type"),
         "application/javascript; charset=utf-8"
@@ -3471,18 +3479,25 @@ async fn a_nick_with_a_device_key_gets_an_icon_and_is_reserved() {
     }
 }
 
-/// Review focus 4: a viewer without a device key (private mode, cleared data).
+/// Review focus 4, after task 16: a taken nick is refused in the viewer's language; a nick sent
+/// without a device key is refused too (the page always sends one), so nothing slips in under
+/// someone else's nick; the same viewer without a nick goes through as an anonymous one.
 #[tokio::test]
-async fn a_taken_nick_without_a_key_is_refused_in_the_viewers_language() {
+async fn a_taken_nick_is_refused_in_the_viewers_language_and_a_nick_needs_a_key() {
     let h = Harness::new();
     h.request_as("1.1.1.1", Some("Kasia"), Some(KEY_A), None)
         .await;
     let en = h
-        .request_as("3.3.3.3", Some("KASIA"), None, Some("en"))
+        .request_as("3.3.3.3", Some("KASIA"), Some(KEY_B), Some("en"))
         .await;
     let pl = h
-        .request_as("3.3.3.3", Some("KASIA"), None, Some("pl"))
+        .request_as("3.3.3.3", Some("KASIA"), Some(KEY_B), Some("pl"))
         .await;
+    for nick in ["KASIA", "Free"] {
+        let keyless = h.request_as("3.3.3.3", Some(nick), None, Some("en")).await;
+        assert_eq!(keyless.status, StatusCode::BAD_REQUEST, "{nick}");
+        assert_eq!(keyless.json()["code"], "invalid_device_key", "{nick}");
+    }
     assert_eq!(en.status, StatusCode::CONFLICT);
     assert_eq!(pl.status, StatusCode::CONFLICT);
     assert_eq!(en.json()["code"], "nick_taken");
@@ -3523,7 +3538,7 @@ async fn words_for_host_are_reserved_and_a_bad_key_is_refused() {
         assert_eq!(res.json()["code"], "nick_reserved", "{w}");
     }
     let keyless = h.request_as("5.5.5.5", Some("Host"), None, None).await;
-    assert_eq!(keyless.json()["code"], "nick_reserved");
+    assert_eq!(keyless.json()["code"], "invalid_device_key");
     for key in ["short", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"] {
         let res = h.request_as("6.6.6.6", Some("Ola"), Some(key), None).await;
         assert_eq!(res.status, StatusCode::BAD_REQUEST);

@@ -1,0 +1,328 @@
+/* The request page (`/`): the player interface's tokens (theme.css) in a single column. */
+
+html,
+body {
+  height: auto;
+  min-height: 100%;
+  overflow: auto;
+  font-size: 15px;
+}
+
+#root {
+  height: auto;
+}
+
+.v-page {
+  width: min(680px, 100%);
+  margin: 0 auto;
+  padding: 18px 16px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.v-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.v-head h1 {
+  margin: 0;
+  min-width: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.v-lang {
+  flex: none;
+}
+
+.v-lang .sel {
+  min-width: 0;
+  min-height: 40px;
+}
+
+.v-offline {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+
+h2.v-eyebrow {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.v-count {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.v-paused {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+p.v-sub,
+small.v-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 13px;
+  min-width: 0;
+}
+
+.v-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Now playing ---------- */
+
+p.v-now-title {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+p.v-now-title.v-idle {
+  color: var(--text-dim);
+}
+
+.v-progress {
+  height: 6px;
+  margin-top: 12px;
+  border-radius: 3px;
+  background: var(--line-control);
+  overflow: hidden;
+}
+
+.v-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--amber);
+}
+
+p.v-time {
+  margin: 6px 0 0;
+  color: var(--text-mute);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Add a video ---------- */
+
+.v-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+  color: var(--text-dim);
+}
+
+.v-field small {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.v-field .txt {
+  width: 100%;
+  min-height: 44px;
+  font-size: 16px; /* no zoom on focus in mobile browsers */
+}
+
+.v-nick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.v-own-badge {
+  display: inline-flex;
+  flex: none;
+}
+
+.v-own-badge .rbadge {
+  width: 22px;
+  height: 22px;
+}
+
+.v-submit {
+  justify-content: center;
+  width: 100%;
+  min-height: 44px;
+}
+
+.v-error {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+
+.v-error p {
+  margin: 0;
+  color: inherit;
+  font-size: 14px;
+}
+
+.v-error .btn {
+  margin-top: 8px;
+  min-height: 44px;
+  color: var(--text);
+}
+
+.v-rules {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-card);
+  color: var(--text-mute);
+  font-size: 13px;
+}
+
+.v-rules p,
+.v-rules div {
+  margin: 0 0 6px;
+}
+
+.v-sites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.v-sites li {
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: var(--selected);
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Up next ---------- */
+
+.v-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.v-item {
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.v-item:first-child {
+  border-top: 0;
+}
+
+.v-item-text {
+  min-width: 0;
+}
+
+.v-item-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.v-empty {
+  margin: 0;
+  color: var(--text-faint);
+}
+
+/* ---------- How to watch ---------- */
+
+.v-howto summary {
+  cursor: pointer;
+  min-height: 24px;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+.v-howto p,
+.v-howto li {
+  color: var(--text-mute);
+  font-size: 13.5px;
+}
+
+.v-howto ol {
+  margin: 10px 0 0;
+  padding-left: 20px;
+}
+
+.v-linkbox {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.v-linkbox .txt {
+  min-height: 44px;
+  font: 13px var(--mono);
+}
+
+.v-linkbox .btn {
+  min-height: 44px;
+  justify-content: center;
+}
+
+/* ---------- Message after a request ---------- */
+
+.v-toast-slot {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.v-toast {
+  margin: 0;
+  max-width: 560px;
+  padding: 10px 14px;
+  border: 1px solid var(--line-focus);
+  border-radius: var(--radius);
+  background: rgba(20, 21, 31, 0.97);
+  box-shadow: var(--shadow-pop);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 380px) {
+  .v-page {
+    padding-inline: 12px;
+  }
+
+  .v-linkbox {
+    flex-direction: column;
+  }
+}

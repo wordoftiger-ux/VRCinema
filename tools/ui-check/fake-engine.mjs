@@ -9,6 +9,7 @@
 // pending (number of videos waiting for approval), addError (code of the error POST …/items
 // answers with), panelFail (the panel answers 500), panelDelayMs, patchDelayMs, signedOut, remote, tunnel}. The queue lives in memory: POST …/items adds,
 // PATCH /api/admin/items/{id} moves ({position}) or decides ({action}), DELETE removes.
+// Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
 // GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
 // History (panel field `history`): played, skipped (played with a reason), failed (localized
 // reason), a file from disk and an old row with a plain-text reason. Share view: GET
@@ -161,6 +162,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       positionApprox: false,
       pending: 0,
       addError: null,
+      viewerError: null,
+      viewerNickTaken: [],
+      viewerKnown: [],
       panelFail: false,
       panelDelayMs: 0,
       patchDelayMs: 0,
@@ -254,6 +258,57 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       channelUrl: `http://127.0.0.1:${port}/live/main.m3u8`,
       requestUrl: `http://127.0.0.1:${port}/`,
     };
+  }
+
+  // The request page's routes. GET …/state is the public state (queue without links; `rules`
+  // from the channel settings). POST …/requests answers like the engine: a nick needs a device
+  // key (400 invalid_device_key), `viewerNickTaken` lists skeletons held by another device
+  // (409 nick_taken), `viewerError` is a code to refuse every request with (400, 429 for
+  // too_many_active / too_many_requests), `viewerKnown` the keys that already own a nick.
+  const publicItem = (i) => ({ id: i.id, title: i.title, durationS: i.durationS, requesterName: i.requesterName, requesterBadge: i.requesterBadge, isLive: i.isLive });
+  function viewerState() {
+    const p = panel();
+    return {
+      status: p.status,
+      current: p.current,
+      paused: p.paused,
+      pauseReasons: p.pauseReasons,
+      queue: s.queue.map(publicItem),
+      channelUrl: p.channelUrl,
+      requestUrl: p.requestUrl,
+      rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation },
+    };
+  }
+  const VIEWER_ERRORS = {
+    domain_not_allowed: [400, 'This site is not allowed. Allowed: youtube.com, youtu.be.', 'Ten serwis nie jest dozwolony. Dozwolone: youtube.com, youtu.be.'],
+    local_address: [400, 'Links to a local network or to this computer are not allowed.', 'Linki do sieci lokalnej lub do tego komputera są niedozwolone.'],
+    too_many_active: [429, 'You already have 5 videos in the queue.', 'Masz już 5 filmów w kolejce.'],
+    too_many_requests: [429, 'Too many requests in a short time. Try again in a few minutes.', 'Za dużo zgłoszeń w krótkim czasie. Spróbuj za kilka minut.'],
+  };
+  function viewerRequest(res, req, payload) {
+    const pl = req.headers['x-vrcinema-lang'] === 'pl';
+    const fail = (status, code, en, plText) => coded(res, status, code, pl ? plText : en);
+    const refusal = VIEWER_ERRORS[s.viewerError];
+    if (refusal) {
+      const body = { error: pl ? refusal[2] : refusal[1], code: s.viewerError };
+      if (s.viewerError === 'too_many_active') body.count = 5;
+      return json(res, refusal[0], body);
+    }
+    if (!/^https?:\/\//.test(payload?.url ?? '')) return fail(400, 'invalid_link', 'That does not look like a valid link (http/https).', 'To nie wygląda na poprawny link (http/https).');
+    const key = payload.deviceKey ?? null;
+    const nick = String(payload.name ?? '').trim();
+    if (key !== null && !/^[0-9a-f]{32}$/.test(key)) return fail(400, 'invalid_device_key', 'The device key must be 32 hexadecimal characters.', 'Klucz urządzenia musi mieć 32 znaki szesnastkowe.');
+    if (nick && key === null) return fail(400, 'invalid_device_key', 'The device key must be 32 hexadecimal characters.', 'Klucz urządzenia musi mieć 32 znaki szesnastkowe.');
+    if (nick && s.viewerNickTaken.includes(nick.toLowerCase()) && !s.viewerKnown.includes(key)) {
+      return fail(409, 'nick_taken', 'This nick is already taken by someone else. Pick another one.', 'Ten nick jest już zajęty przez kogoś innego. Wybierz inny.');
+    }
+    if (nick && key && !s.viewerKnown.includes(key)) s.viewerKnown.push(key);
+    const badge = key ? { hue: parseInt(key.slice(0, 3), 16) % 360, shape: parseInt(key[3], 16) % 12 } : null;
+    const item = queued(nextId++, 'Added from ' + new URL(payload.url).hostname, { requesterName: nick || null, requesterBadge: badge });
+    const pending = s.settings.moderation;
+    if (pending) s.pendingItems.push({ ...item, status: 'pending_approval' });
+    else s.queue.push(item);
+    return json(res, 201, { status: pending ? 'pending_approval' : 'queued', item: publicItem(item) });
   }
 
   const statsAnswer = () => {
@@ -533,6 +588,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const path = url.pathname;
+    if (path === '/') return serveFile(res, 'index.html');
     if (path === '/admin') return serveFile(res, 'app.html');
     if (path === '/wizard') return serveFile(res, 'wizard.html');
     if (path === '/favicon.ico') {
@@ -552,6 +608,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       const change = await body(req);
       Object.assign(s, change);
       if ('pending' in change) s.pendingItems = pendingList(change.pending);
+      if ('settingsPatch' in change) Object.assign(s.settings, change.settingsPatch);
       return json(res, 200, { ...s, queue: undefined, pendingItems: undefined });
     }
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
@@ -559,6 +616,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     const payload = req.method === 'GET' ? null : await body(req).catch(() => null);
     requests.push({ method: req.method, path, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
     const noWindow = s.remote || s.headless;
+    if (path === '/api/channels/main/state' && req.method === 'GET') return json(res, 200, viewerState());
+    if (path === '/api/channels/main/requests' && req.method === 'POST') return viewerRequest(res, req, payload);
     if (path === '/api/admin/login' && req.method === 'POST') {
       const pl = req.headers['x-vrcinema-lang'] === 'pl';
       if (s.remotePanelOff) return coded(res, 403, 'remote_panel_off', pl ? 'Panel zdalny jest wyłączony.' : 'The remote panel is switched off.');

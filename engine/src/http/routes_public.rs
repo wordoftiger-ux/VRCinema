@@ -130,6 +130,10 @@ fn check_viewer(state: &AppState, body: &Value) -> Result<Viewer, ApiError> {
     let nick = clean_name(body.get("name"))
         .map(|n| n.chars().take(NICK_MAX_CHARS).collect::<String>())
         .filter(|n| !skeleton(n).is_empty());
+    // A nick is only kept for a device: the page always sends its key with one.
+    if nick.is_some() && key_hash.is_none() {
+        return Err(ApiError::bad_request("invalid_device_key"));
+    }
     let now = crate::db::now_ms();
     state
         .with_db(|c| {

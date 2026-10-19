@@ -1,132 +1,17 @@
 <!doctype html>
-<html lang="pl">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Kanał filmowy</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <meta name="referrer" content="no-referrer">
+  <title>VRCinema</title>
+  <link rel="stylesheet" href="/static/app/theme.css">
+  <link rel="stylesheet" href="/static/app/viewer/viewer.css">
+  <link rel="modulepreload" href="/static/vendor/preact.mjs">
+  <link rel="modulepreload" href="/static/vendor/signals.mjs">
+  <script type="module" src="/static/app/viewer/main.js"></script>
 </head>
-<body>
-<main>
-  <header class="masthead">
-    <h1>Kanał filmowy</h1>
-  </header>
-
-  <section class="monitor" id="monitor" aria-live="polite">
-    <p class="tally" data-tally data-status="idle">Przerwa</p>
-    <p class="monitor-title idle" data-title>Teraz nic nie leci</p>
-    <p class="muted" data-by></p>
-    <div class="meter" data-meter aria-hidden="true"></div>
-    <div class="meter-row"><span data-pos></span><span data-dur></span></div>
-  </section>
-
-  <h2>Dodaj film</h2>
-  <form class="stack" id="request-form">
-    <label>Link do filmu
-      <input type="url" name="url" required placeholder="https://www.youtube.com/watch?v=…" autocomplete="off">
-    </label>
-    <div class="row">
-      <label>Twój nick (opcjonalnie)
-        <input type="text" name="nick" maxlength="32" autocomplete="nickname">
-      </label>
-      <div style="display:flex;align-items:flex-end;flex:0 0 auto">
-        <button type="submit">Dodaj do kolejki</button>
-      </div>
-    </div>
-    <p class="notice" id="request-notice" role="status"></p>
-    <p class="muted small" id="rules"></p>
-  </form>
-
-  <h2>Kolejka</h2>
-  <ol class="rundown" id="queue"></ol>
-
-  <h2>Jak oglądać w VRChat</h2>
-  <div class="howto">
-    <p>Wklej ten link do odtwarzacza wideo w świecie:</p>
-    <div class="linkbox">
-      <input type="text" id="channel-url" readonly aria-label="Link kanału">
-      <button type="button" class="quiet" id="copy-channel">Kopiuj</button>
-    </div>
-    <ol>
-      <li>Każda osoba w lobby musi włączyć w VRChat opcję <strong>Allow Untrusted URLs</strong> (Settings, zakładka Comfort &amp; Safety). Bez niej zobaczy czarny ekran.</li>
-      <li>Wszyscy widzą ten sam moment filmu. Kto dołączy później, wskoczy w trwający film.</li>
-      <li>Przewijanie w odtwarzaczu nie działa, bo to kanał na żywo.</li>
-    </ol>
-  </div>
-</main>
-
-<script type="module">
-  import { api, el, fmtTime, renderMonitor, setupCopy, notice } from '/static/common.js';
-
-  const monitor = document.getElementById('monitor');
-  const queueList = document.getElementById('queue');
-  const channelUrl = document.getElementById('channel-url');
-  const rules = document.getElementById('rules');
-  setupCopy(channelUrl, document.getElementById('copy-channel'));
-
-  function renderQueue(items) {
-    queueList.replaceChildren();
-    if (items.length === 0) {
-      queueList.append(el('li', { class: 'empty', style: 'display:block' }, 'Kolejka jest pusta. Dodaj pierwszy film.'));
-      return;
-    }
-    for (const i of items) {
-      queueList.append(
-        el('li', {},
-          el('div', {},
-            el('div', { class: 'item-title' }, i.title),
-            i.requesterName ? el('div', { class: 'item-meta' }, `Dodane przez ${i.requesterName}`) : null),
-          el('span', { class: 'item-side' }, i.isLive ? 'na żywo' : fmtTime(i.durationS))),
-      );
-    }
-  }
-
-  async function refresh() {
-    try {
-      const s = await api('GET', '/api/channels/main/state');
-      renderMonitor(monitor, s);
-      renderQueue(s.queue);
-      if (document.activeElement !== channelUrl) channelUrl.value = s.channelUrl;
-      const hours = s.rules.maxDurationS / 3600;
-      const limit = hours >= 1 ? `${+hours.toFixed(1)} h` : `${Math.round(s.rules.maxDurationS / 60)} min`;
-      const sites = s.rules.linkMode === 'allowlist'
-        ? `Działają linki z: ${s.rules.allowedDomains.join(', ')}.`
-        : 'Wklej link do filmu.';
-      rules.textContent = `${sites} Film może trwać do ${limit}.` +
-        (s.rules.moderation ? ' Zgłoszenia zatwierdza właściciel kanału.' : '');
-    } catch {
-      // Chwilowy brak połączenia: spróbujemy przy następnym odświeżeniu.
-    }
-  }
-
-  const form = document.getElementById('request-form');
-  const out = document.getElementById('request-notice');
-  try {
-    form.nick.value = localStorage.getItem('nick') ?? '';
-  } catch {}
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const button = form.querySelector('button');
-    button.disabled = true;
-    notice(out, 'Sprawdzam film…');
-    try {
-      try { localStorage.setItem('nick', form.nick.value); } catch {}
-      const r = await api('POST', '/api/channels/main/requests', { url: form.url.value, name: form.nick.value });
-      notice(out, r.status === 'pending_approval'
-        ? `„${r.item.title}” czeka na zatwierdzenie przez właściciela kanału.`
-        : `Dodano „${r.item.title}” do kolejki.`, 'ok');
-      form.url.value = '';
-      refresh();
-    } catch (err) {
-      notice(out, err.message, 'err');
-    } finally {
-      button.disabled = false;
-    }
-  });
-
-  refresh();
-  setInterval(refresh, 3000);
-</script>
+<body class="viewer-page">
+  <div id="root"></div>
 </body>
 </html>

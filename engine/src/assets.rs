@@ -69,11 +69,11 @@ mod tests {
         assert_eq!(mime, "text/html; charset=utf-8");
         assert!(asset_from("app.html", None).is_some());
         assert_eq!(
-            asset_from("common.js", None).unwrap().1,
+            asset_from("app/viewer/main.js", None).unwrap().1,
             "application/javascript; charset=utf-8"
         );
         assert_eq!(
-            asset_from("style.css", None).unwrap().1,
+            asset_from("app/viewer/viewer.css", None).unwrap().1,
             "text/css; charset=utf-8"
         );
     }
