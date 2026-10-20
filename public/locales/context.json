@@ -946,7 +946,7 @@
   "ticker.added_by_host": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. The video was added by the channel owner (\"Host\" is the owner's badge, also used next to queue items).",
   "ticker.address": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. {address} is the request page web address.",
   "ticker.next": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. The video after the current one; {title} is its title.",
-  "ticker.now": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Start of the ticker; {title} is the video on air. Keep the ► sign (the ticker font has it; ▶ is not in Arial).",
+  "ticker.now": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Start of the ticker; {title} is the video on air. Keep the ► sign (the ticker font Arial has it; ▶ is not in Arial). Japanese uses ▶ instead: its ticker font Yu Gothic has no ►.",
   "ticker.qr_caption": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Caption under the QR code in the corner of the stream picture (the code opens the request page). Very short.",
   "titlebar.close": "New interface, title bar: tooltip of the close button. Closing only hides the program to the notification area.",
   "titlebar.maximize": "New interface, title bar: tooltip of the maximize button (same words as Windows uses).",

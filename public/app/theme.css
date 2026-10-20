@@ -48,6 +48,21 @@
   --shadow-pop: 0 8px 20px rgba(0, 0, 0, 0.45);
 }
 
+/* Japanese: Segoe UI has no Japanese glyphs, so name the Windows Japanese UI fonts instead of
+   leaving the choice to the browser's fallback (Latin text stays in Segoe UI / Consolas). */
+:root:lang(ja) {
+  --font: "Segoe UI Variable", "Segoe UI", "Yu Gothic UI", "Meiryo UI", system-ui, sans-serif;
+  --mono: Consolas, "Yu Gothic UI", "Meiryo UI", ui-monospace, monospace;
+}
+
+:lang(ja) .stats {
+  font-family: var(--mono);
+}
+
+:lang(ja) .stats h5 {
+  font-family: var(--font);
+}
+
 *,
 *::before,
 *::after {

@@ -135,6 +135,11 @@ async function assertScreen(page, lang, where, { ignore = FAKE_ENGLISH } = {}) {
   check(!p.sideways, `${lang} ${where}: no horizontal scrolling`, p.sideways);
   check(p.raw.length === 0, `${lang} ${where}: no raw key on screen`, p.raw);
   check(p.untranslated.length === 0, `${lang} ${where}: no English text left`, p.untranslated);
+  if (lang === 'ja') {
+    // Japanese text is drawn with a Japanese UI font (not whatever the browser falls back to).
+    const fonts = await page.evaluate(() => [document.documentElement.lang, ...[document.body, ...document.querySelectorAll('.stats, .stats h5, pre')].map((e) => getComputedStyle(e).fontFamily)]);
+    check(fonts[0] === 'ja' && fonts.slice(1).every((f) => /Yu Gothic UI/.test(f)), `ja ${where}: Japanese UI font stack`, fonts);
+  }
 }
 
 async function openPage(ctx, path, { inWindow = true, width = 1100, height = 680, wait = '.player .play', storedLang = null } = {}) {

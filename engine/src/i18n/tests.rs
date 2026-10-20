@@ -163,6 +163,8 @@ fn t_and_tn_use_the_built_in_dictionaries() {
         );
     }
     assert_eq!(t(Lang::Ja, "ticker.added_by_host", &[]), "追加：ホスト");
+    // The Japanese ticker is drawn with Yu Gothic, which has ▶ but not the ► of Arial.
+    assert_eq!(t(Lang::Ja, "ticker.now", &[("title", "x")]), "▶ 再生中：x");
     assert_eq!(t(Lang::Pl, "no.such.key", &[]), "no.such.key");
     assert_eq!(
         tn(Lang::En, "errors.too_many_active", 1, &[]),
