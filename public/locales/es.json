@@ -354,7 +354,7 @@
   "log.slates_font_missing": "No se encontró el tipo de letra de las pantallas ({path}), así que las pantallas no tienen texto. Configure FONT_FILE en .env.",
   "log.slates_japanese_font_missing": "No hay ningún tipo de letra japonés (YuGothM.ttc, meiryo.ttc) en la carpeta Fonts de Windows. Las pantallas se muestran en inglés.",
   "log.slates_refresh_failed": "No se pudieron actualizar las pantallas: {reason}. Se mantienen las anteriores.",
-  "log.slates_refreshed": "Las pantallas se actualizaron para la nueva dirección pública (conjunto {generation}).",
+  "log.slates_refreshed": "Las pantallas se actualizaron (conjunto {generation}).",
   "log.start": "VRCinema {version}: inicio",
   "log.started_after_update": "Iniciado después de una actualización.",
   "log.status_failed": "fallido",

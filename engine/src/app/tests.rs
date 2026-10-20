@@ -291,6 +291,21 @@ where
     }
 }
 
+/// The newest slate set swapped in under `slates` (the `gN` folder with the highest N), so a
+/// test never depends on how many sets an earlier change happened to make.
+fn newest_set(slates: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(slates)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let n = name.to_str()?.strip_prefix('g')?.parse::<u32>().ok()?;
+            Some((n, e.path()))
+        })
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, path)| path)
+}
+
 // ---------- Start ----------
 
 #[tokio::test]

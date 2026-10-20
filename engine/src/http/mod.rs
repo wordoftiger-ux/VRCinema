@@ -97,6 +97,8 @@ pub struct AppState {
     pub(crate) cpu: Arc<crate::stats::CpuSampler>,
     /// Random per run: viewer tags in the log cannot be matched across restarts.
     viewer_salt: Arc<[u8; 16]>,
+    /// How many times a new public address restarted the film for the ticker's code.
+    ticker_redraws: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl AppState {
@@ -155,6 +157,7 @@ impl AppState {
             viewers: Arc::new(ViewerActivity::new()),
             cpu: Arc::default(),
             viewer_salt: Arc::new(random_salt()),
+            ticker_redraws: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -221,19 +224,21 @@ impl AppState {
                 SwapOutcome::Replaced {
                     generation,
                     address_changed,
+                    reconnecting,
                 } => {
                     (state.log)(Msg::new("log.slates_refreshed").arg("generation", generation));
                     for notice in swapper.notices() {
                         (state.log)(notice);
                     }
-                    state.after_slates_replaced(address_changed);
+                    state.after_slates_replaced(address_changed, reconnecting);
                 }
                 SwapOutcome::Failed {
                     reason,
                     address_changed,
+                    reconnecting,
                 } => {
                     (state.log)(Msg::new("log.slates_refresh_failed").arg_msg("reason", reason));
-                    state.after_slates_replaced(address_changed);
+                    state.after_slates_replaced(address_changed, reconnecting);
                 }
             }
         });
@@ -318,16 +323,33 @@ impl AppState {
     /// A new slate set went on air. For another public address the QR code the info ticker
     /// draws is out of date too: the film on air starts again from where it is with the new
     /// one (`Command::ApplyTicker`, joined with other changes within 700 ms).
-    pub(crate) fn after_slates_replaced(&self, address_changed: bool) {
-        if !address_changed {
+    ///
+    /// `reconnecting`: the address went away while the tunnel is getting a new one; the film
+    /// waits for that new address (one restart instead of two). A tunnel switched off or
+    /// failed (no address, not connecting) restarts it at once, so the code of a dead address
+    /// does not stay on the stream.
+    pub(crate) fn after_slates_replaced(&self, address_changed: bool, reconnecting: bool) {
+        if !address_changed || reconnecting {
             return;
         }
         let draws_code = self.settings().is_ok_and(|s| {
             s.ticker.enabled && s.ticker.qr != crate::pipeline::ticker::TickerQr::Off
         });
-        if draws_code {
-            self.send_command(Command::ApplyTicker);
+        if draws_code
+            && self.send_command(Command::ApplyTickerCode {
+                public_url: self.live.public_url.get(),
+            })
+        {
+            self.ticker_redraws
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    /// How many times a new public address restarted the film for the ticker's code.
+    #[cfg(test)]
+    pub(crate) fn ticker_redraws(&self) -> usize {
+        self.ticker_redraws
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Stores whether the info ticker starts switched on, unless the channel has a value

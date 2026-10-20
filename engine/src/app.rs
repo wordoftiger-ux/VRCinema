@@ -825,20 +825,24 @@ impl AppCore {
             SwapOutcome::Replaced {
                 generation,
                 address_changed,
+                reconnecting,
             } => {
                 self.log(Msg::new("log.slates_refreshed").arg("generation", generation));
                 for notice in swapper.notices() {
                     self.log(notice);
                 }
-                live.state.after_slates_replaced(address_changed);
+                live.state
+                    .after_slates_replaced(address_changed, reconnecting);
             }
             SwapOutcome::Failed {
                 reason,
                 address_changed,
+                reconnecting,
             } => {
                 self.log(Msg::new("log.slates_refresh_failed").arg_msg("reason", reason));
                 // The ticker's code follows the address in effect, slates or not.
-                live.state.after_slates_replaced(address_changed);
+                live.state
+                    .after_slates_replaced(address_changed, reconnecting);
             }
         }
     }

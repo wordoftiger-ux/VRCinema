@@ -346,7 +346,7 @@
   "log.slates_font_missing": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {path} is the font file path. FONT_FILE is a setting name in the .env file - keep it as is.",
   "log.slates_japanese_font_missing": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Shown when the slate language is Japanese but Windows has no Japanese font; the slates then stay in English. YuGothM.ttc and meiryo.ttc are file names - keep them.",
   "log.slates_refresh_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {reason} is why.",
-  "log.slates_refreshed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {generation} is a number.",
+  "log.slates_refreshed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Written whenever a new slate set goes on air: for a new public address, a new slate language or while the tunnel connects, so it names no reason. {generation} is a number.",
   "log.start": "Log entry (Settings, Log tab; the log file on disk keeps the English text). First entry of a run; {version} is the program version.",
   "log.started_after_update": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The program was restarted by its own update.",
   "log.status_failed": "Word used inside log entries (Settings, Log tab). Status of a queue item; lowercase, fits after \"(\".",

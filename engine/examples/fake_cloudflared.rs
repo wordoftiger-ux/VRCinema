@@ -13,6 +13,8 @@
 //! - `stderr`: lines printed to stderr;
 //! - `ready_down_while`: a file name; `/ready` answers 503 while that file exists in the fake's
 //!   folder (a loss the test starts and ends on its own clock);
+//! - `no_hostname_while`: a file name; `/quicktunnel` reports `""` while that file exists (a
+//!   new quick tunnel whose address comes when the test says so);
 //! - `exit_after_ms` + `exit_code`: exit on its own (runs until killed when absent).
 //!
 //! Every start appends `{"event":"start","pid","args","ms","overlap"}` to `fake_cloudflared.log`
@@ -42,6 +44,7 @@ struct Run {
     ready_after_ms: u64,
     ready_down: Vec<[u64; 2]>,
     ready_down_while: Option<String>,
+    no_hostname_while: Option<String>,
     stderr: Vec<String>,
     exit_after_ms: Option<u64>,
     exit_code: i32,
@@ -56,6 +59,7 @@ impl Default for Run {
             ready_after_ms: 0,
             ready_down: Vec::new(),
             ready_down_while: None,
+            no_hostname_while: None,
             stderr: Vec::new(),
             exit_after_ms: None,
             exit_code: 0,
@@ -144,10 +148,21 @@ fn answer(mut stream: TcpStream, run: &Run, started: Instant, dir: &Path) {
         let _ = file.write_all(format!("{path}\n").as_bytes());
     }
     let (status, body) = match path {
-        "/quicktunnel" => (
-            "200 OK",
-            serde_json::json!({ "hostname": run.hostname.clone().unwrap_or_default() }).to_string(),
-        ),
+        "/quicktunnel" => {
+            let hidden = run
+                .no_hostname_while
+                .as_ref()
+                .is_some_and(|file| dir.join(file).exists());
+            let hostname = if hidden {
+                String::new()
+            } else {
+                run.hostname.clone().unwrap_or_default()
+            };
+            (
+                "200 OK",
+                serde_json::json!({ "hostname": hostname }).to_string(),
+            )
+        }
         "/ready" => {
             if is_ready(run, started, dir) {
                 (

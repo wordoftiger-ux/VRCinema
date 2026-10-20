@@ -188,6 +188,8 @@ fn remove_after_exit(seg: Arc<ClipSegmenter>, dir: PathBuf) {
 struct TickerRun {
     task: tokio::task::AbortHandle,
     slow: Arc<AtomicBool>,
+    /// The request address whose QR code this ticker draws (`""`: no code).
+    code: String,
 }
 
 /// The same clip without the ticker, started when ffmpeg cannot draw it (e.g. a broken font)
@@ -329,6 +331,10 @@ impl ClipHandle for RealClipHandle {
             .is_some_and(|t| t.slow.load(Ordering::Relaxed))
     }
 
+    fn ticker_code(&self) -> Option<String> {
+        self.ticker.as_ref().map(|t| t.code.clone())
+    }
+
     /// Non-blocking: kills ffmpeg, and a background task removes the directory once the process
     /// has really exited (Windows keeps open files locked until then).
     fn dispose(&mut self) {
@@ -407,6 +413,8 @@ impl ContentSource {
 /// The ticker of a clip about to start: its filters and the writer of its texts.
 struct PreparedTicker {
     overlay: String,
+    /// The request address whose QR code the overlay draws (`""`: no code).
+    code: String,
     writer: TickerWriter,
     source: ContentSource,
 }
@@ -612,8 +620,14 @@ fn prepare_ticker(
             text_budget_px: budget,
         },
     );
+    let code = if qr_size.is_some() {
+        content.address.clone()
+    } else {
+        String::new()
+    };
     Some(PreparedTicker {
         overlay,
+        code,
         writer,
         source,
     })
@@ -793,6 +807,7 @@ async fn start_clip(
             let run = TickerRun {
                 task: task.abort_handle(),
                 slow,
+                code: prepared.code,
             };
             (seg, Some(run), Some(fallback))
         }
@@ -1421,6 +1436,11 @@ mod tests {
         );
         assert_eq!(read(CAPTION_FILE), "Add a video");
         assert!(out_dir.join(QR_FILE).is_file());
+        // The channel knows which address the code on air is for (final wave I1).
+        assert_eq!(
+            handle.ticker_code().as_deref(),
+            Some("https://kanal.example.com/")
+        );
         assert!(!handle.copies_video(), "the ticker forces the conversion");
         assert!(
             f.lines.lock().unwrap()[0].contains("transcoding"),
@@ -1481,6 +1501,7 @@ mod tests {
         let out_dir = f.clips.join(format!("{}-0-1", f.item.id));
         assert!(out_dir.exists());
         assert!(!out_dir.join(TEXT_FILE).exists());
+        assert_eq!(handle.ticker_code(), None, "no ticker, no code");
         assert!(handle.copies_video());
         let lines = f.lines.lock().unwrap().clone();
         assert!(

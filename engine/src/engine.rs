@@ -55,6 +55,11 @@ pub enum Command {
     /// The ticker's layout changed (switch, mode, interval, speed, code, progress line): the
     /// current film starts again from where it is (a live stream: from the next item).
     ApplyTicker,
+    /// The public address changed: like `ApplyTicker` for the ticker's QR code, unless the
+    /// film on air already draws the code of `public_url` (see [`Channel::apply_ticker_code`]).
+    ApplyTickerCode {
+        public_url: String,
+    },
 }
 
 /// What HTTP reads: the state right after the latest tick.
@@ -90,6 +95,7 @@ pub trait ChannelControl: SegmentSource + Send {
     fn seek_by(&mut self, delta_s: f64);
     fn play_now(&mut self, item_id: i64) -> anyhow::Result<()>;
     fn apply_ticker(&mut self);
+    fn apply_ticker_code(&mut self, public_url: &str);
     /// Called every tick before the broadcaster (runs a seek once its quiet has passed).
     fn on_tick(&mut self);
     fn state(&self) -> ChannelState;
@@ -137,6 +143,9 @@ impl ChannelControl for Channel {
     }
     fn apply_ticker(&mut self) {
         Channel::apply_ticker(self)
+    }
+    fn apply_ticker_code(&mut self, public_url: &str) {
+        Channel::apply_ticker_code(self, public_url)
     }
     fn on_tick(&mut self) {
         Channel::on_tick(self)
@@ -466,7 +475,8 @@ where
                     | Command::SeekBy { .. }
                     | Command::Restart
                     | Command::PlayNow { .. }
-                    | Command::ApplyTicker => {}
+                    | Command::ApplyTicker
+                    | Command::ApplyTickerCode { .. } => {}
                 }
                 let play_now = matches!(command, Command::PlayNow { .. });
                 match guarded(|| core.apply(command)) {
@@ -542,6 +552,10 @@ impl<C: ChannelControl> Core<C> {
             Command::PlayNow { item_id } => self.channel.play_now(item_id),
             Command::ApplyTicker => {
                 self.channel.apply_ticker();
+                Ok(())
+            }
+            Command::ApplyTickerCode { public_url } => {
+                self.channel.apply_ticker_code(&public_url);
                 Ok(())
             }
         }
@@ -773,6 +787,9 @@ mod tests {
         fn apply_ticker(&mut self) {
             self.probe.event("apply_ticker".to_string());
         }
+        fn apply_ticker_code(&mut self, public_url: &str) {
+            self.probe.event(format!("apply_ticker_code {public_url}"));
+        }
         fn on_tick(&mut self) {
             self.probe.ticks.fetch_add(1, Ordering::SeqCst);
         }
@@ -982,6 +999,9 @@ mod tests {
             Command::Restart,
             Command::PlayNow { item_id: 5 },
             Command::ApplyTicker,
+            Command::ApplyTickerCode {
+                public_url: "https://a.example.com".into(),
+            },
             Command::Resume(PauseReason::Manual),
         ] {
             handle.commands.send(command).await.unwrap();
@@ -997,6 +1017,7 @@ mod tests {
                 "seek_to 0",
                 "play_now 5",
                 "apply_ticker",
+                "apply_ticker_code https://a.example.com",
                 "resume manual"
             ]
         );

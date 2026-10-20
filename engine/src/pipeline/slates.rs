@@ -493,13 +493,22 @@ pub enum SwapOutcome {
     /// A new set was made and handed to the channel loop. `address_changed`: for another
     /// public address (not only another language or "connecting"), so a QR code drawn
     /// elsewhere (the info ticker) is out of date too.
+    ///
+    /// `reconnecting`: the new set says "connecting" (no address while the tunnel is still
+    /// getting one, e.g. a quick tunnel that lost its address): the ticker's code waits for the
+    /// new address instead of restarting the film for the gap.
     Replaced {
         generation: u32,
         address_changed: bool,
+        reconnecting: bool,
     },
-    /// No new set: the previous one stays on air. `address_changed` as for `Replaced` (the
-    /// address changed even though its slates could not be made).
-    Failed { reason: Msg, address_changed: bool },
+    /// No new set: the previous one stays on air. `address_changed` and `reconnecting` as for
+    /// `Replaced` (the address changed even though its slates could not be made).
+    Failed {
+        reason: Msg,
+        address_changed: bool,
+        reconnecting: bool,
+    },
 }
 
 /// Replaces the slate set of a running channel when the public address changes: the new set is
@@ -628,6 +637,7 @@ impl SlateSwapper {
         }
         let public_url = address.public_url.as_str();
         let address_changed = state.address.public_url != address.public_url;
+        let reconnecting = address.connecting;
         let generation = state.generation + 1;
         let dir = self.root.join(format!("g{generation}"));
         let made = generate_slates(&SlateOptions {
@@ -649,6 +659,7 @@ impl SlateSwapper {
                 return SwapOutcome::Failed {
                     reason: e.message(),
                     address_changed,
+                    reconnecting,
                 };
             }
         };
@@ -658,6 +669,7 @@ impl SlateSwapper {
             return SwapOutcome::Failed {
                 reason: Msg::new("log.channel_loop_not_running"),
                 address_changed,
+                reconnecting,
             };
         }
         *self.notices.lock().unwrap_or_else(PoisonError::into_inner) = notices;
@@ -676,6 +688,7 @@ impl SlateSwapper {
         SwapOutcome::Replaced {
             generation,
             address_changed,
+            reconnecting,
         }
     }
 }
@@ -1296,7 +1309,8 @@ mod tests {
             swapper.swap_to(same(Lang::En), &tx).await,
             SwapOutcome::Replaced {
                 generation: 1,
-                address_changed: false
+                address_changed: false,
+                reconnecting: false
             }
         );
         let Ok(Command::ReplaceSlates(en)) = rx.try_recv() else {
@@ -1312,7 +1326,8 @@ mod tests {
             swapper.swap_to(same(Lang::Pl), &tx).await,
             SwapOutcome::Replaced {
                 generation: 2,
-                address_changed: false
+                address_changed: false,
+                reconnecting: false
             }
         );
         assert_eq!(title("g2"), "Brak filmów w kolejce");
@@ -1404,7 +1419,8 @@ mod tests {
             swapper.swap("https://nowy.example.com", &tx).await,
             SwapOutcome::Replaced {
                 generation: 1,
-                address_changed: true
+                address_changed: true,
+                reconnecting: false
             }
         );
         let Ok(Command::ReplaceSlates(second)) = rx.try_recv() else {
@@ -1425,7 +1441,8 @@ mod tests {
             swapper.swap("", &tx).await,
             SwapOutcome::Replaced {
                 generation: 2,
-                address_changed: true
+                address_changed: true,
+                reconnecting: false
             }
         );
         let Ok(Command::ReplaceSlates(third)) = rx.try_recv() else {
@@ -1454,7 +1471,8 @@ mod tests {
             swapper.swap_to(connecting, &tx).await,
             SwapOutcome::Replaced {
                 generation: 1,
-                address_changed: false
+                address_changed: false,
+                reconnecting: true
             }
         );
         let Ok(Command::ReplaceSlates(set)) = rx.try_recv() else {
@@ -1538,7 +1556,8 @@ mod tests {
             swapper.swap("https://b.example.com", &tx).await,
             SwapOutcome::Replaced {
                 generation: 2,
-                address_changed: true
+                address_changed: true,
+                reconnecting: false
             }
         ));
         assert!(root.path().join("g1").is_dir());
@@ -1569,6 +1588,7 @@ mod tests {
         let SwapOutcome::Failed {
             reason: why,
             address_changed: true,
+            reconnecting: false,
         } = outcome
         else {
             panic!("{outcome:?}");
@@ -1644,14 +1664,16 @@ mod tests {
             a,
             SwapOutcome::Replaced {
                 generation: 1,
-                address_changed: true
+                address_changed: true,
+                reconnecting: false
             }
         );
         assert_eq!(
             b,
             SwapOutcome::Replaced {
                 generation: 2,
-                address_changed: true
+                address_changed: true,
+                reconnecting: false
             }
         );
         let Ok(Command::ReplaceSlates(one)) = rx.try_recv() else {

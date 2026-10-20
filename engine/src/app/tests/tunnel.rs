@@ -966,6 +966,145 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
     app.stop().await;
 }
 
+/// The info ticker on, with its QR code (the case where a new address restarts the film).
+async fn ticker_with_code(app: &App, cookie: &str) {
+    let (status, res) = app
+        .call(
+            "PUT",
+            "/api/admin/channels/main/settings",
+            Some(cookie),
+            Some(json!({"tickerEnabled": true, "tickerQr": "always"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+}
+
+/// How many times a new public address restarted the film for the ticker's code.
+fn ticker_redraws(app: &App) -> usize {
+    app.engine().core.live().unwrap().state.ticker_redraws()
+}
+
+/// The newest slate set, once it shows a QR code that decodes to `url`'s request page.
+async fn slates_for(slates: &Path, url: &str) -> PathBuf {
+    let page = format!("{url}/");
+    eventually(90, &format!("the slates for {url}"), || async {
+        newest_set(slates).is_some_and(|set| {
+            let qr = set.join("idle").join("qr.png");
+            qr.is_file() && decode_qr(&qr) == [page.clone()]
+        })
+    })
+    .await;
+    newest_set(slates).unwrap()
+}
+
+/// Waits until `set` was handed to the channel (the log names its number; whatever follows
+/// the swap, such as the ticker's restart, runs right after).
+async fn handed_over(app: &App, set: &Path) {
+    let n = set.file_name().unwrap().to_str().unwrap()[1..].to_string();
+    eventually(120, &format!("set {n} on air"), || async {
+        app.log_text().contains(&format!("(set {n})"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// The newest slate set, once it is a set without a code made after `previous`.
+async fn slates_without_code(slates: &Path, previous: &Path) -> PathBuf {
+    eventually(90, "the slates without a code", || async {
+        newest_set(slates).is_some_and(|set| {
+            set != previous
+                && set.join("idle").join("title.txt").is_file()
+                && !set.join("idle").join("qr.png").exists()
+        })
+    })
+    .await;
+    newest_set(slates).unwrap()
+}
+
+/// Final wave I1: with the ticker drawing its code, a quick tunnel that loses its address
+/// and gets a new one restarts the film once (for the new address), not also for the gap in
+/// between (the connecting slates).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_to_a_new_address_restarts_the_film_for_the_ticker_once() {
+    let second = "drugi.trycloudflare.com";
+    let Some(app) = start(Setup {
+        tools: true,
+        settings: json!({"pauseOnTunnelLoss": false}),
+        // The connection is lost once the test creates `offline`; the next cloudflared gets
+        // another address once the file is gone.
+        runs: Some(json!([
+            { "hostname": QUICK_HOST, "ready_down_while": "offline" },
+            { "hostname": second, "no_hostname_while": "offline" }
+        ])),
+        tunnel: TunnelTimings {
+            reconnect_limit: Duration::from_millis(1500),
+            ..fast_tunnel()
+        },
+        ..Setup::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let cookie = app.window_cookie().await;
+    ticker_with_code(&app, &cookie).await;
+    wait_online(&app, &cookie).await;
+    let slates = app.home.join("data").join("slates");
+    let first = slates_for(&slates, &format!("https://{QUICK_HOST}")).await;
+    handed_over(&app, &first).await;
+    let before = ticker_redraws(&app);
+    let offline = app.home.join("tools").join("offline");
+    std::fs::write(&offline, "").unwrap();
+    eventually(20, "the second cloudflared", || async {
+        fake_starts(&app.home).len() >= 2
+    })
+    .await;
+    let gap = slates_without_code(&slates, &first).await;
+    handed_over(&app, &gap).await;
+    assert_eq!(
+        ticker_redraws(&app),
+        before,
+        "the film restarted for the connecting gap"
+    );
+    std::fs::remove_file(&offline).unwrap();
+    let tunnel = wait_online(&app, &cookie).await;
+    assert_eq!(tunnel["url"], format!("https://{second}"));
+    let new = slates_for(&slates, &format!("https://{second}")).await;
+    handed_over(&app, &new).await;
+    assert_eq!(ticker_redraws(&app) - before, 1, "one restart per address");
+    assert!(pause_reasons(&app.engine().core).is_empty());
+    app.stop().await;
+}
+
+/// Final wave I1: switching the tunnel off is no reconnect: the film restarts at once (one
+/// time), so the code of the dead tunnel address does not stay on the stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_the_tunnel_off_restarts_the_film_for_the_ticker_once() {
+    let Some(app) = start(Setup {
+        tools: true,
+        ..Setup::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let cookie = app.window_cookie().await;
+    ticker_with_code(&app, &cookie).await;
+    wait_online(&app, &cookie).await;
+    let slates = app.home.join("data").join("slates");
+    let first = slates_for(&slates, &format!("https://{QUICK_HOST}")).await;
+    handed_over(&app, &first).await;
+    let before = ticker_redraws(&app);
+    let (status, res) = app
+        .put_config(&cookie, json!({"tunnelEnabled": false}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{res}");
+    let manual = slates_without_code(&slates, &first).await;
+    handed_over(&app, &manual).await;
+    assert_eq!(ticker_redraws(&app) - before, 1);
+    app.stop().await;
+}
+
 // ---------- Upgrade from stage 2 (final review C1) ----------
 
 /// A home as stage 2 leaves it: the wizard done, every tool there except cloudflared (dummy

@@ -350,7 +350,7 @@
   "log.slates_font_missing": "待機画面のフォント（{path}）が見つからないため、待機画面に文字が表示されません。.envでFONT_FILEを設定してください。",
   "log.slates_japanese_font_missing": "Windowsのフォントフォルダーに日本語フォント（YuGothM.ttc、meiryo.ttc）がありません。待機画面は英語で表示されます。",
   "log.slates_refresh_failed": "待機画面を更新できませんでした：{reason}。以前の待機画面をそのまま使用します。",
-  "log.slates_refreshed": "新しい公開アドレスに合わせて待機画面を更新しました（セット{generation}）。",
+  "log.slates_refreshed": "待機画面を更新しました（セット{generation}）。",
   "log.start": "VRCinema {version}：起動",
   "log.started_after_update": "アップデート後に起動しました。",
   "log.status_failed": "失敗",

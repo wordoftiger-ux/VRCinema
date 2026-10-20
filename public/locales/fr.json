@@ -354,7 +354,7 @@
   "log.slates_font_missing": "La police des écrans d’attente ({path}) est introuvable : ils n’ont donc pas de texte. Définissez FONT_FILE dans .env.",
   "log.slates_japanese_font_missing": "Aucune police japonaise (YuGothM.ttc, meiryo.ttc) dans le dossier Fonts de Windows. Les écrans d’attente sont en anglais.",
   "log.slates_refresh_failed": "Impossible d’actualiser les écrans d’attente : {reason}. Les précédents restent en place.",
-  "log.slates_refreshed": "Les écrans d’attente ont été actualisés pour la nouvelle adresse publique (série {generation}).",
+  "log.slates_refreshed": "Les écrans d’attente ont été actualisés (série {generation}).",
   "log.start": "VRCinema {version} : démarrage",
   "log.started_after_update": "Démarré après une mise à jour.",
   "log.status_failed": "en échec",

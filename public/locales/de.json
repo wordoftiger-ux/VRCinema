@@ -352,7 +352,7 @@
   "log.slates_font_missing": "Die Schrift der Tafeln ({path}) wurde nicht gefunden, daher haben die Tafeln keinen Text. Legen Sie FONT_FILE in .env fest.",
   "log.slates_japanese_font_missing": "Keine japanische Schrift (YuGothM.ttc, meiryo.ttc) im Windows-Schriftartenordner. Die Tafeln sind auf Englisch.",
   "log.slates_refresh_failed": "Die Tafeln konnten nicht aktualisiert werden: {reason}. Die bisherigen Tafeln bleiben.",
-  "log.slates_refreshed": "Die Tafeln wurden für die neue öffentliche Adresse aktualisiert (Satz {generation}).",
+  "log.slates_refreshed": "Die Tafeln wurden aktualisiert (Satz {generation}).",
   "log.start": "VRCinema {version}: Start",
   "log.started_after_update": "Nach einem Update gestartet.",
   "log.status_failed": "fehlgeschlagen",

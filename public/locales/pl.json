@@ -356,7 +356,7 @@
   "log.slates_font_missing": "Nie znaleziono czcionki plansz ({path}), więc plansze są bez tekstu. Ustaw FONT_FILE w .env.",
   "log.slates_japanese_font_missing": "Brak japońskiej czcionki (YuGothM.ttc, meiryo.ttc) w folderze czcionek Windows. Plansze są po angielsku.",
   "log.slates_refresh_failed": "Nie udało się odświeżyć plansz: {reason}. Zostają poprzednie plansze.",
-  "log.slates_refreshed": "Plansze odświeżone dla nowego adresu publicznego (zestaw {generation}).",
+  "log.slates_refreshed": "Plansze odświeżone (zestaw {generation}).",
   "log.start": "VRCinema {version}: start",
   "log.started_after_update": "Uruchomiono po aktualizacji.",
   "log.status_failed": "nieudany",

@@ -1694,16 +1694,24 @@ async fn a_new_public_address_restarts_the_film_when_the_ticker_draws_its_code()
         })
     };
     // The ticker is off by default: nothing to redraw.
-    state.after_slates_replaced(true);
+    state.after_slates_replaced(true, false);
     assert!(h.commands().is_empty());
     set(&h, json!({"tickerEnabled": true}));
-    state.after_slates_replaced(true);
-    assert_eq!(h.commands(), [Command::ApplyTicker]);
+    state.after_slates_replaced(true, false);
+    assert_eq!(
+        h.commands(),
+        [Command::ApplyTickerCode {
+            public_url: String::new()
+        }]
+    );
+    // The address went away while the tunnel gets a new one: the film waits for that one.
+    state.after_slates_replaced(true, true);
+    assert!(h.commands().is_empty());
     // Another language only: the code is the same.
-    state.after_slates_replaced(false);
+    state.after_slates_replaced(false, false);
     assert!(h.commands().is_empty());
     set(&h, json!({"tickerQr": "off"}));
-    state.after_slates_replaced(true);
+    state.after_slates_replaced(true, false);
     assert!(h.commands().is_empty());
 }
 

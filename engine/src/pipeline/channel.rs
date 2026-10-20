@@ -17,7 +17,7 @@ use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
 use crate::i18n::{Msg, error_msg, msg_error};
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
-use crate::pipeline::slates::{SlateKind, Slates};
+use crate::pipeline::slates::{SlateKind, Slates, request_url};
 use crate::stats::{ChannelStats, ClipStats, FfmpegInfo, NextInfo, NextState, OnAirInfo};
 
 /// A boxed, sendable future (like `futures::future::BoxFuture`).
@@ -42,6 +42,11 @@ pub trait ClipHandle: Send {
     /// The conversion the info ticker needs has been too slow for 30 s.
     fn ticker_slow(&self) -> bool {
         false
+    }
+    /// The request address whose QR code this clip's ticker draws (`Some("")`: a ticker
+    /// without a code); `None`: no ticker, or not known.
+    fn ticker_code(&self) -> Option<String> {
+        None
     }
     /// What the stats show about this clip (analysis, mode, process).
     fn stats(&self) -> ClipStats {
@@ -718,6 +723,22 @@ impl Channel {
             Some(c) if c.item.is_live => self.log(Msg::new("log.ticker_live_next_item")),
             Some(_) => self.request(SeekRequest::By(0.0), true),
         }
+    }
+
+    /// The public address became `public_url`: like [`Self::apply_ticker`] for the ticker's QR
+    /// code, unless the process on air already draws the code of that address (it was started
+    /// after the change, e.g. by a resume when the tunnel came back).
+    pub fn apply_ticker_code(&mut self, public_url: &str) {
+        let wanted = request_url(public_url);
+        let drawn = self
+            .current
+            .as_ref()
+            .and_then(|c| c.handle.as_ref())
+            .and_then(|h| h.ticker_code());
+        if drawn.is_some_and(|code| code == wanted) {
+            return;
+        }
+        self.apply_ticker();
     }
 
     /// Called by the engine loop every tick: runs a seek whose quiet has passed and warns
@@ -1542,6 +1563,7 @@ mod tests {
         item_id: i64,
         start_at_s: f64,
         ticker_slow: bool,
+        ticker_code: Option<String>,
     }
 
     /// Test-side view of a fake handle (shared with the handle the channel owns).
@@ -1599,6 +1621,9 @@ mod tests {
         }
         fn ticker_slow(&self) -> bool {
             self.fake.lock().ticker_slow
+        }
+        fn ticker_code(&self) -> Option<String> {
+            self.fake.lock().ticker_code.clone()
         }
         fn poll(&mut self) -> Vec<SegmentInfo> {
             std::mem::take(&mut self.fake.lock().pending)
@@ -1728,6 +1753,7 @@ mod tests {
                     item_id: item.id,
                     start_at_s,
                     ticker_slow: false,
+                    ticker_code: None,
                 })));
                 shared.lock().unwrap().handles.push(fake.clone());
                 Ok(Box::new(FakeHandle {
@@ -3595,6 +3621,37 @@ mod tests {
         assert_eq!(e.key(), relaunched_key(&a, 0, 1));
         assert_eq!(e.starts(), 2);
         assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+    }
+
+    /// Final wave I1: a new public address restarts the film for the ticker's code only when
+    /// its process does not draw the code of that address already.
+    #[tokio::test]
+    async fn a_new_address_restarts_the_film_only_when_its_code_is_out_of_date() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        // Started after the change (by a resume): it draws the new code already.
+        h0.lock().ticker_code = Some("https://nowy.example.com/".to_string());
+        e.channel.apply_ticker_code("https://nowy.example.com");
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        assert!(!h0.disposed());
+        // Another address: one restart, as for a new look.
+        e.channel.apply_ticker_code("https://inny.example.com");
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert!(h0.disposed());
+        assert_eq!(e.starts(), 2);
+        // A clip whose code is not known (no ticker drawn) is restarted too.
+        e.factory.handle(1).produce(1);
+        e.channel.apply_ticker_code("https://inny.example.com");
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 3);
     }
 
     /// A seek and a new ticker look at once: one restart, at the seek's target. Pausing while
