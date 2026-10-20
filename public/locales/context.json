@@ -980,6 +980,7 @@
   "viewer.add_button": "Request page (the page viewers open): button that adds the video link to the queue. Short.",
   "viewer.add_heading": "Request page: small heading of the form with the video link and the nick.",
   "viewer.added": "Request page: short message after a video was queued. {title} is the video's title.",
+  "viewer.added_by_host": "Request page: detail of a video the channel owner added, shown where a viewer's nick would be (Now playing and Up next). Lower case, short, impersonal; \"host\" is the owner's badge (ticker.added_by_host).",
   "viewer.adding": "Request page: label of the add button while the channel checks the link (can take several seconds).",
   "viewer.channel_link": "Request page: screen-reader name of the box that holds the channel's address (in the 'How to watch' section).",
   "viewer.copied": "Request page: the copy button for a second after the channel address was copied.",

@@ -9,14 +9,20 @@ Languages: `en` (pattern), `pl`, `es`, `de`, `fr`, `ja` (beta).
 
 ## Style rules
 
-| | Address | Register and form | Typography |
+Two audiences, two registers: the **owner's program** (window, remote panel, tray, log, wizard —
+every key outside `viewer.*`) addresses the owner **formally**; the **request page** (`viewer.*`
+keys, and the errors only that page shows: `errors.nick_reserved`, `errors.nick_taken`,
+`errors.too_many_active`, `errors.too_many_requests`) addresses players **informally**. Errors
+the panel shows too stay formal.
+
+| | Address: program / request page | Register and form | Typography |
 |---|---|---|---|
-| **en** | "you" | Plain, short sentences; buttons are verbs ("Copy link"). | “ ” for quotes in the interface; `"` in log and console texts. |
-| **pl** | "ty" (informal, as today) | Impersonal forms about viewers: "dodane przez", "zgłoszone przez". | „ ” for quotes. |
-| **es** | Neutral or "usted"; never "tú" | Avoid gendered forms about viewers: "añadido por {name}" refers to the video. Infinitive on buttons ("Copiar enlace"). | « » or “ ” consistently (pick “ ” to match the interface); ¿…? ¡…! |
-| **de** | "Sie" (formal) | Impersonal forms about viewers ("hinzugefügt von {name}", "gewünscht von {name}"); infinitive on buttons ("Link kopieren"); progress as passive ("Wird geladen…"). Generic masculine for roles (Zuschauer, Betreiber). | „ “ for quotes; "z. B."; space before units and "%" ("CPU 12 %"). |
-| **fr** | "vous" | Impersonal forms about viewers ("ajouté par {name}"); infinitive on buttons ("Copier le lien"). | « » with a narrow no-break space inside; no-break space before ? ! : ; |
-| **ja** | Polite | です/ます for sentences; short nouns on buttons and labels (「コピー」「スキップ」); no personal pronouns; consistent katakana for loanwords (the table); impersonal "追加: {name}" style about viewers. | 「 」 for quotes; full-width punctuation 。、 in sentences, none at the end of buttons. |
+| **en** | "you" / "you" | Plain, short sentences; buttons are verbs ("Copy link"). | “ ” for quotes in the interface; `"` in log and console texts. |
+| **pl** | "ty" / "ty" (informal, as today) | Impersonal forms about viewers: "dodane przez", "zgłoszone przez". | „ ” for quotes. |
+| **es** | "usted" or neutral / "tú" | Avoid gendered forms about viewers: "añadido por {name}" refers to the video. Infinitive on buttons ("Copiar enlace"). | « » or “ ” consistently (pick “ ” to match the interface); ¿…? ¡…! |
+| **de** | "Sie" / "du" | Impersonal forms about viewers ("hinzugefügt von {name}", "gewünscht von {name}"); infinitive on buttons ("Link kopieren"); progress and waiting as passive or noun forms, never first person ("Wird geladen…", "Wird verbunden…", "Internetverbindung wird hergestellt…", "Warten auf die Anmeldung…", "{url} wird heruntergeladen"); results as "… ist fehlgeschlagen", not "hat nicht geklappt". Generic masculine for roles (Zuschauer, Betreiber). Hints that name a control quote its label exactly („Nur erlaubte Websites“, „Intervall“, Ansicht „Kanal“). | „ “ for quotes; spaced en dash " – " (never the em dash "—"); "z. B."; space before units and "%" ("CPU 12 %"). |
+| **fr** | "vous" / "tu" | Impersonal forms about viewers ("ajouté par {name}"); infinitive on buttons ("Copier le lien"). | « » with a narrow no-break space inside; no-break space before ? ! : ; |
+| **ja** | Polite (both) | です/ます for sentences; short nouns on buttons and labels (「コピー」「スキップ」); no personal pronouns; consistent katakana for loanwords (the table); impersonal "追加: {name}" style about viewers. | 「 」 for quotes; full-width punctuation 。、 in sentences, none at the end of buttons. |
 
 Common to all languages:
 
@@ -48,6 +54,7 @@ Common to all languages:
 | Slate language — language of slates and ticker | language of the slates | język plansz | idioma de las pantallas | Sprache der Tafeln | langue des écrans | 画面の言語 |
 | Info ticker — text band burned into the stream | info ticker | pasek informacyjny | barra informativa | Laufband | bandeau d’information | テロップ |
 | Message (owner's text in the ticker) | message | wiadomość | mensaje | Nachricht | message | メッセージ |
+| Interval (ticker mode "from time to time") | interval | odstęp | intervalo | Intervall | intervalle | 間隔 |
 | Progress line (ticker) | progress line | pasek postępu | línea de progreso | Fortschrittslinie | ligne de progression | 進行バー |
 | Tunnel — built-in Cloudflare connection | tunnel | tunel | túnel | Tunnel | tunnel | トンネル |
 | Quick tunnel / quick link — random trycloudflare.com address | quick tunnel / quick link | szybki tunel / szybki link | túnel rápido / enlace rápido | Schnelltunnel / schneller Link | tunnel rapide / lien rapide | クイックトンネル / クイックリンク |
@@ -60,6 +67,7 @@ Common to all languages:
 | Viewer | viewer | widz | espectador | Zuschauer | spectateur | 視聴者 |
 | Owner — the person running the program | owner | właściciel | propietario | Betreiber | propriétaire | オーナー |
 | Host — the owner's badge and reserved nick (must match `engine/src/nicks.rs`) | Host | Gospodarz | Anfitrión | Gastgeber | Hôte | ホスト |
+| Added by the host (request page, `viewer.added_by_host`; the program's own queue says "added here", `queue.by_host`) | added by the host | dodane przez gospodarza | añadido por el anfitrión | vom Gastgeber hinzugefügt | ajouté par l’hôte | ホストが追加 |
 | Nick — viewer's chosen name | nick | nick | apodo | Nick | pseudo | ニックネーム |
 | Device — a viewer's browser (device key) | device | urządzenie | dispositivo | Gerät | appareil | 端末 |
 | Block / unblock (a device) | block / unblock | zablokuj / odblokuj | bloquear / desbloquear | sperren / entsperren | bloquer / débloquer | ブロック / ブロック解除 |
@@ -67,9 +75,9 @@ Common to all languages:
 | Anonymous | anonymous | anonimowo | anónimo | anonym | anonyme | 匿名 |
 | Approval / approve / reject (moderation) | approval / approve / reject | zatwierdzanie / zatwierdź / odrzuć | aprobación / aprobar / rechazar | Freigabe / freigeben / ablehnen | validation / valider / refuser | 承認 / 承認 / 却下 |
 | Waiting for approval | Waiting for approval | Do zatwierdzenia | Pendiente de aprobación | Wartet auf Freigabe | En attente de validation | 承認待ち |
-| Allowed sites (allowlist) | allowed sites | dozwolone serwisy | sitios permitidos | erlaubte Seiten | sites autorisés | 許可サイト |
-| Blocked sites (blocklist) | blocked sites | zablokowane serwisy | sitios bloqueados | gesperrte Seiten | sites bloqués | ブロックしたサイト |
-| Site (a website a link comes from) | site | serwis | sitio | Seite | site | サイト |
+| Allowed sites (allowlist) | allowed sites | dozwolone serwisy | sitios permitidos | erlaubte Websites | sites autorisés | 許可サイト |
+| Blocked sites (blocklist) | blocked sites | zablokowane serwisy | sitios bloqueados | gesperrte Websites | sites bloqués | ブロックしたサイト |
+| Site (a website a link comes from; not a page of the program) | site | serwis | sitio | Website | site | サイト |
 | Limits (for viewers) | limits | limity | límites | Limits | limites | 制限 |
 | Pause / resume | pause / resume | wstrzymaj / wznów | pausar / reanudar | pausieren / fortsetzen | mettre en pause / reprendre | 一時停止 / 再開 |
 | Paused | paused | wstrzymane | en pausa | pausiert | en pause | 一時停止中 |
@@ -108,7 +116,10 @@ Common to all languages:
 
 - **de:** "freigeben" is used both for approving a request (Freigabe) and for releasing a nick;
   the two buttons never appear together. "Fernzugriff" names the remote panel section and the
-  feature ("Passwort für den Fernzugriff"); the interface itself is "Panel". "Seite" means a
-  website (a site a link comes from), "Wunschseite" the request page.
+  feature ("Passwort für den Fernzugriff"); the interface itself is "Panel". "Website" is a
+  site a link comes from (erlaubte/gesperrte Websites, "Download von Websites"); "Seite" only
+  for pages of the program and Cloudflare's login page; "Wunschseite" is the request page.
+  "Übergänge" for discontinuities (stats), "Stream-Kopie" for copying without conversion.
+  Request page in du-form: "Dein Nick", "Füge einen Link … ein", "So schaust du in VRChat zu".
 - **ja:** loanwords in katakana as in the table (キュー, トンネル, テロップ, ニックネーム); the
   host's word ホスト must stay as in `engine/src/nicks.rs`.

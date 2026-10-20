@@ -126,7 +126,7 @@ try {
   check((await rows.nth(3).innerText()).startsWith('Bez tytułu'), 'the stored default title in Polish');
   await page.locator('.v-lang select').selectOption('en');
   await waitFor(async () => (await rows.nth(3).innerText()).startsWith('Untitled'), 'the stored default title is localized');
-  check((await rows.nth(1).innerText()).includes('added here'), 'the owner item says it was added here');
+  check((await rows.nth(1).innerText()).includes('added by the host'), 'the owner item says the host added it (viewer.added_by_host, not the owner-side "added here")');
 
   // ---------- Live: no bar ----------
   await scenario({ playing: 'live' });

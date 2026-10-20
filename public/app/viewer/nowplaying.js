@@ -5,10 +5,10 @@ import { t, videoTitle } from '../i18n.js';
 import { RequesterBadge } from '../components/badge.js';
 import { formatTime } from './format.js';
 
-/** `requested by Tomek`, `added here` for the owner, `requested anonymously`. */
+/** `requested by Tomek`, `added by the host` for the owner, `requested anonymously`. */
 export function requesterText(item) {
   if (item.requesterName) return t('queue.requested_by', { name: item.requesterName });
-  return item.requesterBadge === 'host' ? t('queue.by_host') : t('queue.requested_anonymously');
+  return item.requesterBadge === 'host' ? t('viewer.added_by_host') : t('queue.requested_anonymously');
 }
 
 function Progress({ current }) {

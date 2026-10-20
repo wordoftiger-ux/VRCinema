@@ -1001,6 +1001,7 @@
   "viewer.add_button": "Add to queue",
   "viewer.add_heading": "Add a video",
   "viewer.added": "Added “{title}” to the queue.",
+  "viewer.added_by_host": "added by the host",
   "viewer.adding": "Checking the video…",
   "viewer.channel_link": "Channel link",
   "viewer.copied": "Copied",

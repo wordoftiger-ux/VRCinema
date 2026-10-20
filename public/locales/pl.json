@@ -1015,6 +1015,7 @@
   "viewer.add_button": "Dodaj do kolejki",
   "viewer.add_heading": "Dodaj film",
   "viewer.added": "Dodano „{title}” do kolejki.",
+  "viewer.added_by_host": "dodane przez gospodarza",
   "viewer.adding": "Sprawdzam film…",
   "viewer.channel_link": "Link kanału",
   "viewer.copied": "Skopiowano",
