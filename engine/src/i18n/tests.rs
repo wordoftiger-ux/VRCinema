@@ -489,6 +489,28 @@ fn every_english_key_has_a_context_note() {
     }
 }
 
+/// Final wave I4: the VRChat caveat about Public and Group Public instances is on the request
+/// page in every language (not English text in a fallback), with what to try instead.
+#[test]
+fn the_vrchat_instance_caveat_is_in_every_language() {
+    let en = t(Lang::En, "viewer.howto_untrusted", &[]);
+    for lang in Lang::ALL {
+        let text = t(lang, "viewer.howto_untrusted", &[]);
+        for part in ["Allow Untrusted URLs", "Group Public", "Friends", "Invite"] {
+            assert!(
+                text.contains(part),
+                "{}: no {part} in {text}",
+                lang.as_str()
+            );
+        }
+        assert!(
+            lang == Lang::En || text != en,
+            "{}: the English text",
+            lang.as_str()
+        );
+    }
+}
+
 // ---------- Keys used by the code ----------
 
 /// The engine's own sources (not tests, not this module).

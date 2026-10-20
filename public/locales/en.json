@@ -1020,7 +1020,7 @@
   "viewer.howto_paste": "Paste this link into the video player in the world:",
   "viewer.howto_same_moment": "Everyone sees the same moment of the video. Whoever joins later jumps into the video that is already playing.",
   "viewer.howto_title": "How to watch in VRChat",
-  "viewer.howto_untrusted": "Everyone in the instance must turn on Allow Untrusted URLs in VRChat (Settings, Comfort & Safety tab), or they will see a black screen. In Public and Group Public instances the world must also allow this channel's address, so the video may only play in other instance types (for example Friends or Invite).",
+  "viewer.howto_untrusted": "Everyone in the instance must turn on Allow Untrusted URLs in VRChat (Settings, Comfort & Safety tab), or they will see a black screen. In Public and Group Public instances VRChat may block this address even with that option on (the world decides which sites play there); if the screen stays black, try a Friends or Invite instance.",
   "viewer.language": "Language",
   "viewer.limit": "A video can be up to {limit} long.",
   "viewer.limit_hours": "{n} h",

@@ -1013,7 +1013,7 @@
   "viewer.howto_paste": "ワールドの動画プレーヤーにこのリンクを貼り付けてください：",
   "viewer.howto_same_moment": "全員が動画の同じ場面を見ます。あとから参加した人は、再生中の動画の途中から見ることになります。",
   "viewer.howto_title": "VRChatでの視聴方法",
-  "viewer.howto_untrusted": "インスタンス内の全員が、VRChatの設定（Settings）の「Comfort & Safety」タブで「Allow Untrusted URLs」をオンにする必要があります。オフのままだと画面が真っ黒になります。",
+  "viewer.howto_untrusted": "インスタンス内の全員が、VRChatの設定（Settings）の「Comfort & Safety」タブで「Allow Untrusted URLs」をオンにする必要があります。オフのままだと画面が真っ黒になります。PublicやGroup Publicのインスタンスでは、このオプションがオンでもVRChatがこのアドレスをブロックすることがあります（そこで再生できるサイトはワールドが決めます）。画面が黒いままの場合は、FriendsやInviteのインスタンスで試してみてください。",
   "viewer.language": "言語",
   "viewer.limit": "動画の長さは{limit}までです。",
   "viewer.limit_hours": "{n}時間",

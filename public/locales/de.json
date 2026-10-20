@@ -1020,7 +1020,7 @@
   "viewer.howto_paste": "Füge diesen Link in den Videoplayer in der Welt ein:",
   "viewer.howto_same_moment": "Alle sehen dieselbe Stelle des Videos. Wer später dazukommt, steigt in das laufende Video ein.",
   "viewer.howto_title": "So schaust du in VRChat zu",
-  "viewer.howto_untrusted": "Alle in der Instanz müssen in VRChat Allow Untrusted URLs einschalten (Settings, Reiter Comfort & Safety). Sonst sehen sie einen schwarzen Bildschirm.",
+  "viewer.howto_untrusted": "Alle in der Instanz müssen in VRChat Allow Untrusted URLs einschalten (Settings, Reiter Comfort & Safety). Sonst sehen sie einen schwarzen Bildschirm. In Instanzen vom Typ Public und Group Public kann VRChat diese Adresse auch mit eingeschalteter Option sperren (welche Websites dort laufen, entscheidet die Welt). Bleibt der Bildschirm schwarz, versuch es in einer Instanz vom Typ Friends oder Invite.",
   "viewer.language": "Sprache",
   "viewer.limit": "Ein Video darf bis zu {limit} lang sein.",
   "viewer.limit_hours": "{n} h",

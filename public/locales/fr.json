@@ -1027,7 +1027,7 @@
   "viewer.howto_paste": "Colle ce lien dans le lecteur vidéo du monde :",
   "viewer.howto_same_moment": "Tout le monde voit la vidéo au même moment. Si tu arrives plus tard, tu la rejoins en cours de route.",
   "viewer.howto_title": "Comment regarder dans VRChat",
-  "viewer.howto_untrusted": "Tout le monde dans l’instance doit activer Allow Untrusted URLs dans VRChat (Settings, onglet Comfort & Safety). Sinon, l’écran restera noir.",
+  "viewer.howto_untrusted": "Tout le monde dans l’instance doit activer Allow Untrusted URLs dans VRChat (Settings, onglet Comfort & Safety). Sinon, l’écran restera noir. Dans les instances Public et Group Public, VRChat peut bloquer cette adresse même avec cette option activée (c’est le monde qui décide quels sites y sont lus). Si l’écran reste noir, essaie une instance Friends ou Invite.",
   "viewer.language": "Langue",
   "viewer.limit": "Une vidéo peut durer jusqu’à {limit}.",
   "viewer.limit_hours": "{n} h",
