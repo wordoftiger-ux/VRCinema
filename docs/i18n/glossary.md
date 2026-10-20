@@ -21,7 +21,7 @@ the panel shows too stay formal.
 | **pl** | "ty" / "ty" (informal, as today) | Impersonal forms about viewers: "dodane przez", "zgłoszone przez". | „ ” for quotes. |
 | **es** | "usted" / "tú" (also the slates and the ticker, which players read: "Pide videos…") | Neutral Spanish for Latin America and Spain (no regional slang): "video", "agregar", "equipo" (this computer), "en vivo". Avoid gendered forms about viewers: "agregado por {name}", "solicitado por {name}" refer to the video. Infinitive on buttons ("Copiar enlace", "Reintentar"); progress as a gerund or an impersonal "se" form, never first person ("Conectando…", "Se están descargando los programas…", "Se abrirá la página de Cloudflare…", "el asistente le indicará cada paso"; the one accepted exception is the stream slate "En pausa — volvemos enseguida"); results as "No se pudo …" / "Falló …". "Le damos la bienvenida" instead of the gendered "Bienvenido". Hints that name a control quote its label exactly (“Solo sitios permitidos”, “Intervalo”, la vista “Canal”). | “ ” for quotes in the interface, `"` in log and console texts; ¿…? ¡…!; spaced em dash " — " only in short status lines (player bar, tray tooltip, slate title), otherwise a colon, semicolon or full stop; "p. ej.,"; space before "%" ("CPU 12 %"). |
 | **de** | "Sie" / "du" | Impersonal forms about viewers ("hinzugefügt von {name}", "gewünscht von {name}"); infinitive on buttons ("Link kopieren"); progress and waiting as passive or noun forms, never first person ("Wird geladen…", "Wird verbunden…", "Internetverbindung wird hergestellt…", "Warten auf die Anmeldung…", "{url} wird heruntergeladen"); results as "… ist fehlgeschlagen", not "hat nicht geklappt". Generic masculine for roles (Zuschauer, Betreiber). Hints that name a control quote its label exactly („Nur erlaubte Websites“, „Intervall“, Ansicht „Kanal“). | „ “ for quotes; spaced en dash " – " (never the em dash "—"); "z. B."; space before units and "%" ("CPU 12 %"). |
-| **fr** | "vous" / "tu" (also the slates and the ticker, which players read: "Ajoute une vidéo sur la page de demandes") | Impersonal forms about viewers; the participle agrees with the (feminine) video: "ajoutée par {name}", "demandée par {name}", "ajoutée par l’hôte". Infinitive on buttons ("Copier le lien", "Réessayer"); progress as a noun, never first person ("Connexion…", "Connexion à internet…", "Téléchargement de {url}", "Création du tunnel…", "En attente de la connexion…", "Vérification de ce qui peut être utilisé", "l’assistant vous guide pas à pas"; the one accepted exception is the stream slate "En pause – à tout de suite"); results as "… a échoué" / "Impossible de …". "Bienvenue dans VRCinema" (no gendered form). Hints that name a control quote its label exactly (« Sites autorisés uniquement », « Intervalle », la vue « Chaîne »). | « » for quotes in the interface, `"` in log and console texts; a no-break space U+00A0 (not the narrow U+202F, which the stream font and older fonts may lack) before : ; ? ! » and % and after «, and between a number and its unit ("10 s", "2 h 5 min", "84 Mo"); ’ for the apostrophe; spaced en dash " – " (never the em dash) only in short status lines (player bar, tray tooltip, slate title), otherwise a colon, semicolon or full stop; "p. ex."; Ko/Mo for kB/MB, "i/s" for fps. |
+| **fr** | "vous" / "tu" (also the slates and the ticker, which players read: "Ajoute une vidéo sur la page de demandes") | Impersonal forms about viewers; the participle agrees with the (feminine) video: "ajoutée par {name}", "demandée par {name}", "ajoutée par l’hôte". Infinitive on buttons ("Copier le lien", "Réessayer"); progress as a noun, never first person ("Connexion…", "Connexion à internet…", "Téléchargement de {url}", "Création du tunnel…", "En attente de la connexion…", "Le programme vérifie ce qui peut être utilisé", "l’assistant vous guide pas à pas"; the one accepted exception is the stream slate "En pause – à tout de suite"); results as "… a échoué" / "Impossible de …". "Bienvenue dans VRCinema" (no gendered form). Hints that name a control quote its label exactly (« Sites autorisés uniquement », « Intervalle », la vue « Chaîne »). | « » for quotes in the interface, `"` in log and console texts; a no-break space U+00A0 (not the narrow U+202F, which the stream font and older fonts may lack) before : ; ? ! » and % and after «, and between a number and its unit ("10 s", "2 h 5 min", "84 Mo"); ’ for the apostrophe; spaced en dash " – " (never the em dash) only in short status lines (player bar, tray tooltip, slate title) and the log line "Tunnel : en ligne – {url}", otherwise a colon, semicolon or full stop; "p. ex."; Ko/Mo for kB/MB, "i/s" for fps. |
 | **ja** | Polite (both) | です/ます for sentences; short nouns on buttons and labels (「コピー」「スキップ」); no personal pronouns; consistent katakana for loanwords (the table); impersonal "追加: {name}" style about viewers. | 「 」 for quotes; full-width punctuation 。、 in sentences, none at the end of buttons. |
 
 Common to all languages:
@@ -50,12 +50,12 @@ Common to all languages:
 | Channel link — the .m3u8 address pasted into the VRChat player | channel link | link kanału | enlace del canal | Kanal-Link | lien de la chaîne | チャンネルのリンク |
 | Queue — videos waiting to be played | queue | kolejka | cola | Warteschlange | file d’attente | キュー |
 | Up next — heading of the queue panel | Up next | Następne | A continuación | Als Nächstes | À suivre | 次に再生 |
-| Slate — still screen the stream shows between videos (idle, buffering, pause) | slate | plansza | pantalla | Tafel (Wartetafel, Pausentafel) | écran | 画面（待機画面） |
-| Slate language — language of slates and ticker | language of the slates | język plansz | idioma de las pantallas | Sprache der Tafeln | langue des écrans | 画面の言語 |
+| Slate — still screen the stream shows between videos (idle, buffering, pause) | slate | plansza | pantalla | Tafel (Wartetafel, Pausentafel) | écran d’attente | 画面（待機画面） |
+| Slate language — language of slates and ticker | language of the slates | język plansz | idioma de las pantallas | Sprache der Tafeln | langue des écrans d’attente | 画面の言語 |
 | Info ticker — text band burned into the stream | info ticker | pasek informacyjny | barra informativa | Laufband | bandeau d’information | テロップ |
 | Message (owner's text in the ticker) | message | wiadomość | mensaje | Nachricht | message | メッセージ |
 | Interval (ticker mode "from time to time") | interval | odstęp | intervalo | Intervall | intervalle | 間隔 |
-| Progress line (ticker) | progress line | pasek postępu | línea de progreso | Fortschrittslinie | ligne de progression | 進行バー |
+| Progress line (ticker) | progress line | pasek postępu | línea de progreso | Fortschrittslinie | barre de progression | 進行バー |
 | Tunnel — built-in Cloudflare connection | tunnel | tunel | túnel | Tunnel | tunnel | トンネル |
 | Quick tunnel / quick link — random trycloudflare.com address | quick tunnel / quick link | szybki tunel / szybki link | túnel rápido / enlace rápido | Schnelltunnel / schneller Link | tunnel rapide / lien rapide | クイックトンネル / クイックリンク |
 | Permanent link — own domain via a named tunnel | permanent link | stały link | enlace permanente | dauerhafter Link | lien permanent | 固定リンク |
@@ -82,14 +82,14 @@ Common to all languages:
 | Pause / resume | pause / resume | wstrzymaj / wznów | pausar / reanudar | pausieren / fortsetzen | mettre en pause / reprendre | 一時停止 / 再開 |
 | Paused | paused | wstrzymane | en pausa | pausiert | en pause | 一時停止中 |
 | Seek (jump within the video), back / forward 10 s | seek, back / forward | skok, wstecz / naprzód | salto, retroceder / adelantar | springen (spulen), zurück / vor | se déplacer, reculer / avancer | シーク、戻す / 進める |
-| Skip / next video | skip / next video | pomiń / następny film | omitir / siguiente video | überspringen / nächstes Video | passer / vidéo suivante (state: passée) | スキップ / 次の動画 |
+| Skip / next video | skip / next video | pomiń / następny film | omitir / siguiente video | überspringen / nächstes Video | passer / vidéo suivante (state: interrompue) | スキップ / 次の動画 |
 | From the beginning | From the beginning | Od początku | Desde el principio | Von vorn | Depuis le début | 最初から |
 | Play now | Play now | Odtwórz teraz | Reproducir ahora | Jetzt abspielen | Lire maintenant | 今すぐ再生 |
 | On air | on air | na antenie | en emisión | auf Sendung (laufendes Video) | à l’antenne | 放送中 |
 | Live stream | live stream | transmisja na żywo | transmisión en vivo (tag: EN VIVO) | Livestream | direct (tag: EN DIRECT) | ライブ配信 |
 | History | History | Historia | Historial | Verlauf | Historique | 履歴 |
 | Preview — the stream played in the window | preview | podgląd | vista previa | Vorschau | aperçu | プレビュー |
-| Stats for nerds — technical overlay (as on YouTube) | Stats for nerds | Statystyki dla nerdów | Estadísticas para nerds | Statistiken für Nerds | Statistiques pour les geeks | 詳細統計情報 |
+| Stats for nerds — technical overlay (as on YouTube) | Stats for nerds | Statystyki dla nerdów | Estadísticas para nerds | Statistiken für Nerds | Statistiques avancées | 詳細統計情報 |
 | Share (view) | Share | Udostępnij | Compartir | Teilen | Partager | 共有 |
 | Settings | Settings | Ustawienia | Configuración | Einstellungen | Paramètres | 設定 |
 | Tools — yt-dlp, ffmpeg, Deno, cloudflared | tools | narzędzia | herramientas | Werkzeuge | outils | ツール |
@@ -140,16 +140,21 @@ Common to all languages:
   stats row "Fuente"). Numbers are formatted by the interface (`Intl`) for the es locale, so
   they come out Spain-style ("1.482,9", "1,9×"); informational only, nothing to translate.
 - **fr:** "chaîne" is the channel, "file d’attente" the queue ("Ajouter à la file" on short
-  buttons), "écran" a slate ("écran d’attente"), "bandeau d’information" the ticker ("bandeau" for
-  short), "page de demandes" the request page and "demande" a viewer's request; a technical
+  buttons), "écran d’attente" a slate (in the interface and the log; never a bare "écran"),
+  "bandeau d’information" the ticker ("bandeau" for short), "barre de progression" its progress line, "page de demandes" the request page and "demande" a viewer's request; a technical
   request of the API is "requête" ("Requête non valide"). "Site" (or "site web") is a site a link
   comes from ("sites autorisés", "téléchargement depuis les sites web"); "page" a page of the
-  program or Cloudflare's login page. "Passer" is skipping a video (state "Passée", "Passée par le
-  propriétaire", log "vidéo passée"); "se déplacer" / "reculer" / "avancer" is seeking within
+  program or Cloudflare's login page. "Passer" is the action of skipping a video ("Passer la vidéo"); the history state of a
+  skipped video is "Interrompue" ("Arrêtée par le propriétaire"; log "passage à la vidéo suivante"); "se déplacer" / "reculer" / "avancer" is seeking within
   one. "Hôte" is the Host (lower case in running text, "ajoutée par l’hôte"; `engine/src/nicks.rs`
   reserves "Hôte"), "propriétaire" the owner, "pseudo" the nick, "valider" / "refuser" approving
   and rejecting a request. "Commande" for a command of the channel or the console; "police" for
-  a font (slate and ticker font in the log), "source" only for the source of a video.
+  a font (slate and ticker font in the log), "source" only for the source of a video. "Lire" / "lecture" only for playback; fetching or
+  reading a link (yt-dlp, pixeldrain, ffprobe) is "récupérer" / "analyser" ("Impossible de récupérer
+  la vidéo", "impossible d’analyser la source"). Before a {nick} field, no article to elide:
+  "l’appareil utilisé par {nick}" (not "de {nick}"). Stats overlay: "Statistiques avancées".
+  Intel graphics like AMD/NVIDIA: "carte graphique Intel (Quick Sync)". "p. ex." instead of "par
+  exemple" in parentheses; "…" (not "...") in log texts too.
   "Copie directe" is copying without conversion (stats and log), "encodeur" the encoder,
   "panneau" the panel and "panneau à distance" the remote panel, "journal" the log, "zone de
   notification" the tray. "Internet" in lower case in running text, capitalised only as the name
