@@ -1162,6 +1162,17 @@ mod tests {
             std::fs::metadata(font).unwrap().len()
         );
         assert!(!dir.path().join("font.ttf").exists());
+        // The texts are the Japanese ones (not the English fallback) and are drawn.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("idle").join("title.txt")).unwrap(),
+            crate::i18n::t(Lang::Ja, "slates.idle_title", &[])
+        );
+        assert!(
+            std::fs::read_to_string(dir.path().join("idle").join("title.txt"))
+                .unwrap()
+                .chars()
+                .any(is_japanese_char)
+        );
         assert!(title_pixels(&ffmpeg, &slates.idle[0].path, 1.0) > 500);
     }
 

@@ -151,6 +151,18 @@ fn t_and_tn_use_the_built_in_dictionaries() {
         tn(Lang::Fr, "errors.too_many_active", 2, &[]),
         "Tu as déjà 2 vidéos dans la file d’attente. Attends qu’elles soient lues."
     );
+    // Japanese: one plural form (`other`) for every number; the host's word matches nicks.rs.
+    assert_eq!(
+        t(Lang::Ja, "errors.no_such_item", &[]),
+        "その項目は存在しません。"
+    );
+    for n in [1, 2] {
+        assert_eq!(
+            tn(Lang::Ja, "errors.too_many_active", n, &[]),
+            format!("すでに{n}本の動画をキューに追加しています。再生が終わるまでお待ちください。")
+        );
+    }
+    assert_eq!(t(Lang::Ja, "ticker.added_by_host", &[]), "追加：ホスト");
     assert_eq!(t(Lang::Pl, "no.such.key", &[]), "no.such.key");
     assert_eq!(
         tn(Lang::En, "errors.too_many_active", 1, &[]),
@@ -295,7 +307,7 @@ fn the_real_windows_ui_language_is_a_supported_language_or_english() {
 
 /// Languages whose dictionary must be complete: every key of en.json, and every text within the
 /// length limits of context.json. Task 17 adds each language here once it is fully translated.
-const STRICT: [Lang; 5] = [Lang::En, Lang::Pl, Lang::De, Lang::Es, Lang::Fr];
+const STRICT: [Lang; 6] = [Lang::En, Lang::Pl, Lang::De, Lang::Es, Lang::Fr, Lang::Ja];
 
 /// The `{…}` fields of a text.
 fn fields(text: &str) -> BTreeSet<String> {
