@@ -41,6 +41,30 @@ fn a_film_the_owner_added_is_from_the_host_in_the_slate_language() {
     );
 }
 
+/// Final wave M1: a video stored without a title carries the Polish default "Bez tytułu"
+/// (shared with the old server); the ticker says "Untitled" in the slate language.
+#[test]
+fn the_stored_default_title_is_untitled_in_the_slate_language() {
+    let n = |title: &str, next: &str| NowNext {
+        title: title.into(),
+        requester: Requester::Anonymous,
+        next_title: Some(next.into()),
+        address: String::new(),
+    };
+    assert_eq!(
+        compose_text(Lang::En, &n("Bez tytułu", "Bez tytułu"), &settings(), 0),
+        "► Now: Untitled   ·   next: Untitled"
+    );
+    assert_eq!(
+        compose_text(Lang::De, &n("Bez tytułu", "Film"), &settings(), 0),
+        "► Jetzt: Ohne Titel   ·   als Nächstes: Film"
+    );
+    assert_eq!(
+        compose_text(Lang::Pl, &n("Bez tytułu", "Film"), &settings(), 0),
+        "► Teraz: Bez tytułu   ·   następnie: Film"
+    );
+}
+
 #[test]
 fn without_a_nick_only_the_title_is_shown() {
     let text = compose_text(Lang::En, &now(Requester::Anonymous, None), &settings(), 0);

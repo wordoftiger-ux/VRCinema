@@ -32,7 +32,7 @@ fn is_safe(path: &str) -> bool {
             .all(|c| matches!(c, Component::Normal(_)))
 }
 
-/// File content and MIME type of `path` (relative to `public/`, e.g. `common.js`).
+/// File content and MIME type of `path` (relative to `public/`, e.g. `app/main.js`).
 pub fn asset(path: &str) -> Option<(Cow<'static, [u8]>, &'static str)> {
     let dir = std::env::var_os("VRCINEMA_PUBLIC_DIR").filter(|d| !d.is_empty());
     asset_from(path, dir.as_deref().map(Path::new))
@@ -295,7 +295,7 @@ mod tests {
                 );
             }
         }
-        // `import { a, b } from '/static/common.js'` in a page: every name is exported.
+        // `import { a, b } from '/static/app/store.js'` in a page: every name is exported.
         for (path, text) in &files {
             for (at, _) in text.match_indices("import {") {
                 let rest = &text[at + "import {".len()..];

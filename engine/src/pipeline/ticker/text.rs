@@ -44,6 +44,16 @@ pub struct NowNext {
 }
 
 /// A part of the one-line text: line breaks and other control characters become spaces.
+/// A title for the ticker: the stored default title of a video without one is "Untitled" in
+/// the slate language.
+fn title(lang: Lang, title: &str) -> String {
+    if title == crate::resolver::ytdlp::NO_TITLE {
+        i18n::t(lang, "player.untitled", &[])
+    } else {
+        clean(title)
+    }
+}
+
 fn clean(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -64,7 +74,7 @@ pub fn compose_text(
     let mut parts = vec![i18n::t(
         lang,
         "ticker.now",
-        &[("title", &clean(&now.title))],
+        &[("title", &title(lang, &now.title))],
     )];
     match &now.requester {
         Requester::Host => parts.push(i18n::t(lang, "ticker.added_by_host", &[])),
@@ -76,7 +86,11 @@ pub fn compose_text(
     if settings.show_next
         && let Some(next) = &now.next_title
     {
-        parts.push(i18n::t(lang, "ticker.next", &[("title", &clean(next))]));
+        parts.push(i18n::t(
+            lang,
+            "ticker.next",
+            &[("title", &title(lang, next))],
+        ));
     }
     if settings.show_address && !now.address.is_empty() {
         parts.push(i18n::t(

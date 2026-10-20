@@ -869,7 +869,7 @@ impl Channel {
         let item = self
             .queue(|q| q.get(item_id))?
             .filter(|i| i.channel_id == channel_id)
-            .ok_or_else(|| anyhow::anyhow!("Nie ma pozycji #{item_id}."))?;
+            .ok_or_else(|| msg_error(Msg::error("no_such_item")))?;
         let chosen = match item.status {
             ItemStatus::Queued => {
                 self.queue(|q| q.move_item(item.id, 0))?;
@@ -3519,7 +3519,12 @@ mod tests {
         assert_eq!(e.get(a.id).status, ItemStatus::Queued);
         e.set_status(a.id, ItemStatus::PendingApproval);
         assert!(e.channel.play_now(a.id).is_err());
-        assert!(e.channel.play_now(9_999).is_err());
+        // Final wave M2: in the reader's language, not hard-coded Polish.
+        let missing = e.channel.play_now(9_999).unwrap_err();
+        assert_eq!(
+            crate::i18n::error_msg(&missing).render(crate::i18n::Lang::En),
+            "There is no such item."
+        );
         assert_eq!(e.get(b.id).status, ItemStatus::Playing);
     }
 

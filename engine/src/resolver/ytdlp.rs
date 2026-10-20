@@ -16,7 +16,9 @@ use crate::process::{ProcessError, ProcessOutput, run_process};
 pub const FORMAT_SELECTOR: &str = "bv*[vcodec^=avc1][height<=1080]+ba/b[vcodec^=avc1][height<=1080]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-const NO_TITLE: &str = "Bez tytułu";
+/// The title stored for a video without one (shared with the old server's database); the
+/// interface and the ticker show it as `player.untitled` in their language.
+pub const NO_TITLE: &str = "Bez tytułu";
 
 /// Runs a program to completion; injectable so tests need no real yt-dlp.
 #[async_trait]
