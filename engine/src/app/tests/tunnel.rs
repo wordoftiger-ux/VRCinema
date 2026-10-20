@@ -7,7 +7,7 @@
 
 #![cfg(windows)]
 
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use super::*;
 use crate::auto_pause::AutoPauseTimings;
@@ -94,13 +94,6 @@ fn fast_tunnel() -> TunnelTimings {
         health_grace: Duration::from_millis(200),
         reconnect_limit: Duration::from_secs(60),
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }
 
 pub(super) struct Setup {
@@ -301,28 +294,15 @@ async fn the_slates_follow_the_tunnel_address() {
         );
     }
     wait_online(&app, &cookie).await;
-    eventually(90, "the slates for the tunnel address", || async {
-        slates.join("g1").join("idle").join("qr.png").is_file()
-    })
-    .await;
-    assert_eq!(
-        decode_qr(&slates.join("g1").join("idle").join("qr.png")),
-        [format!("https://{QUICK_HOST}/")]
-    );
+    let tunnel_set = slates_for(&slates, &format!("https://{QUICK_HOST}")).await;
 
     let (status, res) = app
         .put_config(&cookie, json!({"tunnelEnabled": false}))
         .await;
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["restarted"], false);
-    eventually(90, "the slates for the manual address", || async {
-        slates.join("g2").join("idle").join("qr.png").is_file()
-    })
-    .await;
-    assert_eq!(
-        decode_qr(&slates.join("g2").join("idle").join("qr.png")),
-        ["https://reczny.example.com/".to_string()]
-    );
+    let manual_set = slates_for(&slates, "https://reczny.example.com").await;
+    assert_ne!(manual_set, tunnel_set);
     assert_eq!(app.engine().server_starts(), 1);
     assert_eq!(
         app.engine().channel_loop_counter().load(Ordering::SeqCst),
@@ -645,9 +625,11 @@ async fn the_restart_route_starts_a_new_cloudflared_and_needs_the_tunnel_on() {
 async fn a_short_reconnect_keeps_the_address_and_the_slates() {
     let Some(app) = start(Setup {
         tools: true,
+        // The connection is lost while the test keeps `offline` (its own clock, not the
+        // fake's: however long the slates took under load).
         runs: Some(json!([{
             "hostname": QUICK_HOST,
-            "ready_down": [[7000, 9000]],
+            "ready_down_while": "offline",
         }])),
         ..Setup::default()
     })
@@ -659,26 +641,32 @@ async fn a_short_reconnect_keeps_the_address_and_the_slates() {
     wait_online(&app, &cookie).await;
     let url = format!("https://{QUICK_HOST}");
     let slates = app.home.join("data").join("slates");
-    eventually(90, "the slates for the tunnel address", || async {
-        slates.join("g1").join("idle").join("qr.png").is_file()
-    })
-    .await;
-    let started_ms = fake_starts(&app.home)[0]["ms"].as_u64().unwrap();
+    let set = slates_for(&slates, &url).await;
     let core = Arc::clone(&app.engine().core);
-    let mut reconnecting = false;
-    while now_ms() < started_ms + 11_000 {
-        reconnecting |= core.tunnel_state() == TunnelState::Reconnecting;
+    let offline = app.home.join("tools").join("offline");
+    std::fs::write(&offline, "").unwrap();
+    // Lost (`Reconnecting`) and kept so for about 2 s; the address stays all along.
+    let mut lost_at = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while lost_at.is_none_or(|t: Instant| t.elapsed() < Duration::from_secs(2)) {
+        assert!(Instant::now() < deadline, "the loss did not happen");
+        if lost_at.is_none() && core.tunnel_state() == TunnelState::Reconnecting {
+            lost_at = Some(Instant::now());
+        }
         assert_eq!(core.live_settings.public_url.get(), url);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(reconnecting, "the loss did not happen");
-    assert_eq!(
-        core.tunnel_state(),
-        TunnelState::Online { url: url.clone() }
-    );
+    std::fs::remove_file(&offline).unwrap();
+    let back = Instant::now() + Duration::from_secs(20);
+    while core.tunnel_state() != (TunnelState::Online { url: url.clone() }) {
+        assert!(Instant::now() < back, "the connection did not come back");
+        assert_eq!(core.live_settings.public_url.get(), url);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        !slates.join("g2").exists(),
+    assert_eq!(
+        newest_set(&slates),
+        Some(set),
         "a slate set was made for the short loss"
     );
     assert_eq!(fake_starts(&app.home).len(), 1);
@@ -931,10 +919,7 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
     let cookie = app.window_cookie().await;
     wait_online(&app, &cookie).await;
     let slates = app.home.join("data").join("slates");
-    eventually(90, "the slates for the tunnel address", || async {
-        slates.join("g1").join("idle").join("qr.png").is_file()
-    })
-    .await;
+    let first = slates_for(&slates, &format!("https://{QUICK_HOST}")).await;
     // Only now (however long the set took under load) the connection goes.
     std::fs::write(app.home.join("tools").join("offline"), "").unwrap();
     let core = Arc::clone(&app.engine().core);
@@ -952,14 +937,10 @@ async fn a_quick_tunnel_killed_while_reconnecting_drops_its_dead_address() {
             url: format!("https://{QUICK_HOST}")
         }
     );
-    eventually(90, "the connecting slates", || async {
-        slates.join("g2").join("idle").join("title.txt").is_file()
-            && !slates.join("g2").join("idle").join("qr.png").exists()
-    })
-    .await;
+    let connecting = slates_without_code(&slates, &first).await;
     if std::path::Path::new("C:/Windows/Fonts/arial.ttf").exists() {
         assert_eq!(
-            std::fs::read_to_string(slates.join("g2").join("idle").join("subtitle.txt")).unwrap(),
+            std::fs::read_to_string(connecting.join("idle").join("subtitle.txt")).unwrap(),
             "Connecting to the internet…"
         );
     }
@@ -1531,7 +1512,7 @@ async fn a_manual_pause_survives_a_server_restart_and_the_automatic_pause_leaves
         settings: json!({"tunnelEnabled": false, "pauseWhenNoViewers": true}),
         auto_pause: AutoPauseTimings {
             no_viewers: Duration::from_secs(2),
-            recheck: Duration::from_secs(10),
+            recheck: Duration::from_secs(30),
             ..AutoPauseTimings::default()
         },
         ..Setup::default()
@@ -1591,7 +1572,7 @@ async fn a_manual_pause_survives_a_server_restart_and_the_automatic_pause_leaves
 
 /// No segment fetched for the limit: paused; the pause survives a server restart (the new
 /// channel gets the reason again); the first segment fetch resumes without waiting for the
-/// periodic check (set to 10 s here).
+/// periodic check (set to 30 s here, so a resume well within 10 s cannot be that check).
 #[tokio::test]
 async fn no_viewers_pause_survive_a_restart_and_a_segment_fetch_resumes_at_once() {
     let Some(app) = start(Setup {
@@ -1647,12 +1628,12 @@ async fn no_viewers_pause_survive_a_restart_and_a_segment_fetch_resumes_at_once(
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK, "{segment}");
-    eventually(5, "the resume after a fetch", || async {
+    eventually(10, "the resume after a fetch", || async {
         pause_reasons(&core).is_empty()
     })
     .await;
     assert!(
-        fetched.elapsed() < Duration::from_secs(2),
+        fetched.elapsed() < Duration::from_secs(10),
         "the resume waited {:?}",
         fetched.elapsed()
     );

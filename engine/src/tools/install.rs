@@ -300,8 +300,9 @@ mod tests {
         fs::create_dir_all(&tools).unwrap();
         let running = tools.join("tool.exe");
         fs::copy(&ping, &running).unwrap();
+        // Runs far longer than the test, however slow a loaded machine is (killed on drop).
         let child = std::process::Command::new(&running)
-            .args(["-n", "60", "127.0.0.1"])
+            .args(["-n", "600", "127.0.0.1"])
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
@@ -318,8 +319,17 @@ mod tests {
 
         let _ = child.0.kill();
         let _ = child.0.wait();
-        // Next start: the backups nobody uses any more are cleaned up.
-        clean_old_backups(&tools);
+        // Next start: the backups nobody uses any more are cleaned up. Windows may release the
+        // exited program's file a moment later (a loaded machine, a virus scanner): generous
+        // retries.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            clean_old_backups(&tools);
+            if dir_names(&tools) == ["tool.exe"] || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         assert_eq!(dir_names(&tools), ["tool.exe"]);
     }
 

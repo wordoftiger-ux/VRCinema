@@ -451,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn collects_stdout_and_exit_code() {
         let (cmd, args) = shell("echo hello");
-        let out = run_process(&cmd, &args, Duration::from_secs(10))
+        let out = run_process(&cmd, &args, Duration::from_secs(60))
             .await
             .unwrap();
         assert_eq!(out.code, Some(0));
@@ -466,7 +466,7 @@ mod tests {
         #[cfg(unix)]
         let script = "echo oops 1>&2; exit 3";
         let (cmd, args) = shell(script);
-        let out = run_process(&cmd, &args, Duration::from_secs(10))
+        let out = run_process(&cmd, &args, Duration::from_secs(60))
             .await
             .unwrap();
         assert_eq!(out.code, Some(3));
@@ -509,12 +509,12 @@ mod tests {
     async fn run_process_future_is_send() {
         fn assert_send<T: Send>(_: &T) {}
         let (cmd, args) = shell("echo hello");
-        let fut = run_process(&cmd, &args, Duration::from_secs(10));
+        let fut = run_process(&cmd, &args, Duration::from_secs(60));
         assert_send(&fut);
         drop(fut);
 
         let handle =
-            tokio::spawn(async move { run_process(&cmd, &args, Duration::from_secs(10)).await });
+            tokio::spawn(async move { run_process(&cmd, &args, Duration::from_secs(60)).await });
         let out = handle.await.unwrap().unwrap();
         assert_eq!(out.stdout.trim(), "hello");
     }

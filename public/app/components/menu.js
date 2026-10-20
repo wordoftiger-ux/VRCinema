@@ -38,6 +38,21 @@ export function closeMenu({ restoreFocus = true } = {}) {
   if (restoreFocus && open.opener?.isConnected) open.opener.focus();
 }
 
+// Esc closes the open menu wherever the focus is — also when it is pressed before the menu has
+// moved the focus in (its effect runs after the paint) or after the focus left it — and goes to
+// nothing else while a menu is open. One listener for the page, so no key is missed between
+// the menu's render and its effect.
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.key !== 'Escape' || !menu.value) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+  },
+  true,
+);
+
 /** Opens `items` for the context-menu gesture of an element: right click, Menu key, Shift+F10. */
 export function contextMenuHandlers(labelKey, items) {
   return {
@@ -100,9 +115,6 @@ export function MenuLayer() {
         break;
       case 'End':
         move(-1);
-        break;
-      case 'Escape':
-        closeMenu();
         break;
       case 'Tab':
         closeMenu();

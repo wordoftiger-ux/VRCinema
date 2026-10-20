@@ -406,11 +406,13 @@ async fn a_cloudflared_update_and_the_wizard_never_run_together() {
     drop(silent);
 }
 
+/// Final wave I5: the time limit is far away here (a loaded machine never reaches it before
+/// the cancel); the timeout has a test of its own.
 #[tokio::test]
-async fn a_login_can_be_cancelled_times_out_and_only_one_operation_runs_at_a_time() {
+async fn a_login_can_be_cancelled_and_only_one_operation_runs_at_a_time() {
     let app = start(Setup {
         commands: json!({"login": {"url": LOGIN_URL, "wait_forever": true}}),
-        login_timeout: Duration::from_secs(3),
+        login_timeout: Duration::from_secs(120),
         ..Setup::default()
     })
     .await
@@ -452,8 +454,28 @@ async fn a_login_can_be_cancelled_times_out_and_only_one_operation_runs_at_a_tim
         !login_running(&app.home)
     })
     .await;
+    // Cancelling when nothing runs changes nothing.
+    let (status, body) = app
+        .call("POST", LOGIN, Some(&cookie), Some(json!({"cancel": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["code"], "cancelled");
+    assert_eq!(app.saved()["tunnelMode"], "quick");
+    app.stop().await;
+}
 
-    // "Spróbuj ponownie" — and this time nobody logs in: the time limit ends it.
+/// Nobody logs in: the time limit ends the login, says why and stops cloudflared.
+#[tokio::test]
+async fn a_login_times_out() {
+    let app = start(Setup {
+        commands: json!({"login": {"url": LOGIN_URL, "wait_forever": true}}),
+        login_timeout: Duration::from_secs(3),
+        ..Setup::default()
+    })
+    .await
+    .unwrap();
+    logged_in(&app);
+    let cookie = app.window_cookie().await;
     let started = Instant::now();
     let (status, _) = app.call("POST", LOGIN, Some(&cookie), None).await;
     assert_eq!(status, StatusCode::ACCEPTED);

@@ -253,7 +253,18 @@ try {
   await waitFor(async () => JSON.stringify(await ids(page)) === '[9,10,8,11]', 'moved up');
   await page.click('.qi[data-id="11"]', { button: 'right' });
   check((await page.$$eval('.menu [role=menuitem]', (els) => els[3].getAttribute('aria-disabled'))) === 'true', 'the last row cannot go down');
+  // Final wave I5: Escape closes an open menu even while the focus is not in it (pressed before
+  // the menu moved the focus in, or after a click elsewhere left it on the page).
+  await page.evaluate(() => {
+    document.activeElement?.blur();
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  });
+  await waitFor(async () => !(await page.$('.menu')), 'Escape closes the menu with the focus outside it', 2000);
+  check(true, 'Escape closes the menu with the focus outside it');
+  await page.click('.qi[data-id="11"]', { button: 'right' });
+  await page.waitForFunction(() => document.activeElement?.closest('.menu'));
   await page.keyboard.press('Escape');
+  await waitFor(async () => !(await page.$('.menu')), 'Escape closes the menu', 2000);
   m = await mark();
   await page.click('.qi[data-id="11"]', { button: 'right' });
   await page.click('.menu .danger');

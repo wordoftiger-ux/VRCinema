@@ -217,6 +217,8 @@ try {
 
   // ---------- Router ----------
   await page.click('.rail-history');
+  // The view renders after the hash change: wait for it instead of reading at once.
+  await page.waitForFunction(() => document.querySelector('.page h1')?.textContent === 'History').catch(() => {});
   check((await page.evaluate(() => location.hash)) === '#/history' && (await text(page, '.page h1')) === 'History', 'rail → #/history');
   await page.goto(`${base}/admin#/settings/tools`);
   await page.waitForSelector('.view');
@@ -225,6 +227,7 @@ try {
     '#/settings/tools opens the settings view, section tools',
   );
   await page.click('.rail-channel');
+  await page.waitForFunction(() => document.querySelector('.rail-channel')?.getAttribute('aria-current') === 'page').catch(() => {});
   check((await page.$eval('.rail-channel', (e) => e.getAttribute('aria-current'))) === 'page', 'the current view is marked aria-current');
 
   // ---------- Languages: en → de → pl without a reload ----------

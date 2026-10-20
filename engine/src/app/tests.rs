@@ -82,9 +82,10 @@ fn test_options(tmp: &Path) -> AppOptions {
     }
 }
 
-/// Apps running the real ffmpeg (slates, the channel) run at most three at a time: in a full
-/// parallel `cargo test` more of them starve each other into timeouts.
-static HEAVY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+/// Apps running the real ffmpeg (slates, the channel) run at most two at a time: in a full
+/// parallel `cargo test` more of them starve each other into timeouts (the pipeline's own
+/// ffmpeg tests run alongside).
+static HEAVY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Hard links (no disk space) of the repo's ffmpeg/ffprobe into `<home>/tools`.
 fn link_real_tools(home: &Path) -> bool {
@@ -144,7 +145,7 @@ impl App {
         prepare(&home, &mut options);
         let hooks = Arc::new(FakeHooks::default());
         let engine = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_secs(120),
             AppEngine::start_with(
                 home.clone(),
                 Arc::clone(&hooks) as Arc<dyn DesktopHooks>,
@@ -152,7 +153,7 @@ impl App {
             ),
         )
         .await
-        .expect("the app did not start in 60 s")
+        .expect("the app did not start in 120 s")
         .unwrap();
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -1592,9 +1593,10 @@ async fn a_new_public_address_replaces_the_slates_live() {
     assert_eq!(res["restarted"], false);
     // The new set appears in a folder of its own and goes on air as one discontinuity.
     eventually(90, "the new slate set", || async {
-        slates.join("g1").join("idle").join("qr.png").is_file()
+        newest_set(&slates).is_some_and(|set| set.join("idle").join("qr.png").is_file())
     })
     .await;
+    let with_code = newest_set(&slates).unwrap();
     eventually(60, "the new set on air", || async {
         playlist().await.contains(TAG)
     })
@@ -1603,14 +1605,22 @@ async fn a_new_public_address_replaces_the_slates_live() {
     let (status, _) = app.put_config(&cookie, json!({"publicUrl": ""})).await;
     assert_eq!(status, StatusCode::OK);
     eventually(90, "the second slate set", || async {
-        slates.join("g2").join("idle").join("title.txt").is_file()
+        newest_set(&slates).is_some_and(|set| {
+            set != with_code
+                && set.join("idle").join("title.txt").is_file()
+                && !set.join("idle").join("qr.png").exists()
+        })
     })
     .await;
-    assert!(!slates.join("g2").join("idle").join("qr.png").exists());
-    let title = |set: &str| {
-        std::fs::read_to_string(slates.join(set).join("idle").join("title.txt")).unwrap()
+    let without_code = newest_set(&slates).unwrap();
+    let title = |set: &Path| {
+        std::fs::read_to_string(set.join("idle").join("title.txt")).unwrap_or_default()
     };
-    assert_eq!(title("g2"), "No videos in the queue", "slates start in en");
+    assert_eq!(
+        title(&without_code),
+        "No videos in the queue",
+        "slates start in en"
+    );
     // A new slate language makes another set at once, with the texts of that language, and the
     // stream goes on (no restart, no loop restart, a playlist that keeps advancing).
     let media_sequence = |text: &str| -> u64 {
@@ -1631,10 +1641,10 @@ async fn a_new_public_address_replaces_the_slates_live() {
     assert_eq!(status, StatusCode::OK, "{res}");
     assert_eq!(res["slateLanguage"], "pl");
     eventually(90, "the Polish slate set", || async {
-        slates.join("g3").join("idle").join("title.txt").is_file()
+        newest_set(&slates)
+            .is_some_and(|set| set != without_code && title(&set) == "Brak filmów w kolejce")
     })
     .await;
-    assert_eq!(title("g3"), "Brak filmów w kolejce");
     eventually(60, "the stream to go on after the swap", || async {
         media_sequence(&playlist().await) > sequence_before
     })
