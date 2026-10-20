@@ -129,10 +129,14 @@ fn t_and_tn_use_the_built_in_dictionaries() {
         ),
         "This site is not allowed. Allowed: youtube.com."
     );
-    // No Spanish dictionary yet: English.
+    // The built-in Spanish dictionary (falling back to English is covered above).
     assert_eq!(
         t(Lang::Es, "errors.no_such_item", &[]),
-        t(Lang::En, "errors.no_such_item", &[])
+        "No existe ese elemento."
+    );
+    assert_eq!(
+        tn(Lang::Es, "errors.too_many_active", 2, &[]),
+        "Ya tienes 2 videos en la cola. Espera a que se reproduzcan."
     );
     assert_eq!(t(Lang::Pl, "no.such.key", &[]), "no.such.key");
     assert_eq!(
@@ -278,7 +282,7 @@ fn the_real_windows_ui_language_is_a_supported_language_or_english() {
 
 /// Languages whose dictionary must be complete: every key of en.json, and every text within the
 /// length limits of context.json. Task 17 adds each language here once it is fully translated.
-const STRICT: [Lang; 3] = [Lang::En, Lang::Pl, Lang::De];
+const STRICT: [Lang; 4] = [Lang::En, Lang::Pl, Lang::De, Lang::Es];
 
 /// The `{…}` fields of a text.
 fn fields(text: &str) -> BTreeSet<String> {
