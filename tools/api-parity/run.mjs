@@ -102,7 +102,7 @@ async function waitReady(srv) {
 // (strona go zawsze wysyła); serwer TS pole ignoruje, więc różnic nie ma.
 const DEVICE_KEY = '0123456789abcdef0123456789abcdef';
 
-const TIMING_FIELDS =new Set(['createdAt', 'startedAt', 'finishedAt', 'positionS']);
+const TIMING_FIELDS = new Set(['createdAt', 'startedAt', 'finishedAt', 'positionS']);
 
 function stripTiming(v, topLevelChannel) {
   if (Array.isArray(v)) return v.map((x) => stripTiming(x, false));
@@ -143,6 +143,34 @@ function checkRequesterFields(name, v) {
     if ('requesterIp' in v) throw new Error(`rust: "${name}": odpowiedź zawiera requesterIp`);
   }
   Object.values(v).forEach((x) => checkRequesterFields(name, x));
+}
+
+/**
+ * Etap 4 (ostatnia fala, M7): stan sterowania w panelu (`control`) serwera Rust — serwer TS go nie
+ * ma, więc pole jest pomijane w porównaniu, a tu sprawdzany jest jego kształt (dokładnie te pola,
+ * te typy); w panelu bez filmu (`expectDefault`) także wartości domyślne.
+ */
+function checkControl(name, control, expectDefault) {
+  const fail = (what) => {
+    throw new Error(`rust: "${name}": control ${what}: ${JSON.stringify(control)}`);
+  };
+  if (!control || typeof control !== 'object' || Array.isArray(control)) fail('nie jest obiektem');
+  const keys = ['itemId', 'isLive', 'positionS', 'durationS', 'canPause', 'canSeek', 'seekPending', 'positionApprox', 'paused', 'pauseReasons'];
+  if (JSON.stringify(Object.keys(control).sort()) !== JSON.stringify([...keys].sort())) fail('ma inne pola');
+  const intOrNull = (v) => v === null || Number.isInteger(v);
+  const numOrNull = (v) => v === null || (typeof v === 'number' && Number.isFinite(v));
+  if (!intOrNull(control.itemId)) fail('itemId');
+  if (!(typeof control.positionS === 'number' && control.positionS >= 0)) fail('positionS');
+  if (!numOrNull(control.durationS)) fail('durationS');
+  for (const k of ['isLive', 'canPause', 'canSeek', 'seekPending', 'positionApprox', 'paused']) {
+    if (typeof control[k] !== 'boolean') fail(k);
+  }
+  if (!Array.isArray(control.pauseReasons)) fail('pauseReasons');
+  if (control.itemId === null && (control.canPause || control.canSeek)) fail('bez filmu pozwala sterować');
+  if (expectDefault) {
+    const def = { itemId: null, isLive: false, positionS: 0, durationS: null, canPause: false, canSeek: false, seekPending: false, positionApprox: false, paused: false, pauseReasons: [] };
+    if (JSON.stringify(control) !== JSON.stringify(def)) fail(`różni się od domyślnego ${JSON.stringify(def)}`);
+  }
 }
 
 /** Pełna lista atrybutów z wartościami; normalizowana tylko wartość tokenu i data Expires. */
@@ -323,6 +351,9 @@ class Client {
         bodyShape = `(niepoprawny JSON) ${text}`;
       }
     } else bodyShape = text.length > 300 ? `sha1:${crypto.createHash('sha1').update(text).digest('hex')} len:${text.length}` : text;
+    if (parsed && opts.channelBody === true && this.srv.name === 'rust' && 'control' in parsed) {
+      checkControl(name, parsed.control, name === 'admin panel (pusty)');
+    }
     if (parsed && opts.channelBody === true && this.srv.name === 'rust') {
       // Etap 3: pola dodane przez pauzę; serwer TS ich nie ma, więc tylko sprawdzamy wartości po stronie Rust.
       if (parsed.paused !== false) throw new Error(`rust: "${name}": paused = ${JSON.stringify(parsed.paused)}, oczekiwano false`);
@@ -503,6 +534,20 @@ async function scenario(srv) {
   await c.post('request: pusty obiekt', '/api/channels/main/requests', {});
   await c.call('request: zepsuty JSON', 'POST', '/api/channels/main/requests', { raw: '{nie json' });
   await c.call('request: zły content-type', 'POST', '/api/channels/main/requests', { raw: 'url=x', contentType: 'application/x-www-form-urlencoded' });
+  // Etap 4 (ostatnia fala, M7): nick bez klucza urządzenia serwer Rust odrzuca (400
+  // `invalid_device_key`, zanim policzy jakikolwiek limit); serwer TS nicków nie zna, więc krok
+  // jest sprawdzany tylko po stronie Rust i nie trafia do porównania.
+  if (c.srv.name === 'rust') {
+    const res = await fetch(`${c.srv.base}/api/channels/main/requests`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ url: yt('ok1'), name: 'Ala' }),
+    });
+    const j = await res.json().catch(() => null);
+    if (res.status !== 400 || j?.code !== 'invalid_device_key') {
+      throw new Error(`rust: nick bez klucza -> ${res.status} ${JSON.stringify(j)}, oczekiwano 400 invalid_device_key`);
+    }
+  }
 
   // Panel bez sesji
   await c.get('admin panel bez sesji (401)', adminPanel);

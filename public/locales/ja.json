@@ -1026,6 +1026,7 @@
   "viewer.nick_label": "ニックネーム",
   "viewer.now_playing": "再生中",
   "viewer.offline": "チャンネルに接続できません。再試行しています…",
+  "viewer.send_failed": "リクエストを送信できませんでした。接続を確認して、もう一度お試しください。",
   "viewer.paused": "一時停止中",
   "viewer.pending": "「{title}」はチャンネルのオーナーの承認待ちです。",
   "viewer.progress": "動画の進行状況",

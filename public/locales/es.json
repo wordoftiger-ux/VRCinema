@@ -1040,6 +1040,7 @@
   "viewer.nick_label": "Tu apodo",
   "viewer.now_playing": "Reproduciendo ahora",
   "viewer.offline": "No se puede conectar con el canal.",
+  "viewer.send_failed": "No se pudo enviar la solicitud. Revisa la conexión y vuelve a intentarlo.",
   "viewer.paused": "En pausa",
   "viewer.pending": "“{title}” está pendiente de la aprobación del propietario del canal.",
   "viewer.progress": "Progreso del video",

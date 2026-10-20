@@ -15,7 +15,9 @@
 // name to its tree and a file name to its size in bytes; `libraryAddError`: the code POST …/local
 // answers with.
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
-// GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
+// GET /__test/stats: {maxPanelInFlight, maxViewerInFlight}; GET /__test/hang never answers.
+// Scenario `viewerStateDelayMs`: GET /api/channels/main/state answers that late (setting it
+// starts a new count of maxViewerInFlight).
 // History (panel field `history`): played, skipped (played with a reason), failed (localized
 // reason), a file from disk and an old row with a plain-text reason. Share view: GET
 // /api/desktop/tunnel/qr (window; 403 for a remote session, 404 without a public address) and
@@ -67,6 +69,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
   let nextId;
   let panelInFlight = 0;
   let maxPanelInFlight = 0;
+  let viewerInFlight = 0;
+  let maxViewerInFlight = 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const queued = (id, title, extra = {}) => ({
@@ -216,6 +220,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     s.pendingItems = [];
     nextId = 100;
     maxPanelInFlight = 0;
+    maxViewerInFlight = 0;
   }
   reset();
 
@@ -651,7 +656,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     if (path.startsWith('/live/')) return serveLive(res, path.slice('/live/'.length));
     if (path.startsWith('/static/')) return serveFile(res, decodeURIComponent(path.slice('/static/'.length)));
     if (path === '/__test/requests') return json(res, 200, requests);
-    if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight });
+    if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight, maxViewerInFlight });
     if (path === '/__test/hang') return undefined;
     if (path === '/__test/reset') {
       reset();
@@ -662,6 +667,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       Object.assign(s, change);
       if ('pending' in change) s.pendingItems = pendingList(change.pending);
       if ('settingsPatch' in change) Object.assign(s.settings, change.settingsPatch);
+      if ('viewerStateDelayMs' in change) maxViewerInFlight = viewerInFlight;
       return json(res, 200, { ...s, queue: undefined, pendingItems: undefined });
     }
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
@@ -669,7 +675,16 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     const payload = req.method === 'GET' ? null : await body(req).catch(() => null);
     requests.push({ method: req.method, path, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
     const noWindow = s.remote || s.headless;
-    if (path === '/api/channels/main/state' && req.method === 'GET') return json(res, 200, viewerState());
+    if (path === '/api/channels/main/state' && req.method === 'GET') {
+      viewerInFlight += 1;
+      maxViewerInFlight = Math.max(maxViewerInFlight, viewerInFlight);
+      try {
+        if (s.viewerStateDelayMs) await sleep(s.viewerStateDelayMs);
+        return json(res, 200, viewerState());
+      } finally {
+        viewerInFlight -= 1;
+      }
+    }
     if (path === '/api/channels/main/requests' && req.method === 'POST') return viewerRequest(res, req, payload);
     if (path === '/api/admin/login' && req.method === 'POST') {
       const pl = req.headers['x-vrcinema-lang'] === 'pl';

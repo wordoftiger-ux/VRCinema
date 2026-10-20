@@ -1,6 +1,6 @@
 # Japanese (beta): texts for review
 
-Every Japanese text of VRCinema (`public/locales/ja.json`, 1062 keys) with the English
+Every Japanese text of VRCinema (`public/locales/ja.json`, 1063 keys) with the English
 pattern, where it appears (from `public/locales/context.json`) and the translator's notes. Japanese
 is marked "日本語 (beta)" in the language lists until a native speaker has reviewed this list.
 
@@ -1209,6 +1209,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `viewer.nick_label` | Your nick | ニックネーム | Request page: label of the optional nick field (maximum 24 characters). | en "Your nick"; no pronoun. |
 | `viewer.now_playing` | Now playing | 再生中 | Request page: small heading of the card with the video that is playing now. |  |
 | `viewer.offline` | Cannot reach the channel. Trying again… | チャンネルに接続できません。再試行しています… | Request page: shown at the top while the channel does not answer; the page retries by itself. |  |
+| `viewer.send_failed` | Could not send the request. Check the connection and try again. | リクエストを送信できませんでした。接続を確認して、もう一度お試しください。 | Request page: shown under the form when a request could not be sent at all (no connection, or no answer in time). The page does not send it again by itself, so the viewer is asked to check the connection and press the button again. Informal like the rest of the request page. | Soft polite request-page tone (お試しください as in errors.too_many_requests). |
 | `viewer.paused` | Paused | 一時停止中 | Request page: small tag in the 'Now playing' heading when the owner paused the channel. |  |
 | `viewer.pending` | “{title}” is waiting for the channel owner's approval. | 「{title}」はチャンネルのオーナーの承認待ちです。 | Request page: short message after a request that waits for the owner's approval. {title} is the video's title. |  |
 | `viewer.progress` | Progress of the video | 動画の進行状況 | Request page: screen-reader name of the progress bar of the playing video. |  |

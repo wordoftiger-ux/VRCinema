@@ -1,6 +1,6 @@
 // "Add a video": the link, the nick (with this device's icon) and what the channel accepts.
 
-import { useState } from '/static/vendor/hooks.mjs';
+import { useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { sentenceGap, sentences, t, tn } from '../i18n.js';
 import { api, errorText } from '../api.js';
@@ -13,7 +13,8 @@ const NICK_MAX = 24;
 
 /** The text of a failed request, in the page's language. */
 export function requestErrorText(e) {
-  if (e.code === 'network') return t('viewer.offline');
+  // Not sent (no connection, no answer in time): the page does not try again by itself.
+  if (e.code === 'network') return t('viewer.send_failed');
   if (e.code === 'too_many_active' && Number.isFinite(e.data?.count)) {
     return tn('errors.too_many_active', e.data.count);
   }
@@ -48,6 +49,15 @@ export function RequestForm() {
   const [error, setError] = useState(null);
   const [suggestion, setSuggestion] = useState(null);
   const [badge, setBadge] = useState(savedBadge());
+  const nickField = useRef(null);
+
+  /** Takes the suggested nick; the button goes away with the error, so the focus goes to the nick. */
+  const takeSuggestion = () => {
+    setNick(suggestion);
+    setError(null);
+    setSuggestion(null);
+    nickField.current?.focus();
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -97,7 +107,7 @@ export function RequestForm() {
             ${badge && nick.trim()
               ? html`<span class="v-own-badge" role="img" aria-label=${t('viewer.your_icon')} title=${t('viewer.your_icon')}><${RequesterBadge} badge=${badge} /></span>`
               : null}
-            <input type="text" class="txt" name="nick" maxlength=${NICK_MAX} autocomplete="nickname"
+            <input type="text" class="txt" name="nick" maxlength=${NICK_MAX} autocomplete="nickname" ref=${nickField}
               value=${nick} readOnly=${busy} aria-describedby="v-nick-hint"
               onInput=${(e) => setNick(e.currentTarget.value)} />
           </span>
@@ -107,7 +117,7 @@ export function RequestForm() {
           ? html`<div id="v-error" class="v-error" role="alert" data-code=${error.code ?? undefined}>
               <p>${requestErrorText(error)}</p>
               ${suggestion
-                ? html`<button type="button" class="btn" onClick=${() => { setNick(suggestion); setError(null); setSuggestion(null); }}>
+                ? html`<button type="button" class="btn" onClick=${takeSuggestion}>
                     ${t('viewer.use_nick', { nick: suggestion })}</button>`
                 : null}
             </div>`

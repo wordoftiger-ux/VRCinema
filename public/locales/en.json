@@ -1033,6 +1033,7 @@
   "viewer.nick_label": "Your nick",
   "viewer.now_playing": "Now playing",
   "viewer.offline": "Cannot reach the channel. Trying again…",
+  "viewer.send_failed": "Could not send the request. Check the connection and try again.",
   "viewer.paused": "Paused",
   "viewer.pending": "“{title}” is waiting for the channel owner's approval.",
   "viewer.progress": "Progress of the video",

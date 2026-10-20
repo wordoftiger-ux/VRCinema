@@ -1012,6 +1012,7 @@
   "viewer.nick_label": "Request page: label of the optional nick field (maximum 24 characters).",
   "viewer.now_playing": "Request page: small heading of the card with the video that is playing now.",
   "viewer.offline": "Request page: shown at the top while the channel does not answer; the page retries by itself.",
+  "viewer.send_failed": "Request page: shown under the form when a request could not be sent at all (no connection, or no answer in time). The page does not send it again by itself, so the viewer is asked to check the connection and press the button again. Informal like the rest of the request page.",
   "viewer.paused": "Request page: small tag in the 'Now playing' heading when the owner paused the channel.",
   "viewer.pending": "Request page: short message after a request that waits for the owner's approval. {title} is the video's title.",
   "viewer.progress": "Request page: screen-reader name of the progress bar of the playing video.",

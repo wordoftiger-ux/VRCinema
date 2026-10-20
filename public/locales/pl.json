@@ -1047,6 +1047,7 @@
   "viewer.nick_label": "Twój nick",
   "viewer.now_playing": "Teraz leci",
   "viewer.offline": "Brak połączenia z kanałem. Próbuję ponownie…",
+  "viewer.send_failed": "Nie udało się wysłać zgłoszenia. Sprawdź połączenie i spróbuj ponownie.",
   "viewer.paused": "Wstrzymane",
   "viewer.pending": "„{title}” czeka na zatwierdzenie przez właściciela kanału.",
   "viewer.progress": "Postęp filmu",

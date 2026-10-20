@@ -187,6 +187,9 @@ try {
   await shot(page, 'viewer-nick-taken');
   await page.locator('.v-error .btn').click();
   check(/^Tomek\d\d$/.test(await page.locator('input[name=nick]').inputValue()), 'the suggestion fills the nick');
+  // Final wave M4: the button goes away with the error; the focus goes to the nick field.
+  await page.waitForFunction(() => document.activeElement?.name === 'nick', null, { timeout: 2000 }).catch(() => {});
+  check(await page.evaluate(() => document.activeElement?.name === 'nick'), 'the focus moves to the nick field', await page.evaluate(() => document.activeElement?.outerHTML?.slice(0, 80)));
   await page.click('.v-submit');
   await waitFor(async () => (await page.locator('.v-error').count()) === 0, 'the suggested nick goes through');
   // The error follows a language switch.
@@ -212,6 +215,26 @@ try {
     check((await text(page, '.v-error')).includes(fragment), `${code} is shown`, await text(page, '.v-error'));
   }
   await scenario({ viewerError: null });
+  // Final wave M3: a request that never reached the server is not retried: the page says so.
+  await page.route('**/api/channels/main/requests', (r) => r.abort());
+  await page.fill('input[name=nick]', 'Ola');
+  await sendRequest(page, 'https://example.org/lost');
+  await page.waitForSelector('.v-error[data-code=network]');
+  check(
+    (await text(page, '.v-error')) === 'Could not send the request. Check the connection and try again.',
+    'a request that could not be sent says so (no "trying again")',
+    await text(page, '.v-error'),
+  );
+  await page.unroute('**/api/channels/main/requests');
+  // The aborted request is logged by the browser itself; that one is expected.
+  const aborted = errors.findIndex((e) => e.includes('net::ERR_FAILED'));
+  if (aborted >= 0) errors.splice(aborted, 1);
+  // Final wave M4: a slow channel never gets a second state request while one is on its way.
+  await scenario({ viewerStateDelayMs: 4000 });
+  await page.waitForTimeout(9000);
+  const { maxViewerInFlight } = await call('/__test/stats');
+  await scenario({ viewerStateDelayMs: 0 });
+  check(maxViewerInFlight === 1, 'one state request at a time while the channel answers slowly', maxViewerInFlight);
   await page.fill('input[name=nick]', '');
   await sendRequest(page, 'ftp://x');
   await page.waitForSelector('.v-error[data-code=invalid_link]');

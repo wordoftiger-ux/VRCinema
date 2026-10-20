@@ -1040,6 +1040,7 @@
   "viewer.nick_label": "Ton pseudo",
   "viewer.now_playing": "En cours de lecture",
   "viewer.offline": "Impossible de joindre la chaîne.",
+  "viewer.send_failed": "Impossible d’envoyer la demande. Vérifie la connexion et réessaie.",
   "viewer.paused": "En pause",
   "viewer.pending": "« {title} » attend la validation du propriétaire de la chaîne.",
   "viewer.progress": "Progression de la vidéo",
