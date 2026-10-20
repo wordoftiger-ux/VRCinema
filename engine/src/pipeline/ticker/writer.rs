@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::settings::{TickerMode, TickerSettings};
-use super::text::{NowNext, Requester, compose_text, fit_text};
+use super::text::{NowNext, Requester, compose_text, fit_text, for_font};
 use super::text_file::TickerText;
 use super::{CAPTION_FILE, TEXT_FILE};
 use crate::db::QueueItem;
@@ -66,6 +66,8 @@ pub struct TickerWriter {
     appearance: Option<u64>,
     message_index: usize,
     written: Option<(String, String)>,
+    /// The ticker is drawn with the Japanese font (see [`for_font`]).
+    japanese_font: bool,
 }
 
 impl TickerWriter {
@@ -75,6 +77,7 @@ impl TickerWriter {
         schedule: Schedule,
         budget_px: Option<f64>,
         rotation: Arc<AtomicUsize>,
+        japanese_font: bool,
     ) -> Self {
         Self {
             dir,
@@ -86,6 +89,7 @@ impl TickerWriter {
             appearance: None,
             message_index: 0,
             written: None,
+            japanese_font,
         }
     }
 
@@ -102,7 +106,10 @@ impl TickerWriter {
             next_title: content.next_title.clone(),
             address: content.address.clone(),
         };
-        let text = compose_text(content.lang, &now, &content.settings, self.message_index);
+        let text = for_font(
+            compose_text(content.lang, &now, &content.settings, self.message_index),
+            self.japanese_font,
+        );
         let text = match self.budget_px {
             Some(budget) => fit_text(&text, budget),
             None => text,

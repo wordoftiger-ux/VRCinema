@@ -588,6 +588,7 @@ fn prepare_ticker(
         schedule,
         (ticker.mode == TickerMode::Interval).then_some(budget),
         Arc::clone(rotation),
+        source.japanese_font,
     );
     if let Err(e) =
         std::fs::create_dir_all(s.out_dir).and_then(|()| writer.update(None, &content).map(drop))

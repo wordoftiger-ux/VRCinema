@@ -2,7 +2,7 @@
 
 import { useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
-import { t, tn } from '../i18n.js';
+import { sentenceGap, sentences, t, tn } from '../i18n.js';
 import { api, errorText } from '../api.js';
 import { RequesterBadge } from '../components/badge.js';
 import { deviceKey, existingDeviceKey, saveBadge, saveNick, savedBadge, savedNick } from './device.js';
@@ -35,9 +35,9 @@ function Rules({ rules }) {
       ${allowlist
         ? html`<div><b>${t('viewer.sites_title')}</b>${sites.length
             ? html`<ul class="v-sites">${sites.map((s) => html`<li key=${s}>${s}</li>`)}</ul>`
-            : html` ${t('viewer.sites_none')}`}</div>`
+            : html`${sentenceGap()}${t('viewer.sites_none')}`}</div>`
         : html`<p>${t('viewer.hint_any')}</p>`}
-      <p>${t('viewer.limit', { limit: formatLimit(rules.maxDurationS) })}${rules.moderation ? ` ${t('viewer.moderation')}` : ''}</p>
+      <p>${sentences(t('viewer.limit', { limit: formatLimit(rules.maxDurationS) }), rules.moderation && t('viewer.moderation'))}</p>
     </div>`;
 }
 

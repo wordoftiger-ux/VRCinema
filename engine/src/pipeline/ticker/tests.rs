@@ -138,6 +138,70 @@ fn the_requester_comes_from_the_queue_item() {
     assert_eq!(Requester::of(&item), Requester::Anonymous);
 }
 
+/// The Japanese font (Yu Gothic) has no ►: a ticker drawn with it starts with ▶ in every slate
+/// language (an English ticker with a Japanese title is drawn with the Japanese font too).
+#[test]
+fn a_ticker_drawn_with_the_japanese_font_uses_the_arrow_that_font_has() {
+    use crate::db::{AddedBy, ItemStatus, QueueItem};
+    let item = QueueItem {
+        id: 1,
+        channel_id: 1,
+        position: 0,
+        source_url: String::new(),
+        title: "夜に駆ける".into(),
+        duration_s: None,
+        is_live: false,
+        status: ItemStatus::Queued,
+        added_by: AddedBy::Admin,
+        requester_name: None,
+        requester_ip: None,
+        requester_key_hash: None,
+        error: None,
+        created_at: 0,
+        started_at: None,
+        finished_at: None,
+    };
+    let schedule = Schedule {
+        mode: TickerMode::Interval,
+        interval_s: 60.0,
+        prepare_after_s: 30.0,
+    };
+    let content = |lang| TickerContent {
+        lang,
+        settings: settings(),
+        next_title: None,
+        address: String::new(),
+    };
+    let dir = std::env::temp_dir();
+    let text = |japanese_font, lang| {
+        TickerWriter::new(
+            dir.clone(),
+            &item,
+            schedule,
+            None,
+            Default::default(),
+            japanese_font,
+        )
+        .texts(None, &content(lang))
+        .0
+    };
+    assert_eq!(
+        text(true, Lang::En),
+        "▶ Now: 夜に駆ける   ·   added by Host"
+    );
+    assert_eq!(
+        text(true, Lang::Ja),
+        "▶ 再生中：夜に駆ける   ·   追加：ホスト"
+    );
+    // Arial (any other font) keeps the ►.
+    assert_eq!(
+        text(false, Lang::Pl),
+        "► Teraz: 夜に駆ける   ·   dodane przez Gospodarza"
+    );
+    assert_eq!(for_font("► a ►".into(), true), "▶ a ▶");
+    assert_eq!(for_font("► a".into(), false), "► a");
+}
+
 #[test]
 fn a_text_longer_than_the_window_is_cut_with_an_ellipsis() {
     let long = "x".repeat(400);

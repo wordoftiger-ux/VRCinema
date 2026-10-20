@@ -106,6 +106,16 @@ pub fn compose_text(
         .join(SEPARATOR)
 }
 
+/// `text` as the ticker's font can draw it: the Japanese font (Yu Gothic, chosen for Japanese
+/// or for a Japanese title in any language) has no ►, only ▶.
+pub fn for_font(text: String, japanese_font: bool) -> String {
+    if japanese_font {
+        text.replace('►', "▶")
+    } else {
+        text
+    }
+}
+
 /// Width of `c` in ems, rounded up for the usual fonts (Arial, Yu Gothic), so a text estimated
 /// to fit really fits.
 fn char_em(c: char) -> f64 {

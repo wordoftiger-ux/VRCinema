@@ -105,6 +105,16 @@ export function tn(key, n, args) {
   return fill(entry[category] ?? entry.other ?? key, all);
 }
 
+/** What goes between two sentences (or a label and its text): a space, none in Japanese. */
+export function sentenceGap() {
+  return lang.value === 'ja' ? '' : ' ';
+}
+
+/** Sentences of the current language one after another (empty parts left out). */
+export function sentences(...parts) {
+  return parts.filter(Boolean).join(sentenceGap());
+}
+
 /** Source titles the engine stores in Polish when a source has none (kept for compatibility). */
 const STORED_UNTITLED = 'Bez tytułu';
 

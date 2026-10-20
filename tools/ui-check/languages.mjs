@@ -285,6 +285,12 @@ async function viewerPage(lang, tr) {
     await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
     await sleep(300);
     await assertScreen(page, lang, `request page ${width} px`);
+    // The length limit and the moderation note are two sentences in one line: Japanese puts no
+    // space after 。, the other languages one space.
+    const rules = await page.locator('.v-rules p').last().innerText();
+    const joined = rules.indexOf(tr['viewer.moderation']);
+    const gap = lang === 'ja' ? '' : ' ';
+    check(joined > 0 && rules.slice(0, joined).endsWith(`${lang === 'ja' ? '。' : '.'}${gap}`) && rules.endsWith(tr['viewer.moderation']), `${lang} request page ${width} px: the two sentences are joined the way the language writes them`, rules);
     await page.screenshot({ path: join(shots, `${lang}-viewer-${width}.png`), fullPage: true });
     // A refused nick and its suggestion.
     await scenario({ viewerNickTaken: ['tomek'] });

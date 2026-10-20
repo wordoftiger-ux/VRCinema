@@ -30,7 +30,8 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 - **Terms:** チャンネル, キュー, 次に再生, 待機画面 (slate, never a bare 画面), テロップ (ticker), トンネル,
   クイックリンク, 固定リンク, リクエストページ, リクエスト (a viewer's request; a technical API request
   is 要求), 視聴者, オーナー, ホスト (reserved nick, `engine/src/nicks.rs`), ニックネーム, デバイス,
-  承認/却下, スキップ, シーク, 再生中, 放送中, 履歴, 詳細統計情報 (YouTube Japan), 共有, 設定, ツール,
+  承認/却下, スキップ, シーク, 再生中, 放送中 (on air: what the channel broadcasts now), ライブ配信 (only a live
+  source, e.g. a live stream added to the queue), ストリーム (the HLS output of the channel), 履歴, 詳細統計情報 (YouTube Japan), 共有, 設定, ツール,
   グラフィックボード, CPU, PC (this computer), 再生リスト (playlist, as YouTube Japan). Full list:
   `docs/i18n/glossary.md`.
 - **Katakana:** Microsoft style with the long vowel mark: サーバー, ブラウザー, プレーヤー, フォルダー,
@@ -40,13 +41,17 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
   10秒, ポート{port}); a space between a number and a Latin unit (84 MB, 30 fps, 1.4 MB/s); ～ for
   ranges; no dashes (the English " — " became 。, ：, or parentheses); "…" for progress (接続中…);
   the interface's own separator " · " is kept where the code joins parts.
-- **Units:** 秒, 分, 時間; counters 本 (videos), 件 (items, messages), 台 (devices), 回 (times).
+- **Units:** 秒, 分, 時間; counters 本 (videos), 件 (items, messages, files), 台 (devices), 回 (times).
+- **Settings paths** are always written in parentheses: （設定 → インターネット）.
+- **Sentence joining:** where the page puts two sentences together, Japanese gets no space after 。
+  (`sentences()` in `public/app/i18n.js`).
 - **Kept in English:** VRCinema and program names, VRChat menu names (Allow Untrusted URLs,
   Settings, Comfort & Safety), setting names (ADMIN_PASSWORD, MEDIA_DIRS …), file names, API
   fields and values, keyboard keys Ctrl / Shift / Home, the four API-compatibility errors, the
   language names (endonyms).
 - **Stream font:** slates and ticker are drawn with Yu Gothic (`YuGothM.ttc`). It has no ►, so the
-  Japanese ticker starts with ▶. All slate texts and a ticker line were rendered with ffmpeg and
+  Japanese ticker starts with ▶; the engine also replaces ► with ▶ for any language whose ticker is
+  drawn with the Japanese font (a Japanese title). All slate texts and a ticker line were rendered with ffmpeg and
   checked for missing glyphs.
 
 ## Texts
@@ -73,7 +78,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `banner.go_tools` | Tools | ツール | Link in a notice to Settings → Tools. |  |
 | `banner.go_update` | See the update | アップデートを表示 | Link in a notice to Settings → About, where the update is installed. |  |
 | `banner.label` | Needs attention | 確認が必要な通知 | Screen-reader name of the strip of notices at the top of the interface. | Screen-reader only. Alt.: 要確認, 注意が必要な項目. |
-| `banner.ticker_slow` | The computer cannot keep up with the info ticker — the stream may stutter. | PCの処理がテロップに追いついていません。配信がカクつく可能性があります。 | Notice at the top of the interface. The info ticker is the text strip burned into the stream. | カクつく is casual-technical (common in streaming). Alt.: 途切れる, コマ落ちする. |
+| `banner.ticker_slow` | The computer cannot keep up with the info ticker — the stream may stutter. | PCの処理がテロップに追いついていません。映像がカクつく可能性があります。 | Notice at the top of the interface. The info ticker is the text strip burned into the stream. | 映像 (the picture) rather than 配信; カクつく is casual-technical. Alt.: 途切れる, コマ落ちする. |
 | `banner.tools_missing` | Some tools are missing ({tools}) — the channel needs them. | 一部のツールがありません（{tools}）。チャンネルの動作に必要です。 | Notice at the top of the interface. {tools} is a list of program names like yt-dlp, ffmpeg. |  |
 | `banner.tunnel_error` | The internet connection (tunnel) failed. | インターネット接続（トンネル）に失敗しました。 | Notice at the top of the interface: the built-in Cloudflare tunnel is in an error state. |  |
 | `banner.tunnel_error_reason` | The internet connection (tunnel) failed: {reason} | インターネット接続（トンネル）に失敗しました：{reason} | Like banner.tunnel_error, with the reason (an already translated message). |  |
@@ -85,7 +90,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 |---|---|---|---|---|
 | `drop.hint` | Drop to add to the queue | ドロップしてキューに追加 | New interface: shown over the whole window while files are dragged onto it. |  |
 | `drop.none` | No video was added. | 動画は追加されませんでした。 | New interface: message after files were dropped on the window and none could be added. |  |
-| `drop.skipped` | one: Skipped {count} file (it is not a video or cannot be read).<br>other: Skipped {count} files (they are not videos or cannot be read). | other: {count}個のファイルは追加されませんでした（動画ではないか、読み込めないファイルです）。 | New interface: message after files were dropped on the window; some of them were not added. | en "Skipped"; rendered as 追加されませんでした to avoid confusion with skipping a video (スキップ). |
+| `drop.skipped` | one: Skipped {count} file (it is not a video or cannot be read).<br>other: Skipped {count} files (they are not videos or cannot be read). | other: {count}件のファイルは追加されませんでした（動画ではないか、読み込めないファイルです）。 | New interface: message after files were dropped on the window; some of them were not added. | en "Skipped"; rendered as 追加されませんでした to avoid confusion with skipping a video (スキップ). Files are counted with 件 everywhere. |
 
 ### errors
 
@@ -94,7 +99,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `errors.action_or_position` | Give action (approve/reject) or position. | action（approve/reject）またはpositionを指定してください。 | API error (panel, request page or app window notice). Moving/approving a queue item with a malformed request; action, approve, reject, position are API field names — keep them. |  |
 | `errors.app_closing` | The app is closing. | アプリを終了しています。 | API error (panel, request page or app window notice). The app window asked for something while the app shuts down. |  |
 | `errors.archive_lacks_file` | The downloaded archive has no {file}. | ダウンロードしたアーカイブに{file}がありません。 | Error text (shown in the app window and written to the log). Tools install; {file} is a file name inside the archive. |  |
-| `errors.autostart_failed` | Could not change starting with Windows: {detail} | Windows起動時の自動起動を変更できませんでした：{detail} | API error (panel, request page or app window notice). Settings: switching "start with Windows" failed; {detail} is the system error. | Alt.: スタートアップ (Windows term for start-up apps). |
+| `errors.autostart_failed` | Could not change starting with Windows: {detail} | 自動起動の設定を変更できませんでした：{detail} | API error (panel, request page or app window notice). Settings: switching "start with Windows" failed; {detail} is the system error. | 自動起動 (review fix 1; also log.autostart_refresh_failed and the General switch). |
 | `errors.backup_dir_failed` | Cannot create a backup folder in {path}. | {path}にバックアップフォルダーを作成できません。 | Error text (shown in the app window and written to the log). Tools install; {path} is a folder. |  |
 | `errors.bad_address` | The address contains characters that are not allowed. | アドレスに使用できない文字が含まれています。 | API error (panel, request page or app window notice). The address of the video found for a viewer link has a backslash, a space or a control character (also an item error). |  |
 | `errors.bad_request` | Invalid request. | 無効な要求です。 | API error (panel player controls): generic text of the code bad_request; answers usually carry a more specific text. | 要求 (not リクエスト) for a technical API request; リクエスト is reserved for a viewer's video request. |
@@ -108,7 +113,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `errors.cannot_listen` | Cannot listen on {address}: {detail} | {address}で待ち受けできません：{detail} | Error text (shown in the app window and written to the log). Server start; {address} is host:port, {detail} the system error (port taken). | 待ち受け = listen on a port (network term). Alt.: {address}を使用できません. |
 | `errors.cannot_lock_file` | Cannot lock the file {path}: {detail} | ファイル{path}をロックできません：{detail} | Error text (shown in the app window and written to the log). Server start; the lock keeps two servers from using one data folder. |  |
 | `errors.cannot_open_file` | Cannot open the file {path}: {detail} | ファイル{path}を開けません：{detail} | Error text (shown in the app window and written to the log). Server start; {detail} is the system error. |  |
-| `errors.cannot_replace_file` | Cannot replace the file {path} (is it in use?) | ファイル{path}を置き換えられません（使用中ではありませんか？） | Error text (shown in the app window and written to the log). Tools install; a cause (system error) may follow after a colon. |  |
+| `errors.cannot_replace_file` | Cannot replace the file {path} (is it in use?) | ファイル{path}を置き換えられません（使用中の可能性があります） | Error text (shown in the app window and written to the log). Tools install; a cause (system error) may follow after a colon. |  |
 | `errors.cannot_write_file` | Cannot write {path} | {path}に書き込めません | Error text (shown in the app window and written to the log). Tools install; a cause (system error) may follow after a colon. |  |
 | `errors.certificate_save_failed` | Cannot save the Cloudflare certificate in the program folder: {reason} | Cloudflareの証明書をプログラムのフォルダーに保存できません：{reason} | Permanent-link wizard (app window, Settings → Internet): saving the login certificate failed; {reason} is the system error. |  |
 | `errors.checksum_entry_missing` | The checksum file has no entry for {file}. | チェックサムファイルに{file}のエントリがありません。 | Error text (shown in the app window and written to the log). Tools download; {file} is a file name. | エントリ (Microsoft style without long vowel). |
@@ -189,9 +194,9 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `errors.named_link_first` | Set up the permanent link first (Settings → Internet → Set up a permanent link). | 先に固定リンクを設定してください（設定 → インターネット → 固定リンクを設定）。 | API error (panel, request page or app window notice). Settings: switching to the permanent link before setting it up; the path names the window's sections — use their translated names. | Path uses the real labels: 設定 → インターネット → 固定リンクを設定 (permalink.setup). |
 | `errors.named_operation_running` | A permanent link operation is running (Cloudflare login or address setup) — try again when it ends. | 固定リンクの操作（Cloudflareへのログインまたはアドレスの設定）を実行中です。終了してからもう一度お試しください。 | API error (panel, request page or app window notice). Settings → Tools: updating cloudflared while the permanent-link wizard runs. |  |
 | `errors.nick_not_found` | No such nick. | そのニックネームは見つかりません。 | API error (panel). The nick to release or block is not held by anyone (already released). |  |
-| `errors.nick_reserved` | This nick is reserved. Pick another one. | このニックネームは予約されています。別のニックネームを選んでください。 | API error (request page). The nick is reserved for the owner (the words for host in every language and look-alike spellings of them) and cannot be used by viewers. | Request page (viewer): softer polite. |
+| `errors.nick_reserved` | This nick is reserved. Pick another one. | このニックネームは予約済みのため使用できません。別のニックネームを選んでください。 | API error (request page). The nick is reserved for the owner (the words for host in every language and look-alike spellings of them) and cannot be used by viewers. | Request page (viewer): 予約済みのため使用できません. |
 | `errors.nick_taken` | This nick is already taken by someone else. Pick another one. | このニックネームはすでに他の人が使っています。別のニックネームを選んでください。 | API error (request page). The nick (or a look-alike spelling of it) belongs to another viewer's device, which used it in the last 30 days. | Request page (viewer). |
-| `errors.no_cloudflared` | cloudflared is missing — download the missing tools in the settings (Tools). | cloudflaredがありません。設定（ツール）から不足しているツールをダウンロードしてください。 | Tunnel status and wizard (app window): the cloudflared program is not installed; "Tools" is the name of the settings section. |  |
+| `errors.no_cloudflared` | cloudflared is missing — download the missing tools in the settings (Tools). | cloudflaredがありません。不足しているツールをダウンロードしてください（設定 → ツール）。 | Tunnel status and wizard (app window): the cloudflared program is not installed; "Tools" is the name of the settings section. | Settings paths are always written （設定 → X）. |
 | `errors.no_domain` | Add a domain to Cloudflare before you set up a permanent link. The address {hostname} must belong to the domain chosen at the Cloudflare login. | 固定リンクを設定する前に、Cloudflareにドメインを追加してください。アドレス{hostname}は、Cloudflareへのログイン時に選んだドメインに属している必要があります。 | Permanent-link wizard (app window, Settings → Internet): the account has no domain or the address is outside it; shown with a help link. |  |
 | `errors.no_domain_record` | Add a domain to Cloudflare before you set up a permanent link. The address {hostname} must belong to the domain chosen at the Cloudflare login. Cloudflare set the record {record} instead — delete it in the Cloudflare dashboard (DNS). | 固定リンクを設定する前に、Cloudflareにドメインを追加してください。アドレス{hostname}は、Cloudflareへのログイン時に選んだドメインに属している必要があります。代わりにCloudflareがレコード{record}を設定しました。Cloudflareのダッシュボード（DNS）で削除してください。 | Permanent-link wizard (app window, Settings → Internet): like errors.no_domain, plus the wrong DNS record {record} Cloudflare created. |  |
 | `errors.no_public_address` | The channel has no public address yet. | チャンネルにはまだ公開アドレスがありません。 | API error (panel, request page or app window notice). App window: the QR code was asked for before the channel has an address. |  |
@@ -317,7 +322,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `log.auto_pause_no_viewers_end` | The pause caused by lack of viewers ended. | 視聴者不在による一時停止が終了しました。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The channel went on. |  |
 | `log.auto_pause_tunnel` | Automatic pause: the tunnel has been down for {seconds} s — videos wait for the internet. | 自動一時停止：トンネルが{seconds}秒間切断されています。インターネットに再接続されるまで動画は待機します。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The channel paused itself. |  |
 | `log.auto_pause_tunnel_end` | The pause caused by the tunnel ended. | トンネルによる一時停止が終了しました。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The channel went on. |  |
-| `log.autostart_refresh_failed` | Could not refresh the start with Windows entry: {error} | Windows起動時の自動起動の項目を更新できませんでした：{error} | Log entry (Settings, Log tab; the log file on disk keeps the English text). {error} is the system error. |  |
+| `log.autostart_refresh_failed` | Could not refresh the start with Windows entry: {error} | 自動起動の登録を更新できませんでした：{error} | Log entry (Settings, Log tab; the log file on disk keeps the English text). {error} is the system error. |  |
 | `log.bad_segment_skipped` | Skipped a damaged segment {path}: {error} | 破損したセグメント{path}をスキップしました：{error} | Log entry (Settings, Log tab; the log file on disk keeps the English text). A piece of the stream was unusable. |  |
 | `log.banner_admin` | &nbsp;&nbsp;Admin panel:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{url} | &nbsp;&nbsp;管理パネル：&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{url} | Log entry (Settings, Log tab; the log file on disk keeps the English text). Start-up banner line; keep the leading spaces and align the address with the other banner lines. | Start-up banner: the address starts at display column 26, counting full-width characters as two columns (as a console shows them). In the Log tab the Japanese glyphs are proportional, so the column is approximate there. |
 | `log.banner_builtin_tunnel` | &nbsp;&nbsp;VRChat link: through the built-in tunnel (the address is in the "Tunnel: online" entry). | &nbsp;&nbsp;VRChat用リンク：内蔵トンネル経由（アドレスは「トンネル：オンライン」の項目にあります）。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). Start-up banner line; keep the leading spaces. It points to the entry log.tunnel_online. | Quotes log.tunnel_online 「トンネル：オンライン」. |
@@ -355,7 +360,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `log.encoder_test` | Graphics card test: {encoder} | グラフィックボードのテスト：{encoder} | Log entry (Settings, Log tab; the log file on disk keeps the English text). {encoder} is a technical name (libx264, h264_nvenc, ...), keep it. |  |
 | `log.fake_resolver` | Warning: the fake resolver is active ({path}) — this is a test mode. | 警告：テスト用の偽リゾルバーが有効です（{path}）。これはテストモードです。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). Developer test mode; {path} is a file. |  |
 | `log.files_add_failed` | Could not add the files: {error} | ファイルを追加できませんでした：{error} | Log entry (Settings, Log tab; the log file on disk keeps the English text). Files dropped on the window; {error} is the reason. |  |
-| `log.files_added` | Added from disk: {added} (skipped: {skipped}) | ディスクから追加：{added}件（スキップ：{skipped}件） | Log entry (Settings, Log tab; the log file on disk keeps the English text). Files dropped on the window; the numbers are counts. |  |
+| `log.files_added` | Added from disk: {added} (skipped: {skipped}) | ディスクから追加：{added}件（追加されなかったファイル：{skipped}件） | Log entry (Settings, Log tab; the log file on disk keeps the English text). Files dropped on the window; the numbers are counts. |  |
 | `log.generating_slates` | Generating the slates... | 待機画面を生成しています… | Log entry (Settings, Log tab; the log file on disk keeps the English text). Start of the channel; slates are the still pictures shown between videos. |  |
 | `log.headless_config_error` | <br>Configuration error: {error}<br> | <br>設定エラー：{error}<br> | Log entry (Settings, Log tab; the log file on disk keeps the English text). Printed to the console by the headless server, not to the log. |  |
 | `log.headless_tools_missing` | <br>Tools missing: {tools}<br>Run first: vrcinema setup<br> | <br>ツールがありません：{tools}<br>先に次のコマンドを実行してください：vrcinema setup<br> | Log entry (Settings, Log tab; the log file on disk keeps the English text). Printed to the console by the headless server, not to the log. Keep the command "vrcinema setup". |  |
@@ -447,7 +452,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `log.ticker_failed_plain` | Video #{id} "{title}" could not start with the info ticker ({error}). It starts again without the ticker. | 動画#{id}「{title}」をテロップ付きで開始できませんでした（{error}）。テロップなしで再開します。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). ffmpeg failed to draw the info ticker (e.g. a broken font); the video is started again without it. {error} is ffmpeg's message. |  |
 | `log.ticker_font_missing` | The info ticker font ({path}) was not found: video #{id} "{title}" plays without the ticker. Set FONT_FILE in .env. | テロップのフォント（{path}）が見つからないため、動画#{id}「{title}」はテロップなしで再生されます。.envでFONT_FILEを設定してください。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The font file for the info ticker is missing; {path} is a file path. FONT_FILE and .env are names - keep them. |  |
 | `log.ticker_live_next_item` | Info ticker settings changed: a live stream is not restarted, the change shows from the next video. | テロップの設定が変更されました：ライブ配信は再開されないため、変更は次の動画から反映されます。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The owner changed how the info ticker looks while a live stream airs. |  |
-| `log.ticker_slow` | The computer cannot keep up with the info ticker (video #{id} "{title}" converts at {speed}× for 30 s). Switch the ticker off or turn on conversion on the graphics card. | PCの処理がテロップに追いついていません（動画#{id}「{title}」の変換速度が30秒間{speed}×）。テロップをオフにするか、グラフィックボードでの変換をオンにしてください。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The conversion that drawing the info ticker needs is slower than real time; {speed} is a number like 0.85. |  |
+| `log.ticker_slow` | The computer cannot keep up with the info ticker (video #{id} "{title}" converts at {speed}× for 30 s). Switch the ticker off or turn on conversion on the graphics card. | PCの処理がテロップに追いついていません（動画#{id}「{title}」は30秒間、変換速度が{speed}倍速です）。テロップをオフにするか、グラフィックボードでの変換をオンにしてください。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). The conversion that drawing the info ticker needs is slower than real time; {speed} is a number like 0.85. |  |
 | `log.ticker_text_failed` | Could not update the info ticker text: {error} | テロップのテキストを更新できませんでした：{error} | Log entry (Settings, Log tab; the log file on disk keeps the English text). {error} is a system error. |  |
 | `log.tools_error` | Tools: {error} | ツール：{error} | Log entry (Settings, Log tab; the log file on disk keeps the English text). {error} is the reason a tools job could not start. |  |
 | `log.tools_job_done` | Tools ({what}): done. | ツール（{what}）：完了しました。 | Log entry (Settings, Log tab; the log file on disk keeps the English text). {what} is log.tools_job_install / update / repair. |  |
@@ -558,7 +563,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `permalink.delete_yes` | Delete the permanent link | 固定リンクを削除 | New interface, permanent link: button that confirms the deletion. |  |
 | `permalink.deleting` | Deleting the permanent link… | 固定リンクを削除しています… | New interface, permanent link: progress message. |  |
 | `permalink.dns_taken` | The name {host} already has another DNS record in Cloudflare. Replace it so that it points to this channel? | 名前{host}には、Cloudflareに別のDNSレコードがすでにあります。このチャンネルを指すように置き換えますか？ | New interface, permanent link wizard: question after a name conflict; {host} is the address the owner typed. |  |
-| `permalink.done` | Done. The channel now has a permanent address: https://{host} | 完了しました。チャンネルに固定アドレスが設定されました：https://{host} | New interface, permanent link wizard: shown when it succeeded; {host} is the address without the scheme. |  |
+| `permalink.done` | Done. The channel now has a permanent address: https://{host} | チャンネルの固定リンクを設定しました：https://{host} | New interface, permanent link wizard: shown when it succeeded; {host} is the address without the scheme. |  |
 | `permalink.help_domain` | How to add a domain | ドメインを追加する方法 | New interface, permanent link wizard: link to a help page, after a message that the domain is missing in Cloudflare. |  |
 | `permalink.help_login` | How to do it | 手順を見る | New interface, permanent link wizard: link to a help page, after a failed login. |  |
 | `permalink.host_label` | Permanent link address (e.g. channel.yourdomain.com) | 固定リンクのアドレス（例：channel.yourdomain.com） | New interface, permanent link wizard, step 2: label of the address field. |  |
@@ -577,7 +582,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `permalink.setup` | Set up a permanent link | 固定リンクを設定 | New interface, permanent link: button that opens the wizard. |  |
 | `permalink.starting` | Starting the login… | ログインを開始しています… | New interface, permanent link wizard: shown until the engine reports the login progress. |  |
 | `permalink.step_host` | Step 2 of 2. Enter the full address under which the channel should work. The domain must be on your Cloudflare account. | ステップ2/2：チャンネルを公開するアドレスを完全な形で入力してください。ドメインはCloudflareアカウントに追加済みのものを使います。 | New interface, permanent link wizard, step 2. |  |
-| `permalink.step_login` | Step 1 of 2. I will open the Cloudflare page where you log in and choose the domain for the channel. | ステップ1/2：Cloudflareのページが開きます。ログインして、チャンネルに使うドメインを選んでください。 | New interface, permanent link wizard, step 1. | en is first person ("I will open"); Japanese states what happens: Cloudflareのページが開きます. |
+| `permalink.step_login` | Step 1 of 2. I will open the Cloudflare page where you log in and choose the domain for the channel. | ステップ1/2：Cloudflareのページでログインし、チャンネルに使うドメインを選びます。 | New interface, permanent link wizard, step 1. | en is first person ("I will open"); Japanese describes the step: Cloudflareのページでログインし、…選びます. |
 | `permalink.step_login_wait` | Step 1 of 2. Log in to Cloudflare and choose the domain in the browser window that opened. You have 5 minutes. | ステップ1/2：開いたブラウザーのウィンドウでCloudflareにログインし、ドメインを選んでください。制限時間は5分です。 | New interface, permanent link wizard, step 1, while waiting for the login in the browser. |  |
 | `permalink.switching` | Switching to the quick tunnel… | クイックトンネルに切り替えています… | New interface, permanent link: progress message. |  |
 | `permalink.waiting` | Waiting for the login… | ログインを待っています… | New interface, permanent link wizard: shown while the login is not finished. |  |
@@ -645,7 +650,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `queue.anonymous` | anonymous | 匿名 | New interface, queue row: detail of a video a viewer added without a nick. Lower case, short. |  |
 | `queue.approve` | Approve | 承認 | New interface: tooltip of the check button that lets a viewer's video into the queue. |  |
 | `queue.approve_label` | Approve “{title}” | 「{title}」を承認 | New interface: screen-reader label of the approve button; {title} is the video title. |  |
-| `queue.by_host` | added here | ここで追加 | New interface, queue row: detail of a video the owner added in the program (not a viewer). Lower case, short. | Detail of a queue row (owner's own video): ここで追加. |
+| `queue.by_host` | added here | パネルから追加 | New interface, queue row: detail of a video the owner added in the program (not a viewer). Lower case, short. | Detail of a queue row (the owner's own video): パネルから追加 (review fix 1; was ここで追加). |
 | `queue.copy_link` | Copy link | リンクをコピー | New interface, menu of a queued video: copies the address of the video. |  |
 | `queue.count` | one: {count} video<br>other: {count} videos | other: {count}本の動画 | New interface, Channel view: number of videos in the queue, next to the heading (followed by their total length, e.g. "4 videos · 1:52:40"). | Followed by the total length: 4本の動画 · 1:49:54. |
 | `queue.empty` | The queue is empty. Paste a link to add a video. | キューは空です。リンクを貼り付けて動画を追加してください。 | New interface, Channel view: shown in the queue panel when nothing is waiting. |  |
@@ -655,7 +660,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `queue.more_short` | More | その他 | Tooltip of the ⋮ button on a queue row (phone layout). |  |
 | `queue.move_down` | Move down | 下へ移動 | Queue context menu item: moves the video one place down. |  |
 | `queue.move_up` | Move up | 上へ移動 | Queue context menu item: moves the video one place up. |  |
-| `queue.moved` | “{title}” moved to position {position} of {total} | 「{title}」を{total}件中{position}番目に移動しました | New interface: announced to screen readers after a video was moved in the queue with the keyboard. |  |
+| `queue.moved` | “{title}” moved to position {position} of {total} | 「{title}」を{total}本中{position}番目に移動しました | New interface: announced to screen readers after a video was moved in the queue with the keyboard. |  |
 | `queue.paste_not_link` | The clipboard does not hold a link (http or https). | クリップボードにリンク（httpまたはhttps）がありません。 | New interface: error after Ctrl+V when the pasted text is not a web link. |  |
 | `queue.play_now` | Play now | 今すぐ再生 | New interface, menu of a queued video: puts it on air at once. |  |
 | `queue.reject` | Reject | 却下 | New interface: tooltip of the cross button that refuses a viewer's video. |  |
@@ -750,10 +755,10 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.channel.slate_language_saved` | Language of the slates saved. | 待機画面の言語を保存しました。 | New interface, Settings view, Channel: confirmation. |  |
 | `settings.channel.slate_language_saved_restart` | Language of the slates saved. The video on air starts again from where it is. | 待機画面の言語を保存しました。放送中の動画は現在の位置から再開されます。 | New interface, Settings view, Channel: confirmation when the info ticker is on (its font may change, so the film restarts). |  |
 | `settings.channel.stream` | Stream | ストリーム | New interface, Settings view, Channel: heading of the settings that concern the stream. |  |
-| `settings.general.autostart` | Start VRCinema with Windows | Windowsの起動時にVRCinemaを起動する | New interface, Settings view, General: switch. |  |
+| `settings.general.autostart` | Start VRCinema with Windows | Windowsの起動時にVRCinemaを自動的に開始する | New interface, Settings view, General: switch. |  |
 | `settings.general.autostart_hint` | The program starts minimized in the tray when you sign in. | サインイン時に、プログラムが通知領域に最小化された状態で起動します。 | New interface, Settings view, General: hint under the autostart switch. | サインイン = Windows sign-in (Windows wording). |
-| `settings.general.autostart_off` | The program will no longer start with Windows. | プログラムはWindowsの起動時に起動しなくなります。 | New interface, Settings view, General: confirmation after switching autostart off. |  |
-| `settings.general.autostart_on` | The program will start with Windows. | プログラムはWindowsの起動時に起動します。 | New interface, Settings view, General: confirmation after switching autostart on. |  |
+| `settings.general.autostart_off` | The program will no longer start with Windows. | Windowsの起動時にプログラムが自動で開始されなくなります。 | New interface, Settings view, General: confirmation after switching autostart off. |  |
+| `settings.general.autostart_on` | The program will start with Windows. | Windowsの起動時にプログラムが自動で開始されます。 | New interface, Settings view, General: confirmation after switching autostart on. |  |
 | `settings.general.lan` | Allow opening the page from other devices on the home network | ホームネットワーク上の他のデバイスからページを開けるようにする | New interface, Settings view, General: switch. |  |
 | `settings.general.lan_hint` | Changing this restarts the server for a moment. | 変更するとサーバーが一時的に再起動します。 | New interface, Settings view, General: hint under the home network switch. |  |
 | `settings.general.lan_off` | The page is available only on this computer. | ページはこのPCでのみ利用できます。 | New interface, Settings view, General: confirmation. |  |
@@ -766,7 +771,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.general.port` | Server port | サーバーのポート | New interface, Settings view, General: label of the number field (1024-65535). |  |
 | `settings.general.port_hint` | A new port or network access restarts the server: the video on air is interrupted for a moment and the channel link gets the new port. | ポートまたはネットワークアクセスを変更するとサーバーが再起動します。放送中の動画は一時的に中断され、チャンネルのリンクのポートも新しくなります。 | New interface, Settings view, General: warning under the port field. |  |
 | `settings.general.port_restarted` | The server restarted on port {port}. The window moves to the new address and the channel link has this port now. | サーバーがポート{port}で再起動しました。ウィンドウは新しいアドレスに移動し、チャンネルのリンクもこのポートになりました。 | New interface, Settings view, General: confirmation after the restart; {port} is a number. |  |
-| `settings.general.port_same` | This is already the current port. | これは現在のポートです。 | New interface, Settings view, General: note when the port typed is the one in use. |  |
+| `settings.general.port_same` | This is already the current port. | 現在のポートと同じです。 | New interface, Settings view, General: note when the port typed is the one in use. |  |
 | `settings.general.port_save` | Save port | ポートを保存 | New interface, Settings view, General: button next to the port field. |  |
 | `settings.general.port_saved` | Port {port} saved. | ポート{port}を保存しました。 | New interface, Settings view, General: confirmation; {port} is a number. |  |
 | `settings.general.sign_out` | Sign out | ログアウト | Button (Settings → General and the phone top bar) that ends the password session of the remote panel in this browser. |  |
@@ -778,12 +783,12 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.internet.lose_access_cancel` | Keep it on | オンのままにする | Cancel button of the dialog: the tunnel stays on. |  |
 | `settings.internet.lose_access_mode` | You opened this panel through the tunnel. Switching between the quick and the permanent link changes the channel's address: you will lose access to this panel at this address. | このパネルはトンネル経由で開かれています。クイックリンクと固定リンクを切り替えるとチャンネルのアドレスが変わり、このアドレスではパネルにアクセスできなくなります。 | Body of the dialog before changing the link type from a session that came through the tunnel. |  |
 | `settings.internet.lose_access_mode_title` | Change the link? | リンクを変更しますか？ | Title of the confirmation dialog before switching between the quick and the permanent link from a session that came through the tunnel. |  |
-| `settings.internet.lose_access_mode_yes` | Change and lose access | アクセスを失っても変更する | Confirming button of the link type dialog (danger style). | Danger button "Change and lose access". Alt.: 変更する（アクセスできなくなります）. |
+| `settings.internet.lose_access_mode_yes` | Change and lose access | それでも変更する | Confirming button of the link type dialog (danger style). | Danger button "Change and lose access": それでも変更する (the dialog text says access is lost). |
 | `settings.internet.lose_access_reconnect` | You opened this panel through the tunnel. Reconnecting ends this connection, and a quick link gets a new address: you may lose access to this panel at this address. | このパネルはトンネル経由で開かれています。再接続するとこの接続が切れ、クイックリンクには新しいアドレスが割り当てられるため、このアドレスではパネルにアクセスできなくなる可能性があります。 | Body of the dialog before reconnecting the tunnel from a session that came through it. |  |
 | `settings.internet.lose_access_reconnect_title` | Reconnect the tunnel? | トンネルを再接続しますか？ | Title of the confirmation dialog before reconnecting the tunnel from a remote panel opened through it. |  |
 | `settings.internet.lose_access_reconnect_yes` | Reconnect anyway | それでも再接続する | Confirming button of the reconnect dialog (danger style). |  |
 | `settings.internet.lose_access_title` | Switch the tunnel off? | トンネルをオフにしますか？ | Title of the confirmation dialog when the tunnel is switched off from a remote panel opened through that tunnel. |  |
-| `settings.internet.lose_access_yes` | Switch off and lose access | アクセスを失ってもオフにする | Confirming button of the dialog (danger style). | Danger button "Switch off and lose access". |
+| `settings.internet.lose_access_yes` | Switch off and lose access | それでもオフにする | Confirming button of the dialog (danger style). | Danger button "Switch off and lose access": それでもオフにする. |
 | `settings.internet.manual` | Public address of the channel | チャンネルの公開アドレス | New interface, Settings view, Internet: heading and label of the address typed by hand (shown only with the tunnel off). |  |
 | `settings.internet.manual_hint` | With the tunnel off, you can type the address under which the channel is reachable (for example from another tunnel). | トンネルがオフのときは、チャンネルにアクセスできるアドレス（例：別のトンネルのアドレス）を入力できます。 | New interface, Settings view, Internet: hint. |  |
 | `settings.internet.manual_saved` | Public address saved. | 公開アドレスを保存しました。 | New interface, Settings view, Internet: confirmation. |  |
@@ -801,7 +806,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.internet.state_online` | Online. | オンラインです。 | New interface, Settings view, Internet: state of the tunnel. |  |
 | `settings.internet.state_reconnecting` | The connection dropped — reconnecting… | 接続が切れました。再接続しています… | New interface, Settings view, Internet: state of the tunnel. |  |
 | `settings.internet.trust` | Trust Cloudflare headers | Cloudflareのヘッダーを信頼する | New interface, Settings view, Internet: switch. Cloudflare is a company name. |  |
-| `settings.internet.trust_hint` | Needed when the channel runs behind Cloudflare and should see the real addresses of viewers. | チャンネルがCloudflareの背後で動作し、視聴者の実際のアドレスを取得する必要がある場合に必要です。 | New interface, Settings view, Internet: hint under the switch. |  |
+| `settings.internet.trust_hint` | Needed when the channel runs behind Cloudflare and should see the real addresses of viewers. | Cloudflare経由でチャンネルを公開していて、視聴者の実際のIPアドレスを取得したい場合に必要です。 | New interface, Settings view, Internet: hint under the switch. |  |
 | `settings.internet.trust_off` | Cloudflare headers are ignored. | Cloudflareのヘッダーは無視されます。 | New interface, Settings view, Internet: confirmation. |  |
 | `settings.internet.trust_on` | Viewer addresses will be taken from Cloudflare headers. | 視聴者のアドレスはCloudflareのヘッダーから取得されます。 | New interface, Settings view, Internet: confirmation. |  |
 | `settings.internet.tunnel` | Share the channel on the internet (built-in Cloudflare tunnel) | インターネットでチャンネルを公開する（内蔵のCloudflareトンネル） | New interface, Settings view, Internet: switch. Cloudflare is a company name. |  |
@@ -864,13 +869,13 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.remote.set` | Set password | パスワードを設定 | New interface, Settings view, Remote panel: button. |  |
 | `settings.remote.set_and_on` | The password is set and the remote panel is on. | パスワードを設定し、リモートパネルをオンにしました。 | New interface, Settings view, Remote panel: confirmation. |  |
 | `settings.remote.set_password` | Set a password | パスワードの設定 | New interface, Settings view, Remote panel: label of the password row. |  |
-| `settings.restarting` | The server is restarting. The change will be checked in a moment. | サーバーを再起動しています。変更はまもなく確認されます。 | New interface, Settings view: note after a change of the port or network access made the server restart. |  |
+| `settings.restarting` | The server is restarting. The change will be checked in a moment. | サーバーを再起動しています。まもなく変更を確認します。 | New interface, Settings view: note after a change of the port or network access made the server restart. |  |
 | `settings.save` | Save | 保存 | New interface, Settings view: button that saves a field or a form. |  |
 | `settings.ticker.enabled` | Show the info ticker | テロップを表示する | New interface, Settings view, Channel: switch. |  |
 | `settings.ticker.enabled_hint` | The title of the video and who added it. | 動画のタイトルと、動画を追加した人を表示します。 | New interface, Settings view, Channel: hint. |  |
-| `settings.ticker.enabled_off` | The info ticker is off. | テロップはオフです。 | New interface, Settings view, Channel: confirmation. |  |
-| `settings.ticker.enabled_off_restart` | The info ticker is off. The video on air starts again from where it is. | テロップはオフです。放送中の動画は現在の位置から再開されます。 | New interface, Settings view, Channel: confirmation after switching the ticker off. |  |
-| `settings.ticker.enabled_on` | The info ticker is on. The video on air starts again from where it is. | テロップはオンです。放送中の動画は現在の位置から再開されます。 | New interface, Settings view, Channel: confirmation. |  |
+| `settings.ticker.enabled_off` | The info ticker is off. | テロップをオフにしました。 | New interface, Settings view, Channel: confirmation. |  |
+| `settings.ticker.enabled_off_restart` | The info ticker is off. The video on air starts again from where it is. | テロップをオフにしました。放送中の動画は現在の位置から再開されます。 | New interface, Settings view, Channel: confirmation after switching the ticker off. |  |
+| `settings.ticker.enabled_on` | The info ticker is on. The video on air starts again from where it is. | テロップをオンにしました。放送中の動画は現在の位置から再開されます。 | New interface, Settings view, Channel: confirmation. | Confirmation after the switch: テロップをオンにしました (also _off / _off_restart). |
 | `settings.ticker.encoder_amd` | Conversion: AMD graphics card (h264_amf). | 変換：AMDのグラフィックボード（h264_amf）。 | New interface, Settings view, Channel: which converter the channel uses. h264_amf is a name. |  |
 | `settings.ticker.encoder_cpu` | Conversion: processor (libx264). | 変換：CPU（libx264）。 | New interface, Settings view, Channel: which converter the channel uses. libx264 is a name. |  |
 | `settings.ticker.encoder_cpu_note` | With the info ticker the computer may not keep up. A graphics card works better (Settings → Tools). | テロップを使うと、PCの処理が追いつかない場合があります。グラフィックボードのほうが適しています（設定 → ツール）。 | New interface, Settings view, Channel: follows the converter's name when it is the processor. |  |
@@ -899,7 +904,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.ticker.qr_hint` | In the corner of the picture, above the band | 映像の隅、テロップの上に表示 | New interface, Settings view, Channel: hint. |  |
 | `settings.ticker.qr_off` | Off | オフ | New interface, Settings view, Channel: option. |  |
 | `settings.ticker.qr_with_ticker` | With the band | テロップと一緒に表示 | New interface, Settings view, Channel: option. |  |
-| `settings.ticker.restart_note` | Changing the switch, mode, interval, speed, QR code or progress line starts the video on air again from where it is (a live stream: from the next item). The texts and "next video" change at once. | 「テロップを表示する」「モード」「間隔」「スクロール速度」「リクエストページのQRコード」「動画の進行状況バー」を変更すると、放送中の動画が現在の位置から再開されます（ライブ配信の場合は次の項目から）。テキストと「次の動画を表示する」の変更はすぐに反映されます。 | New interface, Settings view, Channel: note near the ticker controls. | Quotes the seven control labels exactly: テロップを表示する, モード, 間隔, スクロール速度, リクエストページのQRコード, 動画の進行状況バー, 次の動画を表示する. |
+| `settings.ticker.restart_note` | Changing the switch, mode, interval, speed, QR code or progress line starts the video on air again from where it is (a live stream: from the next item). The texts and "next video" change at once. | 「テロップを表示する」「モード」「間隔」「スクロール速度」「リクエストページのQRコード」「動画の進行状況バー」を変更すると、放送中の動画が現在の位置から再開されます（ライブ配信の場合は次の動画から）。テキストと「次の動画を表示する」の変更はすぐに反映されます。 | New interface, Settings view, Channel: note near the ticker controls. | Quotes the seven control labels exactly: テロップを表示する, モード, 間隔, スクロール速度, リクエストページのQRコード, 動画の進行状況バー, 次の動画を表示する. |
 | `settings.ticker.sample_title` | Title of the video | 動画のタイトル | New interface, Settings view, Channel: stand-in title used to estimate how long the band is on the screen when nothing is playing. |  |
 | `settings.ticker.saved` | Info ticker settings saved. | テロップの設定を保存しました。 | New interface, Settings view, Channel: confirmation. |  |
 | `settings.ticker.saved_restart` | Info ticker settings saved. The video on air starts again from where it is. | テロップの設定を保存しました。放送中の動画は現在の位置から再開されます。 | New interface, Settings view, Channel: confirmation of a change of the ticker that restarts the video on air. |  |
@@ -909,7 +914,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `settings.ticker.slow` | The computer cannot keep up with the info ticker — turn it off or turn on conversion on the graphics card. | PCの処理がテロップに追いついていません。テロップをオフにするか、グラフィックボードでの変換をオンにしてください。 | New interface, Settings view, Channel: warning banner shown when the video converts slower than real time. |  |
 | `settings.ticker.speed` | Scrolling speed | スクロール速度 | New interface, Settings view, Channel: label of the choice. |  |
 | `settings.ticker.speed_fast` | Fast | 速い | New interface, Settings view, Channel: option. |  |
-| `settings.ticker.speed_hint` | It decides how long the text stays on the screen (now about {seconds} s) | テキストが画面に表示される時間が決まります（現在は約{seconds}秒） | New interface, Settings view, Channel: hint; {seconds} is a number computed for the current text. |  |
+| `settings.ticker.speed_hint` | It decides how long the text stays on the screen (now about {seconds} s) | テキストが画面に表示される時間が変わります（現在は約{seconds}秒） | New interface, Settings view, Channel: hint; {seconds} is a number computed for the current text. |  |
 | `settings.ticker.speed_normal` | Normal | 標準 | New interface, Settings view, Channel: option. |  |
 | `settings.ticker.speed_slow` | Slow | 遅い | New interface, Settings view, Channel: option. |  |
 | `settings.ticker.title` | Info ticker | テロップ | New interface, Settings view, Channel: heading of the block that sets the band burned into the stream (title, who added it, next video, owner's messages). | テロップ (TV term for burned-in text). Alt.: ティッカー, 情報バー. |
@@ -990,7 +995,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `share.request_title` | Request page | リクエストページ | New interface, Share view: card with the address of the page where viewers add videos. |  |
 | `share.sub` | The link for the VRChat player and the page where viewers add videos. | VRChatのプレーヤー用のリンクと、視聴者が動画を追加するページです。 | New interface, Share view: explanation under the title. VRChat is a name, keep it. |  |
 | `share.title` | Share | 共有 | New interface: title of the Share view (the same word as the left rail). |  |
-| `share.tunnel_off` | The tunnel is off, so the channel works only locally or at the address set in Settings → Internet. | トンネルがオフのため、チャンネルはローカルまたは「設定 → インターネット」で設定したアドレスでのみ動作します。 | New interface, Share view: shown when the built-in tunnel is switched off. "Settings → Internet" names the Settings view and its section; keep the names as in the left rail. |  |
+| `share.tunnel_off` | The tunnel is off, so the channel works only locally or at the address set in Settings → Internet. | トンネルがオフのため、チャンネルはローカル、または設定したアドレス（設定 → インターネット）でのみ動作します。 | New interface, Share view: shown when the built-in tunnel is switched off. "Settings → Internet" names the Settings view and its section; keep the names as in the left rail. |  |
 
 ### shortcuts
 
@@ -1020,7 +1025,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `slates.connecting` | Connecting to the internet… | インターネットに接続しています… | Stream slate (idle): subtitle while the tunnel connects. Max ~40 characters. |  |
 | `slates.idle_hint` | Add a video on the request page | リクエストページから動画を追加できます | Stream slate (idle): subtitle when there is no public address. Max ~40 characters. | Stream slate (players read it): soft polite, できます (invitation) instead of an order. |
 | `slates.idle_title` | No videos in the queue | キューに動画がありません | Stream slate (idle) title. Max ~30 characters. |  |
-| `slates.pause_title` | Paused — back in a moment | 一時停止中・まもなく再開します | Stream slate shown while the channel is paused. Max ~30 characters. | en "Paused — back in a moment"; ・ as separator, no first person. 15 of 30 characters. |
+| `slates.pause_title` | Paused — back in a moment | 一時停止中です。まもなく再開します | Stream slate shown while the channel is paused. Max ~30 characters. | Two short sentences (review fix 1): 一時停止中です。まもなく再開します; 17 of 30 characters, 1204 px of 1920 at 72 px. |
 
 ### stats
 
@@ -1047,7 +1052,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `stats.row_mode` | Mode | モード | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, whether the video is copied or converted. |  |
 | `stats.row_next_state` | State | 状態 | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, how far the preparation of the next video is. |  |
 | `stats.row_pause` | Pause | 一時停止 | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, whether the channel is paused and why. |  |
-| `stats.row_position` | Server position | サーバーの位置 | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, where the server is cutting the video (viewers are a few seconds behind). |  |
+| `stats.row_position` | Server position | サーバーの再生位置 | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, where the server is cutting the video (viewers are a few seconds behind). | Where the server is cutting the video: サーバーの再生位置. |
 | `stats.row_process` | Process | プロセス | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, the ffmpeg process (PID, speed, CPU, memory). |  |
 | `stats.row_sequence` | Sequence | シーケンス | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, numbers of the HLS playlist. |  |
 | `stats.row_timestamps` | Timestamps | タイムスタンプ | New interface, preview overlay "Stats for nerds" (like on YouTube): row label, whether the timestamps of the stream (PTS/DTS) never go back. |  |
@@ -1065,7 +1070,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `stats.v_behind` | {seconds} s behind the server | サーバーから{seconds}秒遅れ | New interface, preview overlay "Stats for nerds" (like on YouTube): value, how far behind the server the preview is. |  |
 | `stats.v_buffered` | buffer {seconds} s | バッファー{seconds}秒 | New interface, preview overlay "Stats for nerds" (like on YouTube): value, seconds of video the preview has loaded ahead. |  |
 | `stats.v_connections` | {n} to Cloudflare | Cloudflareへ{n}本 | New interface, preview overlay "Stats for nerds" (like on YouTube): value, number of connections of the tunnel to Cloudflare. | 本 as the counter for connections (回線). Alt.: Cloudflareへの接続{n}件. |
-| `stats.v_continuous` | continuous ✓ | 連続 ✓ | New interface, preview overlay "Stats for nerds" (like on YouTube): value, timestamps never went back (good). | Timestamps never went back. Alt.: 単調増加 ✓ (more technical). |
+| `stats.v_continuous` | continuous ✓ | 逆戻りなし ✓ | New interface, preview overlay "Stats for nerds" (like on YouTube): value, timestamps never went back (good). | Timestamps never went back: 逆戻りなし ✓ (pairs with 逆戻りあり ✗). |
 | `stats.v_cpu` | CPU {percent}% | CPU {percent}% | New interface, preview overlay "Stats for nerds" (like on YouTube): value, processor use of the process. |  |
 | `stats.v_discontinuities` | discontinuities {n} | 切り替わり{n}回 | New interface, preview overlay "Stats for nerds" (like on YouTube): value, number of discontinuity markers published (one for every change of video source). | Discontinuity markers = transitions between videos, as in settings.channel.discontinuity (切り替わり). |
 | `stats.v_dropped` | dropped frames {n} | フレーム落ち{n} | New interface, preview overlay "Stats for nerds" (like on YouTube): value, video frames the preview skipped. | フレーム落ち (common term). Alt.: ドロップフレーム. |
@@ -1082,7 +1087,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `stats.v_no` | no | なし | New interface, preview overlay "Stats for nerds" (like on YouTube): value, plain "no". | Value of the Pause row when not paused: なし ("none") reads better than いいえ. |
 | `stats.v_no_audio` | no audio | 音声なし | New interface, preview overlay "Stats for nerds" (like on YouTube): value, the video has no sound track. |  |
 | `stats.v_not_continuous` | went back ✗ | 逆戻りあり ✗ | New interface, preview overlay "Stats for nerds" (like on YouTube): value, timestamps went back at least once (bad). | Alt.: 逆行あり ✗. |
-| `stats.v_online_for` | online for {time} | {time}継続中 | New interface, preview overlay "Stats for nerds" (like on YouTube): value, how long the tunnel has worked; {time} is a duration like "1 h 12 min". | Value after the state: オンライン · 1時間12分継続中. |
+| `stats.v_online_for` | online for {time} | 接続時間{time} | New interface, preview overlay "Stats for nerds" (like on YouTube): value, how long the tunnel has worked; {time} is a duration like "1 h 12 min". | Value after the state: オンライン · 接続時間1時間12分. |
 | `stats.v_per_min` | {n}/min | {n}/分 | New interface, preview overlay "Stats for nerds" (like on YouTube): value, count per minute. |  |
 | `stats.v_pid` | PID {pid} | PID {pid} | New interface, preview overlay "Stats for nerds" (like on YouTube): value, process number. PID is a technical term, keep it. |  |
 | `stats.v_pts` | PTS {seconds} s | PTS {seconds}秒 | New interface, preview overlay "Stats for nerds" (like on YouTube): value, end of the last published packet on the channel timeline. PTS is a technical term, keep it. |  |
@@ -1100,9 +1105,9 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 |---|---|---|---|---|
 | `ticker.added_by` | added by {nick} | 追加：{nick} | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Who requested the video; {nick} is the viewer's nick. Impersonal form (the program does not know the gender). | Burned into the stream: impersonal 追加：{nick}. |
 | `ticker.added_by_host` | added by Host | 追加：ホスト | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. The video was added by the channel owner ("Host" is the owner's badge, also used next to queue items). | ホスト must match the reserved nick in engine/src/nicks.rs. |
-| `ticker.address` | add a video: {address} | 動画の追加：{address} | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. {address} is the request page web address. | Noun phrase in the ticker: 動画の追加：{address}. |
+| `ticker.address` | add a video: {address} | リクエストはこちら：{address} | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. {address} is the request page web address. | Invitation to the request page (review fix 1): リクエストはこちら：{address}. |
 | `ticker.next` | next: {title} | 次：{title} | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. The video after the current one; {title} is its title. |  |
-| `ticker.now` | ► Now: {title} | ▶ 再生中：{title} | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Start of the ticker; {title} is the video on air. Keep the ► sign (the ticker font Arial has it; ▶ is not in Arial). Japanese uses ▶ instead: its ticker font Yu Gothic has no ►. | ▶ instead of the ► of the other languages: the Japanese ticker font (Yu Gothic) has no ► (checked on a real frame). |
+| `ticker.now` | ► Now: {title} | ▶ 再生中：{title} | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Start of the ticker; {title} is the video on air. Keep the ► sign (the ticker font Arial has it; ▶ is not in Arial). Japanese uses ▶ instead: its ticker font Yu Gothic has no ►. | ▶ instead of the ► of the other languages: the Japanese ticker font (Yu Gothic) has no ► (checked on a real frame). The engine also writes ▶ for any language whose ticker is drawn with the Japanese font (a Japanese title). |
 | `ticker.qr_caption` | Add a video | 動画を追加 | Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Caption under the QR code in the corner of the stream picture (the code opens the request page). Very short. |  |
 
 ### titlebar
@@ -1131,7 +1136,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `tray.quit` | Quit | 終了 | Tray icon of the desktop app. Menu entry; quits the program and stops the channel. |  |
 | `tray.skip` | Skip video | 動画をスキップ | Tray icon of the desktop app. Menu entry; ends the video that is on air. Max about 30 characters. |  |
 | `tray.tooltip_head` | VRCinema — {net} | VRCinema：{net} | Tray icon of the desktop app. Start of the tooltip; {net} is one of tray.net_*. Keep the product name VRCinema. | Tray tooltip VRCinema：オンライン; idle/playing add ・休止中 / ・再生中：{title}. |
-| `tray.tooltip_idle` | {head} — break | {head}・休止中 | Tray icon of the desktop app. Tooltip when no video is on air; {head} is the start of the tooltip. Windows keeps only about 127 characters of a tooltip. | en "break". Alt.: 待機中. |
+| `tray.tooltip_idle` | {head} — break | {head}・待機中 | Tray icon of the desktop app. Tooltip when no video is on air; {head} is the start of the tooltip. Windows keeps only about 127 characters of a tooltip. | en "break": 待機中 (review fix 1). |
 | `tray.tooltip_playing` | {head} — now playing: {title} | {head}・再生中：{title} | Tray icon of the desktop app. Tooltip while a video is on air; {title} is the video title (cut when too long). |  |
 
 ### tunnel
@@ -1167,19 +1172,19 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `viewer.add_button` | Add to queue | キューに追加 | Request page (the page viewers open): button that adds the video link to the queue. Short. |  |
 | `viewer.add_heading` | Add a video | 動画を追加 | Request page: small heading of the form with the video link and the nick. |  |
 | `viewer.added` | Added “{title}” to the queue. | 「{title}」をキューに追加しました。 | Request page: short message after a video was queued. {title} is the video's title. |  |
-| `viewer.added_by_host` | added by the host | ホストが追加 | Request page: detail of a video the channel owner added, shown where a viewer's nick would be (Now playing and Up next). Lower case, short, impersonal; "host" is the owner's badge (ticker.added_by_host). | Request page: ホストが追加 (shown where a nick would be). |
+| `viewer.added_by_host` | added by the host | 追加：ホスト | Request page: detail of a video the channel owner added, shown where a viewer's nick would be (Now playing and Up next). Lower case, short, impersonal; "host" is the owner's badge (ticker.added_by_host). | Request page, shown where a nick would be: 追加：ホスト, the same form as the ticker. |
 | `viewer.adding` | Checking the video… | 動画を確認中… | Request page: label of the add button while the channel checks the link (can take several seconds). |  |
 | `viewer.channel_link` | Channel link | チャンネルのリンク | Request page: screen-reader name of the box that holds the channel's address (in the 'How to watch' section). |  |
 | `viewer.copied` | Copied | コピーしました | Request page: the copy button for a second after the channel address was copied. |  |
 | `viewer.copy` | Copy | コピー | Request page: button that copies the channel address. |  |
 | `viewer.hint_any` | Paste a link to a video. | 動画のリンクを貼り付けてください。 | Request page: hint under the form when any site is accepted. |  |
-| `viewer.howto_no_seek` | Seeking in the player does not work, because this is a live channel. | ライブチャンネルなので、プレーヤーでのシークはできません。 | Request page, 'How to watch in VRChat': third point. The channel is a live stream, so the in-world player cannot seek. |  |
+| `viewer.howto_no_seek` | Seeking in the player does not work, because this is a live channel. | ライブ配信なので、プレーヤーで再生位置を動かすことはできません。 | Request page, 'How to watch in VRChat': third point. The channel is a live stream, so the in-world player cannot seek. |  |
 | `viewer.howto_paste` | Paste this link into the video player in the world: | ワールドの動画プレーヤーにこのリンクを貼り付けてください： | Request page, 'How to watch in VRChat': introduces the channel address in the box below. |  |
 | `viewer.howto_same_moment` | Everyone sees the same moment of the video. Whoever joins later jumps into the video that is already playing. | 全員が動画の同じ場面を見ます。あとから参加した人は、再生中の動画の途中から見ることになります。 | Request page, 'How to watch in VRChat': second point. |  |
 | `viewer.howto_title` | How to watch in VRChat | VRChatでの視聴方法 | Request page: title of the collapsible section with instructions for VRChat. |  |
 | `viewer.howto_untrusted` | Everyone in the instance must turn on Allow Untrusted URLs in VRChat (Settings, Comfort & Safety tab). Without it they will see a black screen. | インスタンス内の全員が、VRChatの設定（Settings）の「Comfort & Safety」タブで「Allow Untrusted URLs」をオンにする必要があります。オフのままだと画面が真っ黒になります。 | Request page, 'How to watch in VRChat': first point. 'Allow Untrusted URLs', 'Settings' and 'Comfort & Safety' are the names in the VRChat menu; keep them in English (or as the game shows them in your language). | VRChat menu names kept in English (Settings, Comfort & Safety, Allow Untrusted URLs). If the Japanese VRChat client shows Japanese names, they should be used. |
 | `viewer.language` | Language | 言語 | Request page: screen-reader name of the language selector (the selector lists the language names in themselves). |  |
-| `viewer.limit` | A video can be up to {limit} long. | 動画の長さは{limit}までです。 | Request page, under the form. {limit} is a length such as '2 h' or '30 min' (viewer.limit_hours / viewer.limit_minutes). | {limit} is viewer.limit_hours / _minutes: 2時間, 30分. The page joins this sentence and viewer.moderation with a space. |
+| `viewer.limit` | A video can be up to {limit} long. | 動画の長さは{limit}までです。 | Request page, under the form. {limit} is a length such as '2 h' or '30 min' (viewer.limit_hours / viewer.limit_minutes). | {limit} is viewer.limit_hours / _minutes: 2時間, 30分. The page joins this sentence and viewer.moderation without a space in Japanese (sentences() in public/app/i18n.js). |
 | `viewer.limit_hours` | {n} h | {n}時間 | Request page: a length in hours inside viewer.limit; {n} is a number that may have one decimal. |  |
 | `viewer.limit_minutes` | {n} min | {n}分 | Request page: a length in minutes inside viewer.limit; {n} is a whole number. |  |
 | `viewer.link_label` | Video link | 動画のリンク | Request page: label of the field for the video's address. |  |
@@ -1208,7 +1213,7 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `wizard.encoder_cpu` | No supported card was found, so the processor converts the picture. The channel will work, it only loads the computer more. | 対応するグラフィックボードが見つからなかったため、CPUで映像を変換します。チャンネルは動作しますが、PCの負荷が大きくなります。 | Wizard step 3: result when only the processor can be used. |  |
 | `wizard.encoder_failed` | The test failed: {error} | テストに失敗しました：{error} | Wizard step 3: the test failed; {error} is the reason. |  |
 | `wizard.encoder_gpu` | The graphics card will convert the picture. | グラフィックボードで映像を変換します。 | Wizard step 3: result, under the name of the card type. |  |
-| `wizard.encoder_intro` | Converting the picture on the graphics card is much lighter for the computer than on the processor. I am checking what can be used. | 映像の変換は、CPUよりグラフィックボードで行うほうがPCへの負荷がずっと軽くなります。使用できるものを確認しています。 | Wizard step 3: why the test is made. | en first person ("I am checking"); Japanese has no subject: 確認しています. |
+| `wizard.encoder_intro` | Converting the picture on the graphics card is much lighter for the computer than on the processor. I am checking what can be used. | 映像の変換は、CPUよりグラフィックボードで行うほうがPCへの負荷がずっと軽くなります。使用できる変換方式を確認しています。 | Wizard step 3: why the test is made. | en first person ("I am checking"); subject-less: 使用できる変換方式を確認しています. |
 | `wizard.encoder_skip` | Skip this step | このステップをスキップ | Wizard step 3: button after a failed test that goes on. |  |
 | `wizard.encoder_testing` | Checking the graphics card. It takes a few seconds… | グラフィックボードを確認しています。数秒かかります… | Wizard step 3: shown while the test runs. |  |
 | `wizard.encoder_title` | Graphics card test | グラフィックボードのテスト | Wizard step 3: title. |  |
@@ -1240,6 +1245,6 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `wizard.tools_ready` | All the tools are ready. | すべてのツールの準備ができました。 | Wizard step 2: the download is finished. |  |
 | `wizard.tools_skip` | Skip and go to the panel | スキップしてパネルへ | Wizard step 2: button after a failed download that ends the wizard and opens the program. |  |
 | `wizard.tools_title` | Downloading the tools | ツールのダウンロード | Wizard step 2: title. |  |
-| `wizard.welcome_intro` | This program runs your own live video channel for VRChat: you add videos to the queue, and the player in your VRChat world shows them one after another. | このプログラムは、VRChat用の独自のライブ動画チャンネルを運営します。キューに動画を追加すると、VRChatのワールドのプレーヤーで順番に再生されます。 | First wizard step: what the program does. VRChat is a game name, keep it. | 運営します (runs a channel). Alt.: 配信します. |
-| `wizard.welcome_setup` | First, a few helper programs have to be downloaded once and the graphics card checked. It takes a few minutes, and I will guide you step by step. | 最初に、いくつかの補助プログラムを一度だけダウンロードし、グラフィックボードを確認します。数分かかりますが、ウィザードが1ステップずつ案内します。 | First wizard step: what the setup will do. | en "I will guide you"; ウィザードが1ステップずつ案内します (the wizard guides). |
+| `wizard.welcome_intro` | This program runs your own live video channel for VRChat: you add videos to the queue, and the player in your VRChat world shows them one after another. | このプログラムで、VRChat用の自分だけのライブ動画チャンネルを運用できます。キューに動画を追加すると、VRChatのワールドにあるプレーヤーで順番に再生されます。 | First wizard step: what the program does. VRChat is a game name, keep it. | 自分だけの…を運用できます (review fix 1). |
+| `wizard.welcome_setup` | First, a few helper programs have to be downloaded once and the graphics card checked. It takes a few minutes, and I will guide you step by step. | 最初に、いくつかの補助プログラムを一度だけダウンロードし、グラフィックボードを確認します。数分かかりますが、画面の案内に沿って順番に進められます。 | First wizard step: what the setup will do. | en "I will guide you"; 画面の案内に沿って順番に進められます (no subject). |
 | `wizard.welcome_title` | Welcome to VRCinema | VRCinemaへようこそ | Title of the first wizard step (first run of the program). |  |
