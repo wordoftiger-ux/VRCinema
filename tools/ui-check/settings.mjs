@@ -686,6 +686,19 @@ try {
   a = await actions(m, 'remote pause setting');
   check(a[0].path === '/api/admin/config' && JSON.stringify(a[0].body) === '{"pauseWhenNoViewers":true}', 'a pause setting → PUT /api/admin/config', a[0]);
   check(await page.$eval('.named-link button.pri', (b) => b.disabled), 'internet: setting up a permanent link stays in the window');
+  // Final wave I2: trusting Cloudflare's headers decides who a request comes from: window only.
+  await scenario({ tunnel: 'off' });
+  await goto(page, 'tools');
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).loadConfig());
+  await goto(page, 'internet');
+  await page.waitForSelector(sw('Trust Cloudflare headers'));
+  check(await page.$eval(sw('Trust Cloudflare headers'), (e) => e.disabled), 'remote: the Cloudflare trust stays in the window');
+  check(
+    await page.$eval(sw('Trust Cloudflare headers'), (e) => Boolean(e.closest('.row2')?.querySelector('.window-only-hint'))),
+    'and says so under its title',
+  );
+  check(await page.$eval('input[aria-label="Public address of the channel"]', (e) => !e.disabled), 'the manual address still works remotely');
+  await scenario({ tunnel: 'online' });
   await goto(page, 'tools');
   await page.waitForFunction(() => document.querySelectorAll('#view .kv.tool button:not([disabled])').length === 4);
   check(await page.$eval('#view .sform .pl-actions button', (b) => !b.disabled), 'tools: update, repair and the GPU test work remotely');

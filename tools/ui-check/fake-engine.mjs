@@ -659,7 +659,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
       if (s.infoFail && route === '/api/desktop/info') return coded(res, 500, 'internal', 'boom');
       if (req.method === 'PUT') {
-        const REMOTE = ['language', 'autostart', 'publicUrl', 'trustCloudflare', 'videoEncoder', 'ytdlpCookies', 'pixeldrainApiKey', 'skippedUpdateVersion', 'tunnelEnabled', 'tunnelMode', 'pauseOnTunnelLoss', 'pauseWhenNoViewers'];
+        const REMOTE = ['language', 'autostart', 'publicUrl', 'videoEncoder', 'ytdlpCookies', 'pixeldrainApiKey', 'skippedUpdateVersion', 'tunnelEnabled', 'tunnelMode', 'pauseOnTunnelLoss', 'pauseWhenNoViewers'];
         const windowOnly = Object.keys(payload ?? {}).some((k) => !REMOTE.includes(k));
         if (mirror && s.remote && windowOnly) return coded(res, 403, 'window_only', 'This feature is only available in the app window.');
         return putConfig(res, payload);

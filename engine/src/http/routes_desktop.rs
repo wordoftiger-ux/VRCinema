@@ -31,14 +31,14 @@ const ENCODERS: [&str; 5] = ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_
 const MIN_PASSWORD_CHARS: usize = 8;
 
 /// The settings a remote session may change (spec section 2). An allowlist: anything else —
-/// the port, the home network access, the password and the remote panel (they decide who can
-/// reach the panel at all), read-only and unknown fields, and any field added later — stays
-/// with the window until it is added here.
-const REMOTE_SETTINGS: [&str; 12] = [
+/// the port, the home network access, the password, the remote panel and the trust in
+/// Cloudflare's headers (they decide who can reach the panel at all and who a request comes
+/// from), read-only and unknown fields, and any field added later — stays with the window
+/// until it is added here.
+const REMOTE_SETTINGS: [&str; 11] = [
     "language",
     "autostart",
     "publicUrl",
-    "trustCloudflare",
     "videoEncoder",
     "ytdlpCookies",
     "pixeldrainApiKey",
@@ -87,7 +87,10 @@ pub(super) fn router(state: AppState) -> Router<AppState> {
 pub(super) fn panel_router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/info", get(info))
-        .route("/api/admin/config", get(get_config).put(put_panel_config))
+        .route(
+            "/api/admin/config",
+            get(get_panel_config).put(put_panel_config),
+        )
         .route("/api/admin/tools", get(tools_status))
         .route("/api/admin/tools/install", post(tools_install))
         .route("/api/admin/tools/update", post(tools_update))
@@ -204,6 +207,36 @@ async fn info(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -
 async fn get_config(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     Ok(json_ok(&Value::Object(config_view(&core))))
+}
+
+/// [`get_config`] for the panel, see [`for_session`].
+async fn get_panel_config(
+    PanelSession(kind): PanelSession,
+    State(state): State<AppState>,
+) -> ApiResult {
+    let core = state.desktop()?;
+    Ok(json_ok(&Value::Object(for_session(
+        config_view(&core),
+        kind,
+    ))))
+}
+
+/// A remote session sees the cookies file by its name only: its folder shows the owner's user
+/// name and folders (the window shows the whole path).
+fn for_session(mut view: Map<String, Value>, kind: SessionKind) -> Map<String, Value> {
+    let name = match view.get("ytdlpCookies") {
+        Some(Value::String(path)) if kind == SessionKind::Remote => Some(
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+        _ => None,
+    };
+    if let Some(name) = name {
+        view.insert("ytdlpCookies".into(), json!(name));
+    }
+    view
 }
 
 fn type_error(key: &str) -> ApiError {
@@ -356,19 +389,24 @@ fn is_hostname(host: &str) -> bool {
 /// the server (the answer has the new port); everything else applies to the next request,
 /// resolve or clip; a new public address also redraws the slates in the background.
 async fn put_config(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    Ok(json_ok(&Value::Object(save_config(&state, &body).await?)))
+}
+
+/// Saves a settings patch; the settings afterwards and whether the server restarted.
+async fn save_config(state: &AppState, body: &Value) -> Result<Map<String, Value>, ApiError> {
     let core = state.desktop()?;
-    let patch = parse_patch(&body)?;
+    let patch = parse_patch(body)?;
     let restarted = core.apply_config(patch).await?;
     let mut view = config_view(&core);
     view.insert("restarted".into(), json!(restarted));
-    Ok(json_ok(&Value::Object(view)))
+    Ok(view)
 }
 
 /// [`put_config`] for the panel: a remote session changes only [`REMOTE_SETTINGS`] (any other
 /// field: 403 `window_only`, nothing saved); the window's session anything.
 async fn put_panel_config(
     PanelSession(kind): PanelSession,
-    state: State<AppState>,
+    State(state): State<AppState>,
     JsonBody(body): JsonBody,
 ) -> ApiResult {
     let window_only = body
@@ -377,7 +415,8 @@ async fn put_panel_config(
     if kind == SessionKind::Remote && window_only {
         return Err(ApiError::coded(StatusCode::FORBIDDEN, "window_only", &[]));
     }
-    put_config(state, JsonBody(body)).await
+    let view = save_config(&state, &body).await?;
+    Ok(json_ok(&Value::Object(for_session(view, kind))))
 }
 
 async fn tools_status(State(state): State<AppState>) -> ApiResult {

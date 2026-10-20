@@ -1,8 +1,9 @@
 // Settings → Internet: the built-in tunnel (on/off, quick or permanent link with the wizard),
 // the pauses, and — only while the tunnel is off — the address typed by hand and the trust in
 // Cloudflare's headers. A remote panel does all of it (spec section 2) but setting up or
-// deleting the permanent link (the Cloudflare login happens on the computer); a session that
-// came through the tunnel is asked first when an action ends its connection.
+// deleting the permanent link (the Cloudflare login happens on the computer) and the trust in
+// Cloudflare's headers (it decides who a request comes from); a session that came through the
+// tunnel is asked first when an action ends its connection.
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
@@ -24,7 +25,7 @@ const STATE_KEYS = {
 const reconnecting = signal(false);
 
 export function Internet() {
-  const { managed } = useAccess();
+  const { managed, windowed } = useAccess();
   const cfg = useConfig();
   const tun = tunnel.value;
   const [note, say] = useNote();
@@ -88,8 +89,8 @@ export function Internet() {
                   value=${address} onInput=${(e) => setAddress(e.target.value)} />
                 <button type="submit" class="btn">${t('settings.save')}</button>
               </form>
-              <${Row} title=${t('settings.internet.trust')} hint=${t('settings.internet.trust_hint')}>
-                <${Switch} label=${t('settings.internet.trust')} checked=${Boolean(cfg.trustCloudflare)}
+              <${Row} title=${t('settings.internet.trust')} hint=${t('settings.internet.trust_hint')} windowOnly>
+                <${Switch} label=${t('settings.internet.trust')} checked=${Boolean(cfg.trustCloudflare)} disabled=${!windowed}
                   onChange=${(v) => saveWith(say, { trustCloudflare: v }, v ? t('settings.internet.trust_on') : t('settings.internet.trust_off'))} />
               <//>
             <//>`

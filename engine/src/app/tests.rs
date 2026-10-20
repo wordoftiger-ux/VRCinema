@@ -434,7 +434,6 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
         json!({"language": "en"}),
         json!({"autostart": true}),
         json!({"publicUrl": "https://tv.example.com"}),
-        json!({"trustCloudflare": true}),
         json!({"videoEncoder": "libx264"}),
         json!({"ytdlpCookies": null}),
         json!({"pixeldrainApiKey": null}),
@@ -463,6 +462,8 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
         json!({"hasPassword": true}),
         json!({"firstRunCompleted": true}),
         json!({"namedTunnelHostname": "kanal.example.com"}),
+        // Final wave I2: trusting Cloudflare's headers decides who a request comes from.
+        json!({"trustCloudflare": true}),
         json!({"jakiesNowePole": 1}),
     ] {
         let before = app.saved();
@@ -488,6 +489,36 @@ async fn a_remote_session_manages_the_program_but_not_the_window_only_parts() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    // Final wave M5: the cookies file's folder (the owner's user name, his folders) stays with
+    // the window; a remote session sees the file name only.
+    let file = app.tmp.path().join("prywatny-folder").join("cookies.txt");
+    *app.hooks.cookies_file.lock().unwrap() = Some(file.clone());
+    let (status, _) = app
+        .call("POST", "/api/desktop/pick-cookies", Some(&window), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let full = json!(file.to_string_lossy());
+    assert_eq!(
+        app.get("/api/admin/config", &window).await["ytdlpCookies"],
+        full
+    );
+    assert_eq!(
+        app.get("/api/desktop/config", &window).await["ytdlpCookies"],
+        full
+    );
+    let remote_view = app.get("/api/admin/config", &remote).await;
+    assert_eq!(remote_view["ytdlpCookies"], "cookies.txt", "{remote_view}");
+    let (status, body) = app
+        .call(
+            "PUT",
+            "/api/admin/config",
+            Some(&remote),
+            Some(json!({"pauseWhenNoViewers": false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ytdlpCookies"], "cookies.txt", "{body}");
+    assert!(!body.to_string().contains("prywatny-folder"), "{body}");
     // What stays in the window has no panel route, and its window route refuses the session.
     for (method, path) in [
         ("POST", "/api/admin/tunnel/named/login"),
