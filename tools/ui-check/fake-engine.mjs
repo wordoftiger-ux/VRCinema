@@ -9,6 +9,11 @@
 // pending (number of videos waiting for approval), addError (code of the error POST …/items
 // answers with), panelFail (the panel answers 500), panelDelayMs, patchDelayMs, signedOut, remote, tunnel}. The queue lives in memory: POST …/items adds,
 // PATCH /api/admin/items/{id} moves ({position}) or decides ({action}), DELETE removes.
+// Files on disk (final wave I3): GET /api/admin/library?root=&path= and POST
+// /api/admin/channels/main/local {root, path} like the engine's MEDIA_DIRS library; scenario
+// `library`: null (switched off: {enabled: false}) or [{name, tree}] where a tree maps a folder
+// name to its tree and a file name to its size in bytes; `libraryAddError`: the code POST …/local
+// answers with.
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
 // GET /__test/stats: {maxPanelInFlight}; GET /__test/hang never answers.
 // History (panel field `history`): played, skipped (played with a reason), failed (localized
@@ -195,6 +200,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       remotePanelOff: false,
       sessionViaTunnel: false,
       channelDown: false,
+      library: null,
+      libraryAddError: null,
     };
     s.queue = initialQueue();
     s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
@@ -459,6 +466,52 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     res.end(JSON.stringify(body));
   };
   const coded = (res, status, code, error) => json(res, status, { error, code });
+
+  // ---------- Files on disk (MEDIA_DIRS) ----------
+  const libraryNode = (root, rel) => {
+    let node = s.library?.[root]?.tree;
+    for (const part of String(rel).split('/').filter(Boolean)) node = node && typeof node === 'object' ? node[part] : undefined;
+    return node;
+  };
+  const libraryEntries = (node, rel) =>
+    Object.entries(node)
+      .map(([name, v]) => ({
+        type: typeof v === 'object' ? 'dir' : 'file',
+        name,
+        path: rel ? `${rel}/${name}` : name,
+        ...(typeof v === 'object' ? {} : { sizeBytes: v }),
+      }))
+      .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
+  function libraryListing(res, query) {
+    if (!s.library) return json(res, 200, { enabled: false, roots: [] });
+    const root = Number(query.get('root') || 0);
+    const rel = (query.get('path') ?? '').replace(/^\/+|\/+$/g, '');
+    if (!s.library[root]) return coded(res, 400, 'no_such_root', 'There is no such root folder.');
+    const node = libraryNode(root, rel);
+    if (!node || typeof node !== 'object') return coded(res, 400, 'not_a_folder', 'This is not a folder.');
+    return json(res, 200, {
+      enabled: true,
+      roots: s.library.map((r, index) => ({ index, name: r.name })),
+      root,
+      path: rel,
+      parent: rel ? rel.split('/').slice(0, -1).join('/') : null,
+      entries: libraryEntries(node, rel),
+    });
+  }
+  function libraryAdd(res, payload) {
+    if (!s.library) return coded(res, 400, 'library_disabled', 'Files from disk are switched off. Set MEDIA_DIRS in the .env file.');
+    if (s.libraryAddError) return coded(res, 400, s.libraryAddError, `Refused: ${s.libraryAddError}`);
+    const root = Number(payload?.root ?? 0);
+    const rel = String(payload?.path ?? '');
+    if (!s.library[root]) return coded(res, 400, 'no_such_root', 'There is no such root folder.');
+    const node = libraryNode(root, rel);
+    if (node === undefined) return coded(res, 400, 'not_a_folder', 'This is not a folder.');
+    const files = typeof node === 'object' ? libraryEntries(node, rel).filter((e) => e.type === 'file') : [{ name: rel.split('/').at(-1) }];
+    if (!files.length) return coded(res, 400, 'no_videos_in_folder', 'There are no video files in this folder.');
+    for (const f of files) s.queue.push(queued(nextId++, f.name.replace(/\.[^.]+$/, ''), { sourceUrl: `local:${root}/${f.name}` }));
+    const title = files.length === 1 ? s.queue.at(-1).title : rel.split('/').at(-1) || 'folder';
+    return json(res, 201, { added: files.length, title });
+  }
 
   async function body(req) {
     const chunks = [];
@@ -727,7 +780,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       for (const n of s.nicks) if (n.blockId === payload.id) Object.assign(n, { blocked: false, blockId: null });
       return json(res, 200, { ok: true });
     }
+    if (path === '/api/admin/library' && req.method === 'GET') return libraryListing(res, url.searchParams);
     const base = '/api/admin/channels/main';
+    if (path === `${base}/local` && req.method === 'POST') return libraryAdd(res, payload);
     if (path === base && req.method === 'GET') {
       if (s.panelFail) return coded(res, 500, 'internal', 'boom');
       panelInFlight += 1;

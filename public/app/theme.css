@@ -1243,6 +1243,101 @@ kbd {
   letter-spacing: 0.06em;
 }
 
+/* Files on disk (a server without a window) */
+.lib {
+  margin: 0 0 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.lib-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 2px 14px 4px;
+}
+
+.lib-root {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius);
+  background: var(--field);
+  color: var(--text);
+}
+
+.lib-add-folder,
+.lib-add {
+  padding: 3px 10px;
+  font-size: 12px;
+  flex: none;
+}
+
+.lib-where {
+  margin: 4px 14px;
+  color: var(--text-faint);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.lib-up,
+.lib-dir {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.lib-up {
+  color: var(--text-faint);
+}
+
+.lib-up:hover,
+.lib-dir:hover {
+  background: var(--hover-row);
+}
+
+.lib-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.lib-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 14px;
+  font-size: 12.5px;
+}
+
+.lib-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lib-size {
+  color: var(--text-faint);
+  font-size: 12px;
+  flex: none;
+}
+
 .q-empty {
   margin: 8px 14px;
   color: var(--text-faint);

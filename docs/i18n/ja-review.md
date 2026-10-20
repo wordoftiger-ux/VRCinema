@@ -1,6 +1,6 @@
 # Japanese (beta): texts for review
 
-Every Japanese text of VRCinema (`public/locales/ja.json`, 1053 keys) with the English
+Every Japanese text of VRCinema (`public/locales/ja.json`, 1062 keys) with the English
 pattern, where it appears (from `public/locales/context.json`) and the translator's notes. Japanese
 is marked "日本語 (beta)" in the language lists until a native speaker has reviewed this list.
 
@@ -313,6 +313,20 @@ is marked "日本語 (beta)" in the language lists until a native speaker has re
 | `item_errors.stalled` | The source sent no data for 30 s | ソースから30秒間データが届きませんでした | Reason a video failed, kept in the history (panel). |  |
 | `item_errors.start_timeout` | The source took too long to start | ソースの開始に時間がかかりすぎました | Reason a video failed, kept in the history (panel). |  |
 | `item_errors.unknown` | Unknown error | 不明なエラー | Reason a video failed without a known cause, kept in the history. Short. |  |
+
+### library
+
+| Key | English | Japanese | Context | Notes |
+|---|---|---|---|---|
+| `library.title` | Files on disk | ディスク上のファイル | New interface, Channel view of a server without a window (headless, MEDIA_DIRS set): heading of the block under the link field that lists the video files in the folders the server may play from. Short heading (shown in capitals). | Added in the final wave (headless file browser). |
+| `library.folder` | Folder | フォルダー | Files on disk (headless server): accessible name of the list that picks one of the root folders (MEDIA_DIRS). One word. |  |
+| `library.root` | Root folder | ルートフォルダー | Files on disk (headless server): the line that says where the list is, while it shows the top of a root folder (the same term as in errors.no_such_root). | Same term as errors.no_such_root (ルートフォルダー). |
+| `library.you_are_in` | You are in: {path} | 現在のフォルダー：{path} | Files on disk (headless server): the line that says which folder the list shows; {path} is the folder's path inside the root folder, with / between the folders. | No pronoun: 現在のフォルダー instead of "You are in". |
+| `library.up` | Up one folder | 1つ上のフォルダーへ | Files on disk (headless server): button above the list that goes back to the folder that contains this one. Short button text. |  |
+| `library.add` | Add to queue | キューに追加 | Files on disk (headless server): small button at the end of a video file's row that adds that file to the queue. Short button text (the panel is narrow). |  |
+| `library.add_folder` | Add the whole folder | フォルダー全体を追加 | Files on disk (headless server): button next to the root folder list that adds every video file of the folder shown (not its subfolders). Disabled when the folder has no video files. |  |
+| `library.empty` | No videos or folders here. | このフォルダーには動画もサブフォルダーもありません。 | Files on disk (headless server): shown instead of the list when the folder has neither video files nor subfolders. |  |
+| `library.size` | {size} GB | {size} GB | Files on disk (headless server): size of a video file in its row; {size} is a number with two decimals in the language's number format (e.g. 1.50 / 1,50). Keep the unit short. | Space between the number and the Latin unit. |
 
 ### log
 

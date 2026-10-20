@@ -218,7 +218,7 @@ List the folders you want to share in `.env`, separated by semicolons:
 MEDIA_DIRS=D:\Movies;E:\Series
 ```
 
-The server can then queue a single file or a whole folder in natural order (episode 2 before 10) through the panel API (`/api/admin/library`, `/api/admin/channels/main/local`). Only the owner can do this. Viewers only see the title, never the path. The new interface has no file browser yet (the old panel had one); in the desktop app drag files or folders onto the window instead.
+The panel of a server without a window then shows **Files on disk** under the link field in the **Channel** view: pick a folder from the list, open its subfolders, and add one file (**Add to queue**) or every video of the folder in natural order (episode 2 before 10, **Add the whole folder**). The panel API does the same (`/api/admin/library`, `/api/admin/channels/main/local`). Only the owner can do this. Viewers only see the title, never the path. In the desktop app drag files or folders onto the window instead.
 
 ## Settings
 

@@ -249,8 +249,8 @@ W `.env` wpisz foldery z filmami, rozdzielone średnikiem:
 MEDIA_DIRS=D:\Filmy;E:\Seriale
 ```
 
-Serwer może wtedy dodać do kolejki pojedynczy plik albo cały folder w naturalnej kolejności (odcinek 2 przed 10) przez API panelu (`/api/admin/library`, `/api/admin/channels/main/local`).
-Pliki dodaje tylko właściciel. Widzowie widzą wyłącznie tytuł, nigdy ścieżkę. Nowy interfejs nie ma jeszcze przeglądarki plików (stary panel ją miał); w aplikacji na pulpit przeciągnij pliki albo foldery na okno.
+Panel serwera bez okna pokazuje wtedy w widoku **Kanał**, pod polem linku, **Pliki z dysku**: wybierz folder z listy, otwieraj podfoldery i dodaj jeden plik (**Dodaj do kolejki**) albo wszystkie filmy z folderu w naturalnej kolejności (odcinek 2 przed 10, **Dodaj cały folder**). To samo robi API panelu (`/api/admin/library`, `/api/admin/channels/main/local`).
+Pliki dodaje tylko właściciel. Widzowie widzą wyłącznie tytuł, nigdy ścieżkę. W aplikacji na pulpit przeciągnij pliki albo foldery na okno.
 
 ## Ustawienia w panelu
 
