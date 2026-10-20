@@ -4,8 +4,10 @@ Serwer, który z linków do YouTube, pixeldrain, CDA i innych stron robi **jeden
 Link kanału wklejasz raz do odtwarzacza wideo w świecie VRChat, a filmy z kolejki lecą po kolei.
 Wszyscy w lobby widzą ten sam moment filmu.
 
-- Panel właściciela (`/admin`) z hasłem: dodawanie filmów i playlist, kolejność, pomijanie, podgląd, ustawienia.
-- Publiczna strona zgłoszeń (`/`): widzowie dodają filmy, z limitami i opcjonalnym zatwierdzaniem.
+- Okno odtwarzacza / panel właściciela (`/admin`): podgląd na żywo, pauza, przewijanie, „Odtwórz teraz”, kolejka i historia, statystyki dla nerdów, ustawienia.
+- Publiczna strona zgłoszeń (`/`): widzowie dodają filmy pod swoim nickiem, z limitami i opcjonalnym zatwierdzaniem.
+- Pasek informacyjny (opcja): pas wypalany w obrazie z tytułem, autorem zgłoszenia, następnym filmem, Twoimi wiadomościami, kodem QR strony zgłoszeń i paskiem postępu.
+- Program mówi po angielsku, polsku, hiszpańsku, niemiecku, francusku i japońsku (beta).
 - Gdy kolejka jest pusta, kanał nadaje planszę „Brak filmów w kolejce” i nie zrywa połączenia.
 - Możesz puszczać też filmy z własnego dysku.
 
@@ -18,26 +20,96 @@ English version: [README.md](README.md).
 
 `VRCinema.exe` to cały serwer w jednym oknie: bez Node.js, bez instalatora, bez pliku `.env`.
 
-- **Pobranie**: `VRCinema.exe` ze strony [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) (około 19 MB). Połóż go gdziekolwiek, np. na pulpicie. Windows 10/11, 64-bitowy; potrzebny jest składnik Microsoft Edge WebView2 Runtime, który jest w Windows 11 i w większości instalacji Windows 10 (jeśli go brakuje, program podpowie, skąd go wziąć).
-- **Pierwsze uruchomienie**: kreator pobiera narzędzia (ffmpeg, yt-dlp, środowisko Deno potrzebne dla YouTube i cloudflared do linku publicznego, razem około 300 MB) do `%LOCALAPPDATA%\VRCinema`, sprawdza kartę graficzną i wybiera enkoder (NVIDIA, Intel, AMD albo procesor), uruchamia kanał i pokazuje jego link publiczny. Potem program od razu otwiera panel.
+- **Pobranie**: `VRCinema.exe` ze strony [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) (około 25 MB). Połóż go gdziekolwiek, np. na pulpicie. Windows 10/11, 64-bitowy; potrzebny jest składnik Microsoft Edge WebView2 Runtime, który jest w Windows 11 i w większości instalacji Windows 10 (jeśli go brakuje, program podpowie, skąd go wziąć).
+- **Pierwsze uruchomienie**: kreator pyta o język (na start ten z Windows), pobiera narzędzia (ffmpeg, yt-dlp, środowisko Deno potrzebne dla YouTube i cloudflared do linku publicznego, razem około 300 MB) do `%LOCALAPPDATA%\VRCinema`, sprawdza kartę graficzną i wybiera enkoder (NVIDIA, Intel, AMD albo procesor), uruchamia kanał i pokazuje jego link publiczny. Potem program od razu otwiera odtwarzacz.
 - **SmartScreen**: plik nie jest podpisany certyfikatem, więc Windows może pokazać „System Windows chronił ten komputer”. Kliknij **Więcej informacji**, potem **Uruchom mimo to**.
-- **Dodawanie filmów**: przeciągnij pliki wideo lub całe foldery na okno albo wklej linki w panelu. Przeciągnięte pliki są odtwarzane z miejsca, w którym leżą na dysku.
-- **Zasobnik**: zamknięcie okna zostawia kanał w zasobniku (za pierwszym razem pokaże się dymek). Menu zasobnika otwiera panel, kopiuje link kanału, pomija bieżący film i kończy program. **Zakończ** zatrzymuje kanał i wszystkie procesy ffmpeg.
-- **Panel zdalny**: domyślnie wyłączony; panel jest dostępny tylko z tego komputera. Aby zarządzać kanałem z innego urządzenia, włącz go w zakładce **Ustawienia** i ustaw hasło.
+- **Dodawanie filmów**: wklej link w pole nad kolejką (albo naciśnij Ctrl+V gdziekolwiek poza polem tekstowym) albo przeciągnij pliki wideo lub całe foldery na okno. Przeciągnięte pliki są odtwarzane z miejsca, w którym leżą na dysku.
+- **Zasobnik**: zamknięcie okna zostawia kanał w zasobniku (za pierwszym razem pokaże się dymek). Menu zasobnika otwiera okno, kopiuje link kanału albo link strony zgłoszeń, pomija bieżący film i kończy program. **Zakończ** zatrzymuje kanał i wszystkie procesy ffmpeg.
+- **Panel zdalny**: domyślnie wyłączony; panel jest dostępny tylko z tego komputera. Aby zarządzać kanałem z innego urządzenia (telefonu, laptopa), ustaw hasło w **Ustawienia** → **Panel zdalny** (zobacz [Panel zdalny i telefon](#panel-zdalny-i-telefon)).
 - **Aktualizacje**: program sprawdza, czy jest nowszy `VRCinema.exe`, przy starcie i co 24 godziny, i proponuje instalację (plik jest weryfikowany sumą SHA-256, a stary zostaje, dopóki nowy się nie uruchomi). Wymaga to publicznych wydań w repozytorium.
 - **Dane**: wszystko leży w `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Zmienna `VRCINEMA_HOME` wskazuje inny folder. Usunięcie folderu przywraca stan początkowy.
-- **Rozmiar i pamięć** (zmierzone, wersja release): `VRCinema.exe` ma 19,4 MB. Przy otwartym oknie sam zajmuje około 40 MB, a procesy WebView2 rysujące okno około 330 MB; cloudflared zajmuje około 40 MB, a ffmpeg to osobny proces.
-- **Bez okna** (serwer, Docker): zobacz [VPS (Linux, Docker)](#vps-linux-docker) i [Wersja w Rust](#wersja-w-rust-eksperymentalna) niżej; serwer `vrcinema` bez okna działa jak dotąd.
+- **Rozmiar i pamięć** (zmierzone, wersja release): `VRCinema.exe` ma 25 MB. Podczas filmu przy otwartym oknie sam zajmuje około 45 MB; procesy WebView2 rysujące okno zajmują około 600 MB, gdy gra podgląd na żywo; cloudflared zajmuje około 40 MB, a ffmpeg to osobny proces (około 30 MB przy kopiowaniu, około 300 MB przy konwersji na karcie graficznej).
+- **Bez okna** (serwer, Docker): zobacz [VPS (Linux, Docker)](#vps-linux-docker) i [Wersja w Rust](#wersja-w-rust-eksperymentalna) niżej; serwer `vrcinema` bez okna ma ten sam panel i tę samą stronę zgłoszeń.
+
+### Odtwarzacz
+
+Okno wygląda i działa jak odtwarzacz multimediów. Nie ma ramki Windows: pasek 32 px u góry to pasek tytułu (przeciągnij go, żeby przesunąć okno, kliknij dwukrotnie, żeby zmaksymalizować; przyciski minimalizacji, maksymalizacji i zamknięcia są po prawej; przyciąganie do krawędzi Windows działa). Zamknięcie chowa okno do zasobnika. Okno pamięta rozmiar, położenie i maksymalizację.
+
+- **Pasek boczny po lewej** z czterema widokami:
+  - **Kanał**: podgląd strumienia na żywo (z opóźnieniem pod spodem, „Podgląd · ok. 12 s za serwerem”), kolejka **Następne** (przeciąganie zmienia kolejność; menu pozycji ma **Odtwórz teraz**, **Na górę**, **Kopiuj link** i **Usuń z kolejki**), pole linku, **Do zatwierdzenia** przy włączonym zatwierdzaniu i miejsce na upuszczanie plików.
+  - **Historia**: co już leciało (odtworzony, pominięty, błąd) z **Odtwórz teraz** / **Spróbuj ponownie** i **Do kolejki**.
+  - **Udostępnij**: link kanału dla VRChat, strona zgłoszeń z kodem QR, stan internetu i stały link.
+  - **Ustawienia**: Ogólne (język, autostart, sieć domowa, port), Internet, Kanał (linki od widzów, limity, zatwierdzanie, język plansz, pasek informacyjny, nicki widzów, konwersja), Narzędzia, Panel zdalny, Zaawansowane, Dziennik, O programie.
+- **Pasek odtwarzania na dole**: tytuł i kto dodał film; −10 s, ⏮ (od początku), pauza/wznów, ⏭ (następny film), +10 s; oś czasu do kliknięcia albo przeciągnięcia (pokazuje czas pod kursorem); głośność podglądu; stan internetu; **Kopiuj link** (link kanału do odtwarzacza VRChat).
+- **Skróty klawiszowe** (gdy fokus nie jest w polu tekstowym; **?** pokazuje listę):
+
+  | Klawisz | Działanie |
+  |---|---|
+  | Spacja | Pauza / wznów |
+  | ← / → | 10 s wstecz / naprzód |
+  | Shift + ← / → | 60 s wstecz / naprzód |
+  | Home | Od początku tego filmu |
+  | N | Następny film |
+  | I | Statystyki dla nerdów |
+  | Ctrl + V | Dodaj link ze schowka do kolejki |
+  | ? | Skróty klawiszowe |
+
+- **Menu kontekstowe**: prawy przycisk na pozycji kolejki albo na podglądzie (menu podglądu ma **Statystyki dla nerdów** i **Kopiuj link kanału**). Z klawiatury otwiera je Shift+F10 albo klawisz menu; Alt+↑/↓ przesuwa pozycję kolejki z fokusem.
+
+### Sterowanie i opóźnienie
+
+- **Pauza** pokazuje na kanale „Pauza — wracamy za chwilę” i zapamiętuje pozycję; **Wznów** rusza od tego samego miejsca po kilku sekundach planszy buforowania. Pauza, przewijanie i ⏮ są wyłączone dla transmisji na żywo (⏭ działa).
+- **Przewijanie** (±10 s, ±60 s, oś czasu, ⏮) uruchamia ten sam film od nowej pozycji. Kilka szybkich kliknięć łączy się w jeden skok (program czeka 0,7 s po ostatnim), więc osiem kliknięć +10 s to jeden skok o 80 s. Przewinięcie w pauzie tylko przesuwa zapamiętaną pozycję. Skok na ostatnią sekundę puszcza następny film.
+- **Dokładność**: film kopiowany (bez konwersji) skacze do klatki kluczowej w celu albo przed nim, najwyżej o odstęp klatek kluczowych źródła wcześniej, zwykle kilka sekund (czas pokazuje „≈”); film konwertowany (np. przy włączonym pasku informacyjnym) skacze dokładnie.
+- **Odtwórz teraz** (kolejka albo Historia) od razu puszcza film; bieżący kończy się jako pominięty. Z Historii film jest dodawany ponownie jako nowa pozycja (ten sam link i nick).
+- **Opóźnienie**: kanał jest cięty na 4-sekundowe fragmenty, a odtwarzacze startują kilka fragmentów za krawędzią na żywo, więc **widzowie widzą każdą zmianę (pauzę, skok, następny film) ok. 10–15 sekund po kliknięciu**. Podgląd w oknie ma to samo opóźnienie; po skoku dymek mówi „Widzowie zobaczą to za ok. N s”.
+- **Pauza ręczna przetrwa restart serwera** (nowy port, dostęp z sieci domowej, naprawa narzędzi), **ale nie ponowne uruchomienie programu**: po zakończeniu i ponownym uruchomieniu VRCinema kanał gra.
+
+### Statystyki dla nerdów
+
+Naciśnij **I** albo prawy przycisk na podglądzie → **Statystyki dla nerdów**: nakładka jak na YouTube, odświeżana co sekundę, gdy jest otwarta. Pokazuje film na antenie (źródło, rozdzielczość, kopiowanie albo konwersja, koder, gotowe fragmenty), kanał HLS (sekwencja, nieciągłości, czy znaczniki czasu są ciągłe), następny film, ffmpeg (prędkość, CPU, pamięć), widzów (odtwarzacze, które pobrały fragment w ostatnich 30 s, pobrania na minutę, wysyłanie z wykresem 60 s), tunel (stan, czas w sieci, ponowne połączenia, lokalizacje Cloudflare) i podgląd w oknie (opóźnienie, bufor, porzucone klatki). **Kopiuj** kopiuje całość jako tekst. Adresy widzów są tylko liczone, nigdy pokazywane.
+
+### Języki
+
+- Trzy osobne wybory: **program** (okno, panel zdalny, zasobnik, dziennik: **Ustawienia** → **Ogólne** → **Język** i pierwszy krok kreatora; na start język Windows, jeśli jest jednym z sześciu, inaczej angielski), **plansze i pasek informacyjny** (**Ustawienia** → **Kanał** → **Język plansz**, domyślnie angielski — to język, który czytają widzowie w VRChat) i **strona zgłoszeń** (każdy widz wybiera go przełącznikiem u góry; na start język przeglądarki, wybór zapamiętuje przeglądarka).
+- Języki: English, Polski, Español, Deutsch, Français i 日本語 (beta). Komunikaty błędów serwera przychodzą w języku widza albo panelu.
+- **Serwer bez okna** (`vrcinema` z `.env`): angielski, chyba że w `.env` jest `LANGUAGE=pl` (albo `es`, `de`, `fr`, `ja`); jego panel nie ma przełącznika języka.
+- **Japoński to beta**: teksty przetłumaczono bez rodzimego użytkownika. Wszystkie japońskie teksty z angielskim wzorcem i kontekstem są w [docs/i18n/ja-review.md](docs/i18n/ja-review.md) do przeglądu przez rodzimego użytkownika. Plansze i pasek używają czcionki Windows Yu Gothic (zapasowo Meiryo); bez obu plansze zostają po angielsku (z wpisem w dzienniku).
+- **Pomoc w tłumaczeniu**: słowniki to `public/locales/<język>.json` (wzorcem jest angielski `en.json`). `public/locales/context.json` mówi, gdzie występuje każdy tekst i jaki ma limit długości, a [docs/i18n/glossary.md](docs/i18n/glossary.md) ustala pojęcia. Zachowaj `{pola}` i kategorie liczby mnogiej; `cargo test` w `engine/` sprawdza w każdym języku brakujące klucze, pola, liczbę mnogą i długości.
+
+### Pasek informacyjny
+
+Opcjonalny pas wypalany w obrazie strumienia, więc widzi go każdy w VRChat: „▶ Teraz: <tytuł> · dodane przez <nick | Gospodarza> · następnie: <tytuł> · dodaj film: <adres>” i Twoje wiadomości, kod QR strony zgłoszeń w prawym dolnym rogu z podpisem „Dodaj film” i cienki pasek postępu przy dolnej krawędzi.
+
+- **Ustawienia** → **Kanał** → **Pasek informacyjny**: wł./wył.; tryb **Co jakiś czas** (co 1, 2, 5 albo 10 minut; za każdym razem informacja o filmie, a po niej kolejna z Twoich wiadomości) albo **Ciągły** (informacja i wszystkie wiadomości w pętli); prędkość przewijania (panel pokazuje, jak długo tekst jest widoczny); pokazywanie następnego filmu; pokazywanie adresu; kod QR **Wyłączony**, **Razem z paskiem** albo **Zawsze**; pasek postępu; do 10 wiadomości po 200 znaków (nie są tłumaczone).
+- **Sprzęt**: przy włączonym pasku każdy film jest konwertowany (pasek jest rysowany w obrazie), co jest lekkie na karcie graficznej NVIDIA, Intel albo AMD i ciężkie na procesorze. Domyślnie włącza się tylko wtedy, gdy kreator znalazł koder na karcie graficznej. Jeśli komputer nie nadąża (konwersja wolniejsza niż czas rzeczywisty przez 30 s), mówią o tym dziennik i panel: wyłącz pasek albo użyj karty graficznej (**Ustawienia** → **Narzędzia**).
+- **Kiedy widać zmiany**: tekst (Twoje wiadomości, „następnie”, adres, język plansz, zmiany kolejki) zmienia się na strumieniu w ciągu ok. **20–60 sekund** (film jest przygotowywany z wyprzedzeniem; ok. 20 s dla filmu na antenie, do ok. minuty dla filmu przygotowanego wcześniej). Włączenie albo wyłączenie paska, tryb, odstęp, prędkość, kod QR i pasek postępu uruchamiają film na antenie od nowa od bieżącego miejsca (kilka sekund planszy buforowania); tak samo nowy adres publiczny, gdy pokazywany jest kod QR.
+- Tekst jest biały z cieniem na ciemnym pasie; pasek postępu jest bursztynowy. Transmisje na żywo nie mają paska postępu.
+
+### Nicki widzów
+
+- Widzowie mogą wpisać nick (do 24 znaków) na stronie zgłoszeń. Pierwsze zgłoszenie z nickiem tworzy w tej przeglądarce losowy klucz urządzenia; serwer zapisuje tylko jego skrót SHA-256. Nick należy potem do tego urządzenia przez 30 dni od ostatniego użycia: ten sam nick z innej przeglądarki albo urządzenia jest odrzucany („Ten nick jest już zajęty przez kogoś innego”). Podobne nicki liczą się jako ten sam: wielkość liter, znaki diakrytyczne, spacje, kropki, myślniki, niewidoczne znaki i podobne litery cyrylicy albo greki są pomijane (Kasia, KASIA, kásia, K a s i a, Ka5ia to jeden nick). „Gospodarz”, „Host” i ich tłumaczenia są zastrzeżone.
+- Przy nicku panel i strona zgłoszeń pokazują ikonkę (kolor i kształt) wyliczaną z klucza urządzenia. To **pomoc wzrokowa** do wykrywania podszywania się, nie dowód tożsamości. Twoje filmy mają znaczek **Gospodarz**.
+- **Ustawienia** → **Kanał** → **Nicki widzów** pokazuje nicki z ikonkami; **Zwolnij** zwalnia nick, **Zablokuj urządzenie** odrzuca zgłoszenia z tego urządzenia (a **Odblokuj** zdejmuje blokadę).
+- Ograniczenia: nick wymaga klucza urządzenia, więc działa tylko w przeglądarce, która zachowuje dane strony; widz w oknie prywatnym albo po wyczyszczeniu danych strony dostaje nowy klucz, więc stary nick pokazuje się jako zajęty; może wybrać inny nick albo wysłać bez nicku. Zablokowany widz może dalej wysyłać zgłoszenia **bez nicku** z nowego profilu przeglądarki (anonimowo); limity zgłoszeń na adres nadal działają, a zatwierdzanie (**Ustawienia** → **Kanał** → zatwierdzanie) zatrzyma wszystko, czego nie chcesz.
+
+### Panel zdalny i telefon
+
+- Panel zdalny to ten sam interfejs co okno, pod `<adres publiczny>/admin` (albo `http://<ten komputer>:<port>/admin` przy dostępie z sieci domowej), po zalogowaniu hasłem z **Ustawienia** → **Panel zdalny**. Może wszystko to, co okno, **poza czterema rzeczami, które zostają w oknie**: port i dostęp z sieci domowej, hasło i wyłączenie panelu zdalnego, logowanie do Cloudflare (a więc ustawienie i usunięcie stałego linku) oraz wybór pliku cookies (okno wyboru pliku otwiera się na komputerze; panel zdalny może plik odłączyć). Upuszczanie plików i kreator pierwszego uruchomienia też są tylko w oknie. Te miejsca pokazują „Dostępne w programie na komputerze”.
+- **Wylogowanie**: **Ustawienia** → **Ogólne** → **Wyloguj** (na telefonie: ikona w prawym górnym rogu). Zmiana hasła albo wyłączenie panelu zdalnego wylogowuje wszystkie zdalne urządzenia.
+- **Przełącznik tunelu**: gdy panel otwarto przez tunel, wyłączenie tunelu (albo ponowne połączenie, albo zmiana między szybkim a stałym linkiem) najpierw pyta, bo kończy Twoje własne połączenie („Stracisz dostęp do tego panelu”).
+- **Układ na telefon**: poniżej 700 px szerokości pasek boczny staje się zakładkami na dole, a pasek odtwarzania jest pod podglądem z większymi przyciskami. Klucz API pixeldrain można podmienić, ale nigdy nie jest pokazywany z powrotem.
 
 ### Link publiczny (wbudowany tunel)
 
 Program sam udostępnia kanał w internecie: bez konta, bez terminala i bez wpisywania adresu.
 
-- **Szybki tunel, domyślnie włączony**: przy starcie program uruchamia własną kopię [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) i dostaje adres w stylu `https://abc-def.trycloudflare.com`. Znacznik u góry panelu pokazuje **W sieci** i przycisk kopiujący link kanału (`<adres>/live/main.m3u8`); link kopiuje też menu zasobnika.
+- **Szybki tunel, domyślnie włączony**: przy starcie program uruchamia własną kopię [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) i dostaje adres w stylu `https://abc-def.trycloudflare.com`. Pasek odtwarzania pokazuje **W sieci**, a **Kopiuj link** kopiuje link kanału (`<adres>/live/main.m3u8`); link kopiuje też menu zasobnika.
 - **Adres zmienia się przy każdym uruchomieniu programu** (i gdy tunel musi połączyć się od nowa). Podaj znajomym nowy link albo ustaw stały link (niżej).
 - **Zastępuje własny cloudflared.** Jeśli przy poprzedniej wersji uruchamiałeś sam `cloudflared tunnel --url …`, nie musisz już tego robić. Przy włączonym wbudowanym tunelu ręcznie wpisany adres publiczny (**Ustawienia** → **Zaawansowane**) i zaufanie do Cloudflare nie są używane; działają tylko po wyłączeniu tunelu w **Ustawieniach** → **Internet**. Konfiguracja z poprzedniej wersji też dostaje włączony tunel, a brakujący cloudflared program pobiera sam w tle (gdy się nie uda, np. bez internetu, próbuje ponownie co 5 minut).
-- **Kod QR na planszy oczekiwania**: gdy kolejka jest pusta, kanał pokazuje „Brak filmów w kolejce”, kod QR strony zgłoszeń i pod nim jej adres. Znajomi w VRChat skanują go telefonem i dodają film. Nowy adres podmienia kod na żywo, bez restartu. Bez adresu plansza mówi „Łączenie z internetem…”.
+- **Kod QR na planszy oczekiwania**: gdy kolejka jest pusta, kanał pokazuje „Brak filmów w kolejce”, kod QR strony zgłoszeń i pod nim jej adres. Znajomi w VRChat skanują go telefonem i dodają film. Nowy adres podmienia kod na żywo, bez restartu. Bez adresu plansza mówi „Łączenie z internetem…”. (Plansze są w języku plansz, domyślnie po angielsku: „No videos in the queue”.)
 - **Wyłączenie**: **Ustawienia** → **Internet** → „Udostępniaj kanał w internecie”. Bez tunelu kanał jest dostępny tylko z tego komputera (albo pod adresem wpisanym ręcznie).
+- **VRChat i niezaufane adresy**: każdy widz musi włączyć w VRChat opcję **Allow Untrusted URLs**. Według forum zgłoszeń VRChat od wersji 1546 ta opcja nie otwiera już każdego adresu w instancjach **Public** i **Group Public**: grają tam tylko domeny dopuszczone przez twórcę świata. Link `trycloudflare.com` może więc działać tylko w instancjach Friends+, Friends, Invite albo Group, a stały link na własnej domenie tego nie zmienia, chyba że świat dopuszcza Twoją domenę. Sami tego nie sprawdziliśmy: wypróbuj w rodzaju instancji, którego używasz (zobacz listę testów niżej).
 
 ### Stały link (własna domena)
 
@@ -54,29 +126,37 @@ Od tej chwili link kanału to `https://kanal.example.com/live/main.m3u8`, także
 Widzowie nie tracą kawałka filmu, gdy zerwie się połączenie:
 
 - **Utrata internetu** (domyślnie włączona): gdy tunel nie działa przez 10 sekund, film się zatrzymuje, a kanał pokazuje „Pauza — wracamy za chwilę”. Po powrocie tunelu film wznawia się od tego samego miejsca. Krótsze przerwy niczego nie wstrzymują.
-- **Nikt nie ogląda** (domyślnie wyłączona): po 30 sekundach bez widzów film się zatrzymuje i wznawia, gdy tylko ktoś zacznie oglądać (podgląd w panelu też liczy się jako widz).
-- Transmisje na żywo nigdy nie są wstrzymywane. Obie opcje są w **Ustawieniach** → **Internet**. Wznowiony film rusza po kilku sekundach planszy buforowania; tak ma być.
+- **Nikt nie ogląda** (domyślnie wyłączona): po 30 sekundach bez widzów film się zatrzymuje i wznawia, gdy tylko ktoś zacznie oglądać (podgląd w oknie liczy się jako widz, gdy okno jest widoczne; zminimalizowane okno albo schowane do zasobnika zatrzymuje podgląd).
+- Transmisje na żywo nigdy nie są wstrzymywane. Obie opcje są w **Ustawieniach** → **Internet** → „Wstrzymywanie kanału”. Wznowiony film rusza po kilku sekundach planszy buforowania; tak ma być.
 
 ### Lista testów ręcznych dla właściciela
 
 Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
 
-- [ ] Czyste konto Windows (albo komputer, na którym programu nigdy nie było): pierwsze uruchomienie z pustego folderu, kreator, pierwszy film leci.
+- [ ] Czyste konto Windows (albo komputer, na którym programu nigdy nie było): pierwsze uruchomienie z pustego folderu, kreator (najpierw krok języka), pierwszy film leci.
+- [ ] Okno bez ramki, główne i kreatora: przeciąganie za pasek tytułu, dwuklik maksymalizuje i przywraca, przyciski minimalizuj / maksymalizuj / zamknij (zamknięcie chowa do zasobnika), przyciąganie do krawędzi Windows (przeciągnięcie do krawędzi ekranu, Win+←/→/↑), zmiana rozmiaru za krawędzie; rozmiar i położenie wracają po restarcie.
+- [ ] Drugi monitor z innym skalowaniem (np. 100 % i 150 %): przesuń tam okno, zakończ program, uruchom ponownie; otwiera się na tym monitorze we właściwym rozmiarze; zmaksymalizowane też.
+- [ ] Pierwsze uruchomienie na małym albo gęstym ekranie (np. laptop 1366×768 albo 4K przy 200 %): okno mieści się na ekranie (minimum 960×600) i nic nie jest ucięte.
+- [ ] Minimalizacja na ok. 60 s i przywrócenie: podgląd wraca na żywo (nie 60 s z tyłu), a podpis z opóźnieniem się uspokaja; zminimalizowane albo schowane do zasobnika okno nie pobiera strumienia (w statystykach dla nerdów spada liczba widzów); okno tylko zasłonięte innym oknem gra dalej.
+- [ ] Panel zdalny na prawdziwym telefonie: logowanie pod `<adres publiczny>/admin`, zakładki na dole, pasek odtwarzania pod podglądem, pauza i przewijanie działają, elementy tylko-okna mówią „Dostępne w programie na komputerze”, wylogowanie działa; złe hasło jest odrzucane; wyłączenie panelu albo zmiana hasła wylogowuje telefon.
+- [ ] `/desktop-login`: otwórz `http://127.0.0.1:<port>/desktop-login?key=cokolwiek` w zwykłej przeglądarce: kończy się na `/admin` z ekranem logowania, nigdy w panelu (okno używa własnego jednorazowego klucza).
+- [ ] Pasek informacyjny w VRChat: przy włączonym pasku obejrzyj film w świecie VRChat: pas jest czytelny na ekranie świata z normalnej odległości, kod QR da się zeskanować telefonem z VRChat i otwiera stronę zgłoszeń, pasek postępu się przesuwa.
+- [ ] Allow Untrusted URLs: puść link kanału w instancji **Public** albo **Group Public** oraz w instancji Friends albo Invite (z włączonym Allow Untrusted URLs). Zanotuj, gdzie działa (zobacz uwagę o VRChat wyżej).
+- [ ] Przegląd japońskiego: rodzimy użytkownik czyta [docs/i18n/ja-review.md](docs/i18n/ja-review.md) (i program z wybranym 日本語) i przysyła poprawki.
 - [ ] Przeciąganie od początku do końca: jeden plik, kilka plików, folder, plik niebędący filmem (pomijany); strona pokazuje wynik, film leci.
-- [ ] Podążanie za zmianą portu: zmień port w **Ustawieniach**; okno przeładowuje się pod nowym adresem.
-- [ ] Wybór pliku cookies: wskaż plik w **Ustawieniach** i dodaj link, który go wymaga.
+- [ ] Podążanie za zmianą portu: zmień port w **Ustawienia** → **Ogólne**; okno przeładowuje się pod nowym adresem.
+- [ ] Wybór pliku cookies: wskaż plik w **Ustawienia** → **Zaawansowane** i dodaj link, który go wymaga.
 - [ ] Autostart włącz/wyłącz: z Windows program startuje w zasobniku bez okna; wyłączenie usuwa wpis.
 - [ ] Restart po aktualizacji: zainstaluj nowsze wydanie podstawione lokalnie; program uruchamia się ponownie, a stary plik znika.
 - [ ] Kliknięcia w linki: zewnętrzne linki w panelu otwierają się w domyślnej przeglądarce, okno zostaje przy programie.
-- [ ] Pozycje menu zasobnika: otwórz panel, kopiuj link, pomiń, zakończ; dwuklik w ikonę.
+- [ ] Pozycje menu zasobnika: otwórz okno, kopiuj link kanału i link strony zgłoszeń, pomiń, zakończ; dwuklik w ikonę.
 - [ ] Dymek przy zamknięciu do zasobnika: zamknięcie okna chowa je i pokazuje komunikat raz.
 - [ ] Drugie uruchomienie: przy działającym programie (okno schowane do zasobnika albo zminimalizowane) uruchom `VRCinema.exe` jeszcze raz; istniejące okno wraca na wierzch i nie startuje druga kopia (także po **Zakończ**: nowe uruchomienie startuje normalnie w ciągu kilku sekund).
-- [ ] Panel zdalny: w **Ustawieniach** ustaw hasło i włącz panel zdalny (z dostępem z sieci albo adresem publicznym); zaloguj się z innego urządzenia (np. telefonu) pod `/admin`; złe hasło jest odrzucane; wyłączenie panelu albo zmiana hasła wylogowuje to urządzenie.
-- [ ] Pasek naprawy: przy uszkodzonych narzędziach (np. zamień `tools\ffmpeg.exe` w folderze danych na pusty plik i uruchom program ponownie) panel pokazuje „Kanał nie wystartował…” z przyciskami **Uruchom ponownie kanał** i **Napraw narzędzia**; naprawa przywraca kanał.
+- [ ] Naprawa: przy uszkodzonych narzędziach (np. zamień `tools\ffmpeg.exe` w folderze danych na pusty plik i uruchom program ponownie) panel mówi, że kanał nie wystartował, i proponuje ponowne uruchomienie kanału oraz naprawę narzędzi (**Ustawienia** → **Narzędzia**); naprawa przywraca kanał.
 - [ ] Stały link od początku do końca z prawdziwą domeną: **Ustaw stały link** raz otwiera przeglądarkę do logowania w Cloudflare; potem pojawia się krok z nazwą hosta; kanał działa pod `https://<host>/live/main.m3u8` i zachowuje ten link po restarcie programu i zmianie portu. Zakończenie VRCinema (zasobnik → **Zakończ**) w trakcie lub po logowaniu nie zamyka przeglądarki. Nazwa hosta, która ma już rekord DNS, pokazuje pytanie o nadpisanie, a nadpisanie działa. **Wróć do szybkiego tunelu** i **Usuń stały link** działają (tunel znika z panelu Cloudflare).
 - [ ] Kod QR z VRChat: przy pustej kolejce zeskanuj telefonem kod QR z planszy oczekiwania w świecie VRChat; otwiera się strona zgłoszeń, a dodany tam film leci.
-- [ ] Automatyczna pauza: w trakcie filmu odłącz kabel sieciowy (albo wyłącz Wi-Fi) na co najmniej 15 s; znacznik pokazuje „Brak internetu — kanał wstrzymany”, a film się zatrzymuje; po podłączeniu tunel wraca (z tym samym adresem, jeśli cloudflared działał dalej, z nowym, jeśli musiał uruchomić się od nowa), a film leci dalej od tego samego miejsca.
-- [ ] Aktualizacja z poprzedniej wersji: uruchom nowy `VRCinema.exe` na folderze danych poprzedniej wersji (jej `config.json`); tunel jest włączony; program sam pobiera cloudflared w tle; panel pokazuje pobieranie (pasek „Pobieranie programu cloudflared…”, nigdy „kanał nie nadaje”), a potem link publiczny; film może się zatrzymać, jeśli pobieranie trwa dłużej niż 10 s.
+- [ ] Automatyczna pauza: w trakcie filmu odłącz kabel sieciowy (albo wyłącz Wi-Fi) na co najmniej 15 s; stan pokazuje „Brak internetu”, a film się zatrzymuje; po podłączeniu tunel wraca (z tym samym adresem, jeśli cloudflared działał dalej, z nowym, jeśli musiał uruchomić się od nowa), a film leci dalej od tego samego miejsca.
+- [ ] Aktualizacja z poprzedniej wersji: uruchom nowy `VRCinema.exe` na folderze danych poprzedniej wersji (jej `config.json`); tunel jest włączony; program sam pobiera cloudflared w tle; panel pokazuje pobieranie, nigdy „kanał nie nadaje”, a potem link publiczny; film może się zatrzymać, jeśli pobieranie trwa dłużej niż 10 s. Linki od widzów zachowują dotychczasową listę dozwolonych serwisów (tryb „Tylko dozwolone serwisy”).
 
 ## Wymagania
 
@@ -85,6 +165,8 @@ Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
 - Do udostępnienia w internecie: [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) albo VPS.
 
 ffmpeg i yt-dlp instalują się automatycznie do folderu `bin`.
+
+> Serwer Node.js to poprzednia implementacja. Nowy interfejs z etapu 4 serwują tylko aplikacja na pulpit i serwer Rust (`vrcinema`, niżej); starej strony panelu serwera Node.js nie ma już w repozytorium, więc jako serwer bez okna używaj wersji Rust.
 
 ## Pierwsze uruchomienie (Windows)
 
@@ -140,7 +222,7 @@ Darmowy szybki tunel zmienia adres po każdym uruchomieniu cloudflared. Stały a
 - Wklej link kanału na [Pastebin](https://pastebin.com) i dawaj znajomym link „raw” do tej wklejki. VRChat sam przejdzie do kanału. Gdy zmieni się adres tunelu, edytujesz tylko wklejkę.
 
 **Ważne w VRChat:** każda osoba w lobby musi włączyć w ustawieniach opcję **Allow Untrusted URLs**.
-Twoja domena nie jest na liście zaufanych adresów VRChat, więc bez tej opcji zobaczy czarny ekran.
+Twoja domena nie jest na liście zaufanych adresów VRChat, więc bez tej opcji zobaczy czarny ekran. W instancjach Public i Group Public może to nie wystarczyć (od wersji VRChat 1546 decyduje tam lista domen dopuszczonych przez świat; zobacz [uwagę wyżej](#link-publiczny-wbudowany-tunel)).
 
 ### Łącze
 
@@ -154,10 +236,10 @@ Ten test sprawdza, czy odtwarzacz AVPro w VRChat płynnie przechodzi między fil
 1. Dodaj do kolejki dwa krótkie filmy o różnej jakości, np. stary film 240p i nowy 1080p60.
 2. Obejrzyj w VRChat moment przejścia między nimi oraz przejście do planszy na końcu.
 3. Jeśli obraz się zacina, czernieje albo odtwarzacz się rozłącza, zmień w panelu ustawienia i powtórz:
-   - najpierw wyłącz „Oznaczaj przejścia między filmami”,
+   - najpierw wyłącz „Oznaczaj przejścia między filmami w strumieniu” (**Ustawienia** → **Kanał**),
    - jeśli to nie pomoże, włącz z powrotem i włącz „Zawsze konwertuj obraz”.
 
-„Zawsze konwertuj obraz” mocno obciąża procesor. Z kartą NVIDIA ustaw w `.env` `VIDEO_ENCODER=h264_nvenc`, a konwersja przejdzie na kartę graficzną.
+„Zawsze konwertuj obraz” mocno obciąża procesor. Aplikacja na pulpit konwertuje na znalezionej karcie graficznej; serwer bez okna potrzebuje w `.env` `VIDEO_ENCODER=h264_nvenc` (albo `h264_qsv`, `h264_amf`).
 
 ## Filmy z dysku
 
@@ -167,15 +249,14 @@ W `.env` wpisz foldery z filmami, rozdzielone średnikiem:
 MEDIA_DIRS=D:\Filmy;E:\Seriale
 ```
 
-W panelu pojawi się sekcja „Pliki z dysku”. Przeglądasz w niej foldery i dodajesz do kolejki pojedynczy plik albo cały folder.
-Pliki z folderu trafiają do kolejki w naturalnej kolejności, czyli odcinek 2 przed 10.
-Pliki dodaje tylko właściciel. Widzowie widzą wyłącznie tytuł, nigdy ścieżkę.
+Serwer może wtedy dodać do kolejki pojedynczy plik albo cały folder w naturalnej kolejności (odcinek 2 przed 10) przez API panelu (`/api/admin/library`, `/api/admin/channels/main/local`).
+Pliki dodaje tylko właściciel. Widzowie widzą wyłącznie tytuł, nigdy ścieżkę. Nowy interfejs nie ma jeszcze przeglądarki plików (stary panel ją miał); w aplikacji na pulpit przeciągnij pliki albo foldery na okno.
 
 ## Ustawienia w panelu
 
 | Ustawienie | Domyślnie |
 |---|---|
-| Dozwolone serwisy dla widzów | youtube.com, youtu.be, pixeldrain.com, cda.pl |
+| Linki od widzów | dowolny serwis (nowa baza); istniejąca baza zachowuje swoją listę w trybie „Tylko dozwolone serwisy” |
 | Najdłuższy film od widza | 2 godziny |
 | Zgłoszenia z jednego adresu | 3 na 10 minut |
 | Filmów w kolejce na osobę | 5 |
@@ -184,13 +265,30 @@ Pliki dodaje tylko właściciel. Widzowie widzą wyłącznie tytuł, nigdy ście
 Ty jako właściciel możesz dodawać filmy z dowolnej strony obsługiwanej przez yt-dlp, transmisje na żywo
 i całe playlisty YouTube albo listy pixeldrain. Te limity Ciebie nie dotyczą.
 
+### Linki od widzów i sieć domowa
+
+Tryb linków (**Ustawienia** → **Kanał** → **Linki od widzów**; `linkMode` w ustawieniach kanału) to **Dowolny serwis** (`all`; domyślny dla nowej bazy), **Tylko dozwolone serwisy** (`allowlist`: tylko serwisy z listy i ich poddomeny; tak dostaje istniejąca baza, z dotychczasową listą) albo **Wszystkie oprócz zablokowanych** (`blocklist`: każdy serwis poza tymi z listy). Obie listy są zawsze przechowywane; **Dodaj popularne serwisy** wpisuje YouTube, Twitch, Kick, Vimeo, Dailymotion, pixeldrain, CDA, SoundCloud, bilibili, niconico, Streamable, Reddit, X/Twitter i TikTok. W trybie „Tylko dozwolone serwisy” strona zgłoszeń pokazuje listę dozwolonych serwisów.
+
+W każdym trybie link od widza musi być `http` albo `https` i nie może prowadzić do Twojej sieci: odrzucane są `localhost`, `*.local`, `*.lan`, `*.home.arpa`, `*.internal` i nazwy jednowyrazowe, np. `nas`, a także każda nazwa, która rozwiązuje się na adres pętli zwrotnej, prywatny (RFC 1918, `fc00::/7`), link-local, CGNAT (`100.64.0.0/10`), multicast albo inny zarezerwowany (także adres IPv4 zapisany w IPv6). Odrzucana jest też nazwa, której sprawdzenie nie zdążyło się zakończyć. Sprawdzenie odbywa się, gdy link przychodzi, i jeszcze raz, gdy film startuje (nazwa mogła się zmienić). Adres filmu znaleziony przez yt-dlp jest sprawdzany tak samo, a ffprobe i ffmpeg dostają dokładnie sprawdzony adres, nigdy tekst wypisany przez yt-dlp; adres z ukośnikiem wstecznym, spacją albo znakiem sterującym jest odrzucany. Linki dodane przez właściciela nigdy nie są ograniczane.
+
+Znane ograniczenia (sprawdzany jest adres, nie to, co dzieje się po jego pobraniu):
+
+- Przekierowania wewnątrz yt-dlp i przekierowania HTTP w ffmpeg (publiczny adres filmu, który odpowiada 302 na stronę w Twojej sieci) nie są sprawdzane.
+- Playlista albo manifest (HLS, DASH) pod publicznym adresem może wskazywać fragmenty w Twojej sieci; ffmpeg za nimi pójdzie.
+- Nazwa, która zmienia odpowiedź między sprawdzeniem a pobraniem (DNS rebinding), nie zostanie wykryta.
+- Treść strony w Twojej sieci może wyciec: przez ogólny ekstraktor yt-dlp tytuł albo tekst błędu takiej strony może pojawić się jako tytuł w kolejce albo błąd pozycji.
+
+Jeśli Twoja sieć jest ważniejsza niż wygoda, używaj trybu `allowlist` z serwisami, którym ufasz.
+
+Opcje `.env` są opisane w [.env.example](.env.example): język (`LANGUAGE`), enkoder karty graficznej (`VIDEO_ENCODER=h264_nvenc`), cookies dla YouTube (`YTDLP_COOKIES`), klucz API pixeldrain i ścieżki.
+
 ## Gdy coś nie działa
 
 - **Film od razu trafia do historii z błędem.** Powód jest przy filmie w historii. yt-dlp aktualizuje się przy każdym starcie i raz na dobę.
 - **YouTube każe się zalogować.** Wyeksportuj cookies z przeglądarki do pliku `cookies.txt` i ustaw `YTDLP_COOKIES` w `.env`.
 - **pixeldrain zwraca limit pobierania.** Ustaw `PIXELDRAIN_API_KEY` z ustawień swojego konta pixeldrain.
 - **Plansza „Buforowanie” trwa długo.** Źródło jest wolne. Po 30 sekundach bez danych film zostaje pominięty.
-- **Widzowie nie widzą obrazu.** Sprawdź opcję Allow Untrusted URLs i czy link kanału zaczyna się od `https://`.
+- **Widzowie nie widzą obrazu.** Sprawdź opcję Allow Untrusted URLs i czy link kanału zaczyna się od `https://`. W instancji Public albo Group Public spróbuj instancji Friends albo Invite (zobacz uwagę o VRChat w [Link publiczny](#link-publiczny-wbudowany-tunel)).
 
 ## VPS (Linux, Docker)
 

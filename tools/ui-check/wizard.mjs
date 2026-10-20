@@ -99,6 +99,22 @@ try {
   const put = (await sent('PUT', '/api/desktop/config')).at(-1);
   check(put?.body?.language === 'en', 'selecting a language saves it with PUT /api/desktop/config', put?.body);
   check((await page.locator('[data-lang=en]').getAttribute('aria-pressed')) === 'true', 'the choice is marked');
+  // The mark is visible too (amber frame), not only for screen readers (stage 4 live run: the
+  // style still keyed on aria-checked after the buttons moved to aria-pressed).
+  const frame = (code) => page.locator(`[data-lang=${code}]`).evaluate((el) => getComputedStyle(el).borderTopColor);
+  const amber = await page.evaluate(() => {
+    const probe = document.createElement('i');
+    probe.style.color = 'var(--amber)';
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  check((await frame('en')) === amber && (await frame('pl')) !== amber, 'the chosen language has the amber frame, the others not', {
+    en: await frame('en'),
+    pl: await frame('pl'),
+    amber,
+  });
   check((await text(page, '.wz-no')) === 'Step 1 of 4', 'the counter follows the language');
   await shot(page, '1-language-en');
   await page.click('[data-lang=pl]');

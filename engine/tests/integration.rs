@@ -1190,3 +1190,81 @@ async fn a_new_ticker_look_starts_the_film_again_once_from_where_it_is() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
+
+/// With the graphics card this computer has (skipped without one), a converted film is cut
+/// into 4-second segments. The encoder's forced key frames must be IDR frames: otherwise the
+/// segmenter waits for the encoder's own GOP and h264_nvenc gave 10-second segments (stage 4
+/// live run).
+#[tokio::test]
+async fn a_gpu_encoder_cuts_the_converted_film_into_four_second_segments() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let env: HashMap<String, String> = HashMap::from([(
+        "ADMIN_PASSWORD".to_string(),
+        "haslo-testowe-123".to_string(),
+    )]);
+    let cfg = load_config(&env, &root, cfg!(windows)).unwrap();
+    if !cfg.ffmpeg_path.exists() {
+        eprintln!("skipped: no bin/ffmpeg");
+        return;
+    }
+    let encoder = vrcinema::tools::encoder::detect_encoder(&cfg.ffmpeg_path).await;
+    if encoder == VideoEncoder::Libx264 {
+        eprintln!("skipped: no graphics card encoder on this computer");
+        return;
+    }
+    let work = tempfile::tempdir().unwrap();
+    // 25 fps and 13 s: the encoders' default GOP (250 frames) would be one 10 s segment.
+    let film = work.path().join("film.mp4");
+    make_clip(&cfg.ffmpeg_path, &film, "1280x720", 25, true, 13);
+    let out_dir = work.path().join("clip");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let args = vrcinema::pipeline::ffmpeg_args::build_clip_args(
+        &vrcinema::pipeline::ffmpeg_args::ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: film.to_string_lossy().into_owned(),
+                headers: vec![],
+            }],
+            input_format: None,
+            mode: vrcinema::pipeline::probe::VideoMode::Transcode,
+            info: vrcinema::pipeline::probe::VideoInfo {
+                codec: "mpeg4".into(),
+                height: 720,
+                pix_fmt: "yuv420p".into(),
+                fps: 25.0,
+                has_audio: true,
+                duration_s: Some(13.0),
+            },
+            encoder,
+            segment_seconds: 4,
+            out_dir: out_dir.clone(),
+            start_at_s: 0.0,
+            readrate: None,
+            overlay: None,
+        },
+    );
+    let out = Command::new(&cfg.ffmpeg_path).args(&args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{encoder:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = std::fs::read_to_string(out_dir.join("list.csv")).unwrap();
+    let lengths: Vec<f64> = list
+        .lines()
+        .filter_map(|l| {
+            // `seg_00000.ts,<start>,<end>`
+            let cols: Vec<&str> = l.split(',').collect();
+            let start: f64 = cols.get(1)?.trim().parse().ok()?;
+            let end: f64 = cols.get(2)?.trim().parse().ok()?;
+            Some(end - start)
+        })
+        .collect();
+    assert!(lengths.len() >= 4, "{encoder:?}: segments {lengths:?}");
+    assert!(
+        lengths.iter().all(|s| *s <= 4.2),
+        "{encoder:?}: segments {lengths:?}"
+    );
+}

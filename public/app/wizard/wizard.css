@@ -94,7 +94,7 @@
   background: var(--hover);
 }
 
-.wz-lang[aria-checked="true"] {
+.wz-lang[aria-pressed="true"] {
   border-color: var(--amber);
   background: var(--amber-bg);
   color: var(--text-strong);

@@ -1025,7 +1025,7 @@
   "viewer.howto_paste": "Wklej ten link do odtwarzacza wideo w świecie:",
   "viewer.howto_same_moment": "Wszyscy widzą ten sam moment filmu. Kto dołączy później, wskoczy w trwający film.",
   "viewer.howto_title": "Jak oglądać w VRChat",
-  "viewer.howto_untrusted": "Każda osoba w lobby musi włączyć w VRChat opcję Allow Untrusted URLs (Settings, zakładka Comfort & Safety). Bez niej zobaczy czarny ekran.",
+  "viewer.howto_untrusted": "Każda osoba w lobby musi włączyć w VRChat opcję Allow Untrusted URLs (Settings, zakładka Comfort & Safety), inaczej zobaczy czarny ekran. W instancjach Public i Group Public świat musi też dopuszczać adres tego kanału, więc film może działać tylko w innych rodzajach instancji (np. Friends albo Invite).",
   "viewer.language": "Język",
   "viewer.limit": "Film może trwać do {limit}.",
   "viewer.limit_hours": "{n} h",

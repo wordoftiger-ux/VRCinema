@@ -100,6 +100,9 @@ pub fn input_options(input: &StreamInput) -> Vec<OsString> {
     args
 }
 
+/// The encoder and its rate control. The GPU encoders turn the forced key frames (every
+/// segment, see [`build_clip_args`]) into IDR frames: the segmenter cuts only at those, and
+/// without it the segments follow the encoder's own GOP (10 s with h264_nvenc).
 pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
     let mut args = Vec::new();
     match encoder {
@@ -114,6 +117,8 @@ pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
                 "high",
                 "-rc",
                 "cbr",
+                "-forced-idr",
+                "1",
             ],
         ),
         VideoEncoder::H264Qsv => push_all(
@@ -125,11 +130,22 @@ pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
                 "faster",
                 "-profile:v",
                 "high",
+                "-forced_idr",
+                "1",
             ],
         ),
         VideoEncoder::H264Amf => push_all(
             &mut args,
-            &["-c:v", "h264_amf", "-quality", "speed", "-rc", "cbr"],
+            &[
+                "-c:v",
+                "h264_amf",
+                "-quality",
+                "speed",
+                "-rc",
+                "cbr",
+                "-forced_idr",
+                "1",
+            ],
         ),
         VideoEncoder::Libx264 => push_all(
             &mut args,
@@ -559,6 +575,32 @@ mod tests {
         assert_eq!(value_after(&args, "-preset", 0).as_deref(), Some("p4"));
     }
 
+    /// The forced key frames of a GPU encoder are plain I frames unless asked for IDR frames;
+    /// the segmenter cuts only at IDR frames, so the segments grew to the encoder's own GOP
+    /// (10 s with h264_nvenc) instead of 4 s (seen in the stage 4 live run).
+    #[test]
+    fn gpu_encoders_make_the_forced_key_frames_idr_frames() {
+        let nvenc = strs(&encoder_args(VideoEncoder::H264Nvenc));
+        assert_eq!(value_after(&nvenc, "-forced-idr", 0).as_deref(), Some("1"));
+        for encoder in [VideoEncoder::H264Qsv, VideoEncoder::H264Amf] {
+            let args = strs(&encoder_args(encoder));
+            assert_eq!(
+                value_after(&args, "-forced_idr", 0).as_deref(),
+                Some("1"),
+                "{encoder:?}"
+            );
+        }
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.encoder = VideoEncoder::H264Nvenc;
+        let args = build(&o);
+        assert_eq!(value_after(&args, "-forced-idr", 0).as_deref(), Some("1"));
+        assert_eq!(
+            value_after(&args, "-force_key_frames", 0).as_deref(),
+            Some("expr:gte(t,n_forced*4)")
+        );
+    }
+
     #[test]
     fn qsv_and_amf_encoders() {
         let qsv = strs(&encoder_args(VideoEncoder::H264Qsv));
@@ -571,6 +613,8 @@ mod tests {
                 "faster",
                 "-profile:v",
                 "high",
+                "-forced_idr",
+                "1",
                 "-b:v",
                 "6M",
                 "-maxrate",
@@ -583,8 +627,20 @@ mod tests {
         assert_eq!(
             amf,
             [
-                "-c:v", "h264_amf", "-quality", "speed", "-rc", "cbr", "-b:v", "6M", "-maxrate",
-                "6M", "-bufsize", "12M"
+                "-c:v",
+                "h264_amf",
+                "-quality",
+                "speed",
+                "-rc",
+                "cbr",
+                "-forced_idr",
+                "1",
+                "-b:v",
+                "6M",
+                "-maxrate",
+                "6M",
+                "-bufsize",
+                "12M"
             ]
         );
         let x264 = strs(&encoder_args(VideoEncoder::Libx264));
