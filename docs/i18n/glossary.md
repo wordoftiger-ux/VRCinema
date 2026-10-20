@@ -168,8 +168,8 @@ Common to all languages:
   buffering, pause; never a bare "画面"), "テロップ" the ticker, "進行状況バー" its progress line.
   "リクエスト" is a viewer's request and "リクエストページ" the request page; a technical request of
   the API is "要求" ("無効な要求です。"). "サイト" is a site a link comes from; "ページ" a page of the
-  program or Cloudflare's login page. Reading a link (yt-dlp, pixeldrain) is "取得" ("動画の情報を
-  取得できませんでした"), analysing a source "解析"; "再生" only for playback. "スキップ" is skipping a
+  program or Cloudflare's login page. Reading a link (yt-dlp, pixeldrain) is "取得"
+  ("動画の情報を取得できませんでした"), analysing a source "解析"; "再生" only for playback. "スキップ" is skipping a
   video (history state "スキップ済み"); "シーク" / "戻る" / "進む" is moving within one. The queue
   headings are "次に再生" (panel), "承認待ち" and "再生待ち". "PC" for this computer (as Windows),
   "CPU" for the processor, "グラフィックボード" for AMD/NVIDIA and "Intelのグラフィックス" for Intel.
