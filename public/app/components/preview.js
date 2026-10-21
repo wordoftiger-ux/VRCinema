@@ -1,7 +1,7 @@
 // The live preview on the Channel view: the channel's own stream (/live/main.m3u8, as the
 // viewers get it) played with hls.js, so the owner sees what VRChat sees and how far behind
 // the server it is. The delay is measured here once a second (`previewDelayS`) and drives the
-// caption under the preview and the bubble after a seek. A right click opens the preview menu;
+// caption of the On air screen and the bubble after a seek. A right click opens the preview menu;
 // the "Stats for nerds" overlay sits on top of the picture. While the window is hidden
 // (minimised, in the tray) the preview stops loading, so it does not count as a viewer.
 
@@ -187,7 +187,11 @@ function SeekBubble() {
   return html`<div class="seek-bubble" role="status">⏩ ${text}</div>`;
 }
 
-export function Preview() {
+/**
+ * The channel as the viewers get it. `dual`: the right screen "On air" beside the monitor
+ * (its caption above it); otherwise the only screen (phone), caption below.
+ */
+export function Preview({ dual = false }) {
   const video = useRef(null);
   const player = useRef(null);
   const volume = previewVolume.value;
@@ -222,7 +226,10 @@ export function Preview() {
     ];
   };
 
-  return html`
+  const seconds = Number.isFinite(delay) ? Math.max(1, Math.round(delay)) : null;
+  // Beside the monitor the screen is narrow: the stats overlay then spreads over the stage.
+  const stats = statsOpen.value ? html`<${StatsOverlay} delayS=${delay} />` : null;
+  const box = html`
     <div class="video" tabindex="0" aria-label=${t('preview.label')}
       ...${contextMenuHandlers('preview.menu', menuItems)}>
       <video ref=${video} playsinline></video>
@@ -233,9 +240,18 @@ export function Preview() {
           </div>`
         : null}
       <${SeekBubble} />
-      ${statsOpen.value ? html`<${StatsOverlay} delayS=${delay} />` : null}
-    </div>
-    <p class="stage-caption">${Number.isFinite(delay)
-      ? t('preview.caption', { seconds: Math.max(1, Math.round(delay)) })
-      : t('preview.caption_plain')}</p>`;
+      ${dual ? null : stats}
+    </div>`;
+  const caption = seconds === null ? t('monitor.on_air') : t('monitor.on_air_caption', { seconds });
+  if (dual) {
+    return html`
+      <div class="screen screen-air">
+        <p class="stage-caption screen-cap">${caption}</p>
+        ${box}
+        ${stats}
+      </div>`;
+  }
+  return html`
+    ${box}
+    <p class="stage-caption">${caption}</p>`;
 }

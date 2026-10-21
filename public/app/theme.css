@@ -1021,6 +1021,131 @@ kbd {
   object-fit: contain;
 }
 
+/* Two screens side by side (layout A of the monitor spec): Preview left, On air right. */
+.stage.dual {
+  position: relative; /* the stats overlay of On air spreads over both screens */
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.screen {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.screen-cap {
+  margin: 0 2px 6px;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.stage-caption.screen-cap {
+  margin: 0 2px 6px;
+}
+
+.monitor-caption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-mute {
+  margin-left: auto;
+  flex: none;
+}
+
+.stage.dual .video,
+.monitor-box {
+  flex: none;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: calc(100vh - var(--titlebar-h) - var(--player-h) - 150px);
+}
+
+.monitor-box {
+  position: relative;
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  background: #0d0e16;
+  border: 1px solid var(--line-card);
+}
+
+.monitor-box video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.monitor-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-mute);
+}
+
+.monitor-badge {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  max-width: calc(100% - 20px);
+  background: rgba(20, 21, 31, 0.9);
+  border: 1px solid var(--line-focus);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.screen-monitor.is-off .monitor-box {
+  opacity: 0.55;
+}
+
+.screen-actions {
+  display: flex;
+  margin-top: 8px;
+}
+
+.monitor-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.monitor-sync span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow windows down to the minimum (960 px): less padding and, below 1040 px, a narrower
+   queue, so each screen stays at least 300 px wide. */
+@media (min-width: 700px) and (max-width: 1180px) {
+  .stage.dual {
+    padding: 12px;
+    gap: 10px;
+  }
+}
+
+@media (min-width: 700px) and (max-width: 1040px) {
+  .channel .q {
+    width: 244px;
+  }
+}
+
 .preview-unavailable {
   position: absolute;
   inset: 0;

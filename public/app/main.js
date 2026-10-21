@@ -32,6 +32,7 @@ import { HistoryView } from './views/history.js';
 import { ShareView } from './views/share.js';
 import { SettingsView } from './views/settings.js';
 import { toggleStats } from './components/stats.js';
+import { monitorRunning, syncMonitor } from './components/monitor.js';
 import { StatusStrip } from './components/status.js';
 import { LoginView } from './views/login.js';
 
@@ -49,6 +50,7 @@ function openShortcuts() {
     [plus(t('shortcuts.key_home')), 'shortcuts.restart'],
     [plus('N'), 'shortcuts.next'],
     [plus('I'), 'shortcuts.stats'],
+    [plus('S'), 'shortcuts.sync'],
     [plus(t('shortcuts.key_ctrl'), 'V'), 'shortcuts.paste'],
     [plus('?'), 'shortcuts.help'],
   ];
@@ -102,7 +104,10 @@ function onKeyDown(e) {
   } else if ((e.key === 'n' || e.key === 'N') && plain) {
     if (can.current) action = skip;
   } else if ((e.key === 'i' || e.key === 'I') && plain) action = toggleStats;
-  else if (e.key === '?' && plain) action = openShortcuts;
+  else if ((e.key === 's' || e.key === 'S') && plain) {
+    // Only where the monitor runs (the window's Channel view); its button does the same.
+    if (monitorRunning()) action = syncMonitor;
+  } else if (e.key === '?' && plain) action = openShortcuts;
   if (!action) return;
   e.preventDefault();
   action();
