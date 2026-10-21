@@ -15,7 +15,14 @@
 // name to its tree and a file name to its size in bytes; `libraryAddError`: the code POST …/local
 // answers with.
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
-// GET /__test/stats: {maxPanelInFlight, maxViewerInFlight}; GET /__test/hang never answers.
+// GET /__test/stats: {maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight}; GET /__test/hang never answers.
+// The producer's monitor (window only, 403 for a remote session or without a window; requests
+// record their query as `search`; maxMonitorInFlight counts the reads without `from`): GET
+// /api/desktop/monitor.m3u8[?from=<row>] lists scenario `monitorFeed` ({clips: [{key, itemId,
+// baseS, segs: [segment numbers of the HLS folder], src: 'a' (options.hlsDir) or 'b'
+// (options.hlsDir2)}], firstSeq, antenna, aired}; null: an empty list, as without a film) like the
+// engine (2 s rows, #VRCINEMA-AT/ANTENNA/AIRED, EXT-X-START for `from`); GET
+// /api/desktop/monitor/<clip>/<n>.ts serves its segments; `monitorDelayMs` delays the list.
 // Scenario `viewerStateDelayMs`: GET /api/channels/main/state answers that late (setting it
 // starts a new count of maxViewerInFlight).
 // History (panel field `history`): played, skipped (played with a reason), failed (localized
@@ -62,9 +69,13 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
+export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } = {}) {
   if (port === 8080) throw new Error('never port 8080');
   let requests = [];
+  let monitorInFlight = 0;
+  let maxMonitorInFlight = 0;
+  // Rows the engine still keeps after they left the list (it serves them for a while).
+  let monitorKept = [];
   let s;
   let nextId;
   let panelInFlight = 0;
@@ -206,6 +217,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       channelDown: false,
       library: null,
       libraryAddError: null,
+      monitorFeed: null,
+      monitorDelayMs: 0,
     };
     s.queue = initialQueue();
     s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
@@ -221,6 +234,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     nextId = 100;
     maxPanelInFlight = 0;
     maxViewerInFlight = 0;
+    maxMonitorInFlight = 0;
   }
   reset();
 
@@ -358,6 +372,58 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
       res.end(bytes);
     } catch {
       json(res, 404, { error: 'Not Found' });
+    }
+  }
+
+  // The producer's monitor (window only): the list of `monitorFeed` and its segments.
+  function monitorRows() {
+    const f = s.monitorFeed;
+    const rows = [];
+    if (!f || s.playing === 'none') return rows;
+    let seq = f.firstSeq ?? 0;
+    for (const clip of f.clips) {
+      clip.segs.forEach((n, i) => {
+        rows.push({ seq, clip: clip.key, name: `${n}.ts`, src: clip.src ?? 'a', itemId: clip.itemId ?? 7, positionS: clip.baseS + 2 * i, disc: i === 0 && rows.length > 0 });
+        seq += 1;
+      });
+    }
+    return rows;
+  }
+  async function monitorList(res, params) {
+    // The window's own reads (no `from`; hls.js reloads the list with one) are counted.
+    const own = !params.has('from');
+    if (own) monitorInFlight += 1;
+    maxMonitorInFlight = Math.max(maxMonitorInFlight, monitorInFlight);
+    try {
+      if (s.monitorDelayMs) await sleep(s.monitorDelayMs);
+      const f = s.monitorFeed;
+      const rows = monitorRows();
+      if (rows.length) monitorKept = rows;
+      const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:2', `#EXT-X-MEDIA-SEQUENCE:${rows[0]?.seq ?? f?.firstSeq ?? 0}`, '#EXT-X-DISCONTINUITY-SEQUENCE:0'];
+      const at = rows.findIndex((r) => String(r.seq) === params.get('from'));
+      if (at >= 0) lines.push(`#EXT-X-START:TIME-OFFSET=${(2 * at).toFixed(3)},PRECISE=YES`);
+      if (rows.some((r) => r.seq === f?.antenna)) lines.push(`#VRCINEMA-ANTENNA:${f.antenna}`);
+      if (rows.some((r) => r.seq === f?.aired)) lines.push(`#VRCINEMA-AIRED:${f.aired}`);
+      for (const r of rows) {
+        if (r.disc) lines.push('#EXT-X-DISCONTINUITY');
+        lines.push(`#VRCINEMA-AT:${r.itemId},${r.positionS.toFixed(3)}`, '#EXTINF:2.000000,', `monitor/${r.clip}/${r.name}`);
+      }
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' });
+      res.end(`${lines.join('\n')}\n`);
+    } finally {
+      if (own) monitorInFlight -= 1;
+    }
+  }
+  async function monitorSegment(res, clip, name) {
+    const row = [...monitorRows(), ...monitorKept].find((r) => r.clip === clip && r.name === name);
+    const dir = row?.src === 'b' ? hlsDir2 : hlsDir;
+    if (!row || !dir) return coded(res, 404, 'no_segment', 'No such segment');
+    try {
+      const bytes = await readFile(join(dir, name));
+      res.writeHead(200, { 'content-type': 'video/mp2t', 'cache-control': 'no-store' });
+      return res.end(bytes);
+    } catch {
+      return coded(res, 404, 'no_segment', 'No such segment');
     }
   }
 
@@ -656,7 +722,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     if (path.startsWith('/live/')) return serveLive(res, path.slice('/live/'.length));
     if (path.startsWith('/static/')) return serveFile(res, decodeURIComponent(path.slice('/static/'.length)));
     if (path === '/__test/requests') return json(res, 200, requests);
-    if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight, maxViewerInFlight });
+    if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight });
     if (path === '/__test/hang') return undefined;
     if (path === '/__test/reset') {
       reset();
@@ -673,7 +739,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
 
     const payload = req.method === 'GET' ? null : await body(req).catch(() => null);
-    requests.push({ method: req.method, path, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
+    requests.push({ method: req.method, path, search: url.search, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
     const noWindow = s.remote || s.headless;
     if (path === '/api/channels/main/state' && req.method === 'GET') {
       viewerInFlight += 1;
@@ -754,6 +820,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
     }
     if (route.startsWith('/api/desktop/')) {
       if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
+      if (route === '/api/desktop/monitor.m3u8' && req.method === 'GET') return monitorList(res, url.searchParams);
+      const monitorSeg = route.match(/^\/api\/desktop\/monitor\/([a-z0-9-]+)\/(\d+\.ts)$/);
+      if (monitorSeg && req.method === 'GET') return monitorSegment(res, monitorSeg[1], monitorSeg[2]);
       if (await desktopRoute(res, req, route, payload)) return undefined;
       if (route === '/api/desktop/tunnel/qr') return sendQr(res);
       if (route === '/api/desktop/tunnel' && req.method === 'GET') return json(res, 200, tunnelView());
@@ -889,6 +958,6 @@ export function startFakeEngine(port = 8193, { hlsDir = null } = {}) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv[1])) {
   const port = Number(process.argv[2] ?? 8193);
-  const { port: bound } = await startFakeEngine(port, { hlsDir: process.env.FAKE_HLS_DIR ?? null });
+  const { port: bound } = await startFakeEngine(port, { hlsDir: process.env.FAKE_HLS_DIR ?? null, hlsDir2: process.env.FAKE_HLS_DIR2 ?? null });
   console.log(`fake engine on http://127.0.0.1:${bound}/admin`);
 }

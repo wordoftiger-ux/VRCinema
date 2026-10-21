@@ -95,7 +95,7 @@ try {
   const delay = await delayOf(page);
   check(delay >= 0 && delay < 20, 'previewDelayS is a measured number of seconds', delay);
   const caption = await text(page, '.stage-caption');
-  check(/^Preview · about \d+ s behind the server$/.test(caption), 'caption under the preview carries the measured delay', caption);
+  check(/^On air · about \d+ s behind the server$/.test(caption), 'caption of the On air screen carries the measured delay', caption);
   check(Math.abs(Number(caption.match(/\d+/)[0]) - (await delayOf(page))) <= 2, 'the caption number is the measured delay, rounded');
   await page.screenshot({ path: join(shots, 'after-preview-en-1100x680.png') });
 
@@ -156,7 +156,7 @@ try {
   check((await page.$('.stats')) === null, 'the overlay is closed at the start');
   let reads0 = await statsReads();
   check(reads0 === 0, 'closed overlay: no read of the stats route', reads0);
-  await page.click('.video', { button: 'right', position: { x: 300, y: 250 } });
+  await page.click('.video', { button: 'right' });
   await page.waitForSelector('.menu');
   const items = await page.$$eval('.menu [role=menuitem]', (b) => b.map((e) => [e.textContent.trim(), e.getAttribute('aria-disabled')]));
   check(JSON.stringify(items.map((i) => i[0])) === JSON.stringify(['Pause', 'Back 10 seconds', 'Forward 10 seconds', 'Stats for nerds', 'Copy channel link']), 'right click on the preview opens the menu: pause, -10 s, +10 s, stats, copy link', items);
@@ -168,16 +168,16 @@ try {
   await page.click('.menu button:nth-of-type(1)');
   await waitFor(async () => (await requests()).slice(m).some((r) => r.path.endsWith('/pause')), 'menu: Pause sends pause');
   check(true, 'menu: Pause sends pause');
-  await page.click('.video', { button: 'right', position: { x: 300, y: 250 } });
+  await page.click('.video', { button: 'right' });
   check((await text(page, '.menu [role=menuitem]')) === 'Resume', 'while paused the first item is Resume');
   await page.click('.menu [role=menuitem]');
   await waitFor(async () => (await requests()).slice(m).some((r) => r.path.endsWith('/resume')), 'menu: Resume sends resume');
   check(true, 'menu: Resume sends resume');
-  await page.click('.video', { button: 'right', position: { x: 300, y: 250 } });
+  await page.click('.video', { button: 'right' });
   await page.click('.menu button:nth-of-type(3)'); // +10 s
   await waitFor(async () => (await requests()).slice(m).find((r) => r.path.endsWith('/seek') && r.body?.byS === 10), 'menu: +10 s sends seek byS 10');
   check(true, 'menu: +10 s sends seek byS 10');
-  await page.click('.video', { button: 'right', position: { x: 300, y: 250 } });
+  await page.click('.video', { button: 'right' });
   await page.click('.menu button:nth-of-type(5)'); // copy link
   check((await page.evaluate(() => navigator.clipboard.readText())) === `${base}/live/main.m3u8` || (await page.evaluate(() => navigator.clipboard.readText())).endsWith('/live/main.m3u8'), 'menu: Copy channel link copies the channel address');
 
@@ -214,7 +214,7 @@ try {
   check(true, 'the bubble goes away after a few seconds');
 
   // ---------- The overlay ----------
-  await page.click('.video', { button: 'right', position: { x: 300, y: 250 } });
+  await page.click('.video', { button: 'right' });
   await page.click('.menu button:nth-of-type(4)'); // Stats for nerds
   await page.waitForSelector('.stats');
   check(true, 'menu: "Stats for nerds" opens the overlay');
@@ -305,7 +305,7 @@ try {
   const raw = await page.$eval('.stage', (e) => e.textContent.match(/\b(stats|preview)\.[a-z_0-9]+/g));
   check(raw === null, 'no untranslated keys in the stage', raw);
   const plCaption = await text(page, '.stage-caption');
-  check(/^Podgląd · ok\. \d+ s za serwerem$/.test(plCaption), 'the caption follows the language', plCaption);
+  check(/^Na antenie · ok\. \d+ s za serwerem$/.test(plCaption), 'the caption follows the language', plCaption);
   await page.screenshot({ path: join(shots, 'after-stats-pl-1100x680.png') });
   await page.evaluate(async () => (await import('/static/app/store.js')).setLanguage('en'));
 
@@ -340,7 +340,7 @@ try {
   await scenario({ hls: false });
   page = await openApp();
   await sleep(1500);
-  check((await text(page, '.stage-caption')) === 'Preview', 'no stream: the caption is just "Preview"');
+  check((await text(page, '.stage-caption')) === 'On air', 'no stream: the caption is just "On air"');
   check((await delayOf(page)) === null, 'no stream: the delay stays unknown');
   await page.evaluate(async () => { (await import('/static/app/store.js')).seekBubble.value += 1; });
   await waitFor(() => page.$('.seek-bubble'), 'bubble without any measurement');

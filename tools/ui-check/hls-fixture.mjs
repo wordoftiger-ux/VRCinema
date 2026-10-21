@@ -1,7 +1,7 @@
 // A short real HLS stream for the browser checks of the preview: 40 s of a test picture and a
 // tone cut into 2 s segments by the repo's bin/ffmpeg.exe, written to a temporary folder.
 //
-//   const stream = await makeTestStream();   // {dir, cleanup()}
+//   const stream = await makeTestStream();   // {dir, cleanup()}; makeTestStream({color: 'red'}): plain red
 //
 // The fake engine serves it as /live/main.m3u8 (without EXT-X-ENDLIST, so the player treats
 // it as live).
@@ -14,12 +14,14 @@ import { fileURLToPath } from 'node:url';
 
 const FFMPEG = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', 'bin', 'ffmpeg.exe');
 
-export async function makeTestStream() {
+export async function makeTestStream({ color = null } = {}) {
   if (!existsSync(FFMPEG)) throw new Error(`bin/ffmpeg.exe not found (${FFMPEG})`);
   const dir = mkdtempSync(join(tmpdir(), 'ui-check-hls-'));
+  // `color` (e.g. 'red'): a plain picture of that colour instead of the test pattern.
+  const picture = color ? `color=c=${color}:size=320x180:rate=25` : 'testsrc2=size=320x180:rate=25';
   const args = [
     '-hide_banner', '-loglevel', 'error',
-    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=25',
+    '-f', 'lavfi', '-i', picture,
     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
     '-t', '40',
     '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '50', '-pix_fmt', 'yuv420p',
