@@ -979,6 +979,7 @@
   "ticker.now": "► Now: {title}",
   "ticker.qr_caption": "Add a video",
   "titlebar.close": "Close",
+  "titlebar.failed": "The title bar could not control the window: {error}",
   "titlebar.maximize": "Maximize",
   "titlebar.minimize": "Minimize",
   "titlebar.restore": "Restore Down",

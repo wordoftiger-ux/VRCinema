@@ -958,6 +958,7 @@
   "ticker.now": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Start of the ticker; {title} is the video on air. Keep the ► sign (the ticker font Arial has it; ▶ is not in Arial). Japanese uses ▶ instead: its ticker font Yu Gothic has no ►.",
   "ticker.qr_caption": "Info ticker burned into the stream picture (seen by every viewer in VRChat), in the slate language. Caption under the QR code in the corner of the stream picture (the code opens the request page). Very short.",
   "titlebar.close": "New interface, title bar: tooltip of the close button. Closing only hides the program to the notification area.",
+  "titlebar.failed": "New interface, title bar: error message shown when a window button (minimize, maximize, close) or dragging the title bar did not work. {error} is the technical reason (usually English, from the window system).",
   "titlebar.maximize": "New interface, title bar: tooltip of the maximize button (same words as Windows uses).",
   "titlebar.minimize": "New interface, title bar of the window: tooltip of the minimize button (same words as Windows uses).",
   "titlebar.restore": "New interface, title bar: tooltip of the button that un-maximizes the window (same words as Windows uses).",

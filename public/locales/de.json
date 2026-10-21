@@ -979,6 +979,7 @@
   "ticker.now": "► Jetzt: {title}",
   "ticker.qr_caption": "Video hinzufügen",
   "titlebar.close": "Schließen",
+  "titlebar.failed": "Die Titelleiste konnte das Fenster nicht steuern: {error}",
   "titlebar.maximize": "Maximieren",
   "titlebar.minimize": "Minimieren",
   "titlebar.restore": "Verkleinern",

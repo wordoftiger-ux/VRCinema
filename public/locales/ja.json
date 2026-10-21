@@ -972,6 +972,7 @@
   "ticker.now": "▶ 再生中：{title}",
   "ticker.qr_caption": "動画を追加",
   "titlebar.close": "閉じる",
+  "titlebar.failed": "タイトルバーからウィンドウを操作できませんでした：{error}",
   "titlebar.maximize": "最大化",
   "titlebar.minimize": "最小化",
   "titlebar.restore": "元に戻す (縮小)",

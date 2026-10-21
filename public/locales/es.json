@@ -986,6 +986,7 @@
   "ticker.now": "► Ahora: {title}",
   "ticker.qr_caption": "Pide un video",
   "titlebar.close": "Cerrar",
+  "titlebar.failed": "La barra de título no pudo controlar la ventana: {error}",
   "titlebar.maximize": "Maximizar",
   "titlebar.minimize": "Minimizar",
   "titlebar.restore": "Restaurar hacia abajo",

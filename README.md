@@ -134,7 +134,7 @@ Viewers don't miss part of a film because the connection dropped:
 These need a person at the screen and are not covered by the automatic tests:
 
 - [ ] Clean Windows account (or a PC that never had the app): first run from an empty folder, wizard (language step first), first film plays.
-- [ ] Frameless window, main window and wizard: drag by the title bar, double-click to maximise and back, the minimise / maximise / close buttons (close hides to the tray), Windows snapping (drag to a screen edge, Win+←/→/↑), resize from the edges; the size and position come back after a restart.
+- [ ] Frameless window, main window and wizard: drag by the title bar, double-click to maximise and back, the minimise / maximise / close buttons (close hides to the tray), Windows snapping (drag to a screen edge, Win+←/→/↑), resize from the edges; the size and position come back after a restart. Check it in the release build (the tests only simulate the window): nothing here may fail silently; a refused one shows "The title bar could not control the window: …".
 - [ ] Second monitor with a different scale (e.g. 100 % and 150 %): move the window there, quit, start again; it opens on that monitor at the right size; maximised there too.
 - [ ] First start on a small or high-DPI screen (e.g. a 1366×768 laptop or 4K at 200 %): the window fits on the screen (minimum 960×600) and nothing is cut off.
 - [ ] Minimise for about 60 s and restore: the preview jumps back to live (not 60 s behind) and its delay caption settles; while minimised or hidden in the tray the preview stops fetching the stream (the stats for nerds show the viewers drop); a window that is only covered by another window keeps playing.

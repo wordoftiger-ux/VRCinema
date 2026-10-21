@@ -1,8 +1,8 @@
 //! The panel window: opened on the engine's one-time login link, hidden instead of closed,
 //! files dropped on it go to the queue, and it follows the server to a new port. The interface
 //! (`/admin`) and the first-run wizard (`/wizard`) draw their own title bar (no frame); their
-//! window buttons may use Tauri's window commands from those pages of the engine's own address
-//! only. The window's place is kept in `config.json`.
+//! window buttons may use Tauri's window commands from the engine's own address only. The
+//! window's place is kept in `config.json`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,16 +47,25 @@ const WINDOW_CONTROLS: [&str; 6] = [
 /// The pages of the engine that draw their own title bar: the interface and the wizard.
 const UI_PAGES: [&str; 2] = ["/admin", "/wizard"];
 
-/// Lets the interface and the wizard of the main window at `http://127.0.0.1:<port>` (the
-/// engine's own address) use [`WINDOW_CONTROLS`]. Tauri checks every request's page address
-/// against this (any query or `#` route, nothing else of the path): no other page, address,
-/// window or command. Permissions cannot be taken back, so after a port change the old port
-/// keeps them — the window never shows another server's page (see [`link_policy`]).
+/// The address Tauri checks a window command's permissions against: the engine's origin.
+/// On Windows a page's commands reach Tauri as a request to `http://ipc.localhost`, and
+/// Tauri takes the page's address from that request's `Origin` header — scheme, host and
+/// port, never the path. A pattern with a path (`…/admin`) never matches: every command
+/// was refused ("not allowed by ACL") and the title bar did nothing.
+pub fn engine_origin(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Lets the main window's pages of `http://127.0.0.1:<port>` (the engine's own address) use
+/// [`WINDOW_CONTROLS`]: no other address, window or command. Tauri cannot tell the pages of
+/// one origin apart (see [`engine_origin`]), so it is the whole engine; the window shows
+/// only the engine's pages (see [`link_policy`]) and only the interface and the wizard have
+/// a title bar to use them. Permissions cannot be taken back, so after a port change the old
+/// port keeps them — the window never shows another server's page.
 pub fn grant_window_controls<R: Runtime>(app: &AppHandle<R>, port: u16) -> tauri::Result<()> {
-    let capability = UI_PAGES.iter().fold(
-        CapabilityBuilder::new(format!("window-controls-{port}")).window(MAIN),
-        |c, page| c.remote(format!("http://127.0.0.1:{port}{page}")),
-    );
+    let capability = CapabilityBuilder::new(format!("window-controls-{port}"))
+        .window(MAIN)
+        .remote(engine_origin(port));
     let capability = WINDOW_CONTROLS
         .iter()
         .fold(capability, |c, permission| c.permission(*permission));
@@ -808,14 +817,21 @@ mod tests {
     // ---------- Window commands: only for the engine's own address ----------
 
     mod commands {
-        use tauri::ipc::{CallbackFn, InvokeBody};
+        use tauri::ipc::{CallbackFn, CapabilityBuilder, InvokeBody};
         use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder};
         use tauri::webview::InvokeRequest;
-        use tauri::{WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+        use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-        use super::super::{MAIN, grant_window_controls};
+        use super::super::{MAIN, WINDOW_CONTROLS, engine_origin, grant_window_controls};
 
         const ENGINE: u16 = 8181;
+
+        /// What WebView2 hands Tauri as the page's address of a command: the `Origin` header
+        /// of the `http://ipc.localhost` request (scheme, host, port; no path).
+        fn sent_by(page: &str) -> String {
+            let url: tauri::Url = page.parse().unwrap();
+            url.origin().ascii_serialization()
+        }
 
         fn window(app: &tauri::App<MockRuntime>, label: &str) -> WebviewWindow<MockRuntime> {
             let url = format!("http://127.0.0.1:{ENGINE}/admin").parse().unwrap();
@@ -850,48 +866,79 @@ mod tests {
         ];
 
         #[test]
+        fn the_page_address_of_a_command_is_only_its_origin() {
+            assert_eq!(
+                sent_by("http://127.0.0.1:8181/admin#/settings/tools"),
+                "http://127.0.0.1:8181"
+            );
+            assert_eq!(
+                engine_origin(ENGINE),
+                sent_by("http://127.0.0.1:8181/wizard")
+            );
+        }
+
+        /// The bug of the first release: the permissions named the pages (`…/admin`,
+        /// `…/wizard`), but a command only carries the origin, so every one was refused and
+        /// the title bar could neither move, maximise, minimise nor close the window.
+        #[test]
+        fn a_permission_for_a_page_path_never_matches_a_real_command() {
+            let app = mock_builder()
+                .build(tauri::generate_context!(test = true))
+                .unwrap();
+            let main = window(&app, MAIN);
+            let page = format!("http://127.0.0.1:{ENGINE}/admin");
+            let by_path = WINDOW_CONTROLS.iter().fold(
+                CapabilityBuilder::new("by-path")
+                    .window(MAIN)
+                    .remote(page.clone()),
+                |c, p| c.permission(*p),
+            );
+            app.handle().add_capability(by_path).unwrap();
+            assert!(!allowed(&main, &sent_by(&page), "plugin:window|minimize"));
+        }
+
+        #[test]
         fn window_commands_are_allowed_only_for_the_engines_own_address() {
             let app = mock_builder()
                 .build(tauri::generate_context!(test = true))
                 .unwrap();
             let main = window(&app, MAIN);
-            let own = format!("http://127.0.0.1:{ENGINE}/admin");
+            let own = sent_by(&format!("http://127.0.0.1:{ENGINE}/admin"));
             // Nothing is allowed to a web page by default.
             assert!(!allowed(&main, &own, "plugin:window|minimize"));
 
             grant_window_controls(app.handle(), ENGINE).unwrap();
-            // The interface and the wizard of the engine (with any route after #).
+            // The interface and the wizard of the engine (with any route after #), as
+            // WebView2 sends them; and as a full address (other transports send that).
             for page in [
-                own.clone(),
+                format!("http://127.0.0.1:{ENGINE}/admin"),
                 format!("http://127.0.0.1:{ENGINE}/admin#/settings/tools"),
                 format!("http://127.0.0.1:{ENGINE}/wizard"),
             ] {
                 for cmd in CONTROLS {
-                    assert!(allowed(&main, &page, cmd), "{cmd} from {page}");
+                    assert!(allowed(&main, &sent_by(&page), cmd), "{cmd} from {page}");
+                    assert!(allowed(&main, &page, cmd), "{cmd} from full {page}");
                 }
             }
             // Any other address: another local program, another name for this computer,
-            // https, a web site, a look-alike host; and the engine's other pages.
-            for origin in [
+            // https, a web site, a look-alike host.
+            for page in [
                 "http://127.0.0.1:8182/admin",
                 "http://localhost:8181/admin",
                 "https://127.0.0.1:8181/admin",
                 "http://127.0.0.2:8181/admin",
                 "https://evil.example/admin",
                 "http://127.0.0.1.evil.example:8181/admin",
-                "http://127.0.0.1:8181/",
-                "http://127.0.0.1:8181/app",
-                "http://127.0.0.1:8181/administrator",
-                "http://127.0.0.1:8181/static/app.html",
-                "http://127.0.0.1:8181/live/main.m3u8",
             ] {
-                for cmd in CONTROLS {
-                    assert!(!allowed(&main, origin, cmd), "{cmd} from {origin}");
+                for origin in [sent_by(page), page.to_string()] {
+                    for cmd in CONTROLS {
+                        assert!(!allowed(&main, &origin, cmd), "{cmd} from {origin}");
+                    }
+                    assert!(
+                        !allowed(&main, &origin, "plugin:window|close"),
+                        "close from {origin}"
+                    );
                 }
-                assert!(
-                    !allowed(&main, origin, "plugin:window|close"),
-                    "close from {origin}"
-                );
             }
             // Only the window controls, nothing else of Tauri.
             for cmd in [
@@ -919,13 +966,13 @@ mod tests {
             grant_window_controls(app.handle(), ENGINE).unwrap();
             assert!(!allowed(
                 &main,
-                "http://127.0.0.1:9000/admin",
+                "http://127.0.0.1:9000",
                 "plugin:window|minimize"
             ));
             grant_window_controls(app.handle(), 9000).unwrap();
             assert!(allowed(
                 &main,
-                "http://127.0.0.1:9000/admin",
+                "http://127.0.0.1:9000",
                 "plugin:window|minimize"
             ));
         }

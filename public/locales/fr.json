@@ -986,6 +986,7 @@
   "ticker.now": "► En cours : {title}",
   "ticker.qr_caption": "Ajoute une vidéo",
   "titlebar.close": "Fermer",
+  "titlebar.failed": "La barre de titre n’a pas pu contrôler la fenêtre : {error}",
   "titlebar.maximize": "Agrandir",
   "titlebar.minimize": "Réduire",
   "titlebar.restore": "Niveau inférieur",

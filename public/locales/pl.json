@@ -993,6 +993,7 @@
   "ticker.now": "► Teraz: {title}",
   "ticker.qr_caption": "Dodaj film",
   "titlebar.close": "Zamknij",
+  "titlebar.failed": "Pasek tytułu nie mógł sterować oknem: {error}",
   "titlebar.maximize": "Maksymalizuj",
   "titlebar.minimize": "Minimalizuj",
   "titlebar.restore": "Przywróć w dół",
