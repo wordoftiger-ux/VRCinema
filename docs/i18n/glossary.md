@@ -85,10 +85,10 @@ Common to all languages:
 | Skip / next video | skip / next video | pomiń / następny film | omitir / siguiente video | überspringen / nächstes Video | passer / vidéo suivante (state: interrompue) | スキップ / 次の動画 (state: スキップ済み) |
 | From the beginning | From the beginning | Od początku | Desde el principio | Von vorn | Depuis le début | 最初から |
 | Play now | Play now | Odtwórz teraz | Reproducir ahora | Jetzt abspielen | Lire maintenant | 今すぐ再生 |
-| On air | on air | na antenie | en emisión | auf Sendung (laufendes Video) | à l’antenne | 放送中 (what the channel broadcasts now) |
+| On air — also the caption of the right screen of the Channel view (the stream as the viewers get it) | on air / On air | na antenie / Na antenie | en emisión / En emisión | auf Sendung (laufendes Video) / Auf Sendung | à l’antenne / À l’antenne | 放送中 (what the channel broadcasts now) |
 | Live stream | live stream | transmisja na żywo | transmisión en vivo (tag: EN VIVO) | Livestream | direct (tag: EN DIRECT) | ライブ配信 (only a live source; tag: ライブ) |
 | History | History | Historia | Historial | Verlauf | Historique | 履歴 |
-| Preview — the stream played in the window | preview | podgląd | vista previa | Vorschau | aperçu | プレビュー |
+| Preview — the left screen of the Channel view: the newest material the server has, before it airs (the producer's monitor; key S syncs it with on-air) | Preview | Podgląd | Vista previa | Vorschau | Aperçu | プレビュー |
 | Stats for nerds — technical overlay (as on YouTube) | Stats for nerds | Statystyki dla nerdów | Estadísticas para nerds | Statistiken für Nerds | Statistiques avancées | 詳細統計情報 |
 | Share (view) | Share | Udostępnij | Compartir | Teilen | Partager | 共有 |
 | Settings | Settings | Ustawienia | Configuración | Einstellungen | Paramètres | 設定 |
