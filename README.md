@@ -36,7 +36,7 @@ Polish version: [README.pl.md](README.pl.md). The program speaks English, Polish
 The window looks and works like a media player. It has no Windows frame: the 32-pixel bar at the top is the title bar (drag it to move the window, double-click it to maximise; the minimise, maximise and close buttons are on the right; Windows snapping works). Close hides the window in the tray. The window remembers its size, position and maximised state.
 
 - **Rail on the left** with four views:
-  - **Channel**: the live preview of the stream (with the delay under it, "Preview · about 12 s behind the server"), the **Up next** queue (drag to reorder; the menu of an item has **Play now**, **Move to the top**, **Copy link** and **Remove from the queue**), the link field, **Pending approval** when approval is on, and the drop zone for files.
+  - **Channel**: two screens side by side, **Preview** (the newest material, see below) and **On air** (the stream as the viewers get it, "On air · about 12 s behind the server"), the **Up next** queue (drag to reorder; the menu of an item has **Play now**, **Move to the top**, **Copy link** and **Remove from the queue**), the link field, **Pending approval** when approval is on, and the drop zone for files.
   - **History**: what has been on the channel (played, skipped, error) with **Play now** / **Try again** and **Add to queue**.
   - **Share**: the channel link for VRChat, the request page with its QR code, the internet status and the permanent link.
   - **Settings**: General (language, autostart, home network, port), Internet, Channel (links from viewers, limits, approval, language of the slates, info ticker, viewer nicks, conversion), Tools, Remote panel, Advanced, Log, About.
@@ -51,10 +51,11 @@ The window looks and works like a media player. It has no Windows frame: the 32-
   | Home | From the beginning of this video |
   | N | Next video |
   | I | Stats for nerds |
+  | S | Sync Preview with on-air |
   | Ctrl + V | Add the link on the clipboard to the queue |
   | ? | Keyboard shortcuts |
 
-- **Context menu**: right-click a queue item or the preview (the preview's menu has **Stats for nerds** and **Copy channel link**). Shift+F10 or the Menu key opens it from the keyboard; Alt+↑/↓ moves the focused queue item.
+- **Context menu**: right-click a queue item or the On air screen (its menu has **Stats for nerds** and **Copy channel link**). Shift+F10 or the Menu key opens it from the keyboard; Alt+↑/↓ moves the focused queue item.
 
 ### Controls and the delay
 
@@ -62,8 +63,18 @@ The window looks and works like a media player. It has no Windows frame: the 32-
 - **Seeking** (±10 s, ±60 s, the timeline, ⏮) restarts the same film at the new position. Several quick clicks are merged into one jump (the app waits 0.7 s after the last one), so eight clicks of +10 s are one jump of 80 s. A seek during a pause only moves the paused position. Seeking to the last second plays the next video.
 - **Accuracy**: a copied (not converted) film jumps to the key frame at or before the target, up to one key-frame interval of the source earlier, often a few seconds (the time shows "≈"); a converted film (for example with the info ticker on) jumps exactly.
 - **Play now** (queue or History) puts the video on air at once; the current one ends as skipped. From History it is added again as a new queue entry (same link and nick).
-- **The delay**: the channel is cut into 4-second segments and players start a few segments behind the live edge, so **viewers see every change (pause, seek, next video) about 10–15 seconds later** than you press the button. The preview in the window has the same delay; after a seek a bubble says "Viewers will see this in about N s".
+- **The delay**: the channel is cut into 4-second segments and players start a few segments behind the live edge, so **viewers see every change (pause, seek, next video) about 10–15 seconds later** than you press the button. The On air screen has the same delay; after a seek a bubble says "Viewers will see this in about N s". The Preview screen shows the change a few seconds after the click (next section).
 - **A manual pause survives server restarts** (a new port, home network access, repaired tools) **but not an app restart**: after quitting and starting VRCinema again the channel plays.
+
+### Preview and On air
+
+The Channel view shows two screens, like a broadcasting program:
+
+- **Preview** (left) plays the newest segments the server already has, in real time: after a seek, **Play now**, ⏮ or ⏭ it shows the new picture as soon as ffmpeg has cut its first segment (about 2–4 s for a file; a link that yt-dlp has to resolve takes longer), not after the viewers' 10–15 s. The caption says how far it is ahead of the air ("Preview · about 12 s ahead of on-air"). It starts muted (the speaker button next to the caption switches its own sound; the volume in the player bar is On air's). While the channel is paused it stands still on the picture the film will resume from.
+- **On air** (right) is the channel's stream exactly as VRChat plays it, with the delay caption, the stats for nerds and the right-click menu.
+- **Sync with on-air** (button under Preview, key **S**) puts Preview on what the viewers see now. Right after a skip what is on air may no longer be kept; a message then says so. It is off for live streams.
+- No extra ffmpeg runs for Preview: it plays the segments of the film being cut. Each segment it has listed stays readable for 90 s after it aired (at most 256 MiB in total, in `clips\_monitor` of the data folder; removed when the channel stops), so the film's own files are cleaned up exactly as before.
+- Preview is only in the program's window. In the remote panel it is grey ("Available in the program on the computer"); on a phone only On air is shown.
 
 ### Stats for nerds
 
@@ -138,6 +149,7 @@ These need a person at the screen and are not covered by the automatic tests:
 - [ ] Second monitor with a different scale (e.g. 100 % and 150 %): move the window there, quit, start again; it opens on that monitor at the right size; maximised there too.
 - [ ] First start on a small or high-DPI screen (e.g. a 1366×768 laptop or 4K at 200 %): the window fits on the screen (minimum 960×600) and nothing is cut off.
 - [ ] Minimise for about 60 s and restore: the preview jumps back to live (not 60 s behind) and its delay caption settles; while minimised or hidden in the tray the preview stops fetching the stream (the stats for nerds show the viewers drop); a window that is only covered by another window keeps playing.
+- [ ] Preview in the release build: play a film, press +60 s, ⏮, **Play now** on another video and ⏭; the left screen changes within a few seconds, the right one about 12 s later; **Sync with on-air** (and S) makes both show the same; pause shows a still picture, resume plays on; minimise for a minute and restore: Preview plays again. The window at its minimum size (960×600) still shows both screens.
 - [ ] Remote panel on a real phone: log in at `<public address>/admin`, the tabs at the bottom, the player bar under the preview, pause and seek work, window-only items say "Available in the program on the computer", sign out works; a wrong password is refused; switching the panel off or changing the password logs the phone out.
 - [ ] `/desktop-login`: open `http://127.0.0.1:<port>/desktop-login?key=anything` in a normal browser: it ends on `/admin` with the sign-in screen, never the panel (the window uses a one-time key of its own).
 - [ ] Info ticker in VRChat: with the ticker on, watch a film in a VRChat world: the band is readable on the world's screen at a normal distance, the QR code can be scanned with a phone from VRChat and opens the request page, the progress line moves.

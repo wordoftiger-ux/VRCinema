@@ -36,7 +36,7 @@ English version: [README.md](README.md).
 Okno wygląda i działa jak odtwarzacz multimediów. Nie ma ramki Windows: pasek 32 px u góry to pasek tytułu (przeciągnij go, żeby przesunąć okno, kliknij dwukrotnie, żeby zmaksymalizować; przyciski minimalizacji, maksymalizacji i zamknięcia są po prawej; przyciąganie do krawędzi Windows działa). Zamknięcie chowa okno do zasobnika. Okno pamięta rozmiar, położenie i maksymalizację.
 
 - **Pasek boczny po lewej** z czterema widokami:
-  - **Kanał**: podgląd strumienia na żywo (z opóźnieniem pod spodem, „Podgląd · ok. 12 s za serwerem”), kolejka **Następne** (przeciąganie zmienia kolejność; menu pozycji ma **Odtwórz teraz**, **Na górę**, **Kopiuj link** i **Usuń z kolejki**), pole linku, **Do zatwierdzenia** przy włączonym zatwierdzaniu i miejsce na upuszczanie plików.
+  - **Kanał**: dwa ekrany obok siebie, **Podgląd** (najświeższy materiał, opis niżej) i **Na antenie** (strumień tak, jak dostają go widzowie, „Na antenie · ok. 12 s za serwerem”), kolejka **Następne** (przeciąganie zmienia kolejność; menu pozycji ma **Odtwórz teraz**, **Na górę**, **Kopiuj link** i **Usuń z kolejki**), pole linku, **Do zatwierdzenia** przy włączonym zatwierdzaniu i miejsce na upuszczanie plików.
   - **Historia**: co już leciało (odtworzony, pominięty, błąd) z **Odtwórz teraz** / **Spróbuj ponownie** i **Do kolejki**.
   - **Udostępnij**: link kanału dla VRChat, strona zgłoszeń z kodem QR, stan internetu i stały link.
   - **Ustawienia**: Ogólne (język, autostart, sieć domowa, port), Internet, Kanał (linki od widzów, limity, zatwierdzanie, język plansz, pasek informacyjny, nicki widzów, konwersja), Narzędzia, Panel zdalny, Zaawansowane, Dziennik, O programie.
@@ -51,10 +51,11 @@ Okno wygląda i działa jak odtwarzacz multimediów. Nie ma ramki Windows: pasek
   | Home | Od początku tego filmu |
   | N | Następny film |
   | I | Statystyki dla nerdów |
+  | S | Zsynchronizuj Podgląd z anteną |
   | Ctrl + V | Dodaj link ze schowka do kolejki |
   | ? | Skróty klawiszowe |
 
-- **Menu kontekstowe**: prawy przycisk na pozycji kolejki albo na podglądzie (menu podglądu ma **Statystyki dla nerdów** i **Kopiuj link kanału**). Z klawiatury otwiera je Shift+F10 albo klawisz menu; Alt+↑/↓ przesuwa pozycję kolejki z fokusem.
+- **Menu kontekstowe**: prawy przycisk na pozycji kolejki albo na ekranie „Na antenie” (jego menu ma **Statystyki dla nerdów** i **Kopiuj link kanału**). Z klawiatury otwiera je Shift+F10 albo klawisz menu; Alt+↑/↓ przesuwa pozycję kolejki z fokusem.
 
 ### Sterowanie i opóźnienie
 
@@ -62,8 +63,18 @@ Okno wygląda i działa jak odtwarzacz multimediów. Nie ma ramki Windows: pasek
 - **Przewijanie** (±10 s, ±60 s, oś czasu, ⏮) uruchamia ten sam film od nowej pozycji. Kilka szybkich kliknięć łączy się w jeden skok (program czeka 0,7 s po ostatnim), więc osiem kliknięć +10 s to jeden skok o 80 s. Przewinięcie w pauzie tylko przesuwa zapamiętaną pozycję. Skok na ostatnią sekundę puszcza następny film.
 - **Dokładność**: film kopiowany (bez konwersji) skacze do klatki kluczowej w celu albo przed nim, najwyżej o odstęp klatek kluczowych źródła wcześniej, zwykle kilka sekund (czas pokazuje „≈”); film konwertowany (np. przy włączonym pasku informacyjnym) skacze dokładnie.
 - **Odtwórz teraz** (kolejka albo Historia) od razu puszcza film; bieżący kończy się jako pominięty. Z Historii film jest dodawany ponownie jako nowa pozycja (ten sam link i nick).
-- **Opóźnienie**: kanał jest cięty na 4-sekundowe fragmenty, a odtwarzacze startują kilka fragmentów za krawędzią na żywo, więc **widzowie widzą każdą zmianę (pauzę, skok, następny film) ok. 10–15 sekund po kliknięciu**. Podgląd w oknie ma to samo opóźnienie; po skoku dymek mówi „Widzowie zobaczą to za ok. N s”.
+- **Opóźnienie**: kanał jest cięty na 4-sekundowe fragmenty, a odtwarzacze startują kilka fragmentów za krawędzią na żywo, więc **widzowie widzą każdą zmianę (pauzę, skok, następny film) ok. 10–15 sekund po kliknięciu**. Ekran „Na antenie” ma to samo opóźnienie; po skoku dymek mówi „Widzowie zobaczą to za ok. N s”. Ekran „Podgląd” pokazuje zmianę kilka sekund po kliknięciu (następna sekcja).
 - **Pauza ręczna przetrwa restart serwera** (nowy port, dostęp z sieci domowej, naprawa narzędzi), **ale nie ponowne uruchomienie programu**: po zakończeniu i ponownym uruchomieniu VRCinema kanał gra.
+
+### Podgląd i Na antenie
+
+Widok **Kanał** ma dwa ekrany, jak program do transmisji:
+
+- **Podgląd** (po lewej) gra najświeższe fragmenty, jakie serwer już ma, w tempie rzeczywistym: po przewinięciu, **Odtwórz teraz**, ⏮ albo ⏭ pokazuje nowy obraz, gdy tylko ffmpeg wytnie pierwszy fragment (ok. 2–4 s dla pliku; link, który musi rozpoznać yt-dlp, trwa dłużej), a nie po 10–15 s opóźnienia widzów. Podpis mówi, o ile wyprzedza antenę („Podgląd · ok. 12 s przed anteną”). Startuje wyciszony (głośnik obok podpisu włącza jego dźwięk; głośność na pasku odtwarzania dotyczy ekranu „Na antenie”). Gdy kanał jest wstrzymany, stoi na obrazie, od którego film ruszy po wznowieniu.
+- **Na antenie** (po prawej) to strumień kanału dokładnie tak, jak gra go VRChat, z podpisem opóźnienia, statystykami dla nerdów i menu pod prawym przyciskiem.
+- **Zsynchronizuj z anteną** (przycisk pod Podglądem, klawisz **S**) ustawia Podgląd na to, co widzowie widzą teraz. Tuż po pominięciu filmu tego, co jest na antenie, może już nie być; wtedy pojawia się komunikat. Przy transmisji na żywo przycisk jest wyłączony.
+- Podgląd nie uruchamia dodatkowego ffmpeg: gra fragmenty filmu, który właśnie jest cięty. Każdy fragment, który pokazał na liście, zostaje do odczytu przez 90 s po wyemitowaniu (łącznie najwyżej 256 MiB, w `clips\_monitor` folderu danych; usuwane, gdy kanał staje), więc pliki filmu są sprzątane dokładnie jak wcześniej.
+- Podgląd jest tylko w oknie programu. W panelu zdalnym jest wyszarzony („Dostępne w programie na komputerze”); na telefonie widać tylko „Na antenie”.
 
 ### Statystyki dla nerdów
 
@@ -138,6 +149,7 @@ Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
 - [ ] Drugi monitor z innym skalowaniem (np. 100 % i 150 %): przesuń tam okno, zakończ program, uruchom ponownie; otwiera się na tym monitorze we właściwym rozmiarze; zmaksymalizowane też.
 - [ ] Pierwsze uruchomienie na małym albo gęstym ekranie (np. laptop 1366×768 albo 4K przy 200 %): okno mieści się na ekranie (minimum 960×600) i nic nie jest ucięte.
 - [ ] Minimalizacja na ok. 60 s i przywrócenie: podgląd wraca na żywo (nie 60 s z tyłu), a podpis z opóźnieniem się uspokaja; zminimalizowane albo schowane do zasobnika okno nie pobiera strumienia (w statystykach dla nerdów spada liczba widzów); okno tylko zasłonięte innym oknem gra dalej.
+- [ ] Podgląd w buildzie release: puść film, naciśnij +60 s, ⏮, **Odtwórz teraz** na innym filmie i ⏭; lewy ekran zmienia się w ciągu kilku sekund, prawy ok. 12 s później; **Zsynchronizuj z anteną** (i S) sprawia, że oba pokazują to samo; pauza pokazuje nieruchomy obraz, wznowienie gra dalej; minimalizacja na minutę i przywrócenie: Podgląd znowu gra. Okno w minimalnym rozmiarze (960×600) nadal pokazuje oba ekrany.
 - [ ] Panel zdalny na prawdziwym telefonie: logowanie pod `<adres publiczny>/admin`, zakładki na dole, pasek odtwarzania pod podglądem, pauza i przewijanie działają, elementy tylko-okna mówią „Dostępne w programie na komputerze”, wylogowanie działa; złe hasło jest odrzucane; wyłączenie panelu albo zmiana hasła wylogowuje telefon.
 - [ ] `/desktop-login`: otwórz `http://127.0.0.1:<port>/desktop-login?key=cokolwiek` w zwykłej przeglądarce: kończy się na `/admin` z ekranem logowania, nigdy w panelu (okno używa własnego jednorazowego klucza).
 - [ ] Pasek informacyjny w VRChat: przy włączonym pasku obejrzyj film w świecie VRChat: pas jest czytelny na ekranie świata z normalnej odległości, kod QR da się zeskanować telefonem z VRChat i otwiera stronę zgłoszeń, pasek postępu się przesuwa.
