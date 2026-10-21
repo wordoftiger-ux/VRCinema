@@ -20,6 +20,7 @@ use crate::live::LiveSettings;
 use crate::pipeline::broadcaster::{Broadcaster, BroadcasterOptions, LogFn};
 use crate::pipeline::channel::{Channel, ChannelOptions, PauseReason};
 use crate::pipeline::clip_factory::{ClipFactoryDeps, SharedLogFn, create_clip_factory};
+use crate::pipeline::monitor::{MonitorOptions, MonitorWatch};
 use crate::pipeline::probe::probe_duration;
 use crate::pipeline::slates::{
     RETAIN_S, SlateOptions, SlateSwapper, generate_slates, request_url, system_fonts_dir,
@@ -314,7 +315,7 @@ async fn start_channel_loop(
     connecting: bool,
     pause_reasons: Vec<PauseReason>,
     fake_resolver: bool,
-    monitor: bool,
+    monitor: Option<Arc<MonitorWatch>>,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -378,7 +379,11 @@ async fn start_channel_loop(
                 slates.clone(),
             );
             options.log = Some(boxed_log());
-            options.monitor = monitor.then(|| config.data_dir.join("clips").join("_monitor"));
+            options.monitor = monitor.as_ref().map(|watch| MonitorOptions {
+                dir: config.data_dir.join("clips").join("_monitor"),
+                watch: Arc::clone(watch),
+                first_seq: None,
+            });
             let tags_db = Arc::clone(&db);
             let broadcaster = Broadcaster::new(
                 BroadcasterOptions {
@@ -466,6 +471,7 @@ pub async fn run(
     let _ = std::fs::remove_dir_all(&clips_dir);
     std::fs::create_dir_all(&clips_dir)?;
 
+    let monitor_watch = Arc::new(MonitorWatch::default());
     let mut slates = None;
     let (handle, engine_task) = if start_channel {
         let (handle, task, swapper) = start_channel_loop(
@@ -477,7 +483,7 @@ pub async fn run(
             slates_connecting,
             pause_reasons,
             fake_resolver.is_some(),
-            monitor,
+            monitor.then(|| Arc::clone(&monitor_watch)),
         )
         .await?;
         slates = Some(swapper);
@@ -512,7 +518,8 @@ pub async fn run(
         .with_library(Some(library))
         .with_log(Arc::clone(&shared_log))
         .with_live(live.clone())
-        .with_slates(slates);
+        .with_slates(slates)
+        .with_monitor_watch(monitor_watch);
         if let Some(configure) = configure_state {
             state = configure(state);
         }

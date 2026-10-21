@@ -2797,8 +2797,11 @@ async fn the_monitor_list_is_the_feed_and_segments_come_only_from_it() {
         aired_seq: Some(3),
         ..MonitorFeed::default()
     });
+    assert!(!a.state.monitor_watch.watched());
     let list = send_to(router.clone(), get(MONITOR_LIST).cookie(&cookie)).await;
     assert_eq!(list.status, StatusCode::OK);
+    // The channel feeds the monitor ahead while the window reads it (review fix 13).
+    assert!(a.state.monitor_watch.watched());
     assert_eq!(list.header("content-type"), "application/vnd.apple.mpegurl");
     assert_eq!(list.header("cache-control"), "no-store");
     let text = list.text();

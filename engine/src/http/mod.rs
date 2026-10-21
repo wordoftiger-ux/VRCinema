@@ -100,6 +100,8 @@ pub struct AppState {
     viewer_salt: Arc<[u8; 16]>,
     /// How many times a new public address restarted the film for the ticker's code.
     ticker_redraws: Arc<std::sync::atomic::AtomicUsize>,
+    /// Touched by the monitor's routes: the channel feeds the monitor while the window watches.
+    pub(crate) monitor_watch: Arc<crate::pipeline::monitor::MonitorWatch>,
 }
 
 impl AppState {
@@ -159,6 +161,7 @@ impl AppState {
             cpu: Arc::default(),
             viewer_salt: Arc::new(random_salt()),
             ticker_redraws: Arc::default(),
+            monitor_watch: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -186,6 +189,15 @@ impl AppState {
     /// Shares the record of segment fetches with the app's automatic pause.
     pub fn with_viewers(mut self, viewers: Arc<ViewerActivity>) -> Self {
         self.viewers = viewers;
+        self
+    }
+
+    /// Shares the monitor's watch with the channel.
+    pub fn with_monitor_watch(
+        mut self,
+        watch: Arc<crate::pipeline::monitor::MonitorWatch>,
+    ) -> Self {
+        self.monitor_watch = watch;
         self
     }
 

@@ -29,6 +29,7 @@ async fn playlist(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    state.monitor_watch.touch();
     let from = query.get("from").and_then(|s| s.parse::<u64>().ok());
     let feed = std::sync::Arc::clone(&state.snapshot().monitor);
     (
@@ -65,6 +66,7 @@ async fn segment(
     State(state): State<AppState>,
     Path((clip, name)): Path<(String, String)>,
 ) -> Response {
+    state.monitor_watch.touch();
     let missing = || ApiError::coded(StatusCode::NOT_FOUND, "no_segment", &[]).into_response();
     if !is_clip_name(&clip) || !is_segment_name(&name) {
         return missing();
