@@ -4,6 +4,7 @@ pub mod auth;
 pub mod client_ip;
 mod routes_admin;
 mod routes_desktop;
+mod routes_monitor;
 mod routes_public;
 mod routes_stream;
 
@@ -1033,7 +1034,7 @@ pub fn build_router(state: AppState) -> Router {
         routes_admin::require_admin,
     ));
     let desktop = if app {
-        routes_desktop::router(state.clone())
+        routes_desktop::router(state.clone()).merge(routes_monitor::router(state.clone()))
     } else {
         Router::new()
     };

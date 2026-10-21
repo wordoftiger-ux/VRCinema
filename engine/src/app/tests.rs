@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 23] = [
+const ROUTES: [(&str, &str); 25] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -40,6 +40,8 @@ const ROUTES: [(&str, &str); 23] = [
     ("POST", "/api/desktop/tunnel/named/create"),
     ("POST", "/api/desktop/tunnel/named/quick"),
     ("POST", "/api/desktop/tunnel/named/delete"),
+    ("GET", "/api/desktop/monitor.m3u8"),
+    ("GET", "/api/desktop/monitor/clip-1-0/seg_00000.ts"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -560,6 +562,15 @@ async fn every_desktop_route_is_401_without_a_session_and_403_for_a_remote_one()
             "{method} {path}"
         );
     }
+    // The window gets the monitor (an empty list without a film).
+    let (status, list) = app
+        .call("GET", "/api/desktop/monitor.m3u8", Some(&window), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        list.as_str().is_some_and(|l| l.starts_with("#EXTM3U")),
+        "{list}"
+    );
     // Nothing behind the routes ran.
     let saved = app.saved();
     assert_eq!(saved["firstRunCompleted"], false);

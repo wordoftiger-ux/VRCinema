@@ -69,6 +69,9 @@ pub struct RunOptions {
     /// channel has no `tickerEnabled` yet: the server without a window passes it from
     /// `VIDEO_ENCODER`, the app once an encoder was detected. `None`: nothing is stored.
     pub ticker_default: Option<bool>,
+    /// Desktop app: the producer's monitor (the window's preview of the newest segments,
+    /// `crate::pipeline::monitor`) keeps its links in `<data>/clips/_monitor`.
+    pub monitor: bool,
 }
 
 impl RunOptions {
@@ -89,6 +92,7 @@ impl RunOptions {
             builtin_tunnel: false,
             pause_reasons: Vec::new(),
             ticker_default: None,
+            monitor: false,
         }
     }
 }
@@ -310,6 +314,7 @@ async fn start_channel_loop(
     connecting: bool,
     pause_reasons: Vec<PauseReason>,
     fake_resolver: bool,
+    monitor: bool,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -373,6 +378,7 @@ async fn start_channel_loop(
                 slates.clone(),
             );
             options.log = Some(boxed_log());
+            options.monitor = monitor.then(|| config.data_dir.join("clips").join("_monitor"));
             let tags_db = Arc::clone(&db);
             let broadcaster = Broadcaster::new(
                 BroadcasterOptions {
@@ -420,6 +426,7 @@ pub async fn run(
         builtin_tunnel,
         pause_reasons,
         ticker_default,
+        monitor,
     } = opts;
     let live = live.unwrap_or_else(|| LiveSettings::from_config(&config));
     let print_banner = custom_log.is_none();
@@ -470,6 +477,7 @@ pub async fn run(
             slates_connecting,
             pause_reasons,
             fake_resolver.is_some(),
+            monitor,
         )
         .await?;
         slates = Some(swapper);

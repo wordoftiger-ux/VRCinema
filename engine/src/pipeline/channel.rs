@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
 use crate::i18n::{Msg, error_msg, msg_error};
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
+use crate::pipeline::monitor::{LOOKAHEAD, MonitorFeed, MonitorTimeline};
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{SlateKind, Slates, request_url};
 use crate::stats::{ChannelStats, ClipStats, FfmpegInfo, NextInfo, NextState, OnAirInfo};
@@ -190,6 +191,9 @@ pub struct ChannelOptions {
     pub prefetch_s: Option<f64>,
     /// How many segments viewers lag behind the newest published one (for "now playing").
     pub viewer_lag_segments: Option<usize>,
+    /// The producer's monitor ([`crate::pipeline::monitor`]): the folder for its links (the
+    /// program's window has one); `None`: no monitor, nothing listed.
+    pub monitor: Option<PathBuf>,
 }
 
 impl ChannelOptions {
@@ -212,6 +216,7 @@ impl ChannelOptions {
             start_timeout_s: None,
             prefetch_s: None,
             viewer_lag_segments: None,
+            monitor: None,
         }
     }
 }
@@ -261,6 +266,8 @@ struct ActiveClip {
     start: Option<tokio::task::AbortHandle>,
     /// The "too slow for the ticker" warning was logged while this film was on air.
     slow_logged: bool,
+    /// Rows of the monitor for the first segments of `ready` (listed, not aired yet).
+    monitor_listed: VecDeque<u64>,
 }
 
 /// What the clip's analysis found out about a film.
@@ -327,6 +334,7 @@ impl ActiveClip {
             kind: MetaKind::Clip,
             item: Some(self.item.clone()),
             position_s,
+            monitor_seq: None,
         };
         (out, meta)
     }
@@ -367,6 +375,8 @@ struct SegmentMeta {
     kind: MetaKind,
     item: Option<QueueItem>,
     position_s: f64,
+    /// The monitor's row of this clip segment.
+    monitor_seq: Option<u64>,
 }
 
 /// Result of an asynchronous clip start.
@@ -477,13 +487,20 @@ pub struct Channel {
     next_clip_id: u64,
     launch_tx: mpsc::UnboundedSender<Launch>,
     launch_rx: mpsc::UnboundedReceiver<Launch>,
+    /// The producer's monitor (with [`ChannelOptions::monitor`]).
+    monitor: Option<MonitorTimeline>,
+    /// The monitor's newest row handed to the broadcaster.
+    monitor_aired: Option<u64>,
 }
 
 impl Channel {
     pub fn new(mut o: ChannelOptions) -> Self {
         let now = o.now.take().unwrap_or_else(default_clock);
         let (launch_tx, launch_rx) = mpsc::unbounded_channel();
+        let monitor = o.monitor.as_deref().map(MonitorTimeline::new);
         Self {
+            monitor,
+            monitor_aired: None,
             o,
             now,
             current: None,
@@ -748,6 +765,81 @@ impl Channel {
             self.log_error("log.channel_error_seek", &e);
         }
         self.warn_if_too_slow();
+        self.refresh_monitor();
+    }
+
+    /// The monitor follows the clip being cut: its fresh segments are taken from ffmpeg every
+    /// tick (not only when the broadcaster needs one) and up to [`LOOKAHEAD`] of them that have
+    /// not aired yet are listed; rows past their time go. Without a monitor nothing changes
+    /// (the clip is polled when a segment is due, as before).
+    fn refresh_monitor(&mut self) {
+        if self.monitor.is_none() {
+            return;
+        }
+        // A clip that started since the last segment is taken now, not at the next one.
+        self.poll_launches();
+        let Some(m) = self.monitor.as_mut() else {
+            return;
+        };
+        let now = (self.now)();
+        match self.current.as_mut() {
+            Some(c) => {
+                let key = c.source_key();
+                m.set_current(Some(&key), now);
+                if c.start_error.is_none()
+                    && let Some(handle) = c.handle.as_mut()
+                {
+                    let fresh = handle.poll();
+                    c.ready.extend(fresh);
+                }
+                let mut position_s = c.position_s();
+                let listed = c.monitor_listed.len();
+                for (i, seg) in c.ready.iter().enumerate().take(LOOKAHEAD) {
+                    if i >= listed {
+                        let seq = m.push(&key, c.item.id, seg, position_s);
+                        c.monitor_listed.push_back(seq);
+                    }
+                    position_s += seg.duration;
+                }
+            }
+            None => m.set_current(None, now),
+        }
+        m.sweep(now);
+    }
+
+    /// The monitor's row of `seg`, the next segment of `c` to air (listed now if it was not).
+    fn monitor_emit(
+        monitor: Option<&mut MonitorTimeline>,
+        c: &mut ActiveClip,
+        seg: &SegmentInfo,
+        now: u64,
+    ) -> Option<u64> {
+        let m = monitor?;
+        let seq = c
+            .monitor_listed
+            .pop_front()
+            .unwrap_or_else(|| m.push(&c.source_key(), c.item.id, seg, c.position_s()));
+        m.aired(seq, now);
+        Some(seq)
+    }
+
+    /// What the producer's monitor lists: the rows, the one the viewers see now (lagging like
+    /// [`Self::state`]) and the newest aired one; `active` while a film is on air or paused.
+    pub fn monitor_feed(&self) -> MonitorFeed {
+        let Some(m) = &self.monitor else {
+            return MonitorFeed::default();
+        };
+        let lag = self
+            .o
+            .viewer_lag_segments
+            .unwrap_or(DEFAULT_VIEWER_LAG_SEGMENTS);
+        let antenna = self
+            .aired
+            .get(self.aired.len().saturating_sub(lag))
+            .filter(|meta| meta.kind == MetaKind::Clip)
+            .and_then(|meta| meta.monitor_seq);
+        let active = self.control_state().item_id.is_some();
+        m.feed(active, antenna, self.monitor_aired)
     }
 
     /// Logs once per film on air (not for the next one being prepared) that the conversion
@@ -1175,7 +1267,13 @@ impl Channel {
             }
 
             if let Some(seg) = c.ready.pop_front() {
-                let (out, meta) = c.emit(&seg);
+                let now = (self.now)();
+                let monitor_seq = Self::monitor_emit(self.monitor.as_mut(), c, &seg, now);
+                let (out, mut meta) = c.emit(&seg);
+                meta.monitor_seq = monitor_seq;
+                if monitor_seq.is_some() {
+                    self.monitor_aired = monitor_seq;
+                }
                 let remaining = c.remaining_s();
                 self.last_slate_kind = None;
                 self.previous_clip_segment = Some(seg.path.clone());
@@ -1265,6 +1363,7 @@ impl Channel {
                 kind: MetaKind::Slate(kind),
                 item,
                 position_s,
+                monitor_seq: None,
             },
         );
         Ok(SourceSegment {
@@ -1379,6 +1478,7 @@ impl Channel {
             earlier: Probed::default(),
             start: None,
             slow_logged: false,
+            monitor_listed: VecDeque::new(),
         };
         let tx = self.launch_tx.clone();
         match tokio::runtime::Handle::try_current() {
@@ -1530,6 +1630,7 @@ mod tests {
     use super::*;
     use crate::db::{AddedBy, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
     use crate::i18n::Lang;
+    use crate::pipeline::monitor::RETAIN_MS;
     use crate::stats::StreamMode;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::oneshot;
@@ -3831,5 +3932,235 @@ mod tests {
         assert!(!e.channel.stats().ticker_slow);
         e.factory.lock().handles[0].lock().ticker_slow = true;
         assert!(e.channel.stats().ticker_slow);
+    }
+
+    // ---------- The producer's monitor (spec 2026-10-21) ----------
+
+    impl Fake {
+        /// Like [`Self::produce`], with real files in `dir` (the monitor links them).
+        fn produce_files(&self, dir: &Path, count: usize) {
+            let mut s = self.lock();
+            for _ in 0..count {
+                let path = dir.join(format!("{}-{}-{}.ts", s.item_id, s.start_at_s, s.n));
+                std::fs::write(&path, [0x47u8; 188]).unwrap();
+                let index = s.n;
+                s.pending.push(SegmentInfo {
+                    path,
+                    duration: 4.0,
+                    index,
+                });
+                s.n += 1;
+            }
+        }
+    }
+
+    struct MonitorEnv {
+        e: Env,
+        tmp: tempfile::TempDir,
+    }
+
+    impl MonitorEnv {
+        fn clips(&self) -> PathBuf {
+            self.tmp.path().join("clips")
+        }
+        fn feed(&self) -> MonitorFeed {
+            self.e.channel.monitor_feed()
+        }
+        fn rows(&self) -> Vec<(u64, i64, f64, bool)> {
+            self.feed()
+                .rows
+                .iter()
+                .map(|r| (r.seq, r.item_id, r.position_s, r.discontinuity))
+                .collect()
+        }
+        fn last_handle(&self) -> Fake {
+            let n = self.e.factory.lock().handles.len();
+            self.e.factory.handle(n - 1)
+        }
+    }
+
+    fn setup_monitor() -> MonitorEnv {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("clips")).unwrap();
+        let db = Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap()));
+        let factory = FakeFactory::default();
+        let now = Arc::new(AtomicU64::new(0));
+        let removed = Arc::new(Mutex::new(Vec::new()));
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut o = ChannelOptions::new(
+            MAIN_CHANNEL_ID,
+            Arc::clone(&db),
+            Arc::new(factory.clone()),
+            slates(),
+        );
+        let clock = Arc::clone(&now);
+        o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
+        let sink = Arc::clone(&removed);
+        // The channel's own removal of aired segments, for real (the monitor keeps a link).
+        o.remove_file = Some(Box::new(move |p: &Path| {
+            let _ = std::fs::remove_file(p);
+            sink.lock().unwrap().push(p.to_path_buf());
+        }));
+        o.monitor = Some(tmp.path().join("clips").join("_monitor"));
+        let mut channel = Channel::new(o);
+        channel.start().unwrap();
+        MonitorEnv {
+            e: Env {
+                db,
+                factory,
+                now,
+                removed,
+                logs,
+                channel,
+            },
+            tmp,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_monitor_lists_the_new_clip_before_it_airs_and_follows_what_airs() {
+        let mut m = setup_monitor();
+        let a = m.e.add_item("a");
+        assert_eq!(m.e.key(), "buffering");
+        m.e.flush().await;
+        assert!(m.feed().active, "a film is starting");
+        assert!(m.rows().is_empty());
+        m.last_handle().produce_files(&m.clips(), 5);
+        // One loop tick later the first segments are listed, before the broadcaster takes one.
+        m.e.tick();
+        assert_eq!(
+            m.rows(),
+            [
+                (0, a.id, 0.0, false),
+                (1, a.id, 4.0, false),
+                (2, a.id, 8.0, false)
+            ],
+            "at most {LOOKAHEAD} segments ahead of the air"
+        );
+        assert_eq!(m.feed().aired_seq, None);
+        // Two segments air: two more are listed, the aired ones stay (their file is gone).
+        m.e.publish();
+        m.e.publish();
+        m.e.tick();
+        let feed = m.feed();
+        assert_eq!(feed.rows.len(), 5);
+        assert_eq!(feed.rows[4].position_s, 16.0);
+        assert_eq!(feed.aired_seq, Some(1));
+        assert!(
+            m.e.removed.lock().unwrap().len() == 1,
+            "the first aired file was removed"
+        );
+        assert!(feed.rows.iter().all(|r| r.path.exists()), "{:?}", feed.rows);
+        let text = feed.playlist(None);
+        assert_eq!(
+            text.matches(&format!("monitor/clip-{}-0/", a.id)).count(),
+            5,
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_a_seek_the_new_clip_follows_a_discontinuity_and_keeps_the_numbering() {
+        let mut m = setup_monitor();
+        let a = m.e.add_item("a");
+        m.e.next();
+        m.e.flush().await;
+        m.last_handle().produce_files(&m.clips(), 4);
+        m.e.tick();
+        m.e.publish();
+        m.e.publish();
+        m.e.tick();
+        let before = m.rows();
+        assert_eq!(before.len(), 4, "{before:?}");
+        m.e.channel.seek_to(60.0);
+        m.e.advance(800);
+        m.e.tick();
+        m.e.flush().await;
+        // The relaunched clip's first segment is listed right away, after the old rows.
+        m.last_handle().produce_files(&m.clips(), 1);
+        m.e.tick();
+        let rows = m.rows();
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        assert_eq!(rows[..4], before[..]);
+        assert_eq!(rows[4], (4, a.id, 60.0, true));
+        let feed = m.feed();
+        assert_eq!(feed.rows[4].clip, format!("clip-{}-0-r1", a.id));
+        let text = feed.playlist(Some(4));
+        assert!(text.contains("#EXT-X-DISCONTINUITY\n"), "{text}");
+        assert!(text.contains("#EXT-X-START:TIME-OFFSET=16.000"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_antenna_is_the_row_the_viewers_see_and_no_film_means_an_empty_list() {
+        let mut m = setup_monitor();
+        assert!(!m.feed().active, "idle");
+        let a = m.e.add("a", Some(20.0), false);
+        m.e.next();
+        m.e.flush().await;
+        let h = m.last_handle();
+        h.produce_files(&m.clips(), 5);
+        m.e.tick();
+        for _ in 0..4 {
+            m.e.publish();
+            m.e.tick();
+        }
+        // Viewers lag 3 segments: the second of the four aired.
+        assert_eq!(m.e.channel.state().current.unwrap().position_s, 4);
+        assert_eq!(m.feed().antenna_seq, Some(1));
+        assert_eq!(m.feed().aired_seq, Some(3));
+        // The film ends: nothing current, the list is empty (the rows wait for their time).
+        h.set_state(SegmenterState::Done);
+        m.e.publish();
+        m.e.publish();
+        m.e.tick();
+        assert_eq!(m.e.channel.state().control.item_id, None, "{:?}", a.id);
+        let feed = m.feed();
+        assert!(!feed.active);
+        assert!(!feed.playlist(None).contains("#EXTINF"));
+        assert!(!feed.rows.is_empty(), "kept for their 90 s");
+        m.e.advance(RETAIN_MS);
+        m.e.tick();
+        assert!(m.feed().rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn while_paused_the_monitor_keeps_the_segment_the_film_resumes_from() {
+        let mut m = setup_monitor();
+        let a = m.e.add_item("a");
+        m.e.next();
+        m.e.flush().await;
+        m.last_handle().produce_files(&m.clips(), 4);
+        m.e.tick();
+        m.e.publish();
+        m.e.tick();
+        m.e.channel.pause(PauseReason::Manual);
+        m.e.tick();
+        let feed = m.feed();
+        assert!(feed.active, "a paused film");
+        let at = m.e.channel.state().control.position_s;
+        assert_eq!(at, 4.0);
+        let row = feed
+            .rows
+            .iter()
+            .find(|r| r.item_id == a.id && r.position_s == at)
+            .expect("the first segment of the paused position");
+        assert!(row.path.exists());
+        // Resumed: the relaunch is the next clip of the list.
+        m.e.channel.resume(PauseReason::Manual);
+        m.e.flush().await;
+        m.last_handle().produce_files(&m.clips(), 1);
+        m.e.tick();
+        let last = m.feed().rows.last().cloned().unwrap();
+        assert!(last.discontinuity && last.position_s == 4.0, "{last:?}");
+    }
+
+    #[tokio::test]
+    async fn without_the_monitor_the_channel_lists_nothing() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 2).await;
+        e.tick();
+        let feed = e.channel.monitor_feed();
+        assert!(feed.rows.is_empty() && feed.antenna_seq.is_none());
     }
 }

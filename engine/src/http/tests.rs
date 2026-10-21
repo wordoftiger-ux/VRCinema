@@ -34,6 +34,7 @@ use crate::library::MediaLibrary;
 use crate::pipeline::channel::{
     ChannelState, ChannelStatus, ControlState, NowPlaying, PauseReason,
 };
+use crate::pipeline::monitor::{MonitorFeed, MonitorRow};
 use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream};
 
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;
@@ -122,6 +123,7 @@ fn snapshot(live_dir: &Path, segments: &[&str], state: ChannelState) -> Arc<Snap
         state,
         prefetched_item_id: None,
         stats: Default::default(),
+        monitor: Default::default(),
     })
 }
 
@@ -2709,6 +2711,161 @@ async fn headless_mode_has_no_desktop_routes() {
         assert_eq!(res.status, StatusCode::NOT_FOUND, "{method} {url}");
         assert_eq!(res.json()["error"], "Not Found");
     }
+}
+
+// ---------- The producer's monitor (window only, spec 2026-10-21) ----------
+
+fn monitor_router(a: &AppHarness) -> Router {
+    super::routes_monitor::router(a.state.clone()).with_state(a.state.clone())
+}
+
+fn monitor_row(seq: u64, clip: &str, name: &str, path: &Path, position_s: f64) -> MonitorRow {
+    MonitorRow {
+        seq,
+        clip: clip.into(),
+        name: name.into(),
+        path: path.to_path_buf(),
+        duration: 4.0,
+        item_id: 7,
+        position_s,
+        discontinuity: false,
+    }
+}
+
+impl AppHarness {
+    fn set_monitor(&self, feed: MonitorFeed) {
+        let mut s = (*snapshot(self.h.live_dir.path(), &["5.ts"], idle_state())).clone();
+        s.monitor = Arc::new(feed);
+        self.h.snapshots.send_replace(Arc::new(s));
+    }
+}
+
+const MONITOR_LIST: &str = "/api/desktop/monitor.m3u8";
+
+#[tokio::test]
+async fn the_monitor_is_for_the_window_only() {
+    let (a, key) = app_harness(remote_on("sekret"));
+    let desktop = window_cookie(&a, &key).await;
+    let remote = cookie_of(&remote_login(&a, "sekret").await);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("seg_00000.ts");
+    std::fs::write(&file, [0x47u8; 188]).unwrap();
+    a.set_monitor(MonitorFeed {
+        rows: vec![monitor_row(0, "clip-7-0", "seg_00000.ts", &file, 0.0)],
+        next_seq: 1,
+        active: true,
+        ..MonitorFeed::default()
+    });
+    let router = monitor_router(&a);
+    for url in [MONITOR_LIST, "/api/desktop/monitor/clip-7-0/seg_00000.ts"] {
+        let none = send_to(router.clone(), get(url)).await;
+        assert_eq!(none.status, StatusCode::UNAUTHORIZED, "{url}");
+        let res = send_to(router.clone(), get(url).cookie(&remote)).await;
+        assert_eq!(res.status, StatusCode::FORBIDDEN, "{url}");
+        assert_eq!(res.json()["code"], "window_only");
+        let ok = send_to(router.clone(), get(url).cookie(&desktop)).await;
+        assert_eq!(ok.status, StatusCode::OK, "{url}");
+    }
+    // A server without a window has no monitor at all.
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let res = h.send(get(MONITOR_LIST).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_monitor_list_is_the_feed_and_segments_come_only_from_it() {
+    let (a, key) = app_harness(remote_off());
+    let cookie = window_cookie(&a, &key).await;
+    let router = monitor_router(&a);
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("seg_00000.ts");
+    let second = dir.path().join("seg_00001.ts");
+    std::fs::write(&first, [0x47u8; 188]).unwrap();
+    std::fs::write(&second, [0x47u8; 376]).unwrap();
+    std::fs::write(dir.path().join("secret.ts"), b"not listed").unwrap();
+    let mut jump = monitor_row(4, "clip-7-0-r1", "seg_00000.ts", &second, 60.0);
+    jump.discontinuity = true;
+    a.set_monitor(MonitorFeed {
+        rows: vec![
+            monitor_row(3, "clip-7-0", "seg_00000.ts", &first, 8.0),
+            jump,
+        ],
+        next_seq: 5,
+        active: true,
+        antenna_seq: Some(3),
+        aired_seq: Some(3),
+        ..MonitorFeed::default()
+    });
+    let list = send_to(router.clone(), get(MONITOR_LIST).cookie(&cookie)).await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert_eq!(list.header("content-type"), "application/vnd.apple.mpegurl");
+    assert_eq!(list.header("cache-control"), "no-store");
+    let text = list.text();
+    assert!(text.contains("#EXT-X-MEDIA-SEQUENCE:3\n"), "{text}");
+    assert!(
+        text.contains("#EXT-X-DISCONTINUITY\n#VRCINEMA-AT:7,60.000\n#EXTINF:4.000000,\nmonitor/clip-7-0-r1/seg_00000.ts\n"),
+        "{text}"
+    );
+    assert!(text.contains("#VRCINEMA-ANTENNA:3\n"), "{text}");
+    let from = send_to(
+        router.clone(),
+        get(&format!("{MONITOR_LIST}?from=4")).cookie(&cookie),
+    )
+    .await;
+    assert!(
+        from.text()
+            .contains("#EXT-X-START:TIME-OFFSET=4.000,PRECISE=YES\n"),
+        "{}",
+        from.text()
+    );
+    let junk = send_to(
+        router.clone(),
+        get(&format!("{MONITOR_LIST}?from=x")).cookie(&cookie),
+    )
+    .await;
+    assert_eq!(junk.status, StatusCode::OK, "a bad start is ignored");
+    assert!(!junk.text().contains("EXT-X-START"));
+
+    let seg = send_to(
+        router.clone(),
+        get("/api/desktop/monitor/clip-7-0-r1/seg_00000.ts").cookie(&cookie),
+    )
+    .await;
+    assert_eq!(seg.status, StatusCode::OK);
+    assert_eq!(seg.body.len(), 376, "the row's own file (the jump)");
+    assert_eq!(seg.header("content-type"), "video/mp2t");
+    assert_eq!(seg.header("cache-control"), "no-store");
+    for url in [
+        "/api/desktop/monitor/clip-7-0/seg_00001.ts",
+        "/api/desktop/monitor/clip-7-0/secret.ts",
+        "/api/desktop/monitor/clip-7-1/seg_00000.ts",
+        "/api/desktop/monitor/clip-7-0/..%2F..%2Fvrcinema.db",
+        "/api/desktop/monitor/..%5Cclip-7-0/seg_00000.ts",
+        "/api/desktop/monitor/clip-7-0/seg_00000.ts%00.txt",
+        "/api/desktop/monitor/clip-7-0/seg_00000",
+    ] {
+        let res = send_to(router.clone(), get(url).cookie(&cookie)).await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{url}");
+    }
+    // A listed row whose file is gone is a 404 too.
+    std::fs::remove_file(&first).unwrap();
+    let gone = send_to(
+        router.clone(),
+        get("/api/desktop/monitor/clip-7-0/seg_00000.ts").cookie(&cookie),
+    )
+    .await;
+    assert_eq!(gone.status, StatusCode::NOT_FOUND);
+
+    // Nothing on air: an empty list (200), the player shows "no preview".
+    a.set_monitor(MonitorFeed {
+        next_seq: 9,
+        ..MonitorFeed::default()
+    });
+    let empty = send_to(router.clone(), get(MONITOR_LIST).cookie(&cookie)).await;
+    assert_eq!(empty.status, StatusCode::OK);
+    assert!(empty.text().starts_with("#EXTM3U\n"));
+    assert!(!empty.text().contains("#EXTINF"), "{}", empty.text());
 }
 
 // ---------- Channel controls (stage 4) ----------

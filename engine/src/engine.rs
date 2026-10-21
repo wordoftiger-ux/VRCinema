@@ -20,6 +20,7 @@ use tokio::time::MissedTickBehavior;
 use crate::i18n::{Msg, error_msg};
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
 use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
+use crate::pipeline::monitor::MonitorFeed;
 use crate::pipeline::slates::Slates;
 use crate::stats::ChannelStats;
 
@@ -73,6 +74,8 @@ pub struct Snapshot {
     pub prefetched_item_id: Option<i64>,
     /// Numbers for the nerd stats.
     pub stats: ChannelStats,
+    /// What the producer's monitor lists (the window's `/api/desktop/monitor*`).
+    pub monitor: Arc<MonitorFeed>,
 }
 
 /// HTTP's side of the engine. Dropping every handle stops the loop.
@@ -103,6 +106,10 @@ pub trait ChannelControl: SegmentSource + Send {
     /// Numbers for the nerd stats (test doubles have none).
     fn stats(&self) -> ChannelStats {
         ChannelStats::default()
+    }
+    /// What the producer's monitor lists (test doubles: nothing).
+    fn monitor_feed(&self) -> MonitorFeed {
+        MonitorFeed::default()
     }
     /// The queue item being aired right now (not the one viewers see, which lags behind).
     fn current_item_id(&self) -> Option<i64>;
@@ -158,6 +165,9 @@ impl ChannelControl for Channel {
     }
     fn stats(&self) -> ChannelStats {
         Channel::stats(self)
+    }
+    fn monitor_feed(&self) -> MonitorFeed {
+        Channel::monitor_feed(self)
     }
     fn current_item_id(&self) -> Option<i64> {
         Channel::current_item_id(self)
@@ -290,6 +300,7 @@ impl Snapshot {
             },
             prefetched_item_id: None,
             stats: ChannelStats::default(),
+            monitor: Arc::default(),
         }
     }
 }
@@ -579,6 +590,7 @@ impl<C: ChannelControl> Core<C> {
                 hls: Some(self.broadcaster.counters()),
                 ..self.channel.stats()
             },
+            monitor: Arc::new(self.channel.monitor_feed()),
         }
     }
 }

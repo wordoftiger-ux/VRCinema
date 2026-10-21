@@ -572,6 +572,7 @@ impl AppCore {
             builtin_tunnel: settings.tunnel_enabled,
             pause_reasons,
             ticker_default: detected_gpu(settings),
+            monitor: true,
             ..RunOptions::new(self.home.clone())
         };
         let mut join = tokio::spawn(run(config.clone(), opts, async move {
