@@ -43,7 +43,6 @@ pub struct NowNext {
     pub address: String,
 }
 
-/// A part of the one-line text: line breaks and other control characters become spaces.
 /// A title for the ticker: the stored default title of a video without one is "Untitled" in
 /// the slate language.
 fn title(lang: Lang, title: &str) -> String {
@@ -54,6 +53,7 @@ fn title(lang: Lang, title: &str) -> String {
     }
 }
 
+/// A part of the one-line text: line breaks and other control characters become spaces.
 fn clean(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })

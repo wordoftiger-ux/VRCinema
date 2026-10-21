@@ -1512,7 +1512,7 @@ async fn a_manual_pause_survives_a_server_restart_and_the_automatic_pause_leaves
         settings: json!({"tunnelEnabled": false, "pauseWhenNoViewers": true}),
         auto_pause: AutoPauseTimings {
             no_viewers: Duration::from_secs(2),
-            recheck: Duration::from_secs(30),
+            recheck: Duration::from_secs(10),
             ..AutoPauseTimings::default()
         },
         ..Setup::default()
@@ -1581,7 +1581,7 @@ async fn no_viewers_pause_survive_a_restart_and_a_segment_fetch_resumes_at_once(
         settings: json!({"tunnelEnabled": false, "pauseWhenNoViewers": true}),
         auto_pause: AutoPauseTimings {
             no_viewers: Duration::from_secs(2),
-            recheck: Duration::from_secs(10),
+            recheck: Duration::from_secs(30),
             ..AutoPauseTimings::default()
         },
         ..Setup::default()

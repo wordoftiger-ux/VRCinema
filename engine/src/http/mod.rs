@@ -324,10 +324,14 @@ impl AppState {
     /// draws is out of date too: the film on air starts again from where it is with the new
     /// one (`Command::ApplyTicker`, joined with other changes within 700 ms).
     ///
-    /// `reconnecting`: the address went away while the tunnel is getting a new one; the film
-    /// waits for that new address (one restart instead of two). A tunnel switched off or
-    /// failed (no address, not connecting) restarts it at once, so the code of a dead address
-    /// does not stay on the stream.
+    /// `reconnecting`: the tunnel is switched on but has no address (connecting, reconnecting
+    /// after a quick tunnel's process died, or in the `Error` state before its next start —
+    /// `live::apply_tunnel` treats every enabled tunnel without a URL alike): the film keeps the
+    /// old code and waits for the next address (one restart instead of two). Only a tunnel
+    /// switched off (the manual address, or none, applies) restarts it at once, so the code of
+    /// the tunnel's address does not stay on the stream. Accepted (final wave, fix round 2): in
+    /// the `Error` state the old code stays until the tunnel is online again; it shows only with
+    /// the pause on tunnel loss off, and an error is followed by a new start.
     pub(crate) fn after_slates_replaced(&self, address_changed: bool, reconnecting: bool) {
         if !address_changed || reconnecting {
             return;
