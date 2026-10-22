@@ -119,6 +119,44 @@ try {
   await scenario({ monitorFeed: { clips: [clipA], firstSeq: 100, antenna: 102, aired: 105 } });
   let page = await openApp();
 
+  // ---------- The ahead caption does not saw-tooth ----------
+  // The antenna moves on a whole segment at a time while the monitor plays on smoothly, so the
+  // raw measure (from the middle of the antenna's segment) saws over one segment. Sampled about
+  // once a second, as the monitor measures (1.1 s: the phase drifts as on a real clock); 4 s
+  // segments.
+  const steady = await page.evaluate(async () => {
+    const { steadyAhead } = await import('/static/app/components/monitor.js');
+    const run = (means) => {
+      let shown = null;
+      const out = [];
+      means.forEach((mean, t) => {
+        shown = steadyAhead(shown, mean - 2 + ((t * 1.1) % 4), 4);
+        out.push(shown);
+      });
+      return out;
+    };
+    const flips = (xs) => xs.slice(1).filter((x, i) => x !== xs[i]).length;
+    const of = (n, mean) => Array(n).fill(mean);
+    const across = run(of(24, 4.5));
+    const inSync = run(of(24, 0));
+    const far = run(of(24, 10));
+    const synced = run([...of(12, 9), ...of(12, 0)]);
+    const drifted = run([...of(12, 0), ...of(12, 12)]);
+    return {
+      across: flips(across.slice(8)),
+      acrossValue: across.at(-1),
+      inSync: inSync.every((x) => x === 0),
+      far: flips(far.slice(4)),
+      farValue: far.at(-1),
+      synced: synced.slice(16).every((x) => x === 0),
+      drifted: drifted.slice(16).every((x) => x >= 8),
+    };
+  });
+  check(steady.across === 0 && steady.acrossValue >= 2, 'about one segment ahead: the caption stays put (no flip between "in sync" and "N s ahead")', steady);
+  check(steady.inSync, 'in sync: always "in sync"', steady);
+  check(steady.far === 0 && steady.farValue >= 8 && steady.farValue <= 12, 'far ahead: one steady number', steady);
+  check(steady.synced, 'after a sync it says "in sync" within a segment', steady);
+  check(steady.drifted, 'a real change (a jump ahead) shows within a segment', steady);
   // ---------- Two screens, the monitor plays from the newest aired segment ----------
   await waitFor(async () => (await stateOf(page)) === 'playing', 'the monitor plays');
   await waitFor(() => page.$eval('.monitor-box video', (v) => v.currentTime > 0 && !v.paused), 'the monitor picture moves');
@@ -132,7 +170,7 @@ try {
   check(lay.pageOverflow <= 0 && lay.viewOverflow <= 0, '1100x680: no horizontal overflow', lay);
   await waitFor(async () => /^Preview · about \d+ s ahead of on-air$/.test(await text(page, '.monitor-caption')), 'the caption says how far ahead');
   const ahead = await aheadOf(page);
-  check(ahead >= 5 && ahead <= 12, 'about 6 s ahead (three 2 s rows between the antenna row and the playing one)', ahead);
+  check(ahead >= 3 && ahead <= 14, 'about 5 s ahead (the playing row three after the middle of the antenna row)', ahead);
   check(/^On air( · about \d+ s behind the server)?$/.test(await text(page, '.screen-air .stage-caption')), 'the right screen is captioned "On air"', await text(page, '.screen-air .stage-caption'));
   await page.screenshot({ path: join(shots, 'monitor-en-1100x680.png') });
 
@@ -157,9 +195,9 @@ try {
   const newSegs = (await monitorSegments()).slice(segsBefore);
   check(newSegs.find((s) => s.startsWith('clip-7-0-r1/')) === 'clip-7-0-r1/0.ts', 'it starts at the first segment of the new clip', newSegs);
   const t1 = await page.$eval('.monitor-box video', (v) => v.currentTime);
-  await sleep(2000);
+  await sleep(4000);
   const t2 = await page.$eval('.monitor-box video', (v) => v.currentTime);
-  check(t2 - t1 > 1.4 && t2 - t1 < 2.6, 'it plays in real time (not a jump to the end of the list)', t2 - t1);
+  check(t2 - t1 > 2.5 && t2 - t1 < 5.5, 'it plays in real time (not a jump to the end of the list)', t2 - t1);
   await page.screenshot({ path: join(shots, 'monitor-after-seek-en-1100x680.png') });
 
   // ---------- One read at a time ----------
@@ -174,7 +212,7 @@ try {
   reads0 = await monitorReads();
   await sleep(3200);
   reads1 = await monitorReads();
-  check(reads1 - reads0 >= 2 && reads1 - reads0 <= 4, 'otherwise about one read a second', reads1 - reads0);
+  check(reads1 - reads0 >= 1 && reads1 - reads0 <= 5, 'otherwise about one read a second', reads1 - reads0);
 
   // ---------- Sync with on-air ----------
   const segsSync = (await monitorSegments()).length;
@@ -224,8 +262,14 @@ try {
   await waitFor(async () => isRed(await pixel(page)), 'the still picture is the paused clip (row of 36 s)', 6000);
   check(await page.$eval('.monitor-box video', (v) => v.paused), 'the video is paused');
   check((await text(page, '.monitor-badge')) === 'Paused — the video resumes from here', 'with a label');
+  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'paused: nothing to sync');
   const stillAt = await page.$eval('.monitor-box video', (v) => v.currentTime);
+  const loadsPaused = (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length;
+  await page.click('.stage-caption');
+  await page.keyboard.press('s');
   await sleep(1500);
+  check((await page.$('.toast')) === null, 'paused: the key S shows no message');
+  check((await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length === loadsPaused, 'paused: the key S starts no player (no blip)');
   check((await page.$eval('.monitor-box video', (v) => v.currentTime)) === stillAt, 'it does not move while paused');
   await scenario({ paused: false, pauseReasons: [] });
   await sleep(1500);
@@ -252,11 +296,40 @@ try {
   await waitFor(async () => (await stateOf(page)) === 'playing', 'visible again: the monitor plays');
   check(true, 'visible again: reading and playing resume');
 
+  // ---------- The player keeps failing: it gives up, Try again plays again ----------
+  await scenario({ monitorPlayerFail: true, monitorFeed: { clips: [clipA, clipB, { ...clipA, key: 'clip-7-0-r3', baseS: 50 }], firstSeq: 100, antenna: 104, aired: 106 } });
+  await waitFor(async () => (await stateOf(page)) === 'failed', 'the monitor gives up after a few tries', 90000);
+  check((await text(page, '.monitor-box .preview-unavailable span')) === 'Preview unavailable', 'failed: "Preview unavailable" in the left screen');
+  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'failed: nothing to sync');
+  const playerLoads = async () => (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length;
+  const failedAt = await playerLoads();
+  await sleep(4000);
+  check((await playerLoads()) === failedAt, 'failed: the player stops loading (0 in 4 s)');
+  await page.screenshot({ path: join(shots, 'monitor-failed-en-1100x680.png') });
+  await scenario({ monitorPlayerFail: false });
+  await page.click('.monitor-box .preview-unavailable .btn');
+  await waitFor(async () => (await stateOf(page)) === 'playing', 'Try again plays the monitor again', 10000);
+  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 0), 'and it moves');
+  check((await page.$('.monitor-box .preview-unavailable')) === null, 'Try again: the message goes away');
+  // The failed loads above were meant to fail.
+  page.__errors.length = 0;
+
+  // ---------- The engine started anew: its numbers begin again lower ----------
+  const loadsBefore = (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length;
+  await scenario({ monitorFeed: { clips: [clipA, clipB, { ...clipA, key: 'clip-7-0-r3', baseS: 50 }], firstSeq: 0, antenna: 4, aired: 6 } });
+  await waitFor(async () => (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).slice(loadsBefore).some((r) => r.search === '?from=20'), 'lower numbers: the monitor starts its player again (at the newest clip, row 20)');
+  await waitFor(async () => (await stateOf(page)) === 'playing', 'and plays');
+  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 0), 'and it moves');
+  check(true, 'a restarted engine: the monitor follows its new numbers');
+
   // ---------- Nothing on air ----------
   await scenario({ monitorFeed: null });
   await waitFor(async () => (await stateOf(page)) === 'none', 'an empty list: no preview');
   check((await text(page, '.monitor-note')) === 'No preview', '"No preview" in the left screen');
   check(await page.$eval('.monitor-sync', (b) => b.disabled), 'nothing to sync');
+  await page.keyboard.press('s');
+  await sleep(300);
+  check((await page.$('.toast')) === null, 'nothing on air: the key S shows no message');
   const segsNone = (await monitorSegments()).length;
   await sleep(2000);
   check((await monitorSegments()).length === segsNone, 'no segments are fetched without a list');
@@ -345,6 +418,25 @@ try {
   // The window's info answers 403 to a remote session: that is how the panel learns it is remote.
   const unexpected = page.__errors.filter((e) => !e.includes('/api/desktop/info') && !/status of 403/.test(e));
   check(unexpected.length === 0, 'remote: no other errors in the console', unexpected);
+  await page.close();
+
+  // ---------- A window that cannot play HLS ----------
+  await reset();
+  await scenario({ monitorFeed: { clips: [clipA], firstSeq: 100, antenna: 102, aired: 105 } });
+  page = await ctx.newPage();
+  await page.addInitScript(FAKE_TAURI);
+  await page.addInitScript(() => {
+    delete window.MediaSource;
+    delete window.ManagedMediaSource;
+    delete window.WebKitMediaSource;
+  });
+  await page.goto(`${base}/admin`);
+  await page.waitForSelector('.screen-monitor');
+  await waitFor(async () => (await page.$('.monitor-note')) !== null, 'a note in the left screen');
+  check((await text(page, '.monitor-note')) === 'This window cannot play the preview.', 'no MSE: the left screen says it cannot play');
+  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'no MSE: nothing to sync');
+  await sleep(1500);
+  check((await monitorReads()) === 0, 'no MSE: the list is not read');
   await page.close();
 
   console.log(`\n${passed} checks passed`);

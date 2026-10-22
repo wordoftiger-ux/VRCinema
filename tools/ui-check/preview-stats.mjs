@@ -161,7 +161,7 @@ try {
   const items = await page.$$eval('.menu [role=menuitem]', (b) => b.map((e) => [e.textContent.trim(), e.getAttribute('aria-disabled')]));
   check(JSON.stringify(items.map((i) => i[0])) === JSON.stringify(['Pause', 'Back 10 seconds', 'Forward 10 seconds', 'Stats for nerds', 'Copy channel link']), 'right click on the preview opens the menu: pause, -10 s, +10 s, stats, copy link', items);
   check(items.every((i) => i[1] === 'false'), 'all the menu items are enabled while a film plays');
-  check((await page.$eval('.menu', (m) => m.getAttribute('aria-label'))) === 'Preview menu', 'the menu has its own name');
+  check((await page.$eval('.menu', (m) => m.getAttribute('aria-label'))) === 'On air menu', 'the menu has its own name');
 
   // Menu: pause and seek reach the engine; copy puts the channel link on the clipboard.
   let m = (await requests()).length;
@@ -220,7 +220,7 @@ try {
   check(true, 'menu: "Stats for nerds" opens the overlay');
   await waitFor(async () => (await rowText(page, 'Watching')) === '≈ 4', 'the overlay shows the answer of the stats route');
   const titles = await page.$$eval('.stats h5', (h) => h.map((e) => e.textContent.trim()));
-  check(JSON.stringify(titles) === JSON.stringify(['On air', 'HLS channel', 'Next video', 'ffmpeg', 'Viewers', 'Internet (tunnel)', 'Preview in this window']), 'the groups follow the mockup', titles);
+  check(JSON.stringify(titles) === JSON.stringify(['On air', 'HLS channel', 'Next video', 'ffmpeg', 'Viewers', 'Internet (tunnel)', 'Playback in this window']), 'the groups follow the mockup', titles);
   const expect = {
     Video: 'Never Gonna Give You Up · youtube.com',
     'Server position': '1:42.0 / 3:33.0 · attempt 1',
@@ -289,7 +289,7 @@ try {
   await page.click('.stats-copy');
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   check(/\[\d+( \d+){59}\]/.test(copied), 'the copied text carries the 60 samples of the viewers history');
-  const missing = ['On air', 'HLS channel', 'Next video', 'ffmpeg', 'Viewers', 'Internet (tunnel)', 'Preview in this window', 'Never Gonna Give You Up', 'PID 18872', '58/min', 'WAW01', 'Darude — Sandstorm', 'Delay:'].filter((x) => !copied.includes(x));
+  const missing = ['On air', 'HLS channel', 'Next video', 'ffmpeg', 'Viewers', 'Internet (tunnel)', 'Playback in this window', 'Never Gonna Give You Up', 'PID 18872', '58/min', 'WAW01', 'Darude — Sandstorm', 'Delay:'].filter((x) => !copied.includes(x));
   check(missing.length === 0, 'Copy puts every group on the clipboard as text', { missing, copied });
   check(copied.split('\n').length > 20 && !/<|\[object/.test(copied), 'the copied text is plain lines (group heading, indented "label: value")');
   check((await text(page, '.stats-copy')) === 'Copied', 'the button confirms with "Copied"');
@@ -298,7 +298,7 @@ try {
   await page.evaluate(async () => (await import('/static/app/store.js')).setLanguage('pl'));
   await waitFor(async () => (await text(page, '.stats-head b')) === 'Statystyki dla nerdów', 'the overlay switches to Polish');
   const plTitles = await page.$$eval('.stats h5', (h) => h.map((e) => e.textContent.trim()));
-  check(plTitles[0] === 'Teraz na antenie' && plTitles.at(-1) === 'Podgląd w tym oknie', 'group headings follow the language', plTitles);
+  check(plTitles[0] === 'Teraz na antenie' && plTitles.at(-1) === 'Odtwarzanie w tym oknie', 'group headings follow the language', plTitles);
   check((await rowText(page, 'Bufor serwera')) === '5 gotowych (ok. 20 s)', 'plural (many) in the buffer row', await rowText(page, 'Bufor serwera'));
   check((await rowText(page, 'Stan', 0)).includes('3 gotowe'), 'plural (few) in the next video row', await rowText(page, 'Stan', 0));
   check((await rowText(page, 'Pozycja serwera')) === '1:42.0 / 3:33.0 · próba 1', 'row values follow the language', await rowText(page, 'Pozycja serwera'));
@@ -349,7 +349,7 @@ try {
   const playlistReads = [];
   page.on('request', (r) => r.url().includes('/live/main.m3u8') && playlistReads.push(Date.now()));
   await waitFor(() => page.$('.preview-unavailable'), 'the preview gives up', 40000);
-  check((await text(page, '.preview-unavailable span')) === 'Preview unavailable', 'after several failed tries: "Preview unavailable"');
+  check((await text(page, '.preview-unavailable span')) === 'On air unavailable', 'after several failed tries: "On air unavailable"');
   const reads = playlistReads.length;
   await sleep(4500);
   check(playlistReads.length === reads, 'once given up it stops requesting the stream', playlistReads.length - reads);

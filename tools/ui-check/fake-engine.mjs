@@ -22,7 +22,8 @@
 // baseS, segs: [segment numbers of the HLS folder], src: 'a' (options.hlsDir) or 'b'
 // (options.hlsDir2)}], firstSeq, antenna, aired}; null: an empty list, as without a film) like the
 // engine (2 s rows, #VRCINEMA-AT/ANTENNA/AIRED, EXT-X-START for `from`); GET
-// /api/desktop/monitor/<clip>/<n>.ts serves its segments; `monitorDelayMs` delays the list.
+// /api/desktop/monitor/<clip>/<n>.ts serves its segments; `monitorDelayMs` delays the list;
+// `monitorPlayerFail`: the list loads of the player (with `from`) answer 500.
 // Scenario `viewerStateDelayMs`: GET /api/channels/main/state answers that late (setting it
 // starts a new count of maxViewerInFlight).
 // History (panel field `history`): played, skipped (played with a reason), failed (localized
@@ -219,6 +220,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
       libraryAddError: null,
       monitorFeed: null,
       monitorDelayMs: 0,
+      monitorPlayerFail: false,
     };
     s.queue = initialQueue();
     s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
@@ -396,6 +398,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     maxMonitorInFlight = Math.max(maxMonitorInFlight, monitorInFlight);
     try {
       if (s.monitorDelayMs) await sleep(s.monitorDelayMs);
+      // The player's own loads fail (the window's reads still answer): the monitor gives up.
+      if (s.monitorPlayerFail && !own) return coded(res, 500, 'internal', 'boom');
       const f = s.monitorFeed;
       const rows = monitorRows();
       if (rows.length) monitorKept = rows;
