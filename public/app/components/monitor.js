@@ -27,8 +27,6 @@ const RETRY_AFTER_MS = 3000;
 const MAX_MEDIA_RECOVERIES = 2;
 /** Rebuilds in a row (without healthy playback in between) before the monitor gives up. */
 const MAX_RETRIES = 4;
-/** Less than this ahead of on-air counts as in sync. */
-const IN_SYNC_S = 2;
 
 /** `off` (not running), `none` (nothing to preview), `playing`, `paused` (still), `failed`. */
 export const monitorState = signal('off');
@@ -89,6 +87,22 @@ export function parseFeed(text) {
   return { rows, antenna, aired };
 }
 
+/**
+ * The ahead time to show (0: in sync) from the one shown (`shown`, null: none yet) and a new
+ * measure (`raw`: from the middle of the antenna's segment). The antenna moves on a whole
+ * segment at a time, so `raw` saws over one segment around the real value (±½ segment); what
+ * is shown only changes when `raw` leaves that band (hysteresis), so the caption does not flicker.
+ */
+export function steadyAhead(shown, raw, segment) {
+  if (shown === null) return raw < segment ? 0 : raw;
+  // In sync → ahead: the real value is a whole segment or more (the saw's top 1.5 segments).
+  if (shown === 0) return raw >= 1.5 * segment ? raw : 0;
+  // Ahead → in sync: the real value is below ¾ of a segment (the saw's low end below ¼).
+  if (raw < segment / 4) return 0;
+  // Another number only when the real value moved (beyond the saw's span, with a margin).
+  return Math.abs(raw - shown) > 1.25 * segment ? raw : shown;
+}
+
 /** Where a fresh player starts: the newest aired row if it is of the newest clip, else that clip's start. */
 function freshStart(feed) {
   const clip = feed.rows.at(-1).clip;
@@ -107,6 +121,10 @@ function watch(video) {
   let feed = null;
   /** The clip of the newest row seen (a new one restarts the player at its start). */
   let newest = null;
+  /** The first row number of the last list (a lower one: the engine started anew). */
+  let first = null;
+  /** The ahead time shown (changes by at least one segment: no saw-tooth). */
+  let shownAhead = null;
   /** The row a still picture (the channel paused) stands on. */
   let still = null;
   let mediaRecoveries = 0;
@@ -159,6 +177,13 @@ function watch(video) {
 
   const apply = (f) => {
     feed = f;
+    // A restarted engine numbers anew: a player of the old numbers starts again.
+    const top = f.rows[0]?.seq ?? null;
+    if (top !== null && first !== null && top < first && hls) {
+      destroy();
+      newest = null;
+    }
+    if (top !== null) first = top;
     if (monitorState.peek() === 'failed') return;
     if (!f.rows.length) {
       destroy();
@@ -191,6 +216,7 @@ function watch(video) {
   const measure = () => {
     if (!hls || !feed || still !== null || video.readyState < 2) {
       monitorAheadS.value = null;
+      shownAhead = null;
       return;
     }
     const level = hls.levels?.[Math.max(0, hls.currentLevel)];
@@ -198,7 +224,16 @@ function watch(video) {
     const frag = level?.details?.fragments?.find((f) => time >= f.start - 0.05 && time < f.start + f.duration);
     const row = frag && feed.rows.find((r) => r.seq === frag.sn);
     const antenna = feed.rows.find((r) => r.seq === feed.antenna);
-    monitorAheadS.value = row && antenna ? row.start + (time - frag.start) - antenna.start : null;
+    if (row && antenna) {
+      // The viewers are somewhere in the antenna's segment: measured from its middle.
+      const segment = antenna.duration || 4;
+      const raw = row.start + (time - frag.start) - (antenna.start + segment / 2);
+      shownAhead = steadyAhead(shownAhead, raw, segment);
+      monitorAheadS.value = shownAhead;
+    } else {
+      shownAhead = null;
+      monitorAheadS.value = null;
+    }
     // Healthy playback: the counters start again.
     if (!video.paused && time > lastTime + 0.5) {
       mediaRecoveries = 0;
@@ -278,7 +313,8 @@ function watch(video) {
       retryTimer = setTimeout(read, 0);
     },
     sync() {
-      if (control.peek()?.isLive || monitorState.peek() === 'failed') return false;
+      // Only a playing monitor syncs (not idle, paused, failed or for a live stream).
+      if (control.peek()?.isLive || monitorState.peek() !== 'playing') return false;
       const antenna = feed?.rows.find((r) => r.seq === feed.antenna);
       if (!antenna) {
         showToast(t('monitor.sync_unavailable'), 'info');
@@ -292,7 +328,7 @@ function watch(video) {
 
 function caption(state, ahead) {
   if (state !== 'playing' || !Number.isFinite(ahead)) return t('monitor.title');
-  return ahead >= IN_SYNC_S ? t('monitor.ahead', { seconds: Math.round(ahead) }) : t('monitor.in_sync');
+  return ahead >= 1 ? t('monitor.ahead', { seconds: Math.round(ahead) }) : t('monitor.in_sync');
 }
 
 /** The left screen of the Channel view. In a remote panel it stays grey with a note. */
@@ -317,7 +353,8 @@ export function MonitorScreen() {
     if (video.current) video.current.muted = muted;
   }, [muted]);
 
-  const canSync = inWindow && !live && (state === 'playing' || state === 'paused');
+  const supported = Hls.isSupported();
+  const canSync = inWindow && supported && !live && state === 'playing';
   const muteLabel = muted ? t('monitor.unmute') : t('monitor.mute');
   return html`
     <div class=${`screen screen-monitor${inWindow || !known ? '' : ' is-off'}`} data-state=${inWindow ? state : 'remote'}>
@@ -325,7 +362,7 @@ export function MonitorScreen() {
         <span class="monitor-caption">${inWindow ? caption(state, monitorAheadS.value) : t('monitor.title')}</span>
         ${inWindow
           ? html`<button type="button" class="icon-button monitor-mute" aria-label=${muteLabel} title=${muteLabel}
-              aria-pressed=${String(!muted)} onClick=${() => (monitorMuted.value = !monitorMuted.value)}>
+              onClick=${() => (monitorMuted.value = !monitorMuted.value)}>
               <${Icon} name=${muted ? 'muted' : 'volume'} size=${16} />
             </button>`
           : null}
@@ -334,13 +371,15 @@ export function MonitorScreen() {
         <video ref=${video} muted playsinline></video>
         ${!inWindow && known
           ? html`<div class="monitor-note">${t('ui.window_only')}</div>`
-          : state === 'none'
+          : inWindow && !supported
+            ? html`<div class="monitor-note" role="alert">${t('monitor.unsupported')}</div>`
+            : state === 'none'
             ? html`<div class="monitor-note">${t('monitor.none')}</div>`
             : state === 'paused'
               ? html`<div class="monitor-badge" role="status">${t('monitor.paused')}</div>`
               : state === 'failed'
                 ? html`<div class="preview-unavailable" role="alert">
-                    <span>${t('preview.unavailable')}</span>
+                    <span>${t('monitor.unavailable')}</span>
                     <button type="button" class="btn" onClick=${() => current?.retry()}>${t('preview.retry')}</button>
                   </div>`
                 : null}

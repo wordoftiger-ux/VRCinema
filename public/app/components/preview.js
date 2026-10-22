@@ -32,7 +32,7 @@ const MAX_MEDIA_RECOVERIES = 2;
 /** Rebuilds in a row (without healthy playback in between) before the preview gives up. */
 const MAX_RETRIES = 4;
 
-/** The preview gave up after several tries: shows "Preview unavailable" and a retry button. */
+/** The On air screen gave up after several tries: shows "On air unavailable" and a retry button. */
 export const previewFailed = signal(false);
 
 /** The last delay that was really measured (the bubble falls back to it). */
