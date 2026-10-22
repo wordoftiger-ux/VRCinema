@@ -18,6 +18,7 @@ use crate::pipeline::ffmpeg_args::{ClipArgsOptions, MAX_HEIGHT, ReadRate, build_
 use crate::pipeline::probe::{ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
+use crate::pipeline::temp_downloads::{Lease, TempDownloads, is_tiktok};
 use crate::pipeline::ticker::{
     CAPTION_FILE, FONTS_DIR, OverlayContext, QR_FILE, QR_PX, QrOverlay, Schedule, SlowWatch,
     TEXT_FILE, TickerContent, TickerMode, TickerQr, TickerWriter, compose_text, overlay_filter,
@@ -52,6 +53,8 @@ pub struct ClipFactoryDeps {
     pub encoder: LiveValue<VideoEncoder>,
     pub segment_seconds: u32,
     pub clips_dir: PathBuf,
+    /// Where yt-dlp downloads the films that cannot be read from their address (TikTok).
+    pub temp_dir: PathBuf,
     pub db: Arc<Mutex<Connection>>,
     pub channel_id: i64,
     pub log: Option<SharedLogFn>,
@@ -221,6 +224,8 @@ struct RealClipHandle {
     title: String,
     log: Option<SharedLogFn>,
     disposed: bool,
+    /// The downloaded film this clip plays (removed a while after its last clip is gone).
+    _download: Option<Lease>,
 }
 
 impl RealClipHandle {
@@ -382,14 +387,17 @@ pub struct RealClipFactory {
     /// Which of the owner's messages the ticker shows next (interval mode), across clips.
     rotation: Arc<AtomicUsize>,
     prober: Arc<dyn VideoProber>,
+    downloads: TempDownloads,
 }
 
 pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
+    let downloads = TempDownloads::new(deps.temp_dir.clone());
     RealClipFactory {
         deps: Arc::new(deps),
         counter: Arc::new(AtomicU64::new(0)),
         rotation: Arc::new(AtomicUsize::new(0)),
         prober: Arc::new(FfprobeProber),
+        downloads,
     }
 }
 
@@ -445,8 +453,9 @@ fn log_youtube_client(d: &ClipFactoryDeps, item: &QueueItem, client: &str, sourc
 }
 
 /// Probes the resolved stream. YouTube refusing the address (HTTP 403/401) makes yt-dlp
-/// resolve once more with [`FALLBACK_YOUTUBE_CLIENT`]; only when that one fails too does the
-/// start fail (and the channel's retry of the film count).
+/// resolve once more with [`FALLBACK_YOUTUBE_CLIENT`]; when that one fails too, the last
+/// probe error is returned (inner `Err`), for the download fallback or the start's failure
+/// (and the channel's retry of the film). The outer `Err`: the fallback's resolution failed.
 async fn probe_or_fallback(
     d: &ClipFactoryDeps,
     prober: &dyn VideoProber,
@@ -454,20 +463,20 @@ async fn probe_or_fallback(
     source: &str,
     viewer: bool,
     stream: ResolvedStream,
-) -> Result<(ResolvedStream, VideoInfo), Msg> {
+) -> Result<Result<(ResolvedStream, VideoInfo), ProbeError>, Msg> {
     let client = stream_youtube_client(&stream);
     if let Some(client) = &client {
         log_youtube_client(d, item, client, source);
     }
     let error = match prober.probe(&d.ffprobe_path, &stream.inputs).await {
-        Ok(info) => return Ok((stream, info)),
+        Ok(info) => return Ok(Ok((stream, info))),
         Err(e) => e,
     };
     let Some(client) = client.filter(|_| error.access_denied()) else {
-        return Err(error.message());
+        return Ok(Err(error));
     };
     let Some(again) = d.resolver.resolve_with_fallback_client(source).await else {
-        return Err(error.message());
+        return Ok(Err(error));
     };
     if let Some(log) = &d.log {
         log(Msg::new("log.ytdlp_fallback_client")
@@ -480,11 +489,92 @@ async fn probe_or_fallback(
     if let Some(client) = stream_youtube_client(&again) {
         log_youtube_client(d, item, &client, source);
     }
-    let info = prober
+    Ok(prober
         .probe(&d.ffprobe_path, &again.inputs)
         .await
+        .map(|info| (again, info)))
+}
+
+/// What a clip plays: the stream, its analysis and the downloaded film it holds, if any.
+type Probed = (ResolvedStream, VideoInfo, Option<Lease>);
+
+/// Resolves and probes the source; a TikTok film, or one whose address was refused to
+/// ffprobe (HTTP 403/401), is downloaded by yt-dlp and played from the disk.
+async fn resolve_and_probe(
+    d: &ClipFactoryDeps,
+    downloads: &TempDownloads,
+    prober: &dyn VideoProber,
+    item: &QueueItem,
+    source: &str,
+    viewer: bool,
+) -> Result<Probed, Msg> {
+    let stream = d.resolver.resolve(source).await.map_err(|e| e.0)?;
+    let stream = checked_inputs(d, viewer, stream).await?;
+    let live = item.is_live || stream.is_live;
+    let duration_s = stream.duration_s;
+    // TikTok's addresses answer 403 to everything but yt-dlp: not even probed.
+    if !live
+        && is_tiktok(source)
+        && let Some(found) =
+            download_and_probe(d, downloads, prober, item, source, duration_s).await
+    {
+        return found;
+    }
+    match probe_or_fallback(d, prober, item, source, viewer, stream).await? {
+        Ok((stream, info)) => Ok((stream, info, None)),
+        // The address was refused (any site): yt-dlp may still fetch the film itself. When
+        // that fails too, the refusal is what the start fails with.
+        Err(error) if !live && error.access_denied() => {
+            match download_and_probe(d, downloads, prober, item, source, duration_s).await {
+                Some(Ok(found)) => Ok(found),
+                _ => Err(error.message()),
+            }
+        }
+        Err(error) => Err(error.message()),
+    }
+}
+
+/// yt-dlp downloads `source` into the temp folder and the file is probed; `None`: the
+/// resolver of this source cannot download.
+async fn download_and_probe(
+    d: &ClipFactoryDeps,
+    downloads: &TempDownloads,
+    prober: &dyn VideoProber,
+    item: &QueueItem,
+    source: &str,
+    duration_s: Option<f64>,
+) -> Option<Result<Probed, Msg>> {
+    let stem = match downloads.stem(item.id) {
+        Ok(stem) => stem,
+        Err(e) => return Some(Err(Msg::error("source_message").arg("detail", e))),
+    };
+    Some(match d.resolver.download(source, &stem).await? {
+        Ok(file) => probe_download(d, prober, downloads.adopt(item.id, file), duration_s).await,
+        Err(e) => Err(e.0),
+    })
+}
+
+/// Probes a downloaded film (a new one, or the item's earlier download on a resume or a seek).
+async fn probe_download(
+    d: &ClipFactoryDeps,
+    prober: &dyn VideoProber,
+    film: Lease,
+    duration_s: Option<f64>,
+) -> Result<Probed, Msg> {
+    let stream = ResolvedStream {
+        inputs: vec![StreamInput {
+            url: film.path().to_string_lossy().into_owned(),
+            headers: Vec::new(),
+        }],
+        title: String::new(),
+        duration_s,
+        is_live: false,
+    };
+    let info = prober
+        .probe(&d.ffprobe_path, &stream.inputs)
+        .await
         .map_err(|e| e.message())?;
-    Ok((again, info))
+    Ok((stream, info, Some(film)))
 }
 
 /// Where a running ticker reads what it shows.
@@ -811,6 +901,7 @@ async fn start_clip(
         counter,
         rotation,
         prober,
+        downloads,
     } = factory;
     let viewer = item.added_by == AddedBy::Public && d.check_viewer_media;
     let refused = |e: LinkError| Msg::error(e.code());
@@ -823,10 +914,11 @@ async fn start_clip(
     } else {
         item.source_url.clone()
     };
-    let stream = d.resolver.resolve(&source).await.map_err(|e| e.0)?;
-    let stream = checked_inputs(&d, viewer, stream).await?;
-    let (stream, info) =
-        probe_or_fallback(&d, prober.as_ref(), &item, &source, viewer, stream).await?;
+    let (stream, info, download) = match downloads.reuse(item.id) {
+        // A resume or a seek of a film downloaded for an earlier clip of the item.
+        Some(film) => probe_download(&d, prober.as_ref(), film, item.duration_s).await?,
+        None => resolve_and_probe(&d, &downloads, prober.as_ref(), &item, &source, viewer).await?,
+    };
     let settings = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
@@ -947,6 +1039,7 @@ async fn start_clip(
         title: item.title.clone(),
         log: d.log.clone(),
         disposed: false,
+        _download: download,
     }))
 }
 
@@ -1007,6 +1100,7 @@ mod tests {
             fps,
             has_audio,
             duration_s: Some(60.0),
+            portrait: false,
         }
     }
 
@@ -1129,6 +1223,7 @@ mod tests {
             encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
             segment_seconds: 4,
             clips_dir: clips.clone(),
+            temp_dir: clips.join("..").join("temp"),
             db: Arc::clone(&db),
             channel_id: MAIN_CHANNEL_ID,
             log: Some(Arc::new(move |l: Msg| {
@@ -1200,6 +1295,7 @@ mod tests {
             encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
             segment_seconds: 4,
             clips_dir: std::env::temp_dir().join("vrcinema-never-made"),
+            temp_dir: std::env::temp_dir().join("vrcinema-never-made"),
             db: Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap())),
             channel_id: MAIN_CHANNEL_ID,
             log: None,
@@ -1430,6 +1526,7 @@ mod tests {
             encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
             segment_seconds: 4,
             clips_dir: dir.path().join("clips"),
+            temp_dir: dir.path().join("temp"),
             db: Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap())),
             channel_id: MAIN_CHANNEL_ID,
             log: Some(Arc::new(move |l: Msg| {
@@ -1515,8 +1612,120 @@ mod tests {
             "ffprobe: https://rr3---sn-u2oxu.googlevideo.com/videoplayback: Server returned 403 Forbidden (access denied)"
         );
         no_secrets(&text);
-        assert_eq!(y.ytdlp.lock().unwrap().len(), 2, "one fallback only");
-        assert_eq!(y.probed.lock().unwrap().len(), 2);
+        let calls = y.ytdlp.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3, "one fallback client, then one download");
+        assert!(!calls[1].iter().any(|a| a == "--max-filesize"));
+        assert!(calls[2].iter().any(|a| a == "--max-filesize"), "{calls:?}");
+        assert_eq!(y.probed.lock().unwrap().len(), 2, "no film was downloaded");
+    }
+
+    /// yt-dlp for TikTok: the address (refused to ffprobe) for `-j`, the film for a download.
+    struct TikTokRunner {
+        calls: Argv,
+    }
+
+    #[async_trait]
+    impl crate::resolver::ytdlp::ProcessRunner for TikTokRunner {
+        async fn run(
+            &self,
+            _cmd: &Path,
+            args: &[OsString],
+            _timeout: Duration,
+        ) -> Result<crate::process::ProcessOutput, crate::process::ProcessError> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let stdout = match args.iter().position(|a| a == "-o") {
+                Some(i) => {
+                    let film = args[i + 1].replace("%(ext)s", "mp4");
+                    std::fs::write(film, b"film").unwrap();
+                    String::new()
+                }
+                None => serde_json::json!({
+                    "title": "film", "duration": 6,
+                    "url": "https://v16.tiktokcdn.example/v.mp4?sig=1",
+                })
+                .to_string(),
+            };
+            self.calls.lock().unwrap().push(args);
+            Ok(crate::process::ProcessOutput {
+                code: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn tiktok_factory() -> YouTube {
+        let ytdlp = Argv::default();
+        let resolver = Arc::new(
+            crate::resolver::ytdlp::YtDlpResolver::new("yt-dlp".into(), None, None).with_runner(
+                Box::new(TikTokRunner {
+                    calls: Arc::clone(&ytdlp),
+                }),
+            ),
+        );
+        YouTube {
+            ytdlp,
+            ..youtube_factory(Some(resolver), "", vec!["tiktokcdn"], None)
+        }
+    }
+
+    fn tiktok_item() -> QueueItem {
+        QueueItem {
+            source_url: "https://www.tiktok.com/@polishballers/video/7698743057218407702".into(),
+            ..item(129, "TikTok")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tiktok_film_is_downloaded_and_played_from_the_temp_folder() {
+        let y = tiktok_factory();
+        let temp = y._dir.path().join("temp");
+        let mut first = y.factory.create(tiktok_item(), 0.0, 0).await.unwrap();
+        let film = temp.join("129-1.mp4");
+        assert!(film.is_file());
+        // A seek: the same file, without yt-dlp.
+        let mut seek = y.factory.create(tiktok_item(), 3.0, 0).await.unwrap();
+        first.dispose();
+        seek.dispose();
+        let calls = y.ytdlp.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[0].iter().any(|a| a == "-j"));
+        assert!(calls[1].iter().any(|a| a == "--max-filesize"));
+        let film = std::path::absolute(&film).unwrap();
+        let probed = y.probed.lock().unwrap().clone();
+        assert_eq!(
+            probed,
+            [film.to_string_lossy(), film.to_string_lossy()],
+            "the refused address is never probed"
+        );
+        drop((first, seek));
+        assert!(film.is_file(), "kept for a while after its last clip");
+    }
+
+    #[tokio::test]
+    async fn a_refused_address_of_any_site_falls_back_to_a_download() {
+        let y = tiktok_factory();
+        let item = QueueItem {
+            source_url: "https://www.cda.pl/video/1".into(),
+            ..tiktok_item()
+        };
+        let mut handle = y.factory.create(item, 0.0, 0).await.expect("downloaded");
+        handle.dispose();
+        let probed = y.probed.lock().unwrap().clone();
+        assert_eq!(probed.len(), 2);
+        assert!(probed[1].ends_with("129-1.mp4"), "{probed:?}");
+
+        // A live stream is never downloaded.
+        let y = tiktok_factory();
+        let live = QueueItem {
+            is_live: true,
+            ..tiktok_item()
+        };
+        assert!(y.factory.create(live, 0.0, 0).await.is_err());
+        assert_eq!(y.ytdlp.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1952,6 +2161,7 @@ mod tests {
                 sink.lock().unwrap().push(l.to_string())
             })),
             disposed: false,
+            _download: None,
         });
         let segments = run_to_the_end(&mut handle).await;
         assert!(!segments.is_empty());
@@ -2018,6 +2228,7 @@ mod tests {
             title: "Test".into(),
             log: None,
             disposed: false,
+            _download: None,
         };
         assert_eq!(handle.poll().len(), 1);
         assert_eq!(handle.state(), SegmenterState::Failed);
@@ -2249,6 +2460,7 @@ mod tests {
                 sink.lock().unwrap().push(l.to_string())
             })),
             disposed: false,
+            _download: None,
         })
     }
 }

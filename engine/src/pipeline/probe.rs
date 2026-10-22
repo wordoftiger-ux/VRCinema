@@ -20,6 +20,9 @@ pub struct VideoInfo {
     pub fps: f64,
     pub has_audio: bool,
     pub duration_s: Option<f64>,
+    /// Taller than wide as shown (rotation included), e.g. a 9:16 phone video: it is
+    /// converted and letterboxed into a 16:9 picture.
+    pub portrait: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +94,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 const DURATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn decide_video_mode(info: &VideoInfo, force_transcode: bool) -> VideoMode {
-    if force_transcode {
+    if force_transcode || info.portrait {
         return VideoMode::Transcode;
     }
     if info.codec == "h264"
@@ -169,7 +172,9 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
             .to_string()
     };
     let avg = parse_rate(video.get("avg_frame_rate"));
+    let width = js_number(video.get("width"));
     Ok(VideoInfo {
+        portrait: is_portrait(width, height, rotation(video)),
         codec: text("codec_name"),
         // Saturating float-to-int cast: NaN and negatives become 0.
         height: height as u32,
@@ -182,6 +187,30 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
         has_audio: streams.iter().any(|s| is_type(s, "audio")),
         duration_s: (duration.is_finite() && duration > 0.0).then_some(duration),
     })
+}
+
+/// The rotation of a phone video, in degrees (ffprobe's display matrix side data; 0 when none).
+fn rotation(video: &Value) -> f64 {
+    video
+        .get("side_data_list")
+        .and_then(Value::as_array)
+        .and_then(|list| list.iter().find_map(|d| d.get("rotation")))
+        .map(|r| js_number(Some(r)))
+        .filter(|r| r.is_finite())
+        .unwrap_or(0.0)
+}
+
+/// Taller than wide as shown: a quarter turn swaps the stored sides. Unknown sides: not.
+fn is_portrait(width: f64, height: f64, rotation_deg: f64) -> bool {
+    if !(width > 0.0 && height > 0.0) {
+        return false;
+    }
+    let quarter_turn = (rotation_deg.round() as i64).rem_euclid(180) == 90;
+    if quarter_turn {
+        width > height
+    } else {
+        height > width
+    }
 }
 
 /// JavaScript truthiness of a JSON value.
@@ -274,7 +303,42 @@ mod tests {
             fps: 30.0,
             has_audio: true,
             duration_s: Some(60.0),
+            portrait: false,
         }
+    }
+
+    #[test]
+    fn a_portrait_video_is_detected_and_always_converted() {
+        let probe = |video: serde_json::Value| {
+            parse_probe_output(&json!({"streams": [video], "format": {}}))
+                .unwrap()
+                .portrait
+        };
+        // The TikTok film: H.265 1080x1920.
+        assert!(probe(
+            json!({"codec_type": "video", "codec_name": "hevc", "width": 1080, "height": 1920})
+        ));
+        assert!(!probe(
+            json!({"codec_type": "video", "width": 1920, "height": 1080})
+        ));
+        assert!(!probe(json!({"codec_type": "video", "height": 1080})));
+        // A phone film stored wide but shown upright, and the other way round.
+        assert!(probe(
+            json!({"codec_type": "video", "width": 1920, "height": 1080,
+            "side_data_list": [{"side_data_type": "Display Matrix", "rotation": -90}]})
+        ));
+        assert!(!probe(
+            json!({"codec_type": "video", "width": 1080, "height": 1920,
+            "side_data_list": [{"rotation": 90}]})
+        ));
+        assert!(probe(
+            json!({"codec_type": "video", "width": 1080, "height": 1920,
+            "side_data_list": [{"rotation": 180}]})
+        ));
+
+        let mut upright = h264();
+        upright.portrait = true;
+        assert_eq!(decide_video_mode(&upright, false), VideoMode::Transcode);
     }
 
     #[test]
@@ -325,6 +389,7 @@ mod tests {
                 fps: 29.97,
                 has_audio: true,
                 duration_s: Some(123.45),
+                portrait: false,
             }
         );
     }

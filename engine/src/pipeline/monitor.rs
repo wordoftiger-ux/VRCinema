@@ -925,6 +925,7 @@ mod tests {
             encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
             segment_seconds: 4,
             clips_dir: clips.clone(),
+            temp_dir: tmp.path().join("temp"),
             db: Arc::clone(&db),
             channel_id: MAIN_CHANNEL_ID,
             log: None,

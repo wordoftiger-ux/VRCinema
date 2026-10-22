@@ -25,6 +25,7 @@ use crate::pipeline::probe::probe_duration;
 use crate::pipeline::slates::{
     RETAIN_S, SlateOptions, SlateSwapper, generate_slates, request_url, system_fonts_dir,
 };
+use crate::pipeline::temp_downloads::reset_dir;
 use crate::resolver::fake::FakeResolver;
 use crate::resolver::file::FileResolver;
 use crate::resolver::local::{FileDurationProbe, LocalResolver};
@@ -221,7 +222,8 @@ fn build_resolver(
         js_runtime,
         config.ytdlp_cookies.clone(),
     )
-    .with_cookies(live.ytdlp_cookies.clone());
+    .with_cookies(live.ytdlp_cookies.clone())
+    .with_ffmpeg(config.ffmpeg_path.clone());
     let file_probe = |ffprobe: std::path::PathBuf| -> FileDurationProbe {
         Box::new(move |file| {
             let ffprobe = ffprobe.clone();
@@ -239,6 +241,9 @@ fn build_resolver(
             .with_file(Box::new(FileResolver::new(file_probe(ffprobe)))),
     ))
 }
+
+/// The folder of `DATA_DIR` for films yt-dlp downloads before they air (emptied at start).
+pub const TEMP_DIR: &str = "temp";
 
 /// How many ports after the configured one are tried when the fallback is on.
 pub const PORT_FALLBACK_SPAN: u16 = 20;
@@ -362,6 +367,7 @@ async fn start_channel_loop(
                 encoder: encoder.clone(),
                 segment_seconds: config.segment_seconds,
                 clips_dir: config.data_dir.join("clips"),
+                temp_dir: config.data_dir.join(TEMP_DIR),
                 db: Arc::clone(&db),
                 channel_id: MAIN_CHANNEL_ID,
                 log: Some(Arc::clone(&shared_log)),
@@ -470,6 +476,8 @@ pub async fn run(
     let clips_dir = config.data_dir.join("clips");
     let _ = std::fs::remove_dir_all(&clips_dir);
     std::fs::create_dir_all(&clips_dir)?;
+    // Films downloaded by yt-dlp for clips of an earlier run (TikTok).
+    let _ = reset_dir(&config.data_dir.join(TEMP_DIR));
 
     let monitor_watch = Arc::new(MonitorWatch::default());
     let mut slates = None;

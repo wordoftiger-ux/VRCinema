@@ -315,6 +315,7 @@ Switch over from a fresh PowerShell window: overrides set earlier with `$env:POR
 ## How it works
 
 yt-dlp (or the disk library) resolves a video. ffmpeg cuts it into 4-second MPEG-TS segments, repackaging H.264 without re-encoding whenever possible.
+TikTok videos (and any video whose address the site refuses to ffmpeg with HTTP 403/401) are first downloaded whole by yt-dlp into `data\temp` (at most 200 MB, within 100 s; never a live stream) and played from there; the file is deleted about 3 minutes after the video's last clip ends (a resume or a seek reuses it), and the folder is emptied at every start. A vertical (9:16) video is always converted and letterboxed into a 16:9 picture with black bars.
 A broadcaster publishes the segments in real time and rewrites their timestamps, so videos and idle screens form one continuous timeline.
 Design notes: [docs/superpowers/specs](docs/superpowers/specs).
 

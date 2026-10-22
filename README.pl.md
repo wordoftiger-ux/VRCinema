@@ -348,3 +348,4 @@ npm run typecheck
 Architektura i decyzje: `docs/superpowers/specs/2026-10-03-vrcinema-design.md`.
 W skrócie: yt-dlp rozpoznaje film, ffmpeg tnie go na 4-sekundowe fragmenty MPEG-TS (bez konwersji, gdy źródło to H.264 do 1080p),
 a nadajnik publikuje je w tempie czasu rzeczywistego i przepisuje znaczniki czasu, żeby filmy i plansze tworzyły jedną oś czasu.
+Filmy z TikToka (i każdy film, którego adres strona odrzuca dla ffmpeg kodem HTTP 403/401) yt-dlp najpierw pobiera w całości do `data\temp` (najwyżej 200 MB, w ciągu 100 s; nigdy transmisji na żywo) i stamtąd są odtwarzane; plik znika ok. 3 minuty po ostatnim fragmencie filmu (wznowienie albo przewinięcie korzysta z niego ponownie), a folder jest czyszczony przy każdym starcie. Film pionowy (9:16) jest zawsze konwertowany i wpisywany w kadr 16:9 z czarnymi pasami po bokach.

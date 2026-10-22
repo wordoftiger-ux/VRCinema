@@ -10,6 +10,7 @@ pub mod types;
 pub mod ytdlp;
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -68,6 +69,13 @@ pub trait MediaResolver: Send + Sync {
 
     /// Whether yt-dlp is given a JavaScript runtime for `url` (`None`: not resolved by yt-dlp).
     fn js_runtime_passed(&self, _url: &str) -> Option<bool> {
+        None
+    }
+
+    /// Downloads the film behind `url` into a file `<stem>.<ext>` and returns its path, for a
+    /// site whose media addresses only yt-dlp itself may fetch (TikTok); `None`: this resolver
+    /// cannot (everything but yt-dlp).
+    async fn download(&self, _url: &str, _stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
         None
     }
 }
@@ -146,6 +154,10 @@ impl MediaResolver for CompositeResolver {
 
     fn js_runtime_passed(&self, url: &str) -> Option<bool> {
         self.pick(url).ok()?.js_runtime_passed(url)
+    }
+
+    async fn download(&self, url: &str, stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
+        self.pick(url).ok()?.download(url, stem).await
     }
 }
 

@@ -558,6 +558,7 @@ mod drawn {
                 fps: 30.0,
                 has_audio: false,
                 duration_s: Some(f64::from(seconds)),
+                portrait: false,
             },
             encoder: VideoEncoder::Libx264,
             segment_seconds: 4,

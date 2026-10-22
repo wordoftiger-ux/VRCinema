@@ -429,6 +429,7 @@ mod tests {
             fps,
             has_audio,
             duration_s: Some(10.0),
+            portrait: false,
         }
     }
 

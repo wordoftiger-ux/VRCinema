@@ -183,6 +183,91 @@ pub fn ytdlp_error_message(stderr: &str) -> ResolveError {
     }
 }
 
+/// The largest film yt-dlp downloads to disk ([`MediaResolver::download`], `--max-filesize`).
+pub const MAX_DOWNLOAD_SIZE: &str = "200M";
+
+/// How long such a download may take: inside the channel's limit for a start (120 s), which
+/// also covers the resolution before it.
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(100);
+
+/// yt-dlp's output template for the file `<stem>.<ext>`; a `%` of the path is doubled (yt-dlp
+/// would read it as the start of a field).
+pub fn output_template(stem: &Path) -> OsString {
+    let path = stem.to_string_lossy().replace('%', "%%");
+    OsString::from(format!("{path}.%(ext)s"))
+}
+
+/// What a download of `stem` left in its folder: the film and any unfinished parts.
+pub fn files_of(stem: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (stem.parent(), stem.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|e| e.path())
+        .collect()
+}
+
+/// The finished film among the files of `stem`: `<stem>.<ext>`, not a leftover (`.part`,
+/// `.ytdl`, a format downloaded for merging such as `<stem>.f137.mp4`).
+pub fn finished_download(stem: &Path, files: &[PathBuf]) -> Option<PathBuf> {
+    let name = stem.file_name()?.to_string_lossy().into_owned();
+    files
+        .iter()
+        .find(|f| {
+            let Some(file) = f.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                return false;
+            };
+            let Some(ext) = file.strip_prefix(&name).and_then(|r| r.strip_prefix('.')) else {
+                return false;
+            };
+            !ext.is_empty()
+                && !ext.contains('.')
+                && !["part", "ytdl", "temp", "tmp"].contains(&ext.to_ascii_lowercase().as_str())
+        })
+        .cloned()
+}
+
+/// Why a download left no film: yt-dlp's words about the size limit (it stops with exit code
+/// 0), its error, or no stream at all (a live stream is filtered out).
+pub fn download_failure(out: &ProcessOutput) -> ResolveError {
+    let too_large = out
+        .stdout
+        .lines()
+        .chain(out.stderr.lines())
+        .find(|l| l.contains("max-filesize"));
+    if let Some(line) = too_large {
+        let line = line.trim();
+        let line = line.strip_prefix("[download]").unwrap_or(line).trim();
+        return ResolveError::new(redact_urls(line));
+    }
+    if out.code != Some(0) {
+        return ytdlp_error_message(&out.stderr);
+    }
+    ResolveError::coded("ytdlp_no_stream")
+}
+
+/// Removes what a download of `stem` left behind, but the film it keeps (when it fails or is
+/// cancelled midway: the channel gave up on the start).
+struct Leftovers<'a> {
+    stem: &'a Path,
+    keep: Option<PathBuf>,
+}
+
+impl Drop for Leftovers<'_> {
+    fn drop(&mut self) {
+        for file in files_of(self.stem) {
+            if self.keep.as_ref() != Some(&file) {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
+}
+
 /// Why yt-dlp could not run (or ran too long).
 fn process_error(e: ProcessError) -> ResolveError {
     match e {
@@ -202,6 +287,9 @@ pub struct YtDlpResolver {
     pub cookies: LiveValue<Option<PathBuf>>,
     pub timeout: Duration,
     pub runner: Box<dyn ProcessRunner>,
+    /// ffmpeg for merging a download of separate video and audio (`--ffmpeg-location`, given
+    /// only when the file exists).
+    pub ffmpeg: Option<PathBuf>,
 }
 
 impl YtDlpResolver {
@@ -212,7 +300,13 @@ impl YtDlpResolver {
             cookies: LiveValue::new(cookies),
             timeout: DEFAULT_TIMEOUT,
             runner: Box::new(RealRunner),
+            ffmpeg: None,
         }
+    }
+
+    pub fn with_ffmpeg(mut self, ffmpeg: PathBuf) -> Self {
+        self.ffmpeg = Some(ffmpeg);
+        self
     }
 
     /// Shares the cookies setting with the app (see [`crate::live`]).
@@ -227,7 +321,7 @@ impl YtDlpResolver {
     }
 
     /// Full argv: common flags, mode-specific args, `--`, URL (always last).
-    fn argv(&self, mode: &[&str], url: &str) -> Vec<OsString> {
+    fn argv(&self, mode: &[impl AsRef<std::ffi::OsStr>], url: &str) -> Vec<OsString> {
         let mut args: Vec<OsString> = ["--no-progress", "--no-warnings", "--socket-timeout", "20"]
             .iter()
             .map(OsString::from)
@@ -240,7 +334,7 @@ impl YtDlpResolver {
             args.push("--cookies".into());
             args.push(cookies.into());
         }
-        args.extend(mode.iter().map(OsString::from));
+        args.extend(mode.iter().map(|a| a.as_ref().to_os_string()));
         args.push("--".into());
         args.push(url.into());
         args
@@ -262,6 +356,48 @@ impl YtDlpResolver {
             return Err(ytdlp_error_message(&out.stderr));
         }
         serde_json::from_str(&out.stdout).map_err(|_| ResolveError::coded("ytdlp_bad_data"))
+    }
+
+    /// The arguments of a download into `<stem>.<ext>` (see [`MediaResolver::download`]).
+    fn download_argv(&self, url: &str, stem: &Path) -> Vec<OsString> {
+        let mut mode: Vec<OsString> = [
+            "--no-playlist",
+            "-f",
+            FORMAT_SELECTOR,
+            "--max-filesize",
+            MAX_DOWNLOAD_SIZE,
+            "--match-filter",
+            "!is_live",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        if let Some(ffmpeg) = self.ffmpeg.as_ref().filter(|f| f.is_file()) {
+            mode.push("--ffmpeg-location".into());
+            mode.push(ffmpeg.into());
+        }
+        mode.push("-o".into());
+        mode.push(output_template(stem));
+        self.argv(&mode, url)
+    }
+
+    async fn download_to(&self, url: &str, stem: &Path) -> Result<PathBuf, ResolveError> {
+        let args = self.download_argv(url, stem);
+        let mut leftovers = Leftovers { stem, keep: None };
+        let out = self
+            .runner
+            .run(&self.path, &args, DOWNLOAD_TIMEOUT)
+            .await
+            .map_err(process_error)?;
+        let film = finished_download(stem, &files_of(stem))
+            .filter(|f| std::fs::metadata(f).is_ok_and(|m| m.len() > 0));
+        match film {
+            Some(film) if out.code == Some(0) => {
+                leftovers.keep = Some(film.clone());
+                Ok(film)
+            }
+            _ => Err(download_failure(&out)),
+        }
     }
 }
 
@@ -302,6 +438,10 @@ impl MediaResolver for YtDlpResolver {
 
     fn js_runtime_passed(&self, _url: &str) -> Option<bool> {
         Some(self.runtime().is_some())
+    }
+
+    async fn download(&self, url: &str, stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
+        Some(self.download_to(url, stem).await)
     }
 }
 
@@ -651,6 +791,142 @@ mod tests {
         );
         let e = ytdlp_error_message("see https://x.example/a/b?token=1");
         assert_eq!(e.0.render(Lang::En), "see https://x.example/a");
+    }
+
+    #[test]
+    fn the_output_template_names_the_stem_and_escapes_percent_signs() {
+        assert_eq!(
+            output_template(Path::new("data/temp/7-1")),
+            OsString::from("data/temp/7-1.%(ext)s")
+        );
+        assert_eq!(
+            output_template(Path::new("C:\\100%\\7-1")),
+            OsString::from("C:\\100%%\\7-1.%(ext)s")
+        );
+    }
+
+    #[test]
+    fn only_the_finished_film_counts_as_the_download() {
+        let stem = Path::new("t/7-1");
+        let files = |names: &[&str]| -> Vec<PathBuf> {
+            names.iter().map(|n| Path::new("t").join(n)).collect()
+        };
+        assert_eq!(
+            finished_download(stem, &files(&["7-1.mp4.part", "7-1.mp4"])),
+            Some(Path::new("t").join("7-1.mp4"))
+        );
+        for leftovers in [
+            &["7-1.mp4.part"][..],
+            &["7-1.f137.mp4", "7-1.f251.webm"],
+            &["7-1.part", "7-1.ytdl", "7-1."],
+            &["7-10.mp4", "17-1.mp4"],
+        ] {
+            assert_eq!(
+                finished_download(stem, &files(leftovers)),
+                None,
+                "{leftovers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_download_without_a_film_says_why() {
+        let out = |code: i32, stdout: &str, stderr: &str| ProcessOutput {
+            code: Some(code),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        let too_large = download_failure(&out(
+            0,
+            "[TikTok] 1: Downloading webpage\n[download] File is larger than max-filesize (9449815 bytes > 209715200 bytes). Aborting.\n",
+            "",
+        ));
+        assert_eq!(
+            too_large.0.render(Lang::En),
+            "File is larger than max-filesize (9449815 bytes > 209715200 bytes). Aborting."
+        );
+        let refused = download_failure(&out(
+            1,
+            "",
+            "ERROR: unable to download https://v16.tiktokcdn.com/a/b?sig=x: HTTP Error 403\n",
+        ));
+        assert_eq!(
+            refused.0.render(Lang::En),
+            "unable to download https://v16.tiktokcdn.com/a: HTTP Error 403"
+        );
+        // A live stream fails the `!is_live` filter: yt-dlp skips it and ends with 0.
+        let skipped = download_failure(&out(0, "[download] x does not pass filter (!is_live)", ""));
+        assert_eq!(skipped.0.code(), Some("ytdlp_no_stream"));
+    }
+
+    #[tokio::test]
+    async fn a_download_keeps_the_film_and_removes_the_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("7-1");
+        // What yt-dlp would have written (the fake runner writes nothing).
+        std::fs::write(dir.path().join("7-1.mp4"), b"film").unwrap();
+        std::fs::write(dir.path().join("7-1.f251.webm.part"), b"x").unwrap();
+        std::fs::write(dir.path().join("8-1.mp4"), b"other").unwrap();
+        let (r, calls) = resolver(ok(String::new()));
+        let film = r
+            .download("https://www.tiktok.com/@a/video/1", &stem)
+            .await
+            .expect("yt-dlp downloads")
+            .unwrap();
+        assert_eq!(film, dir.path().join("7-1.mp4"));
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["7-1.mp4", "8-1.mp4"]);
+
+        let calls = calls.lock().unwrap();
+        let (_, args, timeout) = &calls[0];
+        assert_eq!(*timeout, DOWNLOAD_TIMEOUT);
+        let after = |flag: &str| {
+            let i = args.iter().position(|a| a == flag).unwrap();
+            args[i + 1].clone()
+        };
+        assert_eq!(after("--max-filesize"), "200M");
+        assert_eq!(after("--match-filter"), "!is_live");
+        assert_eq!(after("-f"), FORMAT_SELECTOR);
+        assert_eq!(after("--js-runtimes"), "node:/node");
+        assert_eq!(after("--cookies"), "c.txt");
+        assert_eq!(
+            after("-o"),
+            output_template(&stem).to_string_lossy().into_owned()
+        );
+        assert!(
+            !args.iter().any(|a| a == "--ffmpeg-location"),
+            "no such file"
+        );
+        assert_eq!(
+            &args[args.len() - 2..],
+            ["--", "https://www.tiktok.com/@a/video/1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("7-2");
+        std::fs::write(dir.path().join("7-2.mp4.part"), b"x").unwrap();
+        let (r, _) = resolver(Ok(ProcessOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "ERROR: [TikTok] 1: Video not available".into(),
+        }));
+        let e = r.download("https://x", &stem).await.unwrap().unwrap_err();
+        assert_eq!(e.0.render(Lang::En), "[TikTok] 1: Video not available");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        // An empty file is no film either.
+        std::fs::write(dir.path().join("7-2.mp4"), b"").unwrap();
+        let (r, _) = resolver(ok(String::new()));
+        let e = r.download("https://x", &stem).await.unwrap().unwrap_err();
+        assert_eq!(e.0.code(), Some("ytdlp_no_stream"));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

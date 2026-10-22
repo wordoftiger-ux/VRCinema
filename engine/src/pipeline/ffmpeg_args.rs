@@ -11,6 +11,10 @@ pub const VIDEO_BITRATE: &str = "6M";
 pub const MAX_HEIGHT: u32 = 1080;
 pub const MAX_FPS: u32 = 30;
 
+/// A portrait picture (already scaled to its output height) centred in a 16:9 frame of the same
+/// height, black bars left and right (an even width; ffmpeg aligns `x` to the chroma grid).
+pub const LETTERBOX: &str = "pad=w='trunc(ih*16/9/2)*2':h=ih:x='(ow-iw)/2':y=0:color=black";
+
 pub const AUDIO_ARGS: [&str; 8] = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"];
 
 /// The pace a source is read at, relative to real time.
@@ -279,6 +283,9 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
                 filters.push(format!("fps={MAX_FPS}"));
             }
             filters.push("format=yuv420p".to_string());
+            if o.info.portrait {
+                filters.push(LETTERBOX.to_string());
+            }
             if let Some(overlay) = &o.overlay {
                 filters.push(overlay.clone());
                 filters.push("format=yuv420p".to_string());
@@ -312,6 +319,7 @@ mod tests {
             fps: 30.0,
             has_audio: true,
             duration_s: Some(60.0),
+            portrait: false,
         }
     }
 
@@ -541,6 +549,22 @@ mod tests {
         );
         o.mode = VideoMode::Copy;
         assert!(!build(&o).contains(&"-vf".to_string()));
+    }
+
+    #[test]
+    fn a_portrait_film_is_letterboxed_into_16_9_under_the_ticker() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.info.portrait = true;
+        o.overlay = Some("drawbox=x=0".into());
+        assert_eq!(
+            value_after(&build(&o), "-vf", 0).as_deref(),
+            Some(
+                "scale=-2:'min(1080,ih)',format=yuv420p,\
+                 pad=w='trunc(ih*16/9/2)*2':h=ih:x='(ow-iw)/2':y=0:color=black,\
+                 drawbox=x=0,format=yuv420p"
+            )
+        );
     }
 
     #[test]
