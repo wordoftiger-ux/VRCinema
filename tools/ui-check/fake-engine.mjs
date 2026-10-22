@@ -24,6 +24,8 @@
 // engine (2 s rows, #VRCINEMA-AT/ANTENNA/AIRED, EXT-X-START for `from`); GET
 // /api/desktop/monitor/<clip>/<n>.ts serves its segments; `monitorDelayMs` delays the list;
 // `monitorPlayerFail`: the list loads of the player (with `from`) answer 500.
+// Controls: `controlDelayMs` delays the answers of …/pause, …/resume and …/seek; with `armPause`
+// a pause with `atS` only arms (`pausePending`, like the engine before the segment end).
 // Scenario `viewerStateDelayMs`: GET /api/channels/main/state answers that late (setting it
 // starts a new count of maxViewerInFlight).
 // History (panel field `history`): played, skipped (played with a reason), failed (localized
@@ -221,6 +223,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
       monitorFeed: null,
       monitorDelayMs: 0,
       monitorPlayerFail: false,
+      controlDelayMs: 0,
+      armPause: false,
+      pausePending: false,
     };
     s.queue = initialQueue();
     s.named = { mode: 'quick', host: null, loggedIn: false, progress: idleProgress() };
@@ -252,6 +257,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
       canSeek: film && s.canSeek,
       seekPending: false,
       positionApprox: s.positionApprox,
+      pausePending: s.pausePending,
       paused: s.paused,
       pauseReasons: s.pauseReasons,
     };
@@ -930,12 +936,18 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     if (s.playing === 'live' && ['pause', 'seek'].includes(action)) {
       return coded(res, 409, 'live_item', `A live stream cannot be paused or seeked (${req.headers['x-vrcinema-lang']})`);
     }
+    if (s.controlDelayMs && ['pause', 'resume', 'seek'].includes(action)) await sleep(s.controlDelayMs);
     switch (action) {
       case 'pause':
+        if (s.armPause && Number.isFinite(payload?.atS)) {
+          s.pausePending = true;
+          break;
+        }
         s.paused = true;
         if (!s.pauseReasons.includes('manual')) s.pauseReasons = [...s.pauseReasons, 'manual'];
         break;
       case 'resume':
+        s.pausePending = false;
         s.pauseReasons = s.pauseReasons.filter((r) => r !== 'manual');
         s.paused = s.pauseReasons.length > 0;
         break;

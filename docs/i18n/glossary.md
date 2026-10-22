@@ -81,6 +81,7 @@ Common to all languages:
 | Limits (for viewers) | limits | limity | límites | Limits | limites | 制限 |
 | Pause / resume | pause / resume | wstrzymaj / wznów | pausar / reanudar | pausieren / fortsetzen | mettre en pause / reprendre | 一時停止 / 再開 |
 | Paused | paused | wstrzymane | en pausa | pausiert | en pause | 一時停止中 |
+| Pause pending — the owner paused at a frame of the Preview the viewers have not got yet; On air plays to the end of that segment, then pauses | Pause pending | Wstrzymywanie | Pausa pendiente | Pause angefordert | Pause demandée | 一時停止待ち |
 | Seek (jump within the video), back / forward 10 s | seek, back / forward | skok, wstecz / naprzód | salto, retroceder / adelantar | springen (spulen), zurück / vor | se déplacer, reculer / avancer | シーク、戻る / 進む (10秒戻る / 10秒進む) |
 | Skip / next video | skip / next video | pomiń / następny film | omitir / siguiente video | überspringen / nächstes Video | passer / vidéo suivante (state: interrompue) | スキップ / 次の動画 (state: スキップ済み) |
 | From the beginning | From the beginning | Od początku | Desde el principio | Von vorn | Depuis le début | 最初から |

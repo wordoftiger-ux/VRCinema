@@ -256,6 +256,54 @@ try {
   await scenario({ playing: 'film' });
   await waitFor(() => page.$eval('.monitor-sync', (b) => !b.disabled), 'on again for a film');
 
+  // ---------- Pause from the Preview: its picture stops at once, the engine gets its position ----------
+  const clipC = { ...clipA, key: 'clip-7-0-r5', baseS: 60 };
+  await scenario({ monitorFeed: { clips: [clipA, clipB, clipC], firstSeq: 100, antenna: 104, aired: 106 }, positionS: 50 });
+  await waitFor(async () => (await monitorSegments()).includes('clip-7-0-r5/0.ts'), 'the Preview plays the newest clip (60 s on)');
+  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 1.5), 'and moves');
+  const previewAt = () => page.evaluate(async () => (await import('/static/app/components/monitor.js')).previewPosition());
+  const shownAt = await previewAt();
+  check(shownAt >= 60 && shownAt < 80, 'the Preview knows the film position it shows (clip from 60 s)', shownAt);
+  await waitFor(async () => /^1:[01]\d$/.test(await text(page, '.tl-pos')), 'the player bar shows the Preview\'s position (1:0x), not the server\'s 0:50');
+  await scenario({ controlDelayMs: 1500, armPause: true });
+  const pausesBefore = (await requests()).filter((r) => r.path.endsWith('/pause')).length;
+  await page.click('.player .play');
+  const instant = await page.$eval('.monitor-box video', (v) => ({ paused: v.paused, t: v.currentTime }));
+  check(instant.paused, 'pause: the Preview stops at once (the engine answers 1.5 s later)', instant);
+  const pauseReq = await waitFor(async () => (await requests()).filter((r) => r.path.endsWith('/pause'))[pausesBefore], 'the pause request is sent');
+  const frozenAt = await previewAt();
+  check(Number.isFinite(pauseReq.body?.atS) && Math.abs(pauseReq.body.atS - frozenAt) < 0.01 && frozenAt >= 60 && frozenAt < 80, 'the pause carries atS = the frozen Preview position', { body: pauseReq.body, frozenAt });
+  await sleep(1000);
+  check((await page.$eval('.monitor-box video', (v) => v.currentTime)) === instant.t, 'the Preview stays frozen while the answer is under way');
+  await waitFor(async () => (await text(page, '.nowp-sub')) === 'Pause pending — On air stops at the end of this segment', 'answered (armed): the player bar says the pause is pending', 4000);
+  check((await text(page, '.monitor-badge')) === 'Pause pending — On air stops at the end of this segment', 'the frozen Preview says so too');
+  check((await page.getAttribute('.player .play', 'aria-label')) === 'Resume', 'the button resumes');
+  check((await page.$eval('.monitor-box video', (v) => v.paused)), 'the Preview is still frozen after the answer');
+  const frozenText = await text(page, '.tl-pos');
+  await sleep(1200);
+  check((await text(page, '.tl-pos')) === frozenText, 'the player bar stands on the frozen position', frozenText);
+  await page.click('.player .play');
+  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused), 'resume: the Preview plays on at once', 1000);
+  await waitFor(async () => (await requests()).some((r) => r.path.endsWith('/resume')), 'the resume request is sent');
+  await waitFor(async () => (await page.getAttribute('.player .play', 'aria-label')) === 'Pause', 'resumed: the button pauses again', 4000);
+  check(true, 'pause / resume from the Preview');
+
+  // ---------- ±10 s count from the Preview ----------
+  await scenario({ controlDelayMs: 0, armPause: false });
+  await waitFor(async () => (await stateOf(page)) === 'playing', 'the Preview plays');
+  const seeks = async () => (await requests()).filter((r) => r.path.endsWith('/seek'));
+  const seeksBefore = (await seeks()).length;
+  const fwdFrom = await previewAt();
+  await page.click('.player .ctl .sm:last-child');
+  const fwd = await waitFor(async () => (await seeks())[seeksBefore], 'the +10 s seek is sent');
+  check(fwd.body?.byS === undefined && Math.abs(fwd.body?.toS - (fwdFrom + 10)) < 1, '+10 s sends toS = Preview position + 10', { body: fwd.body, fwdFrom });
+  await sleep(300);
+  await page.click('.stage-caption');
+  const backFrom = await previewAt();
+  await page.keyboard.press('ArrowLeft');
+  const back = await waitFor(async () => (await seeks())[seeksBefore + 1], 'the ← seek is sent');
+  check(back.body?.byS === undefined && Math.abs(back.body?.toS - (backFrom - 10)) < 1, '← sends toS = Preview position − 10', { body: back.body, backFrom });
+
   // ---------- Paused: a still picture of where the film resumes ----------
   await scenario({ paused: true, pauseReasons: ['manual'], positionS: 36 });
   await waitFor(async () => (await stateOf(page)) === 'paused', 'paused: the monitor stands still');
@@ -411,6 +459,9 @@ try {
   check((await text(page, '.monitor-note')) === 'Available in the program on the computer', 'remote: a note says where it works');
   check(await page.$eval('.monitor-sync', (b) => b.disabled), 'remote: the sync button is off');
   check((await page.$('.monitor-mute')) === null, 'remote: no sound button');
+  await page.click('.player .play');
+  const remotePause = await waitFor(async () => (await requests()).find((r) => r.path.endsWith('/pause')), 'remote: the pause is sent');
+  check(remotePause.body?.atS === undefined, 'remote: the pause goes without a position (no Preview)', remotePause.body);
   check((await requests()).every((r) => !r.path.startsWith('/api/desktop/monitor')), 'remote: no monitor request at all');
   lay = await layout(page);
   check(lay.monitor.width >= 300 && lay.pageOverflow <= 0, 'remote: the same two screens, no overflow', lay);

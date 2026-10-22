@@ -1,8 +1,9 @@
 // The player bar at the bottom: the video on air, the owner's controls (−10 s, ⏮, pause /
 // resume, ⏭, +10 s), the timeline (time under the pointer, click or drag to seek), the
-// preview volume, the internet status and "Copy link". Positions come from `control` — the
-// server's position (a few segments ahead of what viewers see), "≈" when a seek lands on a
-// keyframe. Controls the engine does not allow now are greyed out.
+// preview volume, the internet status and "Copy link". The position is the producer's Preview's
+// (what the owner sees and controls) while it plays or is frozen by a pause; otherwise it comes
+// from `control` — the server's position (a few segments ahead of what viewers see), "≈" when a
+// seek lands on a keyframe. Controls the engine does not allow now are greyed out.
 
 import { signal, effect } from '/static/vendor/signals.mjs';
 import { useRef, useState } from '/static/vendor/hooks.mjs';
@@ -10,6 +11,7 @@ import { html } from '../html.js';
 import { t, videoTitle } from '../i18n.js';
 import { Icon } from '../icons.js';
 import { contextMenuHandlers } from './menu.js';
+import { monitorState, previewPosition } from './monitor.js';
 import {
   channel,
   channelLink,
@@ -75,6 +77,15 @@ export function shownPosition(c, at, status) {
   return pos;
 }
 
+/** The Preview's film position while it plays or stands frozen (moves with the clock); else null. */
+function shownPreviewPosition(c) {
+  const state = monitorState.value;
+  if (!c || c.isLive || (state !== 'playing' && state !== 'paused')) return null;
+  // Read only here: the bar re-renders with the clock while the Preview runs.
+  void now.value;
+  return previewPosition();
+}
+
 const PAUSE_REASON_KEYS = {
   manual: 'player.paused_manual',
   tunnel: 'player.paused_tunnel',
@@ -86,6 +97,7 @@ const PAUSE_REASON_KEYS = {
 function NowPlaying({ current, c }) {
   let sub = '';
   if (!current) sub = t('player.nothing_playing_hint');
+  else if (c?.pausePending) sub = t('player.pause_pending');
   else if (c?.paused && c.pauseReasons?.length) {
     sub = c.pauseReasons.map((r) => (PAUSE_REASON_KEYS[r] ? t(PAUSE_REASON_KEYS[r]) : r)).join(' · ');
   } else if (current.requesterName) sub = t('player.added_by', { name: current.requesterName });
@@ -244,7 +256,8 @@ export function PlayerBar({ onShortcuts }) {
   const c = control.value;
   const current = ch?.current ?? null;
   const status = ch?.status ?? 'idle';
-  const pos = shownPosition(c, controlAt.value, status);
+  const previewPos = shownPreviewPosition(c);
+  const pos = previewPos ?? shownPosition(c, controlAt.value, status);
   const dur = c?.durationS ?? current?.durationS ?? null;
   const live = Boolean(c?.isLive ?? current?.isLive);
   const { canSeek, manual, canToggle } = abilities.value;
@@ -285,7 +298,7 @@ export function PlayerBar({ onShortcuts }) {
             title=${t('player.forward_10_label')} onClick=${() => seekBy(10)}>${t('player.forward_10')}</button>
         </div>
         <${Timeline} pos=${current ? pos : null} dur=${current ? dur : null}
-          approx=${Boolean(c?.positionApprox)} seekable=${canSeek} live=${live && Boolean(current)} />
+          approx=${previewPos === null && Boolean(c?.positionApprox)} seekable=${canSeek} live=${live && Boolean(current)} />
       </div>
       <div class="right">
         <${Volume} />

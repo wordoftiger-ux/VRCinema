@@ -10,6 +10,13 @@
 // and the newest aired one (`#VRCINEMA-AIRED`). While the channel is paused the picture stands
 // still on the segment the film resumes from. While the window is hidden nothing is read and
 // the player is gone; errors are retried a few times, then a retry button is offered.
+//
+// The Preview is the owner's reference (store.js asks it through `attachPreview`): a pause
+// freezes it at once on the frame shown and sends that film position (`atS`); the engine airs
+// up to the end of the segment holding it (at most 4 s further) and pauses there. Until the
+// resume the Preview keeps the frozen frame; the resume plays the film's relaunched clip from
+// its start (the engine's resume position). ±10 s / ±60 s count from the Preview's position,
+// and the player bar shows it.
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef } from '/static/vendor/hooks.mjs';
@@ -17,7 +24,7 @@ import Hls from '/static/vendor/hls.mjs';
 import { html } from '../html.js';
 import { lang, t } from '../i18n.js';
 import { Icon } from '../icons.js';
-import { access, control, showToast } from '../store.js';
+import { access, attachPreview, control, showToast } from '../store.js';
 
 const FEED = '/api/desktop/monitor.m3u8';
 const READ_EVERY_MS = 1000;
@@ -45,6 +52,11 @@ export function monitorRunning() {
 /** "Sync with on-air": the monitor plays from the segment the viewers see now. */
 export function syncMonitor() {
   return current?.sync() ?? false;
+}
+
+/** The film position of the frame the Preview shows now (playing or frozen); null: not known. */
+export function previewPosition() {
+  return current?.position() ?? null;
 }
 
 /**
@@ -125,8 +137,13 @@ function watch(video) {
   let first = null;
   /** The ahead time shown (changes by at least one segment: no saw-tooth). */
   let shownAhead = null;
-  /** The row a still picture (the channel paused) stands on. */
+  /** The row a still picture (the channel paused) stands on; -1: waiting for the next clip. */
   let still = null;
+  /**
+   * The owner's pause froze the picture: `{at}` (its film position), `confirmed` once the
+   * engine took the pause, `parked` once it has paused (not only armed).
+   */
+  let frozen = null;
   let mediaRecoveries = 0;
   let retries = 0;
   let lastTime = -1;
@@ -135,7 +152,45 @@ function watch(video) {
     hls?.destroy();
     hls = null;
     still = null;
+    frozen = null;
     monitorAheadS.value = null;
+  };
+
+  /** The fragment and the row of the list playing now, or null. */
+  const playing = () => {
+    if (!hls || !feed || still !== null || video.readyState < 2) return null;
+    const level = hls.levels?.[Math.max(0, hls.currentLevel)];
+    const time = video.currentTime;
+    const frag = level?.details?.fragments?.find((f) => time >= f.start - 0.05 && time < f.start + f.duration);
+    const row = frag && feed.rows.find((r) => r.seq === frag.sn);
+    return row ? { frag, row, time } : null;
+  };
+
+  /**
+   * The film position shown: the frozen one, else that of the playing row of the film the
+   * controls act on (null while the Preview is still on an older clip, e.g. right after a seek).
+   */
+  const position = () => {
+    if (frozen) return frozen.at;
+    if (monitorState.peek() !== 'playing') return null;
+    const p = playing();
+    const c = control.peek();
+    if (!p || !c || c.isLive || p.row.itemId !== c.itemId || !Number.isFinite(p.row.positionS)) return null;
+    if (p.row.clip !== feed.rows.at(-1)?.clip) return null;
+    const at = p.row.positionS + Math.max(0, p.time - p.frag.start);
+    return Number.isFinite(c.durationS) ? Math.min(at, c.durationS) : at;
+  };
+
+  /** The pause has ended: an armed one plays on, after a real one the relaunched clip plays. */
+  const thaw = () => {
+    const parked = frozen?.parked;
+    frozen = null;
+    if (parked) {
+      still = -1;
+      return;
+    }
+    video.play().catch(() => {});
+    monitorState.value = 'playing';
   };
 
   const onError = (_event, error) => {
@@ -193,6 +248,17 @@ function watch(video) {
     }
     const clip = f.rows.at(-1).clip;
     const c = control.peek();
+    if (frozen) {
+      const manual = Boolean(c?.pauseReasons?.includes('manual'));
+      if (manual && c.paused) frozen.parked = true;
+      if (!frozen.confirmed || manual || c?.pausePending) {
+        // The frame the owner paused at stays until the resume.
+        newest = clip;
+        return;
+      }
+      // Resumed elsewhere (another device): like a resume here.
+      thaw();
+    }
     if (c?.paused && c.itemId != null && !c.isLive) {
       // Paused: the picture stands on the segment the film resumes from.
       const at = f.rows.filter((r) => r.itemId === c.itemId && Math.abs(r.positionS - c.positionS) < 0.5).at(-1);
@@ -214,15 +280,13 @@ function watch(video) {
 
   /** Seconds ahead of on-air: the playing row and the antenna row, both in this list. */
   const measure = () => {
-    if (!hls || !feed || still !== null || video.readyState < 2) {
+    if (!hls || !feed || still !== null || frozen || video.readyState < 2) {
       monitorAheadS.value = null;
       shownAhead = null;
       return;
     }
-    const level = hls.levels?.[Math.max(0, hls.currentLevel)];
     const time = video.currentTime;
-    const frag = level?.details?.fragments?.find((f) => time >= f.start - 0.05 && time < f.start + f.duration);
-    const row = frag && feed.rows.find((r) => r.seq === frag.sn);
+    const { frag, row } = playing() ?? {};
     const antenna = feed.rows.find((r) => r.seq === feed.antenna);
     if (row && antenna) {
       // The viewers are somewhere in the antenna's segment: measured from its middle.
@@ -323,6 +387,28 @@ function watch(video) {
       startAt(antenna.seq);
       return true;
     },
+    position,
+    /** The owner pauses: the picture stops now; its film position, or null (not known). */
+    freeze() {
+      const at = position();
+      if (at === null) return null;
+      video.pause();
+      frozen = { at, confirmed: false, parked: false };
+      monitorState.value = 'paused';
+      monitorAheadS.value = null;
+      shownAhead = null;
+      return at;
+    },
+    /** The engine's answer to the pause: refused, the Preview plays on. */
+    pauseAnswered(ok) {
+      if (!frozen) return;
+      if (ok) frozen.confirmed = true;
+      else thaw();
+    },
+    /** The owner resumes. */
+    resumed() {
+      if (frozen) thaw();
+    },
   };
 }
 
@@ -343,7 +429,9 @@ export function MonitorScreen() {
   useEffect(() => {
     if (!inWindow || !Hls.isSupported()) return undefined;
     current = watch(video.current);
+    attachPreview(current);
     return () => {
+      attachPreview(null);
       current?.stop();
       current = null;
     };
@@ -376,7 +464,9 @@ export function MonitorScreen() {
             : state === 'none'
             ? html`<div class="monitor-note">${t('monitor.none')}</div>`
             : state === 'paused'
-              ? html`<div class="monitor-badge" role="status">${t('monitor.paused')}</div>`
+              ? html`<div class="monitor-badge" role="status">
+                  ${control.value?.pausePending ? t('player.pause_pending') : t('monitor.paused')}
+                </div>`
               : state === 'failed'
                 ? html`<div class="preview-unavailable" role="alert">
                     <span>${t('monitor.unavailable')}</span>

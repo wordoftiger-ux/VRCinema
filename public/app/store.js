@@ -268,13 +268,35 @@ async function send(action, body) {
   }
 }
 
-/** Manual pause: only the owner's own pause is resumed; other reasons stay. */
-export const pause = () => send('pause');
-export const resume = () => send('resume');
+/**
+ * The producer's Preview while it runs (monitor.js): `position()` (the film position it shows,
+ * or null), `freeze()` (stops its picture now; that position or null), `pauseAnswered(ok)` and
+ * `resumed()`. The owner's controls count from what it shows.
+ */
+let preview = null;
+export function attachPreview(p) {
+  preview = p;
+}
+
+/**
+ * Manual pause: only the owner's own pause is resumed; other reasons stay. With the Preview the
+ * picture stops at once and the engine pauses at that frame's segment end (`atS`).
+ */
+export async function pause() {
+  const c = control.value;
+  const atS = c && !c.isLive ? (preview?.freeze() ?? null) : null;
+  const ok = await send('pause', atS === null ? undefined : { atS });
+  preview?.pauseAnswered(ok);
+  return ok;
+}
+export function resume() {
+  preview?.resumed();
+  return send('resume');
+}
 export function togglePause() {
   const c = control.value;
   if (!c) return Promise.resolve(false);
-  return c.pauseReasons?.includes('manual') ? resume() : pause();
+  return c.pauseReasons?.includes('manual') || c.pausePending ? resume() : pause();
 }
 /** A seek (or restart) the engine accepted: viewers see it after the preview's delay. */
 async function sought(action, body) {
@@ -282,8 +304,32 @@ async function sought(action, body) {
   if (ok) seekBubble.value += 1;
   return ok;
 }
-export const seekBy = (byS) => sought('seek', { byS });
-export const seekTo = (toS) => sought('seek', { toS: Math.max(0, toS) });
+// The target of the absolute seek still under way: a step pressed meanwhile counts from it.
+let seekTarget = null;
+let seeksInFlight = 0;
+/**
+ * `byS` seconds from what the Preview shows (an absolute seek), else from the server's
+ * position (the engine joins a burst; also while a seek waits there).
+ */
+export function seekBy(byS) {
+  const c = control.value;
+  let from = null;
+  if (seeksInFlight > 0) from = seekTarget;
+  else if (c && !c.isLive && !c.seekPending && Number.isFinite(c.durationS)) from = preview?.position() ?? null;
+  if (from === null) return sought('seek', { byS });
+  return seekTo(from + byS);
+}
+export async function seekTo(toS) {
+  const c = control.value;
+  const to = Math.max(0, Number.isFinite(c?.durationS) ? Math.min(toS, c.durationS) : toS);
+  seekTarget = to;
+  seeksInFlight += 1;
+  try {
+    return await sought('seek', { toS: to });
+  } finally {
+    seeksInFlight -= 1;
+  }
+}
 export const restart = () => sought('restart');
 export const playNow = (itemId) => send('play-now', { itemId });
 export async function skip() {
@@ -407,7 +453,8 @@ export async function signOut() {
 export const abilities = computed(() => {
   const c = control.value;
   const current = Boolean(channel.value?.current);
-  const manual = Boolean(c?.pauseReasons?.includes('manual'));
+  // A pause waiting for the Preview's position is the owner's pause too (the button resumes).
+  const manual = Boolean(c?.pauseReasons?.includes('manual') || c?.pausePending);
   return {
     current,
     manual,
