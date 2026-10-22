@@ -1245,9 +1245,14 @@ impl Channel {
     /// Clears `reason`; once no reason is left the paused film restarts from where it stopped
     /// (behind the buffering slate) and queued films start again.
     pub fn resume(&mut self, reason: PauseReason) {
-        if reason == PauseReason::Manual {
-            // A pause still waiting for its position never happens.
-            self.armed_pause = None;
+        if reason == PauseReason::Manual
+            && let Some(armed) = self.armed_pause.take()
+        {
+            // A pause still waiting for its position never happens; a seek made meanwhile
+            // runs now (the film goes on from its target, not from where it is).
+            if let Some(target) = armed.resume_at {
+                self.request(SeekRequest::To(target), false);
+            }
         }
         if !self.pause_reasons.remove(&reason) || !self.pause_reasons.is_empty() {
             return;
@@ -3385,6 +3390,25 @@ mod tests {
         e.channel.resume(PauseReason::Manual);
         e.flush().await;
         assert_eq!(e.factory.calls()[1].start_at_s, 60.0);
+    }
+
+    #[tokio::test]
+    async fn a_resume_before_the_boundary_runs_the_seek_made_during_the_pending_pause() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(17.0);
+        e.channel.seek_to(50.0);
+        e.channel.resume(PauseReason::Manual);
+        let c = e.control();
+        assert!(!c.pause_pending && c.seek_pending);
+        assert_eq!(c.position_s, 50.0);
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert!(h0.disposed());
+        assert_eq!(e.factory.calls()[1].start_at_s, 50.0);
+        assert!(e.channel.state().pause_reasons.is_empty());
     }
 
     #[tokio::test]
