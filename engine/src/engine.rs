@@ -520,7 +520,8 @@ where
                         if play_now {
                             self.pause_reasons.remove(&PauseReason::Manual);
                         }
-                        // A pause waiting for its position also ends with a seek or a skip.
+                        // A pause waiting for its position also ends with a skip (a seek
+                        // keeps it) or when its film ends.
                         match core.channel.manual_pause() {
                             Some(true) => {
                                 self.pause_reasons.insert(PauseReason::Manual);
