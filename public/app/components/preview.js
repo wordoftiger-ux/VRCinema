@@ -1,7 +1,8 @@
 // The live preview on the Channel view: the channel's own stream (/live/main.m3u8, as the
 // viewers get it) played with hls.js, so the owner sees what VRChat sees and how far behind
 // the server it is. The delay is measured here once a second (`previewDelayS`) and drives the
-// caption of the On air screen and the bubble after a seek. A right click opens the preview menu;
+// caption of the On air screen and (with how far the Preview is ahead) the bubble after a seek.
+// A right click opens the preview menu;
 // the "Stats for nerds" overlay sits on top of the picture. While the window is hidden
 // (minimised, in the tray) the preview stops loading, so it does not count as a viewer.
 
@@ -11,6 +12,7 @@ import Hls from '/static/vendor/hls.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { contextMenuHandlers } from './menu.js';
+import { monitorAheadS } from './monitor.js';
 import { copyText, previewMuted, previewVolume } from './playerbar.js';
 import { StatsOverlay, previewShown, previewStats, statsOpen, toggleStats } from './stats.js';
 import {
@@ -175,8 +177,14 @@ function SeekBubble() {
   useEffect(() => {
     if (count === seen.current) return undefined;
     seen.current = count;
-    const delay = previewDelayS.peek() ?? lastGoodDelayS;
-    setBubble({ seconds: Number.isFinite(delay) ? Math.max(1, Math.round(delay)) : null });
+    // On air is a delayed copy of the Preview: the change reaches the viewers about as far
+    // behind as the Preview is ahead of the air (its caption), never sooner than the air's own
+    // delay (a Preview in sync with the air jumps ahead to the new clip).
+    const latency = previewDelayS.peek() ?? lastGoodDelayS;
+    const ahead = monitorAheadS.peek();
+    const known = [latency, ahead].filter(Number.isFinite);
+    const delay = known.length ? Math.max(...known) : null;
+    setBubble({ seconds: delay === null ? null : Math.max(1, Math.round(delay)) });
     const timer = setTimeout(() => setBubble(null), BUBBLE_MS);
     return () => clearTimeout(timer);
   }, [count]);

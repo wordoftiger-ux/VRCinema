@@ -270,8 +270,10 @@ async function send(action, body) {
 
 /**
  * The producer's Preview while it runs (monitor.js): `position()` (the film position it shows,
- * or null), `freeze()` (stops its picture now; that position or null), `pauseAnswered(ok)` and
- * `resumed()`. The owner's controls count from what it shows.
+ * or null), `freeze()` (stops its picture now; that position or null), `pauseAnswered(ok)`,
+ * `resumed()`, `expect(toS)` (a seek of the owner: its target is the Preview's position until
+ * the new clip plays), `expectAnswered(ok)` and `expecting()`. The owner's controls count from
+ * what it shows.
  */
 let preview = null;
 export function attachPreview(p) {
@@ -298,24 +300,33 @@ export function togglePause() {
   if (!c) return Promise.resolve(false);
   return c.pauseReasons?.includes('manual') || c.pausePending ? resume() : pause();
 }
-/** A seek (or restart) the engine accepted: viewers see it after the preview's delay. */
-async function sought(action, body) {
+/**
+ * A seek (or restart) the engine accepted: viewers see it after the preview's delay. `toS`:
+ * its target, the Preview's position at once (null: not known here).
+ */
+async function sought(action, body, toS = null) {
+  if (toS !== null && !control.value?.isLive) preview?.expect(toS);
   const ok = await send(action, body);
   if (ok) seekBubble.value += 1;
+  if (toS !== null) preview?.expectAnswered(ok);
   return ok;
 }
-// The target of the absolute seek still under way: a step pressed meanwhile counts from it.
+// The target of the absolute seek still under way: a step pressed meanwhile counts from it
+// (without a Preview; with one, the Preview's position is that target already).
 let seekTarget = null;
 let seeksInFlight = 0;
 /**
- * `byS` seconds from what the Preview shows (an absolute seek), else from the server's
- * position (the engine joins a burst; also while a seek waits there).
+ * `byS` seconds from what the Preview shows (an absolute seek; right after a seek, from its
+ * target), else from the server's position (the engine joins a burst; also while a seek from
+ * elsewhere waits there).
  */
 export function seekBy(byS) {
   const c = control.value;
   let from = null;
   if (seeksInFlight > 0) from = seekTarget;
-  else if (c && !c.isLive && !c.seekPending && Number.isFinite(c.durationS)) from = preview?.position() ?? null;
+  if (c && !c.isLive && Number.isFinite(c.durationS) && (!c.seekPending || seeksInFlight > 0 || preview?.expecting())) {
+    from = preview?.position() ?? from;
+  }
   if (from === null) return sought('seek', { byS });
   return seekTo(from + byS);
 }
@@ -325,12 +336,12 @@ export async function seekTo(toS) {
   seekTarget = to;
   seeksInFlight += 1;
   try {
-    return await sought('seek', { toS: to });
+    return await sought('seek', { toS: to }, to);
   } finally {
     seeksInFlight -= 1;
   }
 }
-export const restart = () => sought('restart');
+export const restart = () => sought('restart', undefined, 0);
 export const playNow = (itemId) => send('play-now', { itemId });
 export async function skip() {
   try {
@@ -459,7 +470,9 @@ export const abilities = computed(() => {
     current,
     manual,
     canSeek: Boolean(current && c?.canSeek),
-    canToggle: Boolean(current && c && (manual || c.canPause)),
+    // The owner's pause can always be resumed, also with no film left on air (the film ended
+    // before the pause point, or was skipped while paused: the next one waits for the resume).
+    canToggle: Boolean(c && (manual || (current && c.canPause))),
   };
 });
 

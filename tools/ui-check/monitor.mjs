@@ -293,16 +293,55 @@ try {
   await waitFor(async () => (await stateOf(page)) === 'playing', 'the Preview plays');
   const seeks = async () => (await requests()).filter((r) => r.path.endsWith('/seek'));
   const seeksBefore = (await seeks()).length;
+  // The engine answers 1.5 s later: the bar must not wait for it.
+  await scenario({ controlDelayMs: 1500 });
+  const aheadAtSeek = await aheadOf(page);
   const fwdFrom = await previewAt();
   await page.click('.player .ctl .sm:last-child');
+  const target = await previewAt();
+  check(Math.abs(target - (fwdFrom + 10)) < 0.3, 'after +10 s the Preview\'s position is the target at once (before the answer)', { target, fwdFrom });
+  const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  await waitFor(async () => (await text(page, '.tl-pos')) === fmt(target), 'the player bar shows the target at once', 600);
   const fwd = await waitFor(async () => (await seeks())[seeksBefore], 'the +10 s seek is sent');
-  check(fwd.body?.byS === undefined && Math.abs(fwd.body?.toS - (fwdFrom + 10)) < 1, '+10 s sends toS = Preview position + 10', { body: fwd.body, fwdFrom });
-  await sleep(300);
+  check(fwd.body?.byS === undefined && Math.abs(fwd.body?.toS - target) < 0.01, '+10 s sends toS = Preview position + 10', { body: fwd.body, fwdFrom });
+  await sleep(1800);
+  // Answered, the old picture still runs (no new clip yet): the bar and a step count from the target.
+  check(await page.$eval('.monitor-box video', (v) => !v.paused), 'the old picture plays on until the new clip is there');
+  const bubbleN = Number((await text(page, '.seek-bubble')).match(/(\d+) s$/)?.[1]);
+  check(Number.isFinite(aheadAtSeek) && aheadAtSeek >= 1 && bubbleN >= Math.round(aheadAtSeek), 'the seek bubble is at least as far as the Preview is ahead of the air', { bubbleN, aheadAtSeek });
+  check((await previewAt()) === target && (await text(page, '.tl-pos')) === fmt(target), 'until then the Preview\'s position stays the target (no jump back to the old picture)', await previewAt());
   await page.click('.stage-caption');
-  const backFrom = await previewAt();
   await page.keyboard.press('ArrowLeft');
   const back = await waitFor(async () => (await seeks())[seeksBefore + 1], 'the ← seek is sent');
-  check(back.body?.byS === undefined && Math.abs(back.body?.toS - (backFrom - 10)) < 1, '← sends toS = Preview position − 10', { body: back.body, backFrom });
+  check(back.body?.byS === undefined && Math.abs(back.body?.toS - (target - 10)) < 0.01, '← right after counts from the target (toS = target − 10), not from the old picture', { body: back.body, target });
+  // The new clip arrives (it starts at the target): the Preview counts from its picture again.
+  const backTo = back.body.toS;
+  await scenario({ controlDelayMs: 0, monitorFeed: { clips: [clipA, clipB, clipC, { ...clipB, key: 'clip-7-0-r6', baseS: backTo }], firstSeq: 100, antenna: 104, aired: 106 } });
+  await waitFor(async () => (await monitorSegments()).includes('clip-7-0-r6/0.ts'), 'the new clip is loaded');
+  await waitFor(async () => {
+    const at = await previewAt();
+    return at > backTo + 0.3 && at < backTo + 4;
+  }, 'the Preview\'s position follows the new clip from the target', 6000);
+  check(true, 'after the new clip the position moves on from the target');
+
+  // ---------- A seek while the pause is pending: it stays paused, at the new position ----------
+  await scenario({ armPause: true });
+  await page.click('.player .play');
+  const pausedAt = await previewAt();
+  await waitFor(async () => (await text(page, '.nowp-sub')) === 'Pause pending — On air stops at the end of this segment', 'the pause is pending');
+  const seeksPaused = (await seeks()).length;
+  await page.click('.player .ctl .sm:last-child');
+  const pausedSeek = await waitFor(async () => (await seeks())[seeksPaused], 'the seek while paused is sent');
+  check(Math.abs(pausedSeek.body?.toS - (pausedAt + 10)) < 0.01, 'a seek while paused counts from the frozen position', { body: pausedSeek.body, pausedAt });
+  check((await previewAt()) === pausedSeek.body.toS, 'the frozen position moves to the target', await previewAt());
+  await sleep(1200);
+  check(await page.$eval('.monitor-box video', (v) => v.paused), 'the Preview stays frozen (no play after the seek)');
+  check((await page.getAttribute('.player .play', 'aria-label')) === 'Resume', 'still paused: the button resumes');
+  check((await text(page, '.tl-pos')) === fmt(pausedSeek.body.toS), 'the player bar shows the new paused position', await text(page, '.tl-pos'));
+  await page.click('.player .play');
+  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused), 'resume: the Preview plays at once');
+  check((await previewAt()) === pausedSeek.body.toS, 'resumed before the new clip: the position is the target, not the old picture', await previewAt());
+  await scenario({ armPause: false });
 
   // ---------- Paused: a still picture of where the film resumes ----------
   await scenario({ paused: true, pauseReasons: ['manual'], positionS: 36 });
@@ -382,6 +421,16 @@ try {
   await sleep(2000);
   check((await monitorSegments()).length === segsNone, 'no segments are fetched without a list');
   await page.screenshot({ path: join(shots, 'monitor-none-en-1100x680.png') });
+  // The film ended before the pause point: no film on air, the owner's pause holds the next one.
+  await scenario({ playing: 'none', paused: true, pauseReasons: ['manual'] });
+  await waitFor(async () => (await text(page, '.nowp-sub')) === 'Paused', 'no film on air but paused: the player bar says so');
+  check(await page.$eval('.player .play', (b) => !b.disabled && b.getAttribute('aria-label') === 'Resume'), 'and the button resumes (the next video waits for it)');
+  const resumesBefore = (await requests()).filter((r) => r.path.endsWith('/resume')).length;
+  await page.click('.player .play');
+  await waitFor(async () => (await requests()).filter((r) => r.path.endsWith('/resume')).length > resumesBefore, 'the resume is sent');
+  await waitFor(async () => (await text(page, '.nowp-sub')) === 'The channel shows the waiting slate until a video is added.', 'resumed: nothing playing', 3000);
+  check(await page.$eval('.player .play', (b) => b.disabled), 'nothing playing and not paused: the button is off');
+  await scenario({ playing: 'film' });
 
   // ---------- Leaving the view stops it ----------
   await scenario({ monitorFeed: { clips: [clipA], firstSeq: 100, antenna: 102, aired: 105 } });

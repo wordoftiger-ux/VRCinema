@@ -1,7 +1,8 @@
 // The player bar at the bottom: the video on air, the owner's controls (−10 s, ⏮, pause /
 // resume, ⏭, +10 s), the timeline (time under the pointer, click or drag to seek), the
 // preview volume, the internet status and "Copy link". The position is the producer's Preview's
-// (what the owner sees and controls) while it plays or is frozen by a pause; otherwise it comes
+// (what the owner sees and controls) while it plays or is frozen by a pause, right after the
+// owner's seek the target (until the Preview has the new clip); otherwise it comes
 // from `control` — the server's position (a few segments ahead of what viewers see), "≈" when a
 // seek lands on a keyframe. Controls the engine does not allow now are greyed out.
 
@@ -96,11 +97,12 @@ const PAUSE_REASON_KEYS = {
 
 function NowPlaying({ current, c }) {
   let sub = '';
-  if (!current) sub = t('player.nothing_playing_hint');
-  else if (c?.pausePending) sub = t('player.pause_pending');
+  // Paused with no film on air (it ended before the pause point): the pause still shows.
+  if (c?.pausePending && current) sub = t('player.pause_pending');
   else if (c?.paused && c.pauseReasons?.length) {
     sub = c.pauseReasons.map((r) => (PAUSE_REASON_KEYS[r] ? t(PAUSE_REASON_KEYS[r]) : r)).join(' · ');
-  } else if (current.requesterName) sub = t('player.added_by', { name: current.requesterName });
+  } else if (!current) sub = t('player.nothing_playing_hint');
+  else if (current.requesterName) sub = t('player.added_by', { name: current.requesterName });
   const title = current ? videoTitle(current.title) : t('player.nothing_playing');
   return html`
     <div class="nowp">

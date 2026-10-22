@@ -13,10 +13,13 @@
 //
 // The Preview is the owner's reference (store.js asks it through `attachPreview`): a pause
 // freezes it at once on the frame shown and sends that film position (`atS`); the engine airs
-// up to the end of the segment holding it (at most 4 s further) and pauses there. Until the
-// resume the Preview keeps the frozen frame; the resume plays the film's relaunched clip from
-// its start (the engine's resume position). ±10 s / ±60 s count from the Preview's position,
-// and the player bar shows it.
+// up to the end of the segment holding it (at most one segment further) and pauses there.
+// Until the resume the Preview keeps the frozen frame; the resume plays the film's relaunched
+// clip from its start (the engine's resume position). ±10 s / ±60 s count from the Preview's
+// position, and the player bar shows it. After the owner's seek (or ⏮) the Preview's position
+// is the target until the new clip plays (its old picture may still run for a few seconds),
+// so the bar and a second step count from where the film goes, not from the old picture; a
+// seek while frozen moves the frozen position (the engine resumes from there).
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef } from '/static/vendor/hooks.mjs';
@@ -34,6 +37,8 @@ const RETRY_AFTER_MS = 3000;
 const MAX_MEDIA_RECOVERIES = 2;
 /** Rebuilds in a row (without healthy playback in between) before the monitor gives up. */
 const MAX_RETRIES = 4;
+/** The longest a seek target stands in for the Preview's position without its clip arriving. */
+const EXPECT_MAX_MS = 60000;
 
 /** `off` (not running), `none` (nothing to preview), `playing`, `paused` (still), `failed`. */
 export const monitorState = signal('off');
@@ -62,13 +67,14 @@ export function previewPosition() {
 /**
  * The list as the window reads it: `rows` [{seq, clip, name, itemId, positionS, duration,
  * start (seconds from the top of this list), discontinuity}], `antenna` and `aired` (row
- * numbers or null).
+ * numbers or null), `target` (the segment length the list announces).
  */
 export function parseFeed(text) {
   const rows = [];
   let seq = 0;
   let antenna = null;
   let aired = null;
+  let target = null;
   let at = null;
   let duration = null;
   let discontinuity = false;
@@ -78,6 +84,7 @@ export function parseFeed(text) {
     if (!line) continue;
     const value = (prefix) => line.slice(prefix.length);
     if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) seq = Number(value('#EXT-X-MEDIA-SEQUENCE:'));
+    else if (line.startsWith('#EXT-X-TARGETDURATION:')) target = Number(value('#EXT-X-TARGETDURATION:'));
     else if (line.startsWith('#VRCINEMA-ANTENNA:')) antenna = Number(value('#VRCINEMA-ANTENNA:'));
     else if (line.startsWith('#VRCINEMA-AIRED:')) aired = Number(value('#VRCINEMA-AIRED:'));
     else if (line === '#EXT-X-DISCONTINUITY') discontinuity = true;
@@ -96,7 +103,7 @@ export function parseFeed(text) {
       discontinuity = false;
     }
   }
-  return { rows, antenna, aired };
+  return { rows, antenna, aired, target: Number.isFinite(target) && target > 0 ? target : null };
 }
 
 /**
@@ -144,6 +151,13 @@ function watch(video) {
    * engine took the pause, `parked` once it has paused (not only armed).
    */
   let frozen = null;
+  /**
+   * The owner's seek on its way to the picture: `{at, clip, itemId, since}`. Its target is the
+   * Preview's position until a newer clip than `clip` plays (or the film changes).
+   */
+  let expected = null;
+  /** The last position worked out from the picture: held through a stall or a gap. */
+  let lastShown = null;
   let mediaRecoveries = 0;
   let retries = 0;
   let lastTime = -1;
@@ -153,45 +167,104 @@ function watch(video) {
     hls = null;
     still = null;
     frozen = null;
+    expected = null;
+    lastShown = null;
     monitorAheadS.value = null;
   };
 
-  /** The fragment and the row of the list playing now, or null. */
+  /**
+   * The fragment and the row of the list playing now, or null. The picture stays on the last
+   * fragment that started (a gap between two, the end of what is buffered).
+   */
   const playing = () => {
     if (!hls || !feed || still !== null || video.readyState < 2) return null;
     const level = hls.levels?.[Math.max(0, hls.currentLevel)];
     const time = video.currentTime;
-    const frag = level?.details?.fragments?.find((f) => time >= f.start - 0.05 && time < f.start + f.duration);
+    const frag = level?.details?.fragments?.filter((f) => f.start <= time + 0.05).at(-1);
     const row = frag && feed.rows.find((r) => r.seq === frag.sn);
     return row ? { frag, row, time } : null;
   };
 
   /**
-   * The film position shown: the frozen one, else that of the playing row of the film the
-   * controls act on (null while the Preview is still on an older clip, e.g. right after a seek).
+   * The seek on its way is over: its clip plays, the film changed, or the channel is paused and
+   * the engine answered (the player bar then shows the engine's paused position).
+   */
+  const settleExpected = (c, p) => {
+    if (!expected) return;
+    const gone =
+      !c ||
+      c.isLive ||
+      c.itemId !== expected.itemId ||
+      (c.paused && expected.answered) ||
+      performance.now() - expected.since > EXPECT_MAX_MS ||
+      (p && p.row.clip !== expected.clip && feed.rows.at(-1)?.clip === p.row.clip);
+    if (gone) expected = null;
+  };
+
+  /**
+   * The film position shown: the frozen one, the target of the owner's seek on its way, else
+   * that of the playing row of the film the controls act on (null while the Preview is still
+   * on an older clip after a seek from elsewhere). A stall or a gap holds the last one.
    */
   const position = () => {
     if (frozen) return frozen.at;
-    if (monitorState.peek() !== 'playing') return null;
-    const p = playing();
+    const state = monitorState.peek();
     const c = control.peek();
-    if (!p || !c || c.isLive || p.row.itemId !== c.itemId || !Number.isFinite(p.row.positionS)) return null;
-    if (p.row.clip !== feed.rows.at(-1)?.clip) return null;
-    const at = p.row.positionS + Math.max(0, p.time - p.frag.start);
-    return Number.isFinite(c.durationS) ? Math.min(at, c.durationS) : at;
+    const p = state === 'playing' ? playing() : null;
+    settleExpected(c, p);
+    if (expected && (state === 'playing' || state === 'paused')) return expected.at;
+    if (state !== 'playing') return null;
+    const valid =
+      p && c && !c.isLive && p.row.itemId === c.itemId && Number.isFinite(p.row.positionS) && p.row.clip === feed.rows.at(-1)?.clip;
+    if (!valid) return lastShown && c && lastShown.itemId === c.itemId && !c.isLive ? lastShown.at : null;
+    const at = p.row.positionS + Math.min(Math.max(0, p.time - p.frag.start), p.frag.duration);
+    const shown = Number.isFinite(c.durationS) ? Math.min(at, c.durationS) : at;
+    lastShown = { at: shown, itemId: c.itemId };
+    return shown;
   };
 
-  /** The pause has ended: an armed one plays on, after a real one the relaunched clip plays. */
+  /**
+   * The pause has ended: an armed one plays on (towards a seek made meanwhile, if any), after
+   * a real one the relaunched clip plays.
+   */
   const thaw = () => {
-    const parked = frozen?.parked;
+    const was = frozen;
     frozen = null;
-    if (parked) {
+    if (was?.parked) {
       still = -1;
       return;
+    }
+    if (was?.moved) {
+      expect(was.at);
+      if (expected) expected.answered = true;
     }
     video.play().catch(() => {});
     monitorState.value = 'playing';
   };
+
+  /**
+   * The owner sought to `at`: frozen, the pause moves there; else the Preview counts from it
+   * (only while it shows a picture: otherwise the server's position counts, as before).
+   */
+  function expect(at) {
+    const c = control.peek();
+    lastShown = null;
+    const state = monitorState.peek();
+    if (state !== 'playing' && state !== 'paused') return;
+    if (frozen) {
+      frozen.at = at;
+      frozen.moved = true;
+      return;
+    }
+    expected = { at, clip: feed?.rows.at(-1)?.clip ?? null, itemId: c?.itemId ?? null, since: performance.now(), answered: false };
+  }
+
+  /** The engine's answer to the seek: refused, the Preview counts from its picture again. */
+  function expectAnswered(ok) {
+    if (!expected) return;
+    if (ok) expected.answered = true;
+    else expected = null;
+  }
 
   const onError = (_event, error) => {
     if (!error.fatal || !hls) return;
@@ -221,6 +294,7 @@ function watch(video) {
       xhrSetup: (xhr) => xhr.setRequestHeader('X-VRCinema-Lang', lang.value),
     });
     still = pause ? seq : null;
+    lastShown = null;
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       if (!pause) video.play().catch(() => {});
     });
@@ -290,7 +364,7 @@ function watch(video) {
     const antenna = feed.rows.find((r) => r.seq === feed.antenna);
     if (row && antenna) {
       // The viewers are somewhere in the antenna's segment: measured from its middle.
-      const segment = antenna.duration || 4;
+      const segment = antenna.duration || feed.target || 1;
       const raw = row.start + (time - frag.start) - (antenna.start + segment / 2);
       shownAhead = steadyAhead(shownAhead, raw, segment);
       monitorAheadS.value = shownAhead;
@@ -388,12 +462,18 @@ function watch(video) {
       return true;
     },
     position,
+    expect,
+    expectAnswered,
+    /** A seek of the owner stands in for the picture's position (see `expect`). */
+    expecting: () => expected !== null || Boolean(frozen?.moved),
     /** The owner pauses: the picture stops now; its film position, or null (not known). */
     freeze() {
       const at = position();
       if (at === null) return null;
       video.pause();
-      frozen = { at, confirmed: false, parked: false };
+      // Paused right after a seek: the pause stands on its target (the old picture stops).
+      frozen = { at, confirmed: false, parked: false, moved: expected !== null };
+      expected = null;
       monitorState.value = 'paused';
       monitorAheadS.value = null;
       shownAhead = null;
