@@ -3,9 +3,9 @@
 //! the viewers' delay. No process of its own: it lists the segments of the clip the channel is
 //! cutting, and keeps the ones it listed for a while after they aired.
 //!
-//! Every segment the monitor lists gets a row: its own sequence number (never reused, so the
-//! list is a well-formed live HLS playlist across clips: a new clip starts after a
-//! discontinuity), the clip, the film position it starts at, and a hard link in the monitor's
+//! Every segment the monitor lists gets a row: its own sequence number (dense and going on
+//! across clips, so the list is a well-formed live HLS playlist: a new clip starts after a
+//! discontinuity, and the window starts its player again for it), the clip, the film position it starts at, and a hard link in the monitor's
 //! folder. The link keeps the segment readable after the channel removes the clip's file (once
 //! the broadcaster read it) or the whole clip folder (seek, skip, end of film) — so the clip's
 //! own cleanup is exactly as before and the public stream is untouched. Where a link cannot be
@@ -41,7 +41,8 @@ const DEFAULT_TARGET_S: u64 = 4;
 /// One segment the monitor lists.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorRow {
-    /// Media sequence number (dense, never reused).
+    /// Media sequence number (dense; only the numbers of rows that left before they aired, the
+    /// old clip's lookahead, are given again, to the next clip's rows).
     pub seq: u64,
     /// The encoder process (the channel's source key, e.g. `clip-12-0-r1`).
     pub clip: String,
@@ -1032,6 +1033,14 @@ mod tests {
             luma / 6
         );
         channel.stop();
+        drop(channel);
+        // The stopped ffmpeg lets go of the film a moment later: the folder goes then (a
+        // TempDir dropped at once would stay behind in %TEMP%).
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while std::fs::remove_dir_all(tmp.path()).is_err() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!tmp.path().exists(), "the test folder was not removed");
     }
 
     #[test]
