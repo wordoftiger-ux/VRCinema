@@ -176,6 +176,9 @@ pub struct ControlState {
     pub seek_pending: bool,
     /// The video is copied: a seek lands on the keyframe before its target.
     pub position_approx: bool,
+    /// The owner paused at a position the channel has not aired yet ([`Channel::pause_at`]):
+    /// the film keeps airing up to the end of the segment holding it, then pauses there.
+    pub pause_pending: bool,
 }
 
 pub struct ChannelOptions {
@@ -421,6 +424,12 @@ struct PendingSeek {
     ticker: bool,
 }
 
+/// A manual pause waiting for the film to reach `at_s` (see [`Channel::pause_at`]).
+struct ArmedPause {
+    item_id: i64,
+    at_s: f64,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SeekRequest {
     To(f64),
@@ -481,6 +490,8 @@ pub struct Channel {
     parked: Option<Parked>,
     pause_reasons: BTreeSet<PauseReason>,
     pending_seek: Option<PendingSeek>,
+    /// The owner's pause at a position not aired yet; the film airs up to it first.
+    armed_pause: Option<ArmedPause>,
     slate_index: [usize; 3],
     last_slate_kind: Option<SlateKind>,
     previous_clip_segment: Option<PathBuf>,
@@ -517,6 +528,7 @@ impl Channel {
             parked: None,
             pause_reasons: BTreeSet::new(),
             pending_seek: None,
+            armed_pause: None,
             slate_index: [0; 3],
             last_slate_kind: None,
             previous_clip_segment: None,
@@ -537,6 +549,7 @@ impl Channel {
     pub fn stop(&mut self) {
         self.parked = None;
         self.pending_seek = None;
+        self.armed_pause = None;
         for mut clip in [self.current.take(), self.prefetched.take()]
             .into_iter()
             .flatten()
@@ -546,6 +559,8 @@ impl Channel {
     }
 
     pub fn skip(&mut self) -> anyhow::Result<()> {
+        // A pause waiting for this film's position goes with it.
+        self.armed_pause = None;
         let skipped = Msg::new(SKIPPED);
         if let Some(p) = self.parked.take() {
             // Paused film: its clip is already gone. The channel stays paused for the next one.
@@ -640,6 +655,7 @@ impl Channel {
                 can_seek: true,
                 seek_pending: false,
                 position_approx: p.probed.copies_video.unwrap_or(false),
+                pause_pending: false,
             };
         }
         let Some(c) = &self.current else {
@@ -661,6 +677,10 @@ impl Channel {
             can_seek: !live,
             seek_pending: pending.is_some(),
             position_approx: !live && probed.copies_video.unwrap_or(false),
+            pause_pending: self
+                .armed_pause
+                .as_ref()
+                .is_some_and(|a| a.item_id == c.item.id),
         }
     }
 
@@ -692,6 +712,11 @@ impl Channel {
     }
 
     fn request(&mut self, request: SeekRequest, ticker: bool) {
+        // The owner's seek (also a restart) replaces a pause waiting for a position; a ticker
+        // restart keeps it (the film's positions stay the same).
+        if !ticker {
+            self.armed_pause = None;
+        }
         if let Some(p) = &self.parked {
             let Some(target) = request.target(p.position_s, p.probed.duration_s) else {
                 self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
@@ -1028,9 +1053,19 @@ impl Channel {
     /// Takes the current film off the air and shows the pause slate until every reason is
     /// resumed. A live stream is not paused (it keeps airing; the next film waits for the
     /// resume). The queue item stays `playing`; the clip is disposed, the position remembered.
+    ///
+    /// While a manual pause waits for its position ([`Self::pause_at`]) another manual pause
+    /// changes nothing; an automatic one pauses at once and the manual reason with it.
     pub fn pause(&mut self, reason: PauseReason) {
+        if self.armed_pause.is_some() && reason == PauseReason::Manual {
+            return;
+        }
+        let armed = self.armed_pause.take().is_some();
         let first = self.pause_reasons.is_empty();
         self.pause_reasons.insert(reason);
+        if armed {
+            self.pause_reasons.insert(PauseReason::Manual);
+        }
         if !first {
             return;
         }
@@ -1069,6 +1104,63 @@ impl Channel {
                 .arg("seconds", format!("{:.0}", p.position_s)),
         );
         self.parked = Some(p);
+    }
+
+    /// The owner's pause at `at_s` seconds of the film (where the producer's monitor stood).
+    /// Viewers cannot be shown less than what was already handed to the broadcaster: when the
+    /// channel has aired up to `at_s` or beyond, the film pauses at once (like
+    /// [`Self::pause`]). Otherwise it keeps airing until the segment holding `at_s` has aired
+    /// and pauses at that segment's end (the first boundary at or after `at_s`, at most one
+    /// segment past it), so the resume neither skips nor repeats a frame. Meanwhile
+    /// [`ControlState::pause_pending`] is set; a resume, a seek, a skip or "play now" cancels
+    /// it, another manual pause changes nothing. A live stream, a seek still waiting or an
+    /// active automatic reason make it a plain pause.
+    pub fn pause_at(&mut self, at_s: f64) {
+        if self.armed_pause.is_some() || self.pause_reasons.contains(&PauseReason::Manual) {
+            return;
+        }
+        let ahead = self
+            .current
+            .as_ref()
+            .filter(|_| self.pause_reasons.is_empty() && self.pending_seek.is_none())
+            .filter(|c| !c.item.is_live && at_s.is_finite() && at_s > c.position_s());
+        let Some(c) = ahead else {
+            self.pause(PauseReason::Manual);
+            return;
+        };
+        self.log(
+            Msg::new("log.pause_armed")
+                .arg("id", c.item.id)
+                .arg("title", &c.item.title)
+                .arg("seconds", format!("{at_s:.0}"))
+                .arg("from", format!("{:.0}", c.position_s())),
+        );
+        self.armed_pause = Some(ArmedPause {
+            item_id: c.item.id,
+            at_s,
+        });
+    }
+
+    /// The owner's manual pause is active or waits for its position.
+    pub fn manual_pause(&self) -> bool {
+        self.armed_pause.is_some() || self.pause_reasons.contains(&PauseReason::Manual)
+    }
+
+    /// Runs the pause of [`Self::pause_at`] once the film has aired up to its position; a film
+    /// that ended (or gave way) before that leaves the channel paused for the next one.
+    fn fire_armed_pause(&mut self) {
+        let Some(armed) = &self.armed_pause else {
+            return;
+        };
+        let waiting = self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.item.id == armed.item_id && c.position_s() < armed.at_s);
+        if waiting {
+            return;
+        }
+        self.armed_pause = None;
+        self.pause(PauseReason::Manual);
     }
 
     /// A clip that already ended or failed must not be parked: a finished film is finished
@@ -1111,6 +1203,10 @@ impl Channel {
     /// Clears `reason`; once no reason is left the paused film restarts from where it stopped
     /// (behind the buffering slate) and queued films start again.
     pub fn resume(&mut self, reason: PauseReason) {
+        if reason == PauseReason::Manual {
+            // A pause still waiting for its position never happens.
+            self.armed_pause = None;
+        }
         if !self.pause_reasons.remove(&reason) || !self.pause_reasons.is_empty() {
             return;
         }
@@ -1267,6 +1363,7 @@ impl Channel {
             .unwrap_or(DEFAULT_STALL_TIMEOUT_S)
             .saturating_mul(1000);
         for _ in 0..NEXT_GUARD {
+            self.fire_armed_pause();
             if self.current.is_none() {
                 if !self.pause_reasons.is_empty() {
                     return self.paused_slate();
@@ -1576,6 +1673,14 @@ impl Channel {
         if let Some(mut c) = self.current.take() {
             c.dispose();
             self.forget_seek_of(c.item.id);
+            // A removed film takes the pause waiting for its position with it.
+            if self
+                .armed_pause
+                .as_ref()
+                .is_some_and(|a| a.item_id == c.item.id)
+            {
+                self.armed_pause = None;
+            }
         }
     }
 
@@ -3103,6 +3208,181 @@ mod tests {
                 attempt: 0
             }
         );
+    }
+
+    // ---------- Pause at the producer's position ("armed" pause) ----------
+
+    #[tokio::test]
+    async fn a_pause_ahead_airs_up_to_the_segment_boundary_then_pauses_there() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await; // 12 s aired
+        e.channel.pause_at(17.0);
+        let c = e.control();
+        assert!(c.pause_pending);
+        assert!(!e.channel.state().paused);
+        assert!(e.channel.state().pause_reasons.is_empty());
+        h0.produce(3);
+        // 12–16 s and 16–20 s still air: 17 s is inside the second one.
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert!(e.control().pause_pending);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert_eq!(e.key(), "pause");
+        assert!(h0.disposed());
+        let c = e.control();
+        assert!(!c.pause_pending);
+        assert_eq!(c.position_s, 20.0);
+        assert_eq!(e.channel.state().pause_reasons, [PauseReason::Manual]);
+        // The resume goes on from the boundary: nothing missed, nothing repeated.
+        e.channel.resume(PauseReason::Manual);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.calls()[1].start_at_s, 20.0);
+    }
+
+    #[tokio::test]
+    async fn a_pause_on_a_boundary_pauses_right_after_that_segment() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(16.0);
+        h0.produce(2);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert_eq!(e.key(), "pause");
+        assert_eq!(e.control().position_s, 16.0);
+    }
+
+    #[tokio::test]
+    async fn a_pause_at_or_behind_what_has_aired_pauses_at_once() {
+        for at in [12.0, 3.0, 0.0] {
+            let mut e = setup();
+            let a = e.add_item("a");
+            let h0 = e.air(&a, 3).await;
+            e.channel.pause_at(at);
+            assert!(h0.disposed(), "at {at}");
+            let c = e.control();
+            assert!(!c.pause_pending);
+            assert_eq!(c.position_s, 12.0);
+            assert_eq!(e.key(), "pause");
+        }
+    }
+
+    #[tokio::test]
+    async fn pausing_again_while_a_pause_is_pending_changes_nothing() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(21.0);
+        e.channel.pause_at(13.0);
+        e.channel.pause(PauseReason::Manual);
+        assert!(!h0.disposed());
+        assert!(e.control().pause_pending);
+        h0.produce(4);
+        for _ in 0..3 {
+            assert_eq!(e.key(), clip_key(&a, 0));
+        }
+        assert_eq!(e.key(), "pause");
+        assert_eq!(e.control().position_s, 24.0);
+    }
+
+    #[tokio::test]
+    async fn a_seek_skip_or_resume_cancels_the_pending_pause() {
+        // Resume: the film simply goes on.
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(17.0);
+        e.channel.resume(PauseReason::Manual);
+        assert!(!e.control().pause_pending);
+        h0.produce(3);
+        for _ in 0..3 {
+            assert_eq!(e.key(), clip_key(&a, 0));
+        }
+        // A seek: the film starts again from the target and does not pause.
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(17.0);
+        e.channel.seek_to(50.0);
+        assert!(!e.control().pause_pending);
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert!(h0.disposed());
+        e.factory.handle(1).produce(3);
+        for _ in 0..3 {
+            assert_eq!(e.key(), relaunched_key(&a, 0, 1));
+        }
+        assert!(e.channel.state().pause_reasons.is_empty());
+        // Restart (a seek to 0) too.
+        let mut e = setup();
+        let a = e.add_item("a");
+        e.air(&a, 3).await;
+        e.channel.pause_at(17.0);
+        e.channel.seek_to(0.0);
+        assert!(!e.control().pause_pending);
+        // A skip: the next film plays.
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 3).await;
+        e.channel.pause_at(17.0);
+        e.channel.skip().unwrap();
+        assert!(!e.control().pause_pending);
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), b.id);
+        let last = e.factory.lock().handles.len() - 1;
+        e.factory.handle(last).produce(1);
+        assert_eq!(e.key(), clip_key(&b, 0));
+        assert!(e.channel.state().pause_reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_automatic_pause_while_one_is_pending_pauses_at_once_and_keeps_the_manual_one() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(30.0);
+        e.channel.pause(PauseReason::Tunnel);
+        assert!(h0.disposed());
+        let c = e.control();
+        assert!(!c.pause_pending);
+        assert_eq!(c.position_s, 12.0);
+        assert_eq!(
+            e.channel.state().pause_reasons,
+            [PauseReason::Tunnel, PauseReason::Manual]
+        );
+        e.channel.resume(PauseReason::Tunnel);
+        assert_eq!(e.key(), "pause");
+    }
+
+    #[tokio::test]
+    async fn a_film_that_ends_before_the_pending_pause_leaves_the_channel_paused() {
+        let mut e = setup();
+        let a = e.add("a", Some(14.0), false);
+        e.add_item("b");
+        let h0 = e.air(&a, 3).await;
+        e.channel.pause_at(13.9);
+        h0.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "pause");
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+        // The next film waits for the resume.
+        assert_eq!(e.channel.current_item_id(), None);
+        assert_eq!(e.key(), "pause");
+        assert_eq!(e.channel.state().pause_reasons, [PauseReason::Manual]);
+    }
+
+    #[tokio::test]
+    async fn a_live_stream_ignores_the_position_of_a_pause() {
+        let mut e = setup();
+        let live = e.add("live", None, true);
+        let h = e.air(&live, 2).await;
+        e.channel.pause_at(30.0);
+        assert!(!e.control().pause_pending);
+        assert!(!h.disposed());
+        h.produce(1);
+        assert_eq!(e.key(), clip_key(&live, 0));
     }
 
     #[tokio::test]

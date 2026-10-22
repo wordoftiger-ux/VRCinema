@@ -2885,6 +2885,7 @@ fn film_control(duration_s: Option<f64>, is_live: bool) -> ControlState {
         can_seek: !is_live,
         seek_pending: false,
         position_approx: false,
+        pause_pending: false,
     }
 }
 
@@ -2952,13 +2953,72 @@ async fn pause_and_resume_send_the_manual_reason_and_answer_with_the_control_sta
         json!({"control": {
             "itemId": 7, "isLive": false, "positionS": 12, "durationS": 100,
             "canPause": true, "canSeek": true, "seekPending": false, "positionApprox": true,
-            "paused": true, "pauseReasons": ["tunnel", "manual"]
+            "pausePending": false, "paused": true, "pauseReasons": ["tunnel", "manual"]
         }})
     );
     assert_eq!(h.commands(), [Command::Pause(PauseReason::Manual)]);
     let res = h.send(control_route("resume").cookie(&cookie)).await;
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(h.commands(), [Command::Resume(PauseReason::Manual)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pause_takes_the_position_of_the_preview_and_refuses_a_bad_one() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let mut control = film_control(Some(100.0), false);
+    control.pause_pending = true;
+    h.set_control(control);
+    for (body, command) in [
+        (json!({"atS": 17.5}), Command::PauseAt { at_s: 17.5 }),
+        (json!({"atS": 0}), Command::PauseAt { at_s: 0.0 }),
+        (json!({"atS": 100}), Command::PauseAt { at_s: 100.0 }),
+        (json!({"atS": null}), Command::Pause(PauseReason::Manual)),
+        (json!({}), Command::Pause(PauseReason::Manual)),
+    ] {
+        let res = h
+            .send(control_route("pause").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::OK, "{body}");
+        assert_eq!(res.json()["control"]["pausePending"], true, "{body}");
+        assert_eq!(h.commands(), [command], "{body}");
+    }
+    for body in [
+        json!({"atS": -1}),
+        json!({"atS": 100.5}),
+        json!({"atS": "17"}),
+        json!({"atS": true}),
+    ] {
+        let res = h
+            .send(control_route("pause").cookie(&cookie).json(body.clone()))
+            .await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(res.json()["code"], "bad_request", "{body}");
+        assert!(!res.error().is_empty());
+    }
+    assert!(h.commands().is_empty());
+    // A film of unknown length takes any position; a live stream none (409 as without one).
+    h.set_control(film_control(None, false));
+    let res = h
+        .send(
+            control_route("pause")
+                .cookie(&cookie)
+                .json(json!({"atS": 5000})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(h.commands(), [Command::PauseAt { at_s: 5000.0 }]);
+    h.set_control(film_control(None, true));
+    let res = h
+        .send(
+            control_route("pause")
+                .cookie(&cookie)
+                .json(json!({"atS": 5})),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::CONFLICT);
+    assert_eq!(res.json()["code"], "live_item");
+    assert!(h.commands().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

@@ -570,9 +570,25 @@ async fn apply_control(state: &AppState, command: Command) -> ApiResult {
     ))
 }
 
-async fn pause(State(state): State<AppState>) -> ApiResult {
-    controllable_film(&state)?;
-    apply_control(&state, Command::Pause(PauseReason::Manual)).await
+/// No body, or `{"atS": seconds}`: the position the producer's monitor showed (0 ≤ atS ≤ the
+/// film's length when known). With it the film airs up to the end of the segment holding that
+/// position first, then pauses there (see `Channel::pause_at`).
+async fn pause(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let control = controllable_film(&state)?;
+    let at_s = match body.get("atS") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_f64()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .filter(|n| control.duration_s.is_none_or(|d| *n <= d))
+                .ok_or_else(|| control_bad_request("pause_at"))?,
+        ),
+    };
+    let command = match at_s {
+        Some(at_s) => Command::PauseAt { at_s },
+        None => Command::Pause(PauseReason::Manual),
+    };
+    apply_control(&state, command).await
 }
 
 /// Clears only the manual pause; other active reasons stay (and are shown).

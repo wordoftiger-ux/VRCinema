@@ -32,6 +32,12 @@ pub enum Command {
     /// Adds a pause reason; the channel pauses while any reason is active. The loop keeps the
     /// active reasons, so a channel rebuilt after a crash starts paused too.
     Pause(PauseReason),
+    /// The owner's pause at `at_s` seconds of the film (what the producer's monitor showed): the
+    /// film airs up to the end of the segment holding it first (see [`Channel::pause_at`]). The
+    /// loop keeps it as the manual reason, so a channel rebuilt after a crash starts paused.
+    PauseAt {
+        at_s: f64,
+    },
     /// Clears a pause reason; the channel resumes once none is left.
     Resume(PauseReason),
     /// Airs another slate set from now on (a new public address is drawn on it). The loop
@@ -92,6 +98,15 @@ pub trait ChannelControl: SegmentSource + Send {
     fn skip(&mut self) -> anyhow::Result<()>;
     fn on_queue_changed(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self, reason: PauseReason);
+    /// The owner's pause at `at_s` seconds of the film (test doubles: a plain manual pause).
+    fn pause_at(&mut self, at_s: f64) {
+        let _ = at_s;
+        self.pause(PauseReason::Manual);
+    }
+    /// The owner's manual pause is active or waiting for its position (`None`: not known).
+    fn manual_pause(&self) -> Option<bool> {
+        None
+    }
     fn resume(&mut self, reason: PauseReason);
     fn replace_slates(&mut self, slates: Slates);
     fn seek_to(&mut self, to_s: f64);
@@ -132,6 +147,12 @@ impl ChannelControl for Channel {
     }
     fn pause(&mut self, reason: PauseReason) {
         Channel::pause(self, reason)
+    }
+    fn pause_at(&mut self, at_s: f64) {
+        Channel::pause_at(self, at_s)
+    }
+    fn manual_pause(&self) -> Option<bool> {
+        Some(Channel::manual_pause(self))
     }
     fn resume(&mut self, reason: PauseReason) {
         Channel::resume(self, reason)
@@ -477,6 +498,9 @@ where
                     Command::Pause(reason) => {
                         self.pause_reasons.insert(*reason);
                     }
+                    Command::PauseAt { .. } => {
+                        self.pause_reasons.insert(PauseReason::Manual);
+                    }
                     Command::Resume(reason) => {
                         self.pause_reasons.remove(reason);
                     }
@@ -495,6 +519,16 @@ where
                         // A play-now ends the manual pause (see `Channel::play_now`).
                         if play_now {
                             self.pause_reasons.remove(&PauseReason::Manual);
+                        }
+                        // A pause waiting for its position also ends with a seek or a skip.
+                        match core.channel.manual_pause() {
+                            Some(true) => {
+                                self.pause_reasons.insert(PauseReason::Manual);
+                            }
+                            Some(false) => {
+                                self.pause_reasons.remove(&PauseReason::Manual);
+                            }
+                            None => {}
                         }
                     }
                     Ok(Err(e)) => (self.log)(
@@ -538,6 +572,10 @@ impl<C: ChannelControl> Core<C> {
             Command::QueueChanged => self.channel.on_queue_changed(),
             Command::Pause(reason) => {
                 self.channel.pause(reason);
+                Ok(())
+            }
+            Command::PauseAt { at_s } => {
+                self.channel.pause_at(at_s);
                 Ok(())
             }
             Command::Resume(reason) => {
