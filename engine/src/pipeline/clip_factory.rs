@@ -15,7 +15,7 @@ use crate::i18n::{Lang, Msg};
 use crate::live::LiveValue;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, MAX_HEIGHT, ReadRate, build_clip_args};
-use crate::pipeline::probe::{VideoInfo, VideoMode, decide_video_mode, probe_video};
+use crate::pipeline::probe::{ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
 use crate::pipeline::ticker::{
@@ -23,7 +23,8 @@ use crate::pipeline::ticker::{
     TEXT_FILE, TickerContent, TickerMode, TickerQr, TickerWriter, compose_text, overlay_filter,
     prepare_after_s, window_budget_px,
 };
-use crate::resolver::MediaResolver;
+use crate::resolver::ytdlp::{FALLBACK_YOUTUBE_CLIENT, youtube_client};
+use crate::resolver::{MediaResolver, ResolvedStream, StreamInput};
 use crate::rules::{HostResolver, LinkError, check_media_url, check_media_urls};
 use crate::stats::{ClipStats, ProbeSummary, StreamMode};
 
@@ -357,11 +358,30 @@ impl Drop for RealClipHandle {
     }
 }
 
+/// Analyses a source before its clip starts; injectable so tests need no real ffprobe.
+#[async_trait::async_trait]
+pub trait VideoProber: Send + Sync {
+    async fn probe(&self, ffprobe: &Path, inputs: &[StreamInput]) -> Result<VideoInfo, ProbeError>;
+}
+
+/// The real thing: [`probe_video`].
+pub struct FfprobeProber;
+
+#[async_trait::async_trait]
+impl VideoProber for FfprobeProber {
+    async fn probe(&self, ffprobe: &Path, inputs: &[StreamInput]) -> Result<VideoInfo, ProbeError> {
+        probe_video(ffprobe, inputs).await
+    }
+}
+
+/// Cheap to clone: every field is shared.
+#[derive(Clone)]
 pub struct RealClipFactory {
     deps: Arc<ClipFactoryDeps>,
     counter: Arc<AtomicU64>,
     /// Which of the owner's messages the ticker shows next (interval mode), across clips.
     rotation: Arc<AtomicUsize>,
+    prober: Arc<dyn VideoProber>,
 }
 
 pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
@@ -369,7 +389,102 @@ pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
         deps: Arc::new(deps),
         counter: Arc::new(AtomicU64::new(0)),
         rotation: Arc::new(AtomicUsize::new(0)),
+        prober: Arc::new(FfprobeProber),
     }
+}
+
+impl RealClipFactory {
+    /// Tests: probes with `prober` instead of ffprobe.
+    pub fn with_prober(mut self, prober: Arc<dyn VideoProber>) -> Self {
+        self.prober = prober;
+        self
+    }
+}
+
+/// A viewer's link: what it led to must not be the owner's network, and the programs get exactly
+/// the address that was checked (not the text the extractor wrote, which they could read
+/// differently), before ffprobe or ffmpeg touch it.
+async fn checked_inputs(
+    d: &ClipFactoryDeps,
+    viewer: bool,
+    mut stream: ResolvedStream,
+) -> Result<ResolvedStream, Msg> {
+    if viewer {
+        let raw: Vec<&str> = stream.inputs.iter().map(|i| i.url.as_str()).collect();
+        let checked = check_media_urls(&raw, d.host_resolver.as_ref())
+            .await
+            .map_err(|e| Msg::error(e.code()))?;
+        for (input, url) in stream.inputs.iter_mut().zip(checked) {
+            input.url = url;
+        }
+    }
+    Ok(stream)
+}
+
+/// The yt-dlp client of a YouTube stream (its first `googlevideo.com` input), `None` for
+/// any other stream.
+fn stream_youtube_client(stream: &ResolvedStream) -> Option<String> {
+    stream.inputs.iter().find_map(|i| youtube_client(&i.url))
+}
+
+/// One line per YouTube resolution: which yt-dlp client made the address and whether yt-dlp
+/// had a JavaScript runtime (the address itself never reaches the log).
+fn log_youtube_client(d: &ClipFactoryDeps, item: &QueueItem, client: &str, source: &str) {
+    let Some(log) = &d.log else {
+        return;
+    };
+    let key = if d.resolver.js_runtime_passed(source) == Some(true) {
+        "log.ytdlp_client"
+    } else {
+        "log.ytdlp_client_no_js"
+    };
+    log(Msg::new(key)
+        .arg("id", item.id)
+        .arg("title", &item.title)
+        .arg("client", client));
+}
+
+/// Probes the resolved stream. YouTube refusing the address (HTTP 403/401) makes yt-dlp
+/// resolve once more with [`FALLBACK_YOUTUBE_CLIENT`]; only when that one fails too does the
+/// start fail (and the channel's retry of the film count).
+async fn probe_or_fallback(
+    d: &ClipFactoryDeps,
+    prober: &dyn VideoProber,
+    item: &QueueItem,
+    source: &str,
+    viewer: bool,
+    stream: ResolvedStream,
+) -> Result<(ResolvedStream, VideoInfo), Msg> {
+    let client = stream_youtube_client(&stream);
+    if let Some(client) = &client {
+        log_youtube_client(d, item, client, source);
+    }
+    let error = match prober.probe(&d.ffprobe_path, &stream.inputs).await {
+        Ok(info) => return Ok((stream, info)),
+        Err(e) => e,
+    };
+    let Some(client) = client.filter(|_| error.access_denied()) else {
+        return Err(error.message());
+    };
+    let Some(again) = d.resolver.resolve_with_fallback_client(source).await else {
+        return Err(error.message());
+    };
+    if let Some(log) = &d.log {
+        log(Msg::new("log.ytdlp_fallback_client")
+            .arg("id", item.id)
+            .arg("title", &item.title)
+            .arg("client", client)
+            .arg("fallback", FALLBACK_YOUTUBE_CLIENT));
+    }
+    let again = checked_inputs(d, viewer, again.map_err(|e| e.0)?).await?;
+    if let Some(client) = stream_youtube_client(&again) {
+        log_youtube_client(d, item, &client, source);
+    }
+    let info = prober
+        .probe(&d.ffprobe_path, &again.inputs)
+        .await
+        .map_err(|e| e.message())?;
+    Ok((again, info))
 }
 
 /// Where a running ticker reads what it shows.
@@ -685,14 +800,18 @@ async fn run_ticker(
 }
 
 async fn start_clip(
-    d: Arc<ClipFactoryDeps>,
-    counter: Arc<AtomicU64>,
-    rotation: Arc<AtomicUsize>,
+    factory: RealClipFactory,
     item: QueueItem,
     start_at_s: f64,
     attempt: u32,
     ahead: bool,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
+    let RealClipFactory {
+        deps: d,
+        counter,
+        rotation,
+        prober,
+    } = factory;
     let viewer = item.added_by == AddedBy::Public && d.check_viewer_media;
     let refused = |e: LinkError| Msg::error(e.code());
     // A viewer's link is looked up again now (yt-dlp fetches it anew): its name may have started
@@ -704,22 +823,10 @@ async fn start_clip(
     } else {
         item.source_url.clone()
     };
-    let mut stream = d.resolver.resolve(&source).await.map_err(|e| e.0)?;
-    if viewer {
-        // What the link led to must not be the owner's network, and the programs get exactly the
-        // address that was checked (not the text the extractor wrote, which they could read
-        // differently), before ffprobe or ffmpeg touch it.
-        let raw: Vec<&str> = stream.inputs.iter().map(|i| i.url.as_str()).collect();
-        let checked = check_media_urls(&raw, d.host_resolver.as_ref())
-            .await
-            .map_err(refused)?;
-        for (input, url) in stream.inputs.iter_mut().zip(checked) {
-            input.url = url;
-        }
-    }
-    let info = probe_video(&d.ffprobe_path, &stream.inputs)
-        .await
-        .map_err(|e| e.message())?;
+    let stream = d.resolver.resolve(&source).await.map_err(|e| e.0)?;
+    let stream = checked_inputs(&d, viewer, stream).await?;
+    let (stream, info) =
+        probe_or_fallback(&d, prober.as_ref(), &item, &source, viewer, stream).await?;
     let settings = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
@@ -850,30 +957,14 @@ impl ClipFactory for RealClipFactory {
         start_at_s: f64,
         attempt: u32,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
-        Box::pin(start_clip(
-            Arc::clone(&self.deps),
-            Arc::clone(&self.counter),
-            Arc::clone(&self.rotation),
-            item,
-            start_at_s,
-            attempt,
-            false,
-        ))
+        Box::pin(start_clip(self.clone(), item, start_at_s, attempt, false))
     }
 
     fn create_ahead(
         &self,
         item: QueueItem,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
-        Box::pin(start_clip(
-            Arc::clone(&self.deps),
-            Arc::clone(&self.counter),
-            Arc::clone(&self.rotation),
-            item,
-            0.0,
-            0,
-            true,
-        ))
+        Box::pin(start_clip(self.clone(), item, 0.0, 0, true))
     }
 }
 
@@ -1220,6 +1311,276 @@ mod tests {
         )
         .await;
         assert_eq!(err.render(Lang::En), "program not found", "{err:?}");
+    }
+
+    // ---- YouTube refusing an address: the fallback client ----
+
+    /// A signed address as yt-dlp hands it out (the IP address and tokens made up).
+    fn googlevideo(host: &str, client: &str) -> String {
+        format!(
+            "https://{host}/videoplayback?expire=1792700650&ip=188.47.115.50&id=o-AI6&itag=137&c={client}&sig=AE0s2JYw%3D"
+        )
+    }
+
+    type Argv = Arc<Mutex<Vec<Vec<String>>>>;
+
+    /// yt-dlp: the TVHTML5 address normally, `fallback` with the extractor args.
+    struct YtDlpRunner {
+        calls: Argv,
+        fallback: String,
+    }
+
+    #[async_trait]
+    impl crate::resolver::ytdlp::ProcessRunner for YtDlpRunner {
+        async fn run(
+            &self,
+            _cmd: &Path,
+            args: &[OsString],
+            _timeout: Duration,
+        ) -> Result<crate::process::ProcessOutput, crate::process::ProcessError> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let url = if args.iter().any(|a| a == "--extractor-args") {
+                self.fallback.clone()
+            } else {
+                googlevideo("rr7---sn-u2oxu.googlevideo.com", "TVHTML5")
+            };
+            self.calls.lock().unwrap().push(args);
+            Ok(crate::process::ProcessOutput {
+                code: Some(0),
+                stdout: serde_json::json!({"title": "film", "duration": 6, "url": url}).to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// ffprobe: refuses (as it reports a 403, addresses already cut) every address that contains
+    /// one of `denied`, or fails with `other`; reads the rest.
+    struct FakeProber {
+        denied: Vec<&'static str>,
+        other: Option<&'static str>,
+        probed: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl VideoProber for FakeProber {
+        async fn probe(
+            &self,
+            _ffprobe: &Path,
+            inputs: &[StreamInput],
+        ) -> Result<VideoInfo, ProbeError> {
+            let url = inputs[0].url.clone();
+            self.probed.lock().unwrap().push(url.clone());
+            if let Some(other) = self.other {
+                return Err(ProbeError::Failed(other.into()));
+            }
+            if self.denied.iter().any(|d| url.contains(d)) {
+                return Err(ProbeError::Failed(crate::redact::redact_urls(&format!(
+                    "{url}: Server returned 403 Forbidden (access denied)"
+                ))));
+            }
+            Ok(video("h264", 720, 25.0, true))
+        }
+    }
+
+    struct YouTube {
+        _dir: tempfile::TempDir,
+        factory: RealClipFactory,
+        ytdlp: Argv,
+        probed: Arc<Mutex<Vec<String>>>,
+        lines: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn youtube_factory(
+        resolver: Option<Arc<dyn MediaResolver>>,
+        fallback: &str,
+        denied: Vec<&'static str>,
+        other: Option<&'static str>,
+    ) -> YouTube {
+        let dir = tempfile::tempdir().unwrap();
+        let ytdlp = Argv::default();
+        let resolver = resolver.unwrap_or_else(|| {
+            Arc::new(
+                crate::resolver::ytdlp::YtDlpResolver::new(
+                    "yt-dlp".into(),
+                    Some("deno:/deno".into()),
+                    None,
+                )
+                .with_runner(Box::new(YtDlpRunner {
+                    calls: Arc::clone(&ytdlp),
+                    fallback: fallback.to_string(),
+                })),
+            )
+        });
+        let hosts = crate::rules::TableHostResolver::new(&[
+            ("youtu.be", &["142.250.0.1"]),
+            ("rr7---sn-u2oxu.googlevideo.com", &["142.250.0.2"]),
+            ("rr3---sn-u2oxu.googlevideo.com", &["142.250.0.3"]),
+            ("evil.example", &["192.168.0.10"]),
+        ]);
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        let probed = Arc::new(Mutex::new(Vec::new()));
+        let factory = create_clip_factory(ClipFactoryDeps {
+            resolver,
+            ffmpeg_path: "no-such-ffmpeg".into(),
+            ffprobe_path: "no-such-ffprobe".into(),
+            encoder: crate::live::LiveValue::new(VideoEncoder::Libx264),
+            segment_seconds: 4,
+            clips_dir: dir.path().join("clips"),
+            db: Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap())),
+            channel_id: MAIN_CHANNEL_ID,
+            log: Some(Arc::new(move |l: Msg| {
+                sink.lock().unwrap().push(l.to_string())
+            })),
+            font_file: default_font(),
+            public_url: crate::live::LiveValue::new(String::new()),
+            host_resolver: Arc::new(hosts),
+            check_viewer_media: true,
+        })
+        .with_prober(Arc::new(FakeProber {
+            denied,
+            other,
+            probed: Arc::clone(&probed),
+        }));
+        YouTube {
+            _dir: dir,
+            factory,
+            ytdlp,
+            probed,
+            lines,
+        }
+    }
+
+    fn visionos() -> String {
+        googlevideo("rr3---sn-u2oxu.googlevideo.com", "VISIONOS")
+    }
+
+    async fn start(y: &YouTube, added_by: AddedBy) -> Result<Box<dyn ClipHandle>, Msg> {
+        let item = QueueItem {
+            added_by,
+            ..item(128, "Ado")
+        };
+        y.factory.create(item, 0.0, 0).await
+    }
+
+    fn no_secrets(text: &str) {
+        for secret in ["188.47.115.50", "ip=", "sig=", "expire="] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_youtube_address_is_resolved_again_with_the_fallback_client() {
+        for added_by in [AddedBy::Admin, AddedBy::Public] {
+            let y = youtube_factory(None, &visionos(), vec!["c=TVHTML5"], None);
+            let mut handle = start(&y, added_by).await.expect("the fallback plays");
+            handle.dispose();
+            let calls = y.ytdlp.lock().unwrap().clone();
+            assert_eq!(calls.len(), 2, "{added_by:?}");
+            assert!(!calls[0].iter().any(|a| a == "--extractor-args"));
+            let i = calls[1]
+                .iter()
+                .position(|a| a == "--extractor-args")
+                .unwrap();
+            assert_eq!(calls[1][i + 1], "youtube:player_client=visionos");
+            let probed = y.probed.lock().unwrap().clone();
+            assert_eq!(probed.len(), 2);
+            assert!(probed[1].contains("c=VISIONOS"), "{probed:?}");
+            let lines = y.lines.lock().unwrap().clone();
+            assert_eq!(
+                lines[..3],
+                [
+                    "Video #128 \"Ado\": YouTube address from yt-dlp client TVHTML5 (with a JavaScript runtime)",
+                    "Video #128 \"Ado\": YouTube refused the address of yt-dlp client TVHTML5; trying client visionos",
+                    "Video #128 \"Ado\": YouTube address from yt-dlp client VISIONOS (with a JavaScript runtime)",
+                ],
+                "{lines:?}"
+            );
+            for line in &lines {
+                no_secrets(line);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn when_the_fallback_is_refused_too_the_start_fails_without_the_signed_address() {
+        let y = youtube_factory(None, &visionos(), vec!["googlevideo.com"], None);
+        let err = start(&y, AddedBy::Admin).await.err().expect("both refused");
+        let text = err.render(Lang::En);
+        assert_eq!(
+            text,
+            "ffprobe: https://rr3---sn-u2oxu.googlevideo.com/videoplayback: Server returned 403 Forbidden (access denied)"
+        );
+        no_secrets(&text);
+        assert_eq!(y.ytdlp.lock().unwrap().len(), 2, "one fallback only");
+        assert_eq!(y.probed.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_fallback_address_of_a_viewers_link_is_checked_as_well() {
+        let y = youtube_factory(
+            None,
+            "https://evil.example/videoplayback?c=VISIONOS",
+            vec!["c=TVHTML5"],
+            None,
+        );
+        let err = start(&y, AddedBy::Public).await.err().unwrap();
+        assert_eq!(err.code(), Some("local_address"), "{err:?}");
+        assert_eq!(y.probed.lock().unwrap().len(), 1, "never probed");
+    }
+
+    #[tokio::test]
+    async fn other_failures_and_other_resolvers_get_no_fallback() {
+        // Not a refusal.
+        let y = youtube_factory(
+            None,
+            &visionos(),
+            vec![],
+            Some("Invalid data found when processing input"),
+        );
+        let err = start(&y, AddedBy::Admin).await.err().unwrap();
+        assert_eq!(
+            err.render(Lang::En),
+            "ffprobe: Invalid data found when processing input"
+        );
+        assert_eq!(y.ytdlp.lock().unwrap().len(), 1);
+
+        // A refused address that is not YouTube's.
+        let y = youtube_factory(
+            Some(Arc::new(UrlResolver(vec![
+                "https://cdn.example/v.mp4?token=1",
+            ]))),
+            &visionos(),
+            vec!["cdn.example"],
+            None,
+        );
+        let err = start(&y, AddedBy::Admin).await.err().unwrap();
+        assert_eq!(
+            err.render(Lang::En),
+            "ffprobe: https://cdn.example/v.mp4: Server returned 403 Forbidden (access denied)"
+        );
+        assert_eq!(y.probed.lock().unwrap().len(), 1);
+
+        // A YouTube address from a resolver without a fallback (not yt-dlp).
+        let y = youtube_factory(
+            Some(Arc::new(UrlResolver(vec![
+                "https://rr7---sn-u2oxu.googlevideo.com/videoplayback?c=TVHTML5",
+            ]))),
+            &visionos(),
+            vec!["googlevideo.com"],
+            None,
+        );
+        assert!(start(&y, AddedBy::Admin).await.is_err());
+        assert_eq!(y.probed.lock().unwrap().len(), 1);
+        assert_eq!(
+            y.lines.lock().unwrap()[..],
+            [
+                "Video #128 \"Ado\": YouTube address from yt-dlp client TVHTML5 (without a JavaScript runtime)"
+            ]
+        );
     }
 
     async fn wait_until(mut cond: impl FnMut() -> bool, timeout: Duration) -> bool {

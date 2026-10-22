@@ -55,6 +55,21 @@ pub type ProbeFuture = Pin<Box<dyn Future<Output = Option<f64>> + Send>>;
 pub trait MediaResolver: Send + Sync {
     async fn fetch_meta(&self, url: &str) -> Result<MediaMeta, ResolveError>;
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError>;
+
+    /// Resolves `url` again with yt-dlp's fallback YouTube client
+    /// ([`ytdlp::FALLBACK_YOUTUBE_CLIENT`]), for an address YouTube refused; `None`: this
+    /// resolver has no such fallback (everything but yt-dlp).
+    async fn resolve_with_fallback_client(
+        &self,
+        _url: &str,
+    ) -> Option<Result<ResolvedStream, ResolveError>> {
+        None
+    }
+
+    /// Whether yt-dlp is given a JavaScript runtime for `url` (`None`: not resolved by yt-dlp).
+    fn js_runtime_passed(&self, _url: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// Routes disk files (`local:` library files, `file:` absolute paths) to the file modules, pixeldrain hosts to their own module and
@@ -120,6 +135,17 @@ impl MediaResolver for CompositeResolver {
 
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError> {
         self.pick(url)?.resolve(url).await
+    }
+
+    async fn resolve_with_fallback_client(
+        &self,
+        url: &str,
+    ) -> Option<Result<ResolvedStream, ResolveError>> {
+        self.pick(url).ok()?.resolve_with_fallback_client(url).await
+    }
+
+    fn js_runtime_passed(&self, url: &str) -> Option<bool> {
+        self.pick(url).ok()?.js_runtime_passed(url)
     }
 }
 

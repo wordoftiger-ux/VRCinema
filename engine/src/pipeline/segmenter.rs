@@ -357,12 +357,13 @@ async fn read_progress<R: AsyncRead + Unpin>(progress: R, cells: Progress) {
     }
 }
 
-/// Keeps the last [`STDERR_TAIL_LINES`] non-empty trimmed stderr lines until EOF.
 /// Words of ffmpeg or the system, shown as they are.
 fn output(text: impl std::fmt::Display) -> Msg {
     Msg::error("source_message").arg("detail", text)
 }
 
+/// Keeps the last [`STDERR_TAIL_LINES`] non-empty trimmed stderr lines until EOF, with
+/// addresses cut to their host and first path segment.
 async fn read_stderr_tail<R: AsyncRead + Unpin>(stderr: Option<R>) -> VecDeque<String> {
     let mut tail = VecDeque::new();
     let Some(stderr) = stderr else {
@@ -381,7 +382,8 @@ async fn read_stderr_tail<R: AsyncRead + Unpin>(stderr: Option<R>) -> VecDeque<S
                     if tail.len() == STDERR_TAIL_LINES {
                         tail.pop_front();
                     }
-                    tail.push_back(line.to_string());
+                    // ffmpeg quotes the inputs' signed addresses (the owner's IP address).
+                    tail.push_back(crate::redact::redact_urls(line));
                 }
             }
         }
@@ -397,6 +399,19 @@ mod tests {
     use crate::pipeline::probe::{VideoInfo, VideoMode};
     use crate::resolver::types::StreamInput;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn the_stderr_tail_keeps_no_signed_addresses() {
+        let stderr: &[u8] = b"[tls] something\n[https @ 0x1] https://rr7---sn-x.googlevideo.com/videoplayback?ip=188.47.115.50&sig=abc: Server returned 403 Forbidden (access denied)\n";
+        let tail: Vec<String> = read_stderr_tail(Some(stderr)).await.into();
+        assert_eq!(
+            tail,
+            [
+                "[tls] something",
+                "[https @ 0x1] https://rr7---sn-x.googlevideo.com/videoplayback: Server returned 403 Forbidden (access denied)"
+            ]
+        );
+    }
 
     pub(crate) fn ffmpeg_bin() -> Option<PathBuf> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?;

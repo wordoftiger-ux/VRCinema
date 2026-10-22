@@ -15,6 +15,7 @@ pub mod logging;
 pub mod nicks;
 pub mod pipeline;
 pub mod process;
+pub mod redact;
 pub mod resolver;
 pub mod rules;
 pub mod self_update;

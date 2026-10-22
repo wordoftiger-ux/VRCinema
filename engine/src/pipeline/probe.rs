@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::i18n::Msg;
 use crate::pipeline::ffmpeg_args::input_options;
 use crate::process::{ProcessError, run_process};
+use crate::redact::redact_urls;
 use crate::resolver::types::StreamInput;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +63,26 @@ impl ProbeError {
             Self::Json(e) => Msg::error("source_message").arg("detail", e),
         }
     }
+
+    /// The server refused the address (HTTP 403 or 401), as ffprobe reports it.
+    pub fn access_denied(&self) -> bool {
+        match self {
+            Self::Failed(reason) => is_access_denied(reason),
+            _ => false,
+        }
+    }
+}
+
+/// ffmpeg's and ffprobe's words for an HTTP 403 or 401 answer.
+pub fn is_access_denied(text: &str) -> bool {
+    [
+        "403 Forbidden",
+        "401 Unauthorized",
+        "HTTP error 403",
+        "HTTP error 401",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 const COPYABLE_PIX_FMTS: [&str; 2] = ["yuv420p", "yuvj420p"];
@@ -206,7 +227,7 @@ async fn probe_with_timeout(
             .next_back()
             .filter(|l| !l.is_empty())
             .unwrap_or_default();
-        return Err(ProbeError::Failed(last.to_string()));
+        return Err(ProbeError::Failed(redact_urls(last)));
     }
     let info = parse_probe_output(&serde_json::from_str(&res.stdout)?)?;
     Ok(if inputs.len() > 1 {
@@ -342,6 +363,21 @@ mod tests {
             "Przekroczono limit czasu (45 s): ffprobe"
         );
         assert_eq!(slow.to_string(), "Time limit exceeded (45 s): ffprobe");
+    }
+
+    #[test]
+    fn http_403_and_401_count_as_access_denied() {
+        let denied = |s: &str| ProbeError::Failed(s.into()).access_denied();
+        assert!(denied(
+            "https://rr7.googlevideo.com/videoplayback: Server returned 403 Forbidden (access denied)"
+        ));
+        assert!(denied(
+            "https://x/a: Server returned 401 Unauthorized (authorization failed)"
+        ));
+        assert!(denied("HTTP error 403 Forbidden"));
+        assert!(!denied("Server returned 404 Not Found"));
+        assert!(!denied("Invalid data found when processing input"));
+        assert!(!ProbeError::NoVideoStream.access_denied());
     }
 
     #[test]

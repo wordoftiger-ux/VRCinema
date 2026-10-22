@@ -11,11 +11,33 @@ use super::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStrea
 use crate::i18n::Msg;
 use crate::live::LiveValue;
 use crate::process::{ProcessError, ProcessOutput, run_process};
+use crate::redact::redact_urls;
 
 /// Prefers H.264 up to 1080p (can be remuxed without transcoding), otherwise anything up to 1080p.
 pub const FORMAT_SELECTOR: &str = "bv*[vcodec^=avc1][height<=1080]+ba/b[vcodec^=avc1][height<=1080]/bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// yt-dlp's YouTube client asked for when the address of the usual one is refused (HTTP 403):
+/// since yt-dlp 2026.10.21 its default (TVHTML5) addresses answer 403 to ffprobe and ffmpeg,
+/// with or without a JavaScript runtime, while VISIONOS addresses play.
+pub const FALLBACK_YOUTUBE_CLIENT: &str = "visionos";
+
+/// The YouTube client a `googlevideo.com` address was made for (its `c=` parameter, `?`
+/// when missing); `None` for any other address.
+pub fn youtube_client(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host != "googlevideo.com" && !host.ends_with(".googlevideo.com") {
+        return None;
+    }
+    Some(
+        parsed
+            .query_pairs()
+            .find(|(k, _)| k == "c")
+            .map_or_else(|| "?".to_string(), |(_, v)| v.into_owned()),
+    )
+}
 /// The title stored for a video without one (shared with the old server's database); the
 /// interface and the ticker show it as `player.untitled` in their language.
 pub const NO_TITLE: &str = "Bez tytułu";
@@ -153,10 +175,10 @@ pub fn ytdlp_error_message(stderr: &str) -> ResolveError {
         if reason.starts_with("Unsupported URL") {
             return ResolveError::coded("site_not_supported");
         }
-        return ResolveError::new(reason);
+        return ResolveError::new(redact_urls(reason));
     }
     match stderr.trim().lines().next_back() {
-        Some(line) if !line.is_empty() => ResolveError::new(line),
+        Some(line) if !line.is_empty() => ResolveError::new(redact_urls(line)),
         _ => ResolveError::coded("ytdlp_unknown"),
     }
 }
@@ -210,7 +232,7 @@ impl YtDlpResolver {
             .iter()
             .map(OsString::from)
             .collect();
-        if let Some(runtime) = self.js_runtime.as_deref().filter(|r| !r.is_empty()) {
+        if let Some(runtime) = self.runtime() {
             args.push("--js-runtimes".into());
             args.push(runtime.into());
         }
@@ -222,6 +244,11 @@ impl YtDlpResolver {
         args.push("--".into());
         args.push(url.into());
         args
+    }
+
+    /// The JavaScript runtime given to yt-dlp, if any.
+    fn runtime(&self) -> Option<&str> {
+        self.js_runtime.as_deref().filter(|r| !r.is_empty())
     }
 
     async fn exec(&self, mode: &[&str], url: &str) -> Result<Value, ResolveError> {
@@ -251,6 +278,30 @@ impl MediaResolver for YtDlpResolver {
             .exec(&["-j", "--no-playlist", "-f", FORMAT_SELECTOR], url)
             .await?;
         parse_ytdlp_resolve(&json)
+    }
+
+    async fn resolve_with_fallback_client(
+        &self,
+        url: &str,
+    ) -> Option<Result<ResolvedStream, ResolveError>> {
+        let client = format!("youtube:player_client={FALLBACK_YOUTUBE_CLIENT}");
+        let mode = [
+            "--extractor-args",
+            client.as_str(),
+            "-j",
+            "--no-playlist",
+            "-f",
+            FORMAT_SELECTOR,
+        ];
+        Some(
+            self.exec(&mode, url)
+                .await
+                .and_then(|json| parse_ytdlp_resolve(&json)),
+        )
+    }
+
+    fn js_runtime_passed(&self, _url: &str) -> Option<bool> {
+        Some(self.runtime().is_some())
     }
 }
 
@@ -539,6 +590,67 @@ mod tests {
         let r = YtDlpResolver::new(PathBuf::from("yt-dlp"), None, None);
         assert_send(&r.fetch_meta("https://x"));
         assert_send(&r.resolve("https://x"));
+    }
+
+    #[tokio::test]
+    async fn the_fallback_client_adds_only_the_extractor_args() {
+        let (r, calls) = resolver(ok(fixture("ytdlp-resolve-split.json").to_string()));
+        assert_eq!(r.js_runtime_passed("https://youtu.be/x"), Some(true));
+        r.resolve("https://youtu.be/x").await.unwrap();
+        r.resolve_with_fallback_client("https://youtu.be/x")
+            .await
+            .expect("yt-dlp has a fallback")
+            .unwrap();
+        let calls = calls.lock().unwrap();
+        let normal = &calls[0].1;
+        assert!(!normal.iter().any(|a| a == "--extractor-args"));
+        let fallback = &calls[1].1;
+        let i = fallback
+            .iter()
+            .position(|a| a == "--extractor-args")
+            .unwrap();
+        assert_eq!(fallback[i + 1], "youtube:player_client=visionos");
+        let mut without: Vec<String> = fallback.clone();
+        without.drain(i..i + 2);
+        assert_eq!(
+            &without, normal,
+            "everything else as in a normal resolution"
+        );
+        assert_eq!(fallback.last().unwrap(), "https://youtu.be/x");
+
+        let bare = YtDlpResolver::new(PathBuf::from("yt-dlp"), Some(String::new()), None);
+        assert_eq!(bare.js_runtime_passed("https://youtu.be/x"), Some(false));
+    }
+
+    #[test]
+    fn the_client_of_a_youtube_address() {
+        assert_eq!(
+            youtube_client(
+                "https://rr7---sn-u2oxu.googlevideo.com/videoplayback?ip=1.2.3.4&c=TVHTML5&sig=x"
+            )
+            .as_deref(),
+            Some("TVHTML5")
+        );
+        assert_eq!(
+            youtube_client("https://rr1.GOOGLEVIDEO.com/videoplayback?itag=1").as_deref(),
+            Some("?")
+        );
+        assert_eq!(youtube_client("https://cdn.example/v.mp4?c=WEB"), None);
+        assert_eq!(youtube_client("https://evilgooglevideo.com/v?c=WEB"), None);
+        assert_eq!(youtube_client("C:\\film.mp4"), None);
+    }
+
+    #[test]
+    fn ytdlp_errors_lose_the_signed_parts_of_addresses() {
+        let e = ytdlp_error_message(
+            "ERROR: unable to download https://rr1.googlevideo.com/videoplayback?ip=188.47.115.50&sig=abc: HTTP Error 403\n",
+        );
+        assert_eq!(
+            e.0.render(Lang::En),
+            "unable to download https://rr1.googlevideo.com/videoplayback: HTTP Error 403"
+        );
+        let e = ytdlp_error_message("see https://x.example/a/b?token=1");
+        assert_eq!(e.0.render(Lang::En), "see https://x.example/a");
     }
 
     #[tokio::test]
