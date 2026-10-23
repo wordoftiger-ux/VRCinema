@@ -559,6 +559,7 @@ mod drawn {
                 has_audio: false,
                 duration_s: Some(f64::from(seconds)),
                 portrait: false,
+                keyframe_gap_s: Some(1.0),
             },
             encoder: VideoEncoder::Libx264,
             segment_seconds: 4,

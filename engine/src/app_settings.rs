@@ -306,8 +306,8 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         } else {
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
         }),
-        segment_seconds: 4,
-        window_size: 10,
+        segment_seconds: crate::pipeline::SEGMENT_S,
+        window_size: crate::pipeline::WINDOW_SEGMENTS,
         language: settings.language,
     }
 }

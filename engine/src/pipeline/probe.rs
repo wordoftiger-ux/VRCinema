@@ -23,7 +23,17 @@ pub struct VideoInfo {
     /// Taller than wide as shown (rotation included), e.g. a 9:16 phone video: it is
     /// converted and letterboxed into a 16:9 picture.
     pub portrait: bool,
+    /// The longest stretch without a key frame in the first [`KEYFRAME_SAMPLE_S`] seconds of
+    /// the video; `None`: not measured. A copied video can only be cut at its key frames.
+    pub keyframe_gap_s: Option<f64>,
 }
+
+/// Seconds of the video whose packets are read to measure the key frame spacing.
+pub const KEYFRAME_SAMPLE_S: u32 = 6;
+
+/// The longest key frame gap a copied video may have: its segments are then about
+/// [`crate::pipeline::SEGMENT_S`] long (25 % slack for 24/25/29.97 fps groups of pictures).
+pub const MAX_COPY_KEYFRAME_GAP_S: f64 = crate::pipeline::SEGMENT_S as f64 * 1.25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoMode {
@@ -101,6 +111,10 @@ pub fn decide_video_mode(info: &VideoInfo, force_transcode: bool) -> VideoMode {
         && info.height > 0
         && info.height <= 1080
         && COPYABLE_PIX_FMTS.contains(&info.pix_fmt.as_str())
+        // Key frames far apart (or not measured) would cut segments longer than one.
+        && info
+            .keyframe_gap_s
+            .is_some_and(|gap| gap <= MAX_COPY_KEYFRAME_GAP_S)
     {
         VideoMode::Copy
     } else {
@@ -186,7 +200,50 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
         },
         has_audio: streams.iter().any(|s| is_type(s, "audio")),
         duration_s: (duration.is_finite() && duration > 0.0).then_some(duration),
+        keyframe_gap_s: keyframe_gap(j, video),
     })
+}
+
+/// The longest gap between key frames of `video` in the packets ffprobe read (`packets`, see
+/// [`KEYFRAME_SAMPLE_S`]), the stretch after the last key frame included; `None` without
+/// packets of that stream.
+fn keyframe_gap(j: &Value, video: &Value) -> Option<f64> {
+    let packets = j.get("packets")?.as_array()?;
+    let index = video.get("index").and_then(Value::as_i64);
+    let mut keys = Vec::new();
+    let (mut first, mut last) = (f64::INFINITY, f64::NEG_INFINITY);
+    for p in packets {
+        if index.is_some() && p.get("stream_index").and_then(Value::as_i64) != index {
+            continue;
+        }
+        let pts = js_number(p.get("pts_time"));
+        let t = if pts.is_finite() {
+            pts
+        } else {
+            js_number(p.get("dts_time"))
+        };
+        if !t.is_finite() {
+            continue;
+        }
+        first = first.min(t);
+        last = last.max(t);
+        if p.get("flags")
+            .and_then(Value::as_str)
+            .is_some_and(|f| f.starts_with('K'))
+        {
+            keys.push(t);
+        }
+    }
+    if !first.is_finite() {
+        return None;
+    }
+    if keys.is_empty() {
+        return Some(last - first);
+    }
+    keys.sort_by(f64::total_cmp);
+    let between = keys.windows(2).map(|w| w[1] - w[0]);
+    let tail = last - keys[keys.len() - 1];
+    Some(between.chain([tail]).fold(0.0, f64::max))
 }
 
 /// The rotation of a phone video, in degrees (ffprobe's display matrix side data; 0 when none).
@@ -228,6 +285,7 @@ async fn probe_with_timeout(
     ffprobe: &Path,
     inputs: &[StreamInput],
     timeout: Duration,
+    keyframes: bool,
 ) -> Result<VideoInfo, ProbeError> {
     let video = inputs
         .first()
@@ -243,6 +301,17 @@ async fn probe_with_timeout(
     .iter()
     .map(OsString::from)
     .collect();
+    if keyframes {
+        // The packets of the first seconds (no decoding): where the key frames are.
+        for arg in [
+            "-show_entries",
+            "packet=stream_index,pts_time,dts_time,flags",
+            "-read_intervals",
+            &format!("%+{KEYFRAME_SAMPLE_S}"),
+        ] {
+            args.push(arg.into());
+        }
+    }
     args.extend(input_options(video));
     args.push("-i".into());
     args.push((&video.url).into());
@@ -271,7 +340,7 @@ async fn probe_with_timeout(
 
 /// Analyses the source with ffprobe. When audio arrives as a separate input, `has_audio` = true.
 pub async fn probe_video(ffprobe: &Path, inputs: &[StreamInput]) -> Result<VideoInfo, ProbeError> {
-    probe_with_timeout(ffprobe, inputs, PROBE_TIMEOUT).await
+    probe_with_timeout(ffprobe, inputs, PROBE_TIMEOUT, true).await
 }
 
 /// File duration in seconds, `None` on any error.
@@ -284,7 +353,7 @@ pub async fn probe_duration(
         url: url.to_string(),
         headers: headers.to_vec(),
     };
-    probe_with_timeout(ffprobe, &[input], DURATION_TIMEOUT)
+    probe_with_timeout(ffprobe, &[input], DURATION_TIMEOUT, false)
         .await
         .ok()?
         .duration_s
@@ -304,6 +373,7 @@ mod tests {
             has_audio: true,
             duration_s: Some(60.0),
             portrait: false,
+            keyframe_gap_s: Some(1.0),
         }
     }
 
@@ -390,8 +460,50 @@ mod tests {
                 has_audio: true,
                 duration_s: Some(123.45),
                 portrait: false,
+                keyframe_gap_s: None,
             }
         );
+    }
+
+    #[test]
+    fn the_keyframe_gap_comes_from_the_video_packets_tail_included() {
+        let gap = |packets: serde_json::Value| {
+            parse_probe_output(&json!({
+                "streams": [
+                    {"index": 0, "codec_type": "audio"},
+                    {"index": 1, "codec_type": "video", "codec_name": "h264", "height": 720}
+                ],
+                "format": {},
+                "packets": packets
+            }))
+            .unwrap()
+            .keyframe_gap_s
+        };
+        let every = |step: f64, until: f64| {
+            let mut v = Vec::new();
+            let mut t = 0.0;
+            while t <= until {
+                let key = (t / step - (t / step).round()).abs() < 1e-9;
+                v.push(json!({"stream_index": 1, "pts_time": format!("{t:.6}"), "flags": if key { "K__" } else { "___" }}));
+                // Audio key frames everywhere must not count.
+                v.push(json!({"stream_index": 0, "pts_time": format!("{t:.6}"), "flags": "K__"}));
+                t += 0.5;
+            }
+            serde_json::Value::Array(v)
+        };
+        assert_eq!(gap(every(1.0, 6.0)), Some(1.0));
+        assert_eq!(gap(every(2.0, 6.0)), Some(2.0));
+        // One key frame, then nothing for 5.5 s.
+        assert_eq!(gap(every(100.0, 5.5)), Some(5.5));
+        assert_eq!(gap(json!([])), None);
+
+        let mut copy = h264();
+        copy.keyframe_gap_s = Some(1.04);
+        assert_eq!(decide_video_mode(&copy, false), VideoMode::Copy);
+        copy.keyframe_gap_s = Some(2.0);
+        assert_eq!(decide_video_mode(&copy, false), VideoMode::Transcode);
+        copy.keyframe_gap_s = None;
+        assert_eq!(decide_video_mode(&copy, false), VideoMode::Transcode);
     }
 
     #[test]
@@ -565,6 +677,11 @@ mod tests {
         assert_eq!(info.fps, 25.0);
         assert!(info.has_audio);
         assert!(info.duration_s.unwrap() > 0.5);
+        // libx264's default group of pictures (250 frames) is longer than the 1 s clip.
+        assert!(
+            info.keyframe_gap_s.is_some_and(|g| g > 0.5 && g < 1.5),
+            "{info:?}"
+        );
 
         // separate audio input forces has_audio
         let two = [input.clone(), input.clone()];

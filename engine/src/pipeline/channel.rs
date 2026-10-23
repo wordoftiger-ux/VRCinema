@@ -17,7 +17,7 @@ use crate::db::{ItemStatus, NewItem, QueueItem, QueueRepo};
 use crate::i18n::{Msg, error_msg, msg_error};
 use crate::pipeline::broadcaster::{LogFn, PublishedSegment, SegmentSource, SourceSegment};
 use crate::pipeline::monitor::{
-    LOOKAHEAD, MonitorFeed, MonitorOptions, MonitorTimeline, MonitorWatch,
+    LOOKAHEAD_S, MonitorFeed, MonitorOptions, MonitorTimeline, MonitorWatch,
 };
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{SlateKind, Slates, request_url};
@@ -230,9 +230,10 @@ impl ChannelOptions {
 const DEFAULT_STALL_TIMEOUT_S: u64 = 30;
 const DEFAULT_START_TIMEOUT_S: u64 = 120;
 const DEFAULT_PREFETCH_S: f64 = 60.0;
-const DEFAULT_VIEWER_LAG_SEGMENTS: usize = 3;
+/// The viewers' lag ([`crate::pipeline::VIEWER_LAG_S`]) in segments.
+const DEFAULT_VIEWER_LAG_SEGMENTS: usize = crate::pipeline::VIEWER_LAG_SEGMENTS;
 /// How many aired segments are remembered for `state()`.
-const AIRED_KEEP: usize = 20;
+const AIRED_KEEP: usize = 2 * crate::pipeline::VIEWER_LAG_SEGMENTS;
 /// Upper bound on state transitions within one `next()` call.
 const NEXT_GUARD: usize = 50;
 /// A seek runs after this much quiet; every new seek command moves the deadline (and target).
@@ -825,7 +826,7 @@ impl Channel {
 
     /// The monitor follows the clip being cut: while the window watches it, the clip's fresh
     /// segments are taken from ffmpeg every tick (not only when the broadcaster needs one) and
-    /// up to [`LOOKAHEAD`] of them that have not aired yet are listed; a paused film keeps its
+    /// those starting within [`LOOKAHEAD_S`] that have not aired yet are listed; a paused film keeps its
     /// still picture; rows past their time go. Unwatched (and without a monitor) the clip is
     /// polled when a segment is due, as before.
     fn refresh_monitor(&mut self) {
@@ -857,9 +858,14 @@ impl Channel {
                         let fresh = handle.poll();
                         c.ready.extend(fresh);
                     }
-                    let mut position_s = c.position_s();
+                    let start_s = c.position_s();
+                    let mut position_s = start_s;
                     let listed = c.monitor_listed.len();
-                    for (i, seg) in c.ready.iter().enumerate().take(LOOKAHEAD) {
+                    for (i, seg) in c.ready.iter().enumerate() {
+                        // Segments starting within the lookahead (12 s) of what airs next.
+                        if position_s - start_s >= LOOKAHEAD_S - 1e-6 {
+                            break;
+                        }
                         if i >= listed {
                             let seq = m.push(&key, c.item.id, seg, position_s);
                             c.monitor_listed.push_back(seq);
@@ -2060,6 +2066,8 @@ mod tests {
             Arc::new(factory.clone()),
             slates(),
         );
+        // The tests cut 4 s segments: the viewers' 12 s are 3 of them.
+        o.viewer_lag_segments = Some(3);
         let clock = Arc::clone(now);
         o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
         let removed = Arc::clone(removed);
@@ -4417,6 +4425,8 @@ mod tests {
             Arc::new(factory.clone()),
             slates(),
         );
+        // The tests cut 4 s segments: the viewers' 12 s are 3 of them.
+        o.viewer_lag_segments = Some(3);
         let clock = Arc::clone(&now);
         o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
         let sink = Arc::clone(&removed);
@@ -4463,7 +4473,7 @@ mod tests {
                 (1, a.id, 4.0, false),
                 (2, a.id, 8.0, false)
             ],
-            "at most {LOOKAHEAD} segments ahead of the air"
+            "at most {LOOKAHEAD_S} s ahead of the air"
         );
         assert_eq!(m.feed().aired_seq, None);
         // Two segments air: two more are listed, the aired ones stay (their file is gone).
@@ -4611,7 +4621,7 @@ mod tests {
         assert_eq!(m.rows().len(), 1, "the aired one");
         watch.touch();
         m.e.tick();
-        assert_eq!(m.rows().len(), 4, "watched: {LOOKAHEAD} ahead again");
+        assert_eq!(m.rows().len(), 4, "watched: {LOOKAHEAD_S} s ahead again");
     }
 
     fn setup_maybe_monitor(dir: Option<&Path>) -> Env {
@@ -4626,6 +4636,8 @@ mod tests {
             Arc::new(factory.clone()),
             slates(),
         );
+        // The tests cut 4 s segments: the viewers' 12 s are 3 of them.
+        o.viewer_lag_segments = Some(3);
         let clock = Arc::clone(&now);
         o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
         let sink = Arc::clone(&removed);

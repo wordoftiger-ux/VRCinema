@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::i18n::{Msg, error_msg};
 use crate::pipeline::playlist::{LivePlaylistInput, PlaylistSegment, build_live_playlist};
 use crate::pipeline::tsrewrite::{TsRewriter, content_end, min_dts};
+use crate::pipeline::{MIN_TARGET_DURATION_S, VIEWER_LAG_S};
 use crate::stats::{DtsMonitor, HlsCounters};
 
 /// Start of the channel timeline (10 s) so shifted DTS values are never negative.
@@ -40,7 +41,6 @@ pub trait SegmentSource {
     fn on_published(&mut self, seg: &PublishedSegment);
 }
 
-const INITIAL_SEGMENTS: usize = 3;
 const MAX_SOURCE_ATTEMPTS: usize = 5;
 const MAX_PUBLISH_PER_TICK: usize = 100;
 const DEFAULT_RETAIN_S: u64 = 60;
@@ -90,7 +90,9 @@ pub struct Broadcaster {
 
 impl Broadcaster {
     pub fn new(o: BroadcasterOptions, now: Box<dyn Fn() -> u64 + Send>) -> Self {
-        let target_duration = o.segment_seconds;
+        // Players start three target durations from the end: with short segments the list
+        // still announces a third of the viewers' lag (valid HLS: an upper bound).
+        let target_duration = o.segment_seconds.max(f64::from(MIN_TARGET_DURATION_S));
         Self {
             o,
             now,
@@ -123,7 +125,17 @@ impl Broadcaster {
             .saturating_mul(1000)
     }
 
-    /// Clears the directory and publishes 3 segments in advance.
+    /// Segments published in advance: the viewers' lag ([`VIEWER_LAG_S`]) in segments.
+    fn initial_segments(&self) -> usize {
+        let s = self.o.segment_seconds;
+        if s.is_finite() && s > 0.0 {
+            ((f64::from(VIEWER_LAG_S) / s).ceil() as usize).max(1)
+        } else {
+            1
+        }
+    }
+
+    /// Clears the directory and publishes the viewers' lag of segments in advance (12 s).
     pub fn start_initial(&mut self, source: &mut dyn SegmentSource) {
         let _ = std::fs::remove_dir_all(&self.o.dir);
         if let Err(e) = std::fs::create_dir_all(&self.o.dir) {
@@ -134,7 +146,7 @@ impl Broadcaster {
             );
         }
         let mut first = 0.0;
-        for i in 0..INITIAL_SEGMENTS {
+        for i in 0..self.initial_segments() {
             let d = self.publish_one(source);
             if i == 0 {
                 first = d;
@@ -520,6 +532,28 @@ mod tests {
         b.tick(&mut src);
         assert_eq!(ts_lines(&b).len(), 6);
         assert!(env.live_dir().join("5.ts").exists());
+    }
+
+    /// One-second segments: the same 12 s published ahead (12 segments), and a target duration
+    /// of 4 so players still start 12 s from the end.
+    #[test]
+    fn one_second_segments_keep_the_12_s_lead_and_a_target_duration_of_4() {
+        let env = Env::new();
+        let mut src = env.source();
+        for i in 0..20 {
+            let s = src.make_with("a", i, 1.0, 126_000 + i * 90_000);
+            src.push(s);
+        }
+        let mut o = env.options("main/", true);
+        o.segment_seconds = 1.0;
+        o.window_size = 40;
+        let mut b = env.broadcaster_with(o);
+        b.start_initial(&mut src);
+        assert_eq!(ts_lines(&b).len(), 12);
+        assert!(b.playlist().contains("#EXT-X-TARGETDURATION:4\n"));
+        env.advance(1_000);
+        b.tick(&mut src);
+        assert_eq!(ts_lines(&b).len(), 13);
     }
 
     #[test]

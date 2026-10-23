@@ -393,6 +393,7 @@ async fn generate_one(
             has_audio: false,
             duration_s: Some(f64::from(SLATE_SECONDS)),
             portrait: false,
+            keyframe_gap_s: Some(1.0),
         },
         encoder: VideoEncoder::Libx264,
         segment_seconds: o.segment_seconds,

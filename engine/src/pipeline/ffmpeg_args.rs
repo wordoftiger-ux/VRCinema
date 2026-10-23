@@ -320,6 +320,7 @@ mod tests {
             has_audio: true,
             duration_s: Some(60.0),
             portrait: false,
+            keyframe_gap_s: Some(1.0),
         }
     }
 

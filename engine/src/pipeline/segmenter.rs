@@ -69,6 +69,15 @@ pub fn parse_segment_csv(text: &str) -> Vec<(String, f64)> {
     out
 }
 
+/// How much of `list.csv` [`ClipSegmenter::poll`] has handed out.
+#[derive(Debug, Default)]
+struct Consumed {
+    /// Rows handed out (the next segment's index).
+    rows: usize,
+    /// Bytes of complete lines read.
+    bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 struct Snapshot {
     state: SegmenterState,
@@ -86,7 +95,7 @@ struct Snapshot {
 #[derive(Debug)]
 pub struct ClipSegmenter {
     out_dir: PathBuf,
-    consumed: Mutex<usize>,
+    consumed: Mutex<Consumed>,
     status: watch::Sender<Snapshot>,
     kill: Arc<Notify>,
     /// The ffmpeg process, once it runs.
@@ -138,7 +147,7 @@ impl ClipSegmenter {
         });
         let mut segmenter = ClipSegmenter {
             out_dir,
-            consumed: Mutex::new(0),
+            consumed: Mutex::new(Consumed::default()),
             status,
             kill: Arc::new(Notify::new()),
             pid: None,
@@ -278,22 +287,35 @@ impl ClipSegmenter {
     pub fn poll(&self) -> Vec<SegmentInfo> {
         // Hold the lock across read + parse + update so concurrent polls cannot hand out a
         // segment twice or move `consumed` backwards.
+        // The muxer only appends to its CSV list: read from the end of the last complete line
+        // (a long film has thousands of one-second rows; it is polled several times a second).
+        use std::io::{Read, Seek, SeekFrom};
         let mut consumed = self.consumed.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(bytes) = std::fs::read(self.out_dir.join("list.csv")) else {
+        let Ok(mut file) = std::fs::File::open(self.out_dir.join("list.csv")) else {
             return Vec::new();
         };
-        let all = parse_segment_csv(&String::from_utf8_lossy(&bytes));
-        let fresh = all
-            .iter()
+        let mut bytes = Vec::new();
+        if file.seek(SeekFrom::Start(consumed.bytes)).is_err()
+            || file.read_to_end(&mut bytes).is_err()
+        {
+            return Vec::new();
+        }
+        let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else {
+            return Vec::new();
+        };
+        let rows = parse_segment_csv(&String::from_utf8_lossy(&bytes[..=end]));
+        let first = consumed.rows;
+        let fresh: Vec<SegmentInfo> = rows
+            .into_iter()
             .enumerate()
-            .skip(*consumed)
-            .map(|(index, (name, duration))| SegmentInfo {
+            .map(|(i, (name, duration))| SegmentInfo {
                 path: self.out_dir.join(name),
-                duration: *duration,
-                index,
+                duration,
+                index: first + i,
             })
             .collect();
-        *consumed = all.len();
+        consumed.rows += fresh.len();
+        consumed.bytes += end as u64 + 1;
         fresh
     }
 
@@ -430,6 +452,7 @@ mod tests {
             has_audio,
             duration_s: Some(10.0),
             portrait: false,
+            keyframe_gap_s: Some(1.0),
         }
     }
 
@@ -631,7 +654,7 @@ mod tests {
         });
         ClipSegmenter {
             out_dir: dir.to_path_buf(),
-            consumed: Mutex::new(0),
+            consumed: Mutex::new(Consumed::default()),
             status,
             kill: Arc::new(Notify::new()),
             pid: None,

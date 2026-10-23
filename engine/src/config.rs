@@ -206,8 +206,8 @@ pub fn load_config(
             .map(PathBuf::from)
             .collect(),
         font_file: PathBuf::from(trimmed(env, "FONT_FILE").unwrap_or(default_font(windows))),
-        segment_seconds: 4,
-        window_size: 10,
+        segment_seconds: crate::pipeline::SEGMENT_S,
+        window_size: crate::pipeline::WINDOW_SEGMENTS,
         language,
     })
 }
@@ -457,8 +457,8 @@ mod tests {
         let c = load_config(&env(&[("ADMIN_PASSWORD", "haslo123")]), &root(), true).unwrap();
         assert_eq!(c.port, 8080);
         assert_eq!(c.host, "0.0.0.0");
-        assert_eq!(c.segment_seconds, 4);
-        assert_eq!(c.window_size, 10);
+        assert_eq!(c.segment_seconds, 1);
+        assert_eq!(c.window_size, 40);
         assert_eq!(c.video_encoder, VideoEncoder::Libx264);
         assert!(!c.trust_cloudflare);
         assert!(!c.trust_proxy);

@@ -16,8 +16,8 @@
 //! or any row of a clip that is no longer current, stays [`RETAIN_MS`] (90 s) and then goes; the
 //! links together never take more than [`MAX_BYTES`] (256 MiB) and the list never has more than
 //! [`MAX_ROWS`] rows — the oldest go first. Rows only ever leave from the front, so the
-//! numbering stays dense. The channel lists at most [`LOOKAHEAD`] segments that have not aired
-//! yet (about 12 s), so what is retained is about 90 s of the stream plus that.
+//! numbering stays dense. The channel lists the segments within [`LOOKAHEAD_S`] that have not aired
+//! yet (12 s), so what is retained is about 90 s of the stream plus that.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -27,16 +27,18 @@ use std::time::Instant;
 
 use crate::pipeline::segmenter::SegmentInfo;
 
-/// How many segments of the current clip that have not aired yet the monitor lists.
-pub const LOOKAHEAD: usize = 3;
+/// How far ahead of what airs next the monitor lists segments of the current clip that have
+/// not aired yet (the viewers' lag: 12 s, 12 segments).
+pub const LOOKAHEAD_S: f64 = crate::pipeline::VIEWER_LAG_S as f64;
 /// How long a row stays after its segment aired (or its clip stopped being current).
 pub const RETAIN_MS: u64 = 90_000;
-/// Upper bound on the size of the retained links.
+/// Upper bound on the size of the retained links (bytes follow the seconds kept, not the
+/// segment length).
 pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Upper bound on the rows of the list.
-pub const MAX_ROWS: usize = 120;
+/// Upper bound on the rows of the list: 8 minutes of segments.
+pub const MAX_ROWS: usize = crate::pipeline::segments_for(480);
 /// `EXT-X-TARGETDURATION` of a list without segments.
-const DEFAULT_TARGET_S: u64 = 4;
+const DEFAULT_TARGET_S: u64 = crate::pipeline::SEGMENT_S as u64;
 
 /// One segment the monitor lists.
 #[derive(Debug, Clone, PartialEq)]

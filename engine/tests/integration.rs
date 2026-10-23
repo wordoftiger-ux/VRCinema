@@ -69,7 +69,7 @@ fn make_clip(ffmpeg: &Path, file: &Path, size: &str, rate: u32, with_audio: bool
         ]
         .map(String::from),
     );
-    args.push((rate * 2).to_string());
+    args.push(rate.to_string());
     if with_audio {
         args.extend(["-c:a", "aac"].map(String::from));
     }
@@ -183,12 +183,12 @@ async fn two_clips_and_slates_form_one_stream_without_dts_going_backwards() {
         host_resolver: std::sync::Arc::new(vrcinema::rules::SystemHostResolver),
         check_viewer_media: true,
     });
-    let mut channel = Channel::new(ChannelOptions::new(
+    let mut channel = Channel::new(four_second_lag(ChannelOptions::new(
         MAIN_CHANNEL_ID,
         Arc::clone(&db),
         Arc::new(factory),
         slates,
-    ));
+    )));
     channel.start().unwrap();
 
     // Accelerated broadcaster clock; ffmpeg runs at its own pace.
@@ -414,12 +414,12 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
         host_resolver: std::sync::Arc::new(vrcinema::rules::SystemHostResolver),
         check_viewer_media: true,
     });
-    let mut channel = Channel::new(ChannelOptions::new(
+    let mut channel = Channel::new(four_second_lag(ChannelOptions::new(
         MAIN_CHANNEL_ID,
         Arc::clone(&db),
         Arc::new(factory),
         slates,
-    ));
+    )));
     channel.start().unwrap();
 
     let clock = Arc::new(AtomicU64::new(0));
@@ -586,7 +586,7 @@ async fn pause_and_resume_continue_the_same_film_without_dts_going_backwards() {
 // ---------- Seek (stage 4) ----------
 
 /// GOP of the counter film: a keyframe every 2 s (50 frames at 25 fps).
-const COUNTER_GOP_S: i64 = 2;
+const COUNTER_GOP_S: i64 = 1;
 
 /// A film whose picture is its own counter: the brightness of every frame is
 /// `16 + 3 × whole second` (luma), with a tone. Keyframes every [`COUNTER_GOP_S`].
@@ -607,7 +607,7 @@ fn make_counter_clip(ffmpeg: &Path, file: &Path, seconds: u32) {
             "-pix_fmt",
             "yuv420p",
         ])
-        .args(["-g", "50", "-c:a", "aac"])
+        .args(["-g", "25", "-c:a", "aac"])
         .arg(file)
         .output()
         .unwrap();
@@ -742,12 +742,12 @@ async fn seek_lands_on_its_target(force_transcode: bool) {
         host_resolver: std::sync::Arc::new(vrcinema::rules::SystemHostResolver),
         check_viewer_media: true,
     });
-    let mut channel = Channel::new(ChannelOptions::new(
+    let mut channel = Channel::new(four_second_lag(ChannelOptions::new(
         MAIN_CHANNEL_ID,
         Arc::clone(&db),
         Arc::new(factory),
         slates,
-    ));
+    )));
     channel.start().unwrap();
     let clock = Arc::new(AtomicU64::new(0));
     let live_dir = work_dir.join("live");
@@ -1044,6 +1044,7 @@ async fn a_new_ticker_look_starts_the_film_again_once_from_where_it_is() {
         ChannelOptions::new(MAIN_CHANNEL_ID, Arc::clone(&db), Arc::new(factory), slates);
     let sink = Arc::clone(&logs);
     options.log = Some(Box::new(move |m| sink.lock().unwrap().push(m.to_string())));
+    options.viewer_lag_segments = Some(3);
     let mut channel = Channel::new(options);
     channel.start().unwrap();
     let clock = Arc::new(AtomicU64::new(0));
@@ -1241,6 +1242,7 @@ async fn a_gpu_encoder_cuts_the_converted_film_into_four_second_segments() {
                 has_audio: true,
                 duration_s: Some(13.0),
                 portrait: false,
+                keyframe_gap_s: Some(1.0),
             },
             encoder,
             segment_seconds: 4,
@@ -1272,4 +1274,10 @@ async fn a_gpu_encoder_cuts_the_converted_film_into_four_second_segments() {
         lengths.iter().all(|s| *s <= 4.2),
         "{encoder:?}: segments {lengths:?}"
     );
+}
+
+/// The tests cut 4 s segments: the viewers' 12 s are 3 of them.
+fn four_second_lag(mut o: ChannelOptions) -> ChannelOptions {
+    o.viewer_lag_segments = Some(3);
+    o
 }
