@@ -328,6 +328,7 @@
   "log.pause_reason_no_viewers": "視聴者なし",
   "log.pause_reason_tunnel": "トンネル",
   "log.play_now": "今すぐ再生：「{title}」（#{id}）",
+  "log.preview_download_failed": "動画#{id}：プレビュー用のダウンロードに失敗しました（{error}）。プレビューには代わりにチャンネルのセグメントを表示します",
   "log.program_stopped": "プログラムを停止しました。",
   "log.queue_error_prefetch": "次の動画の事前準備中にキューのエラーが発生しました：{error}",
   "log.request_received": "視聴者{viewer}からのリクエスト：「{title}」（{status}）",

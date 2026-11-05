@@ -407,6 +407,13 @@ impl RealClipFactory {
         self.prober = prober;
         self
     }
+
+    /// Shares the downloaded films with the window's Preview ([`crate::preview_source`]): a
+    /// film downloaded for one is played by the other (one download per film).
+    pub fn with_downloads(mut self, downloads: TempDownloads) -> Self {
+        self.downloads = downloads;
+        self
+    }
 }
 
 /// A viewer's link: what it led to must not be the owner's network, and the programs get exactly

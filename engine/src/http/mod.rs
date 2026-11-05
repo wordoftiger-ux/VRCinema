@@ -102,6 +102,8 @@ pub struct AppState {
     ticker_redraws: Arc<std::sync::atomic::AtomicUsize>,
     /// Touched by the monitor's routes: the channel feeds the monitor while the window watches.
     pub(crate) monitor_watch: Arc<crate::pipeline::monitor::MonitorWatch>,
+    /// The films the window's Preview plays itself (`None`: only the monitor's segments).
+    pub(crate) preview: Option<crate::preview_source::PreviewSources>,
 }
 
 impl AppState {
@@ -162,6 +164,7 @@ impl AppState {
             viewer_salt: Arc::new(random_salt()),
             ticker_redraws: Arc::default(),
             monitor_watch: Arc::default(),
+            preview: None,
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -198,6 +201,12 @@ impl AppState {
         watch: Arc<crate::pipeline::monitor::MonitorWatch>,
     ) -> Self {
         self.monitor_watch = watch;
+        self
+    }
+
+    /// The films the window's Preview plays (`/api/desktop/preview*`).
+    pub fn with_preview(mut self, preview: crate::preview_source::PreviewSources) -> Self {
+        self.preview = Some(preview);
         self
     }
 

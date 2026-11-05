@@ -330,6 +330,7 @@
   "log.pause_reason_no_viewers": "keine Zuschauer",
   "log.pause_reason_tunnel": "Tunnel",
   "log.play_now": "Jetzt abspielen: „{title}“ (#{id})",
+  "log.preview_download_failed": "Video #{id}: Der Download für die Vorschau ist fehlgeschlagen ({error}); die Vorschau zeigt stattdessen die Segmente des Kanals",
   "log.program_stopped": "Programm beendet.",
   "log.queue_error_prefetch": "Warteschlangenfehler beim Vorbereiten: {error}",
   "log.request_received": "Wunsch von Zuschauer {viewer}: „{title}“ ({status})",

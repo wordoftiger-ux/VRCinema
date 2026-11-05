@@ -324,6 +324,7 @@
   "log.pause_reason_no_viewers": "Word used inside log entries (Settings, Log tab). Why the channel is paused; lowercase, used in log.pause as {reason}.",
   "log.pause_reason_tunnel": "Word used inside log entries (Settings, Log tab). Why the channel is paused; lowercase, used in log.pause as {reason}.",
   "log.play_now": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The owner chose a video to play at once.",
+  "log.preview_download_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The window's Preview plays a film from the internet from a file yt-dlp downloads; this download failed. {error} is yt-dlp's message.",
   "log.program_stopped": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The program has stopped cleanly.",
   "log.queue_error_prefetch": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The next video is prepared in advance; {error} is the reason.",
   "log.request_received": "Log entry (Settings, Log tab; the log file on disk keeps the English text). A viewer asked for a video. {viewer} is an anonymous tag of 8 hex digits (never an address), keep it as it is; {status} is log.status_queued / log.status_pending.",

@@ -332,6 +332,7 @@
   "log.pause_reason_no_viewers": "aucun spectateur",
   "log.pause_reason_tunnel": "tunnel",
   "log.play_now": "Lecture immédiate : \"{title}\" (#{id})",
+  "log.preview_download_failed": "Vidéo #{id} : le téléchargement pour l’aperçu a échoué ({error}) ; l’aperçu affiche à la place les segments de la chaîne",
   "log.program_stopped": "Programme arrêté.",
   "log.queue_error_prefetch": "Erreur de la file d’attente lors de la préparation de la vidéo suivante : {error}",
   "log.request_received": "Demande du spectateur {viewer} : \"{title}\" ({status})",

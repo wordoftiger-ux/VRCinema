@@ -6,18 +6,25 @@
 use std::collections::HashMap;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::{
+    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
+};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::{ApiError, AppState};
+use crate::preview_source::{PreviewStatus, Unsatisfiable, byte_range, content_type};
 
 pub(super) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/desktop/monitor.m3u8", get(playlist))
         .route("/api/desktop/monitor/{clip}/{name}", get(segment))
+        .route("/api/desktop/preview", get(preview_status))
+        .route("/api/desktop/preview/{item}/media", get(preview_media))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             super::require_window,
@@ -88,6 +95,113 @@ async fn segment(
         bytes,
     )
         .into_response()
+}
+
+/// What the Preview can play for `?item=<id>` (spec `2026-11-06-preview-player-design.md`):
+/// `{itemId, state: ready|preparing|unavailable, reason?, url?}`. A film from the internet is
+/// downloaded on the first ask; the window asks again while it is `preparing`.
+async fn preview_status(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let no_item = || ApiError::coded(StatusCode::NOT_FOUND, "no_such_item", &[]).into_response();
+    let Some(id) = query.get("item").and_then(|s| s.parse::<i64>().ok()) else {
+        return no_item();
+    };
+    let item = match state.with_db(|c| crate::db::QueueRepo::new(c).get(id)) {
+        Ok(Some(item)) => item,
+        Ok(None) => return no_item(),
+        Err(e) => return e.into_response(),
+    };
+    let status = match &state.preview {
+        Some(preview) => preview.status(&item).await,
+        None => PreviewStatus::Unavailable {
+            reason: "unsupported",
+        },
+    };
+    let mut body = serde_json::to_value(&status).unwrap_or_default();
+    if let Some(map) = body.as_object_mut() {
+        map.insert("itemId".into(), id.into());
+        if status == PreviewStatus::Ready {
+            map.insert(
+                "url".into(),
+                format!("/api/desktop/preview/{id}/media").into(),
+            );
+        }
+    }
+    ([(CACHE_CONTROL, "no-store")], axum::Json(body)).into_response()
+}
+
+/// The Preview's film itself, with `Range` (the window's `<video>` seeks in it).
+async fn preview_media(
+    State(state): State<AppState>,
+    Path(item): Path<i64>,
+    headers: HeaderMap,
+) -> Response {
+    let missing = || ApiError::coded(StatusCode::NOT_FOUND, "no_such_item", &[]).into_response();
+    let Some(path) = state.preview.as_ref().and_then(|p| p.file(item)) else {
+        return missing();
+    };
+    let Ok(mut file) = tokio::fs::File::open(&path).await else {
+        return missing();
+    };
+    let Ok(len) = file.metadata().await.map(|m| m.len()) else {
+        return missing();
+    };
+    let kind = content_type(&path);
+    let range = byte_range(headers.get(RANGE).and_then(|v| v.to_str().ok()), len);
+    let (status, first, last) = match range {
+        Err(Unsatisfiable) => {
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(CONTENT_RANGE, format!("bytes */{len}"))],
+            )
+                .into_response();
+        }
+        Ok(None) if len == 0 => {
+            return (
+                [(CONTENT_TYPE, kind), (CACHE_CONTROL, "no-store")],
+                Vec::<u8>::new(),
+            )
+                .into_response();
+        }
+        Ok(None) => (StatusCode::OK, 0, len - 1),
+        Ok(Some((first, last))) => (StatusCode::PARTIAL_CONTENT, first, last),
+    };
+    if first > 0 && file.seek(std::io::SeekFrom::Start(first)).await.is_err() {
+        return missing();
+    }
+    let count = last - first + 1;
+    let body = Body::from_stream(chunks(file.take(count)));
+    let mut res = (status, body).into_response();
+    let h = res.headers_mut();
+    h.insert(CONTENT_TYPE, HeaderValue::from_static(kind));
+    h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    h.insert(CONTENT_LENGTH, HeaderValue::from(count));
+    if status == StatusCode::PARTIAL_CONTENT
+        && let Ok(v) = HeaderValue::from_str(&format!("bytes {first}-{last}/{len}"))
+    {
+        h.insert(CONTENT_RANGE, v);
+    }
+    res
+}
+
+/// The bytes of `reader` in pieces of up to 256 KiB.
+fn chunks(
+    reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> + Send {
+    futures_util::stream::unfold(reader, |mut reader| async move {
+        let mut buf = vec![0u8; 256 * 1024];
+        match reader.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok(buf), reader))
+            }
+            Err(e) => Some((Err(e), reader)),
+        }
+    })
 }
 
 #[cfg(test)]

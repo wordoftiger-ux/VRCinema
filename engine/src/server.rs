@@ -25,7 +25,8 @@ use crate::pipeline::probe::probe_duration;
 use crate::pipeline::slates::{
     RETAIN_S, SlateOptions, SlateSwapper, generate_slates, request_url, system_fonts_dir,
 };
-use crate::pipeline::temp_downloads::reset_dir;
+use crate::pipeline::temp_downloads::{TempDownloads, reset_dir};
+use crate::preview_source::PreviewSources;
 use crate::resolver::fake::FakeResolver;
 use crate::resolver::file::FileResolver;
 use crate::resolver::local::{FileDurationProbe, LocalResolver};
@@ -321,6 +322,7 @@ async fn start_channel_loop(
     pause_reasons: Vec<PauseReason>,
     fake_resolver: bool,
     monitor: Option<Arc<MonitorWatch>>,
+    downloads: &TempDownloads,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -355,6 +357,7 @@ async fn start_channel_loop(
         let shared_log = Arc::clone(shared_log);
         let encoder = live.encoder.clone();
         let public_url = live.public_url.clone();
+        let downloads = downloads.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -377,7 +380,8 @@ async fn start_channel_loop(
                 // The fake resolver (a test mode of black-box tests, no extractor involved)
                 // hands out local files as media.
                 check_viewer_media: !fake_resolver,
-            });
+            })
+            .with_downloads(downloads.clone());
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
                 Arc::clone(&db),
@@ -480,6 +484,13 @@ pub async fn run(
     let _ = reset_dir(&config.data_dir.join(TEMP_DIR));
 
     let monitor_watch = Arc::new(MonitorWatch::default());
+    // Films yt-dlp downloads, shared by the air's clips and the window's Preview.
+    let downloads = TempDownloads::new(config.data_dir.join(TEMP_DIR));
+    let preview = PreviewSources::new(
+        Arc::clone(&resolver),
+        downloads.clone(),
+        Some(Arc::clone(&shared_log)),
+    );
     let mut slates = None;
     let (handle, engine_task) = if start_channel {
         let (handle, task, swapper) = start_channel_loop(
@@ -492,6 +503,7 @@ pub async fn run(
             pause_reasons,
             fake_resolver.is_some(),
             monitor.then(|| Arc::clone(&monitor_watch)),
+            &downloads,
         )
         .await?;
         slates = Some(swapper);
@@ -527,7 +539,8 @@ pub async fn run(
         .with_log(Arc::clone(&shared_log))
         .with_live(live.clone())
         .with_slates(slates)
-        .with_monitor_watch(monitor_watch);
+        .with_monitor_watch(monitor_watch)
+        .with_preview(preview);
         if let Some(configure) = configure_state {
             state = configure(state);
         }

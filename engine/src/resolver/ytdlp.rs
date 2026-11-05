@@ -190,6 +190,13 @@ pub const MAX_DOWNLOAD_SIZE: &str = "200M";
 /// also covers the resolution before it.
 pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(100);
 
+/// The largest film downloaded for the window's Preview ([`MediaResolver::download_preview`]):
+/// longer films than the air's own downloads (a larger one plays from the engine's segments).
+pub const PREVIEW_MAX_DOWNLOAD_SIZE: &str = "2G";
+
+/// How long a download for the Preview may take (it runs beside the air, not before it).
+pub const PREVIEW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// yt-dlp's output template for the file `<stem>.<ext>`; a `%` of the path is doubled (yt-dlp
 /// would read it as the start of a field).
 pub fn output_template(stem: &Path) -> OsString {
@@ -359,13 +366,13 @@ impl YtDlpResolver {
     }
 
     /// The arguments of a download into `<stem>.<ext>` (see [`MediaResolver::download`]).
-    fn download_argv(&self, url: &str, stem: &Path) -> Vec<OsString> {
+    fn download_argv(&self, url: &str, stem: &Path, max_size: &str) -> Vec<OsString> {
         let mut mode: Vec<OsString> = [
             "--no-playlist",
             "-f",
             FORMAT_SELECTOR,
             "--max-filesize",
-            MAX_DOWNLOAD_SIZE,
+            max_size,
             "--match-filter",
             "!is_live",
         ]
@@ -381,12 +388,18 @@ impl YtDlpResolver {
         self.argv(&mode, url)
     }
 
-    async fn download_to(&self, url: &str, stem: &Path) -> Result<PathBuf, ResolveError> {
-        let args = self.download_argv(url, stem);
+    async fn download_to(
+        &self,
+        url: &str,
+        stem: &Path,
+        max_size: &str,
+        timeout: Duration,
+    ) -> Result<PathBuf, ResolveError> {
+        let args = self.download_argv(url, stem, max_size);
         let mut leftovers = Leftovers { stem, keep: None };
         let out = self
             .runner
-            .run(&self.path, &args, DOWNLOAD_TIMEOUT)
+            .run(&self.path, &args, timeout)
             .await
             .map_err(process_error)?;
         let film = finished_download(stem, &files_of(stem))
@@ -441,7 +454,26 @@ impl MediaResolver for YtDlpResolver {
     }
 
     async fn download(&self, url: &str, stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
-        Some(self.download_to(url, stem).await)
+        Some(
+            self.download_to(url, stem, MAX_DOWNLOAD_SIZE, DOWNLOAD_TIMEOUT)
+                .await,
+        )
+    }
+
+    async fn download_preview(
+        &self,
+        url: &str,
+        stem: &Path,
+    ) -> Option<Result<PathBuf, ResolveError>> {
+        Some(
+            self.download_to(
+                url,
+                stem,
+                PREVIEW_MAX_DOWNLOAD_SIZE,
+                PREVIEW_DOWNLOAD_TIMEOUT,
+            )
+            .await,
+        )
     }
 }
 

@@ -78,6 +78,16 @@ pub trait MediaResolver: Send + Sync {
     async fn download(&self, _url: &str, _stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
         None
     }
+
+    /// Like [`Self::download`], for the window's Preview: larger films and more time
+    /// (`None`: this resolver cannot download).
+    async fn download_preview(
+        &self,
+        _url: &str,
+        _stem: &Path,
+    ) -> Option<Result<PathBuf, ResolveError>> {
+        None
+    }
 }
 
 /// Routes disk files (`local:` library files, `file:` absolute paths) to the file modules, pixeldrain hosts to their own module and
@@ -158,6 +168,14 @@ impl MediaResolver for CompositeResolver {
 
     async fn download(&self, url: &str, stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
         self.pick(url).ok()?.download(url, stem).await
+    }
+
+    async fn download_preview(
+        &self,
+        url: &str,
+        stem: &Path,
+    ) -> Option<Result<PathBuf, ResolveError>> {
+        self.pick(url).ok()?.download_preview(url, stem).await
     }
 }
 

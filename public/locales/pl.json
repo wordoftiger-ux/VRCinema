@@ -334,6 +334,7 @@
   "log.pause_reason_no_viewers": "brak widzów",
   "log.pause_reason_tunnel": "tunel",
   "log.play_now": "Odtwórz teraz: „{title}” (#{id})",
+  "log.preview_download_failed": "Film #{id}: pobieranie dla Podglądu nie powiodło się ({error}); Podgląd pokazuje zamiast tego fragmenty kanału",
   "log.program_stopped": "Program zatrzymany.",
   "log.queue_error_prefetch": "Błąd kolejki przy wyprzedzaniu: {error}",
   "log.request_received": "Zgłoszenie od widza {viewer}: „{title}” ({status})",
