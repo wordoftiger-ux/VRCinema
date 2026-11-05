@@ -86,6 +86,9 @@ Common to all languages:
 | Skip / next video | skip / next video | pomiń / następny film | omitir / siguiente video | überspringen / nächstes Video | passer / vidéo suivante (state: interrompue) | スキップ / 次の動画 (state: スキップ済み) |
 | From the beginning | From the beginning | Od początku | Desde el principio | Von vorn | Depuis le début | 最初から |
 | Play now | Play now | Odtwórz teraz | Reproducir ahora | Jetzt abspielen | Lire maintenant | 今すぐ再生 |
+| Play next — queue a video right after the one on air | Play next | Odtwórz jako następny | Reproducir a continuación | Als Nächstes abspielen | Lire ensuite | 次に再生 |
+| Clear the queue — remove every waiting video | Clear queue | Wyczyść kolejkę | Vaciar la cola | Warteschlange leeren | Vider la file | キューを空にする |
+| Undo (a removal, for a few seconds) | Undo | Cofnij | Deshacer | Rückgängig | Annuler | 元に戻す |
 | On air — also the caption of the right screen of the Channel view (the stream as the viewers get it) | on air / On air | na antenie / Na antenie | en emisión / En emisión | auf Sendung (laufendes Video) / Auf Sendung | à l’antenne / À l’antenne | 放送中 (what the channel broadcasts now) |
 | Live stream | live stream | transmisja na żywo | transmisión en vivo (tag: EN VIVO) | Livestream | direct (tag: EN DIRECT) | ライブ配信 (only a live source; tag: ライブ) |
 | History | History | Historia | Historial | Verlauf | Historique | 履歴 |
