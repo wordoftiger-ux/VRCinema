@@ -137,6 +137,31 @@ pub struct NewItem {
     pub requester_key_hash: Option<String>,
 }
 
+/// The viewer behind an item: their device when the request carried a device key, else the
+/// nick they typed (a viewer without a device key). The owner's items have no requester.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Requester {
+    Device(String),
+    Nick(String),
+}
+
+impl Requester {
+    pub fn of(item: &QueueItem) -> Option<Self> {
+        if item.added_by != AddedBy::Public {
+            return None;
+        }
+        match (&item.requester_key_hash, &item.requester_name) {
+            (Some(key), _) => Some(Self::Device(key.clone())),
+            (None, Some(name)) => Some(Self::Nick(name.clone())),
+            (None, None) => None,
+        }
+    }
+
+    pub fn matches(&self, item: &QueueItem) -> bool {
+        Self::of(item).as_ref() == Some(self)
+    }
+}
+
 fn bad_value(idx: usize, what: &str, got: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         idx,
@@ -403,6 +428,70 @@ impl<'a> QueueRepo<'a> {
             .chain(std::iter::once(Value::Integer(i64::from(limit))));
         let mut stmt = self.conn.prepare(&sql)?;
         stmt.query_map(params_from_iter(args), to_item)?.collect()
+    }
+
+    /// Marks every item of the channel with one of `statuses` (and, with `requester`, only that
+    /// viewer's) as removed, in one transaction. Returns each removed id with the status it
+    /// had, in queue order, for [`QueueRepo::restore_removed`].
+    pub fn remove_where(
+        &self,
+        channel_id: i64,
+        statuses: &[ItemStatus],
+        requester: Option<&Requester>,
+    ) -> rusqlite::Result<Vec<(i64, ItemStatus)>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let removed: Vec<(i64, ItemStatus)> = QueueRepo::new(&tx)
+            .list_by_status(channel_id, statuses)?
+            .into_iter()
+            .filter(|i| requester.is_none_or(|r| r.matches(i)))
+            .map(|i| (i.id, i.status))
+            .collect();
+        let now = now_ms();
+        for (id, _) in &removed {
+            tx.execute(
+                "UPDATE queue_items SET status = 'removed', finished_at = ? WHERE id = ?",
+                params![now, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Puts removed items back with the status they had (an item that was on air goes back to
+    /// the front of the queue); items no longer `removed` stay as they are. Returns how many
+    /// came back.
+    pub fn restore_removed(&self, items: &[(i64, ItemStatus)]) -> rusqlite::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut restored = 0;
+        let mut was_playing = Vec::new();
+        for &(id, status) in items {
+            let back = if status == ItemStatus::Playing {
+                ItemStatus::Queued
+            } else {
+                status
+            };
+            let changed = tx.execute(
+                "UPDATE queue_items SET status = ?, finished_at = NULL, error = NULL
+                 WHERE id = ? AND status = 'removed'",
+                params![back.as_str(), id],
+            )?;
+            restored += changed;
+            if changed > 0 && status == ItemStatus::Playing {
+                was_playing.push(id);
+            }
+        }
+        if let Some(&first) = was_playing.first() {
+            let repo = QueueRepo::new(&tx);
+            if let Some(item) = repo.get(first)? {
+                let queued = repo.list_by_status(item.channel_id, &[ItemStatus::Queued])?;
+                let ids: Vec<i64> = std::iter::once(first)
+                    .chain(queued.iter().map(|i| i.id).filter(|&i| i != first))
+                    .collect();
+                renumber_in(&tx, &ids)?;
+            }
+        }
+        tx.commit()?;
+        Ok(restored)
     }
 
     fn renumber(&self, ids: &[i64]) -> rusqlite::Result<()> {

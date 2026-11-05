@@ -4322,3 +4322,108 @@ async fn the_settings_carry_the_modes_the_lists_and_the_popular_sites() {
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn queue_tools_remove_a_viewer_or_everything_block_undo_and_play_next() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let viewer = |title: &str, key: &str, status: ItemStatus| {
+        h.with_db(|c| {
+            QueueRepo::new(c)
+                .add(&NewItem {
+                    channel_id: MAIN_CHANNEL_ID,
+                    source_url: format!("https://youtu.be/{title}"),
+                    title: title.into(),
+                    duration_s: Some(1.0),
+                    is_live: false,
+                    status,
+                    added_by: AddedBy::Public,
+                    requester_name: Some("Ola".into()),
+                    requester_ip: Some("1.1.1.1".into()),
+                    requester_key_hash: crate::nicks::hash_device_key(key),
+                })
+                .unwrap()
+        })
+    };
+    let on_air = viewer("on-air", KEY_A, ItemStatus::Queued);
+    h.with_db(|c| QueueRepo::new(c).start_playing(on_air.id).unwrap());
+    let a = viewer("a", KEY_A, ItemStatus::Queued);
+    viewer("a2", KEY_A, ItemStatus::PendingApproval);
+    let host = h.add("host", ItemStatus::Queued);
+    let b = viewer("b", KEY_B, ItemStatus::Queued);
+    h.commands();
+    let post = |path: &str, body: Value| {
+        h.send(
+            call("POST", &format!("/api/admin/channels/main/{path}"))
+                .cookie(&cookie)
+                .json(body),
+        )
+    };
+
+    let r = post("remove-requester", json!({"itemId": a.id, "dryRun": true})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.json(),
+        json!({"name": "Ola", "queued": 1, "pending": 1,
+               "playing": {"itemId": on_air.id, "title": "on-air"}, "canBlock": true, "blocked": false})
+    );
+    let r = post("remove-requester", json!({"itemId": host.id})).await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.json()["code"], "no_requester");
+
+    let r = post("remove-requester", json!({"itemId": a.id, "block": true})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let body = r.json();
+    assert_eq!(
+        (body["removed"].clone(), body["blocked"].clone()),
+        (json!(2), json!(true))
+    );
+    assert_eq!(h.item(a.id).status, ItemStatus::Removed);
+    assert_eq!(
+        h.item(on_air.id).status,
+        ItemStatus::Playing,
+        "on air stays"
+    );
+    let key_a = crate::nicks::hash_device_key(KEY_A).unwrap();
+    let blocked =
+        |h: &Harness| h.with_db(|c| crate::nicks::NickStore::new(c).is_blocked(&key_a).unwrap());
+    assert!(blocked(&h));
+
+    let r = post("undo", json!({"undo": body["undo"]})).await;
+    assert_eq!(r.json(), json!({"restored": 2}));
+    assert_eq!(h.item(a.id).status, ItemStatus::Queued);
+    assert!(!blocked(&h), "the undo lifts the block it made");
+    let r = post("undo", json!({"undo": body["undo"]})).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(r.json()["code"], "undo_expired");
+
+    // Clearing takes everything waiting, but not the film on air unless asked.
+    let r = post("clear", json!({})).await;
+    assert_eq!(r.json()["removed"], 4);
+    assert_eq!(h.item(on_air.id).status, ItemStatus::Playing);
+    assert_eq!(h.item(b.id).status, ItemStatus::Removed);
+    let r = post("clear", json!({"includePlaying": true})).await;
+    assert_eq!(r.json()["removed"], 1);
+    assert_eq!(h.item(on_air.id).status, ItemStatus::Removed);
+    let r = post("clear", json!({"includePlaying": "yes"})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    // Play next: a queued video moves first, a played one comes back first.
+    h.with_db(|c| {
+        QueueRepo::new(c)
+            .set_status(host.id, ItemStatus::Played, None)
+            .unwrap()
+    });
+    let r = post("play-next", json!({"itemId": host.id})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let again = r.json()["itemId"].as_i64().unwrap();
+    assert_ne!(again, host.id);
+    let c = h.add("c", ItemStatus::Queued);
+    assert_eq!(h.list(ItemStatus::Queued)[0].id, again);
+    let r = post("play-next", json!({"itemId": c.id})).await;
+    assert_eq!(r.json()["itemId"], c.id);
+    assert_eq!(h.list(ItemStatus::Queued)[0].id, c.id);
+    let r = post("play-next", json!({"itemId": a.id})).await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.json()["code"], "not_playable_next");
+}

@@ -1171,3 +1171,95 @@ fn link_mode_and_blocked_domains_are_validated_normalised_and_stored() {
         "blockedDomains: oczekiwano listy"
     );
 }
+
+fn viewer(title: &str, name: Option<&str>, key: Option<&str>, status: ItemStatus) -> NewItem {
+    NewItem {
+        added_by: AddedBy::Public,
+        requester_name: name.map(str::to_string),
+        requester_key_hash: key.map(str::to_string),
+        status,
+        ..item(title)
+    }
+}
+
+#[test]
+fn remove_where_takes_one_viewer_or_everything_and_restore_puts_it_back() {
+    use super::queue::Requester;
+    let conn = mem();
+    let q = QueueRepo::new(&conn);
+    let on_air = q
+        .add(&viewer(
+            "on-air",
+            Some("Ola"),
+            Some("k1"),
+            ItemStatus::Queued,
+        ))
+        .unwrap();
+    q.start_playing(on_air.id).unwrap();
+    q.add(&viewer("a", Some("Ola"), Some("k1"), ItemStatus::Queued))
+        .unwrap();
+    q.add(&item("host")).unwrap();
+    // Same device under another nick: still that viewer.
+    q.add(&viewer(
+        "b",
+        Some("Ola2"),
+        Some("k1"),
+        ItemStatus::PendingApproval,
+    ))
+    .unwrap();
+    q.add(&viewer("c", Some("Ola"), None, ItemStatus::Queued))
+        .unwrap();
+    q.add(&viewer("d", Some("Tomek"), Some("k2"), ItemStatus::Queued))
+        .unwrap();
+
+    let device = Requester::Device("k1".into());
+    let removed = q
+        .remove_where(
+            MAIN_CHANNEL_ID,
+            &[ItemStatus::Queued, ItemStatus::PendingApproval],
+            Some(&device),
+        )
+        .unwrap();
+    assert_eq!(removed.len(), 2);
+    assert_eq!(queued_titles(&q), ["host", "c", "d"]);
+    assert_eq!(
+        q.get(on_air.id).unwrap().unwrap().status,
+        ItemStatus::Playing
+    );
+
+    // A nick without a device matches only items without a device key.
+    let nick = Requester::Nick("Ola".into());
+    let by_nick = q
+        .remove_where(MAIN_CHANNEL_ID, &[ItemStatus::Queued], Some(&nick))
+        .unwrap();
+    assert_eq!(by_nick.len(), 1);
+    assert_eq!(queued_titles(&q), ["host", "d"]);
+
+    assert_eq!(q.restore_removed(&removed).unwrap(), 2);
+    assert_eq!(queued_titles(&q), ["a", "host", "d"]);
+    let b = q
+        .list_by_status(MAIN_CHANNEL_ID, &[ItemStatus::PendingApproval])
+        .unwrap();
+    assert_eq!(titles(b), ["b"]);
+    assert!(q.get(removed[0].0).unwrap().unwrap().finished_at.is_none());
+    // A second restore changes nothing.
+    assert_eq!(q.restore_removed(&removed).unwrap(), 0);
+
+    // Everything, the film on air too; it comes back first in the queue.
+    let all = q
+        .remove_where(
+            MAIN_CHANNEL_ID,
+            &[ItemStatus::Queued, ItemStatus::Playing],
+            None,
+        )
+        .unwrap();
+    assert_eq!(all.len(), 4);
+    assert!(queued_titles(&q).is_empty());
+    assert_eq!(q.restore_removed(&all).unwrap(), 4);
+    assert_eq!(queued_titles(&q), ["on-air", "a", "host", "d"]);
+    assert_eq!(
+        Requester::of(&q.get(on_air.id).unwrap().unwrap()),
+        Some(device)
+    );
+    assert_eq!(Requester::of(&q.add(&item("x")).unwrap()), None);
+}

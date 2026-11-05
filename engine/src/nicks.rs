@@ -292,6 +292,14 @@ impl<'a> NickStore<'a> {
             > 0)
     }
 
+    /// Lifts the block of this device; returns whether there was one.
+    pub fn unblock_key(&self, key_hash: &str) -> rusqlite::Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM blocked_devices WHERE key_hash = ?", [key_hash])?
+            > 0)
+    }
+
     pub fn key_hash_of(&self, skeleton: &str) -> rusqlite::Result<Option<String>> {
         self.conn
             .query_row(

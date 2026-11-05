@@ -11,7 +11,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub use queue::{ACTIVE_STATUSES, AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo};
+pub use queue::{ACTIVE_STATUSES, AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo, Requester};
 pub use settings::{
     ChannelSettings, LinkMode, SettingsPatch, SettingsRepo, sanitize_settings_patch,
 };

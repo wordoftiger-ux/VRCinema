@@ -6,6 +6,7 @@ mod routes_admin;
 mod routes_desktop;
 mod routes_monitor;
 mod routes_public;
+mod routes_queue;
 mod routes_stream;
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -102,6 +103,8 @@ pub struct AppState {
     ticker_redraws: Arc<std::sync::atomic::AtomicUsize>,
     /// Touched by the monitor's routes: the channel feeds the monitor while the window watches.
     pub(crate) monitor_watch: Arc<crate::pipeline::monitor::MonitorWatch>,
+    /// The owner's bulk removals that can still be undone.
+    pub(crate) queue_undo: Arc<routes_queue::UndoStore>,
 }
 
 impl AppState {
@@ -162,6 +165,7 @@ impl AppState {
             viewer_salt: Arc::new(random_salt()),
             ticker_redraws: Arc::default(),
             monitor_watch: Arc::default(),
+            queue_undo: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -1042,6 +1046,7 @@ pub fn build_router(state: AppState) -> Router {
     } else {
         routes_admin::router()
     }
+    .merge(routes_queue::router())
     .route_layer(middleware::from_fn_with_state(
         state.clone(),
         routes_admin::require_admin,
