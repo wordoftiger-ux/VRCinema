@@ -393,6 +393,8 @@ async fn post_list(
         "added": accepted.len(),
         "skipped": skipped,
         "listId": list_id,
+        // The icon of the viewer's device, as a single request's item carries it.
+        "requesterBadge": super::requester_badge(AddedBy::Public, viewer.key_hash.as_deref()),
         "results": rows.iter().map(|r| row_json(r, status, lang)).collect::<Vec<_>>(),
     })))
 }

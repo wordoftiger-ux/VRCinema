@@ -1,4 +1,6 @@
 // "Add a video": the link, the nick (with this device's icon) and what the channel accepts.
+// With the owner's "lists" setting on, the link field takes several links (one per line) and
+// playlists; the answer lists what was added and why the rest was left out.
 
 import { useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
@@ -19,6 +21,28 @@ export function requestErrorText(e) {
     return tn('errors.too_many_active', e.data.count);
   }
   return errorText(e);
+}
+
+/** The non-empty lines of the link field. */
+export function linkLines(text) {
+  return String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+}
+
+/** What a list request did: the counts, then each left-out link or entry with its reason. */
+function ListResult({ result }) {
+  const left = result.results.filter((r) => r.status === 'skipped');
+  const key = result.status === 'pending_approval' ? 'viewer.list_pending' : 'viewer.list_added';
+  return html`
+    <div class="v-list-result" role="status" data-added=${result.added} data-skipped=${result.skipped}>
+      <p>
+        ${result.added ? html`<span class="ok">${tn(key, result.added)}</span>` : null}
+        ${left.length ? html`<span>${tn('viewer.list_skipped', left.length)}</span>` : null}
+      </p>
+      ${left.length
+        ? html`<ul>${left.map((r, i) => html`<li key=${i} data-code=${r.code ?? undefined}>
+            <b>${r.title || t('viewer.list_line', { line: r.line })}</b>${sentenceGap()}<span>${r.reason}</span></li>`)}</ul>`
+        : null}
+    </div>`;
 }
 
 /** The nick with two digits at the end (kept within the length limit): a free one is likely. */
@@ -49,7 +73,11 @@ export function RequestForm() {
   const [error, setError] = useState(null);
   const [suggestion, setSuggestion] = useState(null);
   const [badge, setBadge] = useState(savedBadge());
+  const [result, setResult] = useState(null);
   const nickField = useRef(null);
+  const rules = channel.value?.rules;
+  const lists = Boolean(rules?.viewerLists);
+  const lines = lists ? linkLines(url) : [];
 
   /** Takes the suggested nick; the button goes away with the error, so the focus goes to the nick. */
   const takeSuggestion = () => {
@@ -66,20 +94,35 @@ export function RequestForm() {
     setBusy(true);
     setError(null);
     setSuggestion(null);
+    setResult(null);
     saveNick(name);
     // The key is made when a nick is first used; once it exists it goes with every request.
     const key = name ? deviceKey() : existingDeviceKey();
-    const body = { url: url.trim(), name };
+    const body = lists ? { urls: lines, name } : { url: url.trim(), name };
     if (key) body.deviceKey = key;
+    const keepBadge = (b) => {
+      if (name && b && typeof b === 'object') {
+        saveBadge(b);
+        setBadge(b);
+      }
+    };
     try {
+      if (lists) {
+        // Every link is read by the channel; a long list takes a while.
+        const r = await api('POST', '/api/channels/main/request-list', body, { timeoutMs: 180000 });
+        setResult(r);
+        if (r.added) {
+          setUrl('');
+          keepBadge(r.requesterBadge);
+        }
+        refresh();
+        return;
+      }
       const r = await api('POST', '/api/channels/main/requests', body, { timeoutMs: 60000 });
       const title = r.item?.title;
       showToast(r.status === 'pending_approval' ? t('viewer.pending', { title }) : t('viewer.added', { title }));
       setUrl('');
-      if (name && r.item?.requesterBadge && typeof r.item.requesterBadge === 'object') {
-        saveBadge(r.item.requesterBadge);
-        setBadge(r.item.requesterBadge);
-      }
+      keepBadge(r.item?.requesterBadge);
       refresh();
     } catch (err) {
       // Kept as the error itself: its text follows a language switch made after it.
@@ -94,13 +137,22 @@ export function RequestForm() {
     <section class="v-add card2" aria-labelledby="v-add-h">
       <h2 id="v-add-h" class="v-eyebrow">${t('viewer.add_heading')}</h2>
       <form onSubmit=${submit} novalidate>
-        <label class="v-field">
+        ${lists
+          ? html`<label class="v-field">
+              <span>${t('viewer.links_label')}</span>
+              <textarea class="txt v-links" name="urls" rows="4" autocomplete="off" spellcheck="false"
+                placeholder=${t('viewer.links_placeholder')} value=${url} readOnly=${busy}
+                aria-describedby=${error ? 'v-links-hint v-error' : 'v-links-hint'} aria-invalid=${error ? 'true' : undefined}
+                onInput=${(e) => setUrl(e.currentTarget.value)}></textarea>
+              <small id="v-links-hint">${tn('viewer.links_hint', rules.viewerListMax ?? 10)}</small>
+            </label>`
+          : html`<label class="v-field">
           <span>${t('viewer.link_label')}</span>
           <input type="url" class="txt" name="url" required autocomplete="off" inputmode="url"
             placeholder=${t('viewer.link_placeholder')} value=${url} readOnly=${busy}
             aria-describedby=${error ? 'v-error' : undefined} aria-invalid=${error ? 'true' : undefined}
             onInput=${(e) => setUrl(e.currentTarget.value)} />
-        </label>
+        </label>`}
         <label class="v-field">
           <span>${t('viewer.nick_label')}</span>
           <span class="v-nick">
@@ -123,8 +175,9 @@ export function RequestForm() {
             </div>`
           : null}
         <button type="submit" class="btn pri v-submit" disabled=${busy || !url.trim()}>
-          ${busy ? t('viewer.adding') : t('viewer.add_button')}</button>
+          ${busy ? (lists ? tn('viewer.checking_links', lines.length) : t('viewer.adding')) : t('viewer.add_button')}</button>
       </form>
-      <${Rules} rules=${channel.value?.rules} />
+      ${result ? html`<${ListResult} result=${result} />` : null}
+      <${Rules} rules=${rules} />
     </section>`;
 }

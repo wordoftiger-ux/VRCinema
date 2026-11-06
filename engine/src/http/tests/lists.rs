@@ -107,6 +107,7 @@ async fn several_links_each_pass_the_checks_of_a_single_request() {
         ]
     );
     assert_eq!(res.json()["added"], 2);
+    assert!(res.json()["requesterBadge"]["hue"].is_number());
     assert_eq!(res.json()["skipped"], 6);
     let items = h.list(ItemStatus::Queued);
     assert_eq!(items.len(), 2);
