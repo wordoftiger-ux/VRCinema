@@ -1,4 +1,4 @@
-// Settings → Channel: the links viewers may send, the limits, moderation, the language of the
+// Settings → Channel: the links viewers may send, the limits, moderation, viewer lists, the language of the
 // slates, conversion, the info ticker and the viewers' nicks. These are the channel's own
 // settings: they work in a remote session too.
 
@@ -139,6 +139,34 @@ function Limits({ settings, say }) {
     <//>`;
 }
 
+/** Viewer lists: the switch and the most videos one list adds (1–50). */
+function ViewerLists({ settings, say }) {
+  const current = String(settings.viewerListMax ?? 10);
+  const [max, setMax] = useState(current);
+  useEffect(() => setMax(current), [current]);
+  const submit = (e) => {
+    e.preventDefault();
+    const n = Number(max);
+    if (!Number.isInteger(n) || n < 1 || n > 50) return say('err', t('settings.channel.viewer_list_max_invalid'));
+    saveChannelWith(say, { viewerListMax: n }, t('settings.channel.viewer_list_max_saved'));
+  };
+  const label = t('settings.channel.viewer_lists');
+  return html`
+    <${Block} title=${t('settings.channel.viewer_lists_block')}>
+      <${Row} title=${label} hint=${t('settings.channel.viewer_lists_hint')}>
+        <${Switch} label=${label} checked=${Boolean(settings.viewerLists)}
+          onChange=${(v) => saveChannelWith(say, { viewerLists: v }, t(v ? 'settings.channel.viewer_lists_on' : 'settings.channel.viewer_lists_off'))} />
+      <//>
+      <form class="limits" data-form="viewer-lists" onSubmit=${submit}>
+        <label class="limit"><span>${t('settings.channel.viewer_list_max')}</span>
+          <input type="number" class="num" min="1" max="50" step="1" name="viewerListMax" value=${max}
+            disabled=${!settings.viewerLists} onInput=${(e) => setMax(e.target.value)} /></label>
+        <button type="submit" class="btn pri" disabled=${!settings.viewerLists}>${t('settings.save')}</button>
+      </form>
+      <p class="set-sub">${t('settings.channel.viewer_list_max_hint')}</p>
+    <//>`;
+}
+
 export function ChannelSettings() {
   const settings = channelSettings.value;
   const [note, say] = useNote();
@@ -158,6 +186,7 @@ export function ChannelSettings() {
       <${Block} title=${t('settings.channel.moderation_block')}>
         ${toggle('moderation', t('settings.channel.moderation'), t('settings.channel.moderation_hint'), t('settings.channel.moderation_on'), t('settings.channel.moderation_off'))}
       <//>
+      <${ViewerLists} settings=${settings} say=${say} />
       <${Block} title=${t('settings.channel.stream')}>
         <${Row} title=${t('settings.channel.slate_language')} hint=${t('settings.channel.slate_language_hint')}>
           <select class="sel" aria-label=${t('settings.channel.slate_language')} value=${settings.slateLanguage}

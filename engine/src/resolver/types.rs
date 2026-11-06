@@ -6,6 +6,8 @@ pub struct PlaylistEntry {
     pub url: String,
     pub title: String,
     pub duration_s: Option<f64>,
+    /// A live stream (yt-dlp's `live_status` of a flat entry), refused for viewers.
+    pub is_live: bool,
 }
 
 /// One input handed to ffmpeg/ffprobe: a URL or path plus the HTTP headers to send with it.

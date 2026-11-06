@@ -220,6 +220,7 @@ impl MediaResolver for PixeldrainResolver {
                         .unwrap_or_default()
                         .to_string(),
                     duration_s: None,
+                    is_live: false,
                 })
                 .collect();
             let title = match list.get("title").and_then(Value::as_str) {
@@ -437,6 +438,7 @@ mod tests {
                 url: "https://pixeldrain.com/u/f1".into(),
                 title: "one.mkv".into(),
                 duration_s: None,
+                is_live: false,
             }]
         );
         let e = resolver(None, None)

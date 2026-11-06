@@ -54,6 +54,10 @@ pub struct ChannelSettings {
     /// The info ticker (keys `tickerEnabled`, `tickerMode`, ...).
     #[serde(flatten)]
     pub ticker: TickerSettings,
+    /// Viewers may send several links at once and playlists (the request page's list form).
+    pub viewer_lists: bool,
+    /// Most videos one viewer list adds (also the entries read from a playlist).
+    pub viewer_list_max: u32,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -73,6 +77,8 @@ impl Default for ChannelSettings {
             request_limit_window_s: 600,
             max_active_per_requester: 5,
             moderation: false,
+            viewer_lists: false,
+            viewer_list_max: 10,
             force_transcode: false,
             discontinuity_tags: true,
             slate_language: Lang::En,
@@ -105,6 +111,8 @@ pub struct SettingsPatch {
     pub request_limit_window_s: Option<u64>,
     pub max_active_per_requester: Option<u32>,
     pub moderation: Option<bool>,
+    pub viewer_lists: Option<bool>,
+    pub viewer_list_max: Option<u32>,
     pub force_transcode: Option<bool>,
     pub discontinuity_tags: Option<bool>,
     pub slate_language: Option<Lang>,
@@ -259,6 +267,10 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
                 out.max_active_per_requester = Some(expect_number(key, value)? as u32);
             }
             "moderation" => out.moderation = Some(expect_bool(key, value)?),
+            "viewerLists" => out.viewer_lists = Some(expect_bool(key, value)?),
+            "viewerListMax" => {
+                out.viewer_list_max = Some(list_max(expect_number(key, value)?));
+            }
             "forceTranscode" => out.force_transcode = Some(expect_bool(key, value)?),
             "discontinuityTags" => out.discontinuity_tags = Some(expect_bool(key, value)?),
             "slateLanguage" => out.slate_language = Some(expect_lang(key, value)?),
@@ -282,6 +294,14 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
         }
     }
     Ok(out)
+}
+
+/// The largest [`ChannelSettings::viewer_list_max`] the owner can set.
+pub const VIEWER_LIST_MAX: u32 = 50;
+
+/// A list size within 1..=[`VIEWER_LIST_MAX`] (a fraction truncated).
+fn list_max(n: f64) -> u32 {
+    (n as u32).clamp(1, VIEWER_LIST_MAX)
 }
 
 /// JSON text of a number as JS would write it (`600`, not `600.0`).
@@ -348,6 +368,8 @@ impl<'a> SettingsRepo<'a> {
                         num.map_or(s.max_active_per_requester, |n| n as u32);
                 }
                 "moderation" => s.moderation = value.as_bool().unwrap_or(s.moderation),
+                "viewerLists" => s.viewer_lists = value.as_bool().unwrap_or(s.viewer_lists),
+                "viewerListMax" => s.viewer_list_max = num.map_or(s.viewer_list_max, list_max),
                 "forceTranscode" => {
                     s.force_transcode = value.as_bool().unwrap_or(s.force_transcode)
                 }
@@ -401,7 +423,7 @@ impl<'a> SettingsRepo<'a> {
         patch: &SettingsPatch,
     ) -> rusqlite::Result<ChannelSettings> {
         let quoted = |name: &str| format!("\"{name}\"");
-        let entries: [(&str, Option<String>); 20] = [
+        let entries: [(&str, Option<String>); 22] = [
             ("linkMode", patch.link_mode.map(|m| quoted(m.as_str()))),
             (
                 "allowedDomains",
@@ -425,6 +447,11 @@ impl<'a> SettingsRepo<'a> {
                 patch.max_active_per_requester.map(|n| n.to_string()),
             ),
             ("moderation", patch.moderation.map(|b| b.to_string())),
+            ("viewerLists", patch.viewer_lists.map(|b| b.to_string())),
+            (
+                "viewerListMax",
+                patch.viewer_list_max.map(|n| n.to_string()),
+            ),
             (
                 "forceTranscode",
                 patch.force_transcode.map(|b| b.to_string()),

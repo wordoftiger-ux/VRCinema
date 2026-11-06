@@ -71,6 +71,7 @@
   "errors.download_incomplete": "Download unterbrochen ({downloaded} von {total} Bytes): {url}",
   "errors.download_interrupted": "Download unterbrochen: {url}",
   "errors.download_unexpected_range": "Der Server hat einen unerwarteten Datenbereich geliefert: {url}",
+  "errors.duplicate_link": "Dieses Video ist schon in deiner Liste.",
   "errors.empty_json_body": "Body cannot be empty when content-type is set to 'application/json'",
   "errors.empty_playlist": "Die Playlist ist leer.",
   "errors.engine_unavailable": "Der Kanal nimmt gerade keine Befehle an. Versuchen Sie es gleich noch einmal.",
@@ -108,6 +109,7 @@
   "errors.item_id_required": "Geben Sie itemId an.",
   "errors.item_not_playable": "Eintrag #{id} kann jetzt nicht abgespielt werden (Status {status}).",
   "errors.library_disabled": "Dateien vom Datenträger sind ausgeschaltet. Legen Sie MEDIA_DIRS in der Datei .env fest.",
+  "errors.list_full": "Über dem Limit an Videos pro Liste.",
   "errors.live_item": "Ein Livestream kann nicht pausiert oder gespult werden.",
   "errors.live_owner_only": "Livestreams kann nur der Betreiber des Kanals hinzufügen.",
   "errors.local_address": "Links ins lokale Netzwerk oder zu diesem Computer sind nicht erlaubt.",
@@ -133,6 +135,7 @@
   "errors.no_requester": "Dieses Video wurde nicht von einem Zuschauer mit Nick oder Gerät hinzugefügt.",
   "errors.no_segment": "Kein solches Segment",
   "errors.no_such_item": "Diesen Eintrag gibt es nicht.",
+  "errors.no_such_list": "Diese Liste gibt es nicht.",
   "errors.no_such_root": "Diesen Stammordner gibt es nicht.",
   "errors.no_update": "Es ist kein Update verfügbar.",
   "errors.no_videos_in_folder": "In diesem Ordner gibt es keine Videodateien.",
@@ -218,6 +221,7 @@
   "errors.update_sum_missing": "Die Prüfsummendatei fehlt ({file})",
   "errors.update_sum_unreadable": "Die Prüfsummendatei kann nicht gelesen werden ({file})",
   "errors.update_unavailable": "Updates sind in dieser Programmversion nicht verfügbar.",
+  "errors.viewer_lists_off": "Dieser Kanal nimmt nur einen Link auf einmal an. Schick einen einzelnen Link.",
   "errors.window_only": "Diese Funktion gibt es nur im App-Fenster.",
   "errors.wrong_password": "Falsches Passwort.",
   "errors.ytdlp_bad_data": "yt-dlp hat ungültige Daten geliefert.",
@@ -344,6 +348,7 @@
   "log.preview_download_failed": "Video #{id}: Der Download für die Vorschau ist fehlgeschlagen ({error}); die Vorschau zeigt stattdessen die Segmente des Kanals",
   "log.program_stopped": "Programm beendet.",
   "log.queue_error_prefetch": "Warteschlangenfehler beim Vorbereiten: {error}",
+  "log.request_list_received": "Wunschliste von Zuschauer {viewer}: {added} hinzugefügt, {skipped} übersprungen ({status})",
   "log.request_received": "Wunsch von Zuschauer {viewer}: „{title}“ ({status})",
   "log.restart_failed_reverting": "Der Server ist mit den neuen Einstellungen nicht gestartet: {error}. Die vorherigen werden wiederhergestellt.",
   "log.resume": "Fortsetzung: Video #{id} „{title}“ ab {seconds} s",
@@ -579,6 +584,8 @@
   "queue.anonymous": "anonym",
   "queue.approve": "Freigeben",
   "queue.approve_label": "„{title}“ freigeben",
+  "queue.approve_list": "Alle freigeben",
+  "queue.approve_list_label": "Alle Videos dieser Liste freigeben",
   "queue.by_host": "hier hinzugefügt",
   "queue.clear": "Warteschlange leeren",
   "queue.clear_body": {
@@ -595,6 +602,10 @@
   "queue.empty": "Die Warteschlange ist leer. Fügen Sie einen Link ein, um ein Video hinzuzufügen.",
   "queue.from_disk": "vom Datenträger",
   "queue.include_on_air": "Auch das Video auf Sendung beenden („{title}“)",
+  "queue.list_heading": {
+    "one": "Liste: {count} Video",
+    "other": "Liste: {count} Videos"
+  },
   "queue.menu": "Videomenü",
   "queue.more": "Weitere Aktionen für „{title}“",
   "queue.more_short": "Mehr",
@@ -605,6 +616,8 @@
   "queue.play_now": "Jetzt abspielen",
   "queue.reject": "Ablehnen",
   "queue.reject_label": "„{title}“ ablehnen",
+  "queue.reject_list": "Alle ablehnen",
+  "queue.reject_list_label": "Alle Videos dieser Liste ablehnen",
   "queue.remove": "Aus der Warteschlange entfernen",
   "queue.remove_confirm": "Videos entfernen",
   "queue.remove_requester": "Alles dieses Zuschauers entfernen",
@@ -1166,5 +1179,37 @@
   "screens.window": "In eigenem Fenster öffnen",
   "screens.away": "„Auf Sendung“ ist in einem eigenen Fenster",
   "screens.bring_back": "Zurückholen",
-  "screens.on_top": "Immer im Vordergrund"
+  "screens.on_top": "Immer im Vordergrund",
+  "settings.channel.viewer_list_max": "Videos pro Liste",
+  "settings.channel.viewer_list_max_hint": "Auch die höchste Zahl an Einträgen, die aus einer Playlist gelesen werden (1–50).",
+  "settings.channel.viewer_list_max_invalid": "Geben Sie eine ganze Zahl von 1 bis 50 ein.",
+  "settings.channel.viewer_list_max_saved": "Listengröße gespeichert.",
+  "settings.channel.viewer_lists": "Zuschauern erlauben, Listen hinzuzufügen",
+  "settings.channel.viewer_lists_block": "Listen",
+  "settings.channel.viewer_lists_hint": "Zuschauer können mehrere Links auf einmal (einen pro Zeile) und Playlists einfügen. Jedes Video durchläuft dieselben Prüfungen und Limits wie ein einzelner Link.",
+  "settings.channel.viewer_lists_off": "Zuschauer fügen einen Link nach dem anderen hinzu.",
+  "settings.channel.viewer_lists_on": "Zuschauer können Listen hinzufügen.",
+  "viewer.checking_links": {
+    "one": "{count} Link wird geprüft…",
+    "other": "{count} Links werden geprüft…"
+  },
+  "viewer.links_hint": {
+    "one": "Ein Link pro Zeile; Playlists gehen auch. Bis zu {count} Video auf einmal.",
+    "other": "Ein Link pro Zeile; Playlists gehen auch. Bis zu {count} Videos auf einmal."
+  },
+  "viewer.links_label": "Links zu Videos",
+  "viewer.links_placeholder": "Links einfügen, einer pro Zeile…",
+  "viewer.list_added": {
+    "one": "{count} Video hinzugefügt",
+    "other": "{count} Videos hinzugefügt"
+  },
+  "viewer.list_line": "Zeile {line}",
+  "viewer.list_pending": {
+    "one": "{count} Video wartet auf Freigabe",
+    "other": "{count} Videos warten auf Freigabe"
+  },
+  "viewer.list_skipped": {
+    "one": "{count} übersprungen",
+    "other": "{count} übersprungen"
+  }
 }

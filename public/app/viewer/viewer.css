@@ -152,6 +152,45 @@ p.v-time {
   font-size: 16px; /* no zoom on focus in mobile browsers */
 }
 
+.v-field textarea.v-links {
+  min-height: 104px;
+  resize: vertical;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* What a list request did: counts, then the links left out with their reasons. */
+.v-list-result {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-card);
+  font-size: 14px;
+}
+
+.v-list-result p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  color: var(--text);
+}
+
+.v-list-result .ok {
+  color: var(--green);
+}
+
+.v-list-result ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.v-list-result li + li {
+  margin-top: 4px;
+}
+
 .v-nick {
   display: flex;
   align-items: center;

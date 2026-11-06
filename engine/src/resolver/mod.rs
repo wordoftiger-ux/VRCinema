@@ -57,6 +57,21 @@ pub trait MediaResolver: Send + Sync {
     async fn fetch_meta(&self, url: &str) -> Result<MediaMeta, ResolveError>;
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError>;
 
+    /// [`Self::fetch_meta`] reading at most `max_entries` entries of a playlist (a viewer's
+    /// list must not make yt-dlp walk a playlist of thousands). The default reads everything
+    /// and keeps the first `max_entries`.
+    async fn fetch_meta_capped(
+        &self,
+        url: &str,
+        max_entries: usize,
+    ) -> Result<MediaMeta, ResolveError> {
+        let mut meta = self.fetch_meta(url).await?;
+        if let Some(entries) = meta.entries.as_mut() {
+            entries.truncate(max_entries);
+        }
+        Ok(meta)
+    }
+
     /// Resolves `url` again with yt-dlp's fallback YouTube client
     /// ([`ytdlp::FALLBACK_YOUTUBE_CLIENT`]), for an address YouTube refused; `None`: this
     /// resolver has no such fallback (everything but yt-dlp).
@@ -153,6 +168,14 @@ impl MediaResolver for CompositeResolver {
 
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError> {
         self.pick(url)?.resolve(url).await
+    }
+
+    async fn fetch_meta_capped(
+        &self,
+        url: &str,
+        max_entries: usize,
+    ) -> Result<MediaMeta, ResolveError> {
+        self.pick(url)?.fetch_meta_capped(url, max_entries).await
     }
 
     async fn resolve_with_fallback_client(

@@ -71,6 +71,7 @@
   "errors.download_incomplete": "Download interrupted ({downloaded} of {total} bytes): {url}",
   "errors.download_interrupted": "Download interrupted: {url}",
   "errors.download_unexpected_range": "The server returned an unexpected range of data: {url}",
+  "errors.duplicate_link": "This video is already in your list.",
   "errors.empty_json_body": "Body cannot be empty when content-type is set to 'application/json'",
   "errors.empty_playlist": "The playlist is empty.",
   "errors.engine_unavailable": "The channel is not taking commands right now. Try again in a moment.",
@@ -108,6 +109,7 @@
   "errors.item_id_required": "Give itemId.",
   "errors.item_not_playable": "Item #{id} cannot be played now (status {status}).",
   "errors.library_disabled": "Files from disk are switched off. Set MEDIA_DIRS in the .env file.",
+  "errors.list_full": "Over the limit of videos in one list.",
   "errors.live_item": "A live stream cannot be paused or seeked.",
   "errors.live_owner_only": "Only the channel owner can add live streams.",
   "errors.local_address": "Links to a local network or to this computer are not allowed.",
@@ -133,6 +135,7 @@
   "errors.no_requester": "This video was not added by a viewer with a nick or device.",
   "errors.no_segment": "No such segment",
   "errors.no_such_item": "There is no such item.",
+  "errors.no_such_list": "That list does not exist.",
   "errors.no_such_root": "There is no such root folder.",
   "errors.no_update": "No update is available.",
   "errors.no_videos_in_folder": "There are no video files in this folder.",
@@ -218,6 +221,7 @@
   "errors.update_sum_missing": "The checksum file is missing ({file})",
   "errors.update_sum_unreadable": "The checksum file cannot be read ({file})",
   "errors.update_unavailable": "Updates are not available in this version of the program.",
+  "errors.viewer_lists_off": "This channel takes one link at a time. Send a single link.",
   "errors.window_only": "This feature is only available in the app window.",
   "errors.wrong_password": "Wrong password.",
   "errors.ytdlp_bad_data": "yt-dlp returned invalid data.",
@@ -344,6 +348,7 @@
   "log.preview_download_failed": "Video #{id}: the download for the Preview failed ({error}); the Preview shows the channel's segments instead",
   "log.program_stopped": "Program stopped.",
   "log.queue_error_prefetch": "Queue error while looking ahead: {error}",
+  "log.request_list_received": "Request list from viewer {viewer}: {added} added, {skipped} skipped ({status})",
   "log.request_received": "Request from viewer {viewer}: \"{title}\" ({status})",
   "log.restart_failed_reverting": "The server did not start with the new settings: {error}. Restoring the previous ones.",
   "log.resume": "Resuming: video #{id} \"{title}\" from {seconds} s",
@@ -579,6 +584,8 @@
   "queue.anonymous": "anonymous",
   "queue.approve": "Approve",
   "queue.approve_label": "Approve “{title}”",
+  "queue.approve_list": "Approve all",
+  "queue.approve_list_label": "Approve all videos of this list",
   "queue.by_host": "added here",
   "queue.clear": "Clear queue",
   "queue.clear_body": {
@@ -595,6 +602,10 @@
   "queue.empty": "The queue is empty. Paste a link to add a video.",
   "queue.from_disk": "from disk",
   "queue.include_on_air": "Also stop the video on air (“{title}”)",
+  "queue.list_heading": {
+    "one": "List: {count} video",
+    "other": "List: {count} videos"
+  },
   "queue.menu": "Video menu",
   "queue.more": "More for “{title}”",
   "queue.more_short": "More",
@@ -605,6 +616,8 @@
   "queue.play_now": "Play now",
   "queue.reject": "Reject",
   "queue.reject_label": "Reject “{title}”",
+  "queue.reject_list": "Reject all",
+  "queue.reject_list_label": "Reject all videos of this list",
   "queue.remove": "Remove from the queue",
   "queue.remove_confirm": "Remove videos",
   "queue.remove_requester": "Remove all from this viewer",
@@ -1166,5 +1179,37 @@
   "screens.window": "Open in its own window",
   "screens.away": "On air is in its own window",
   "screens.bring_back": "Bring back",
-  "screens.on_top": "Always on top"
+  "screens.on_top": "Always on top",
+  "settings.channel.viewer_list_max": "Videos per list",
+  "settings.channel.viewer_list_max_hint": "Also the most entries read from a playlist (1–50).",
+  "settings.channel.viewer_list_max_invalid": "Enter a whole number from 1 to 50.",
+  "settings.channel.viewer_list_max_saved": "List size saved.",
+  "settings.channel.viewer_lists": "Allow viewers to add lists",
+  "settings.channel.viewer_lists_block": "Lists",
+  "settings.channel.viewer_lists_hint": "Viewers can paste several links at once (one per line) and playlists. Every video passes the same checks and limits as a single link.",
+  "settings.channel.viewer_lists_off": "Viewers add one link at a time.",
+  "settings.channel.viewer_lists_on": "Viewers can add lists.",
+  "viewer.checking_links": {
+    "one": "Checking {count} link…",
+    "other": "Checking {count} links…"
+  },
+  "viewer.links_hint": {
+    "one": "One link per line; playlists work too. Up to {count} video at once.",
+    "other": "One link per line; playlists work too. Up to {count} videos at once."
+  },
+  "viewer.links_label": "Video links",
+  "viewer.links_placeholder": "Paste links, one per line…",
+  "viewer.list_added": {
+    "one": "{count} video added",
+    "other": "{count} videos added"
+  },
+  "viewer.list_line": "Line {line}",
+  "viewer.list_pending": {
+    "one": "{count} video is waiting for approval",
+    "other": "{count} videos are waiting for approval"
+  },
+  "viewer.list_skipped": {
+    "one": "{count} skipped",
+    "other": "{count} skipped"
+  }
 }

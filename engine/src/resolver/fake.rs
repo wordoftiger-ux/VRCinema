@@ -47,6 +47,7 @@ fn parse_entry(v: &Value) -> FakeEntry {
                     .unwrap_or_default()
                     .into(),
                 duration_s: duration(e.get("durationS")),
+                is_live: false,
             })
             .collect()
     });
