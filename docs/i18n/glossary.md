@@ -12,7 +12,8 @@ Languages: `en` (pattern), `pl`, `es`, `de`, `fr`, `ja` (beta).
 Two audiences, two registers: the **owner's program** (window, remote panel, tray, log, wizard —
 every key outside `viewer.*`) addresses the owner **formally**; the **request page** (`viewer.*`
 keys, and the errors only that page shows: `errors.nick_reserved`, `errors.nick_taken`,
-`errors.too_many_active`, `errors.too_many_requests`) addresses players **informally**. Errors
+`errors.too_many_active`, `errors.too_many_requests`, `errors.viewer_lists_off`, `errors.list_full`,
+`errors.duplicate_link`) addresses players **informally**. Errors
 the panel shows too stay formal.
 
 | | Address: program / request page | Register and form | Typography |
@@ -110,6 +111,8 @@ Common to all languages:
 | Sign in / sign out | sign in / sign out | zaloguj / wyloguj | iniciar sesión / cerrar sesión | anmelden / abmelden | se connecter / se déconnecter | ログイン / ログアウト |
 | Video | video | film | video | Video | vidéo | 動画 |
 | Link | link | link | enlace | Link | lien | リンク |
+| Playlist — a site's list of videos (YouTube, pixeldrain) | playlist | playlista | lista de reproducción | Playlist | playlist | 再生リスト |
+| List — several links a viewer sends at once (one per line, or a playlist), approved as one group | list | lista | lista | Liste | liste | リスト |
 | QR code | QR code | kod QR | código QR | QR-Code | code QR | QRコード |
 | Buffering (slate title) | Buffering… | Buforowanie… | Cargando… | Wird geladen… | Chargement… | 読み込み中… |
 | Online / no internet (status pill) | Online / No internet | W sieci / Brak internetu | En línea / Sin internet | Online / Kein Internet | En ligne / Pas d’internet (connecting: Connexion…) | オンライン / インターネットなし (connecting: 接続中) |
