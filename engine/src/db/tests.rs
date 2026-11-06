@@ -428,6 +428,18 @@ fn settings_serialize_with_camel_case_keys() {
             "viewerLists": false,
             "viewerListMax": 10,
             "uploadMbps": 0,
+            "transitionsEnabled": false,
+            "transitionS": 1,
+            "peakMbps": 0,
+            "peakBufferS": 2,
+            "subtitlesEnabled": false,
+            "subtitlesLanguage": "en",
+            "loudnessEnabled": false,
+            "loudnessTarget": -16,
+            "alarmsEnabled": false,
+            "alarmBlackS": 10,
+            "alarmSilenceS": 15,
+            "alarmSilenceDb": -50,
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -457,9 +469,42 @@ fn settings_serialize_with_camel_case_keys() {
             "tickerMessages",
             "viewerLists",
             "viewerListMax",
-            "uploadMbps"
+            "uploadMbps",
+            "transitionsEnabled",
+            "transitionS",
+            "peakMbps",
+            "peakBufferS",
+            "subtitlesEnabled",
+            "subtitlesLanguage",
+            "loudnessEnabled",
+            "loudnessTarget",
+            "alarmsEnabled",
+            "alarmBlackS",
+            "alarmSilenceS",
+            "alarmSilenceDb"
         ]
     );
+}
+
+#[test]
+fn advanced_settings_are_saved_and_read_back() {
+    let conn = mem();
+    let s = SettingsRepo::new(&conn);
+    let patch = sanitize_settings_patch(&json!({
+        "loudnessEnabled": true,
+        "loudnessTarget": -23,
+        "peakMbps": 4.5,
+        "moderation": true,
+    }))
+    .unwrap();
+    let saved = s.update(MAIN_CHANNEL_ID, &patch).unwrap();
+    assert!(saved.moderation && saved.advanced.loudness_enabled);
+    assert_eq!(saved.advanced.loudness_target, -23);
+    assert_eq!(saved.advanced.peak_mbps, 4.5);
+    assert_eq!(s.get(MAIN_CHANNEL_ID).unwrap(), saved);
+    let err = sanitize_settings_patch(&json!({"peakMbps": 40})).unwrap_err();
+    assert!(err.to_string().contains("peakMbps"), "{err}");
+    assert!(sanitize_settings_patch(&json!({"nieznane": 1})).is_err());
 }
 
 #[test]

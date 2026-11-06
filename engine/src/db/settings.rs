@@ -5,6 +5,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::i18n::{Lang, Msg};
+use crate::pipeline::advanced::{AdvancedPatch, AdvancedSettings};
 use crate::pipeline::ticker::{
     INTERVALS_S, MAX_MESSAGE_CHARS, MAX_MESSAGES, TickerMode, TickerQr, TickerSettings, TickerSpeed,
 };
@@ -62,6 +63,9 @@ pub struct ChannelSettings {
     /// compared with it and the panel warns (nothing is ever refused).
     #[serde(serialize_with = "serialize_number")]
     pub upload_mbps: f64,
+    /// Settings → Advanced: transitions, peak limit, subtitles, loudness, alarms.
+    #[serde(flatten)]
+    pub advanced: AdvancedSettings,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -88,6 +92,7 @@ impl Default for ChannelSettings {
             discontinuity_tags: true,
             slate_language: Lang::En,
             ticker: TickerSettings::default(),
+            advanced: AdvancedSettings::default(),
         }
     }
 }
@@ -131,6 +136,7 @@ pub struct SettingsPatch {
     pub ticker_qr: Option<TickerQr>,
     pub ticker_progress: Option<bool>,
     pub ticker_messages: Option<Vec<String>>,
+    pub advanced: AdvancedPatch,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -301,7 +307,10 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             }
             "tickerProgress" => out.ticker_progress = Some(expect_bool(key, value)?),
             "tickerMessages" => out.ticker_messages = Some(expect_messages(key, value)?),
-            _ => return Err(Msg::error("unknown_setting").arg("key", key)),
+            _ => match crate::pipeline::advanced::sanitize_key(key, value, &mut out.advanced) {
+                Some(result) => result?,
+                None => return Err(Msg::error("unknown_setting").arg("key", key)),
+            },
         }
     }
     Ok(out)
@@ -422,7 +431,9 @@ impl<'a> SettingsRepo<'a> {
                         s.ticker.messages = messages;
                     }
                 }
-                _ => {}
+                _ => {
+                    s.advanced.read_stored(&key, &value);
+                }
             }
         }
         Ok(s)
@@ -515,6 +526,9 @@ impl<'a> SettingsRepo<'a> {
                 if let Some(value) = value {
                     stmt.execute(params![channel_id, key, value])?;
                 }
+            }
+            for (key, value) in patch.advanced.entries() {
+                stmt.execute(params![channel_id, key, value])?;
             }
         }
         tx.commit()?;

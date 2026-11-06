@@ -151,6 +151,53 @@ pub fn input_options(input: &StreamInput) -> Vec<OsString> {
 /// segment, see [`build_clip_args`]) into IDR frames: the segmenter cuts only at those, and
 /// without it the segments follow the encoder's own GOP (10 s with h264_nvenc).
 pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
+    encoder_args_with(encoder, &RateLimit::default())
+}
+
+/// The bitrate of a converted picture: its target, peak (`-maxrate`) and buffer (`-bufsize`),
+/// in kbit/s. The default is the channel's usual 6M / 6M / 12M.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateLimit {
+    pub peak_kbps: u32,
+    pub buffer_kbits: u32,
+}
+
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self {
+            peak_kbps: 6000,
+            buffer_kbits: 12000,
+        }
+    }
+}
+
+impl RateLimit {
+    /// From Settings → Advanced: `peak_mbps` 0 is automatic (6), the buffer is seconds of the peak.
+    pub fn from_settings(peak_mbps: f64, buffer_s: f64) -> Self {
+        let peak = if peak_mbps > 0.0 { peak_mbps } else { 6.0 };
+        let peak_kbps = (peak * 1000.0).round() as u32;
+        Self {
+            peak_kbps,
+            buffer_kbits: (f64::from(peak_kbps) * buffer_s).round() as u32,
+        }
+    }
+
+    /// `-b:v`, `-maxrate`, `-bufsize` (the target never above the usual 6M nor the peak).
+    fn values(self) -> [String; 3] {
+        if self == Self::default() {
+            return [VIDEO_BITRATE.into(), VIDEO_BITRATE.into(), "12M".into()];
+        }
+        let kbps = |v: u32| format!("{v}k");
+        [
+            kbps(self.peak_kbps.min(6000)),
+            kbps(self.peak_kbps),
+            kbps(self.buffer_kbits.max(1)),
+        ]
+    }
+}
+
+/// [`encoder_args`] with the bitrate of `rate`.
+pub fn encoder_args_with(encoder: VideoEncoder, rate: &RateLimit) -> Vec<OsString> {
     let mut args = Vec::new();
     match encoder {
         VideoEncoder::H264Nvenc => push_all(
@@ -216,18 +263,64 @@ pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
             ],
         ),
     }
+    let [target, peak, buffer] = rate.values();
     push_all(
         &mut args,
-        &[
-            "-b:v",
-            VIDEO_BITRATE,
-            "-maxrate",
-            VIDEO_BITRATE,
-            "-bufsize",
-            "12M",
-        ],
+        &["-b:v", &target, "-maxrate", &peak, "-bufsize", &buffer],
     );
     args
+}
+
+/// Settings → Advanced applied to one clip (spec `2026-11-06-advanced-design.md`); the default
+/// changes nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClipExtras {
+    /// Fade the picture and the sound in from the clip's start (seconds).
+    pub fade_in_s: Option<f64>,
+    /// Fade out: `(start, length)` in seconds of the clip.
+    pub fade_out: Option<(f64, f64)>,
+    /// The bitrate of a converted picture (`None`: the usual one).
+    pub rate: Option<RateLimit>,
+    /// Normalise the loudness to this target (LUFS).
+    pub loudness_target: Option<i32>,
+    /// Burn in this subtitle file (a name in ffmpeg's working folder, the clip folder); the
+    /// second value is the film second the clip starts at (the subtitles' clock is shifted).
+    pub subtitles: Option<(String, f64)>,
+}
+
+/// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
+/// fade-out when the end is known; nothing when the clip is shorter than three fades.
+pub fn clip_fades(fade_s: f64, length_s: Option<f64>) -> (Option<f64>, Option<(f64, f64)>) {
+    if !(fade_s > 0.0) {
+        return (None, None);
+    }
+    match length_s {
+        None => (Some(fade_s), None),
+        Some(len) if len.is_finite() && len >= 3.0 * fade_s => {
+            (Some(fade_s), Some((len - fade_s, fade_s)))
+        }
+        Some(_) => (None, None),
+    }
+}
+
+/// The loudness chain: capped normalisation (at most +12 dB, ×3.98), then a limiter at
+/// −1.5 dBFS run at 4× the sample rate (close to a true-peak limit), back to 48 kHz.
+pub fn loudness_filter(target_lufs: i32) -> String {
+    let rms = 10f64.powf(f64::from(target_lufs) / 20.0);
+    format!(
+        "dynaudnorm=f=250:g=15:p=0.95:m=3.98:r={rms:.4},aresample=192000,\
+         alimiter=limit=0.841:attack=1:release=50:level=false,aresample=48000"
+    )
+}
+
+/// The subtitles filter for a file in ffmpeg's working folder, its clock moved to the film's
+/// time when the clip starts midway (a seek or a resume start at 0 s of the output).
+pub fn subtitles_filter(file: &str, start_at_s: f64) -> String {
+    if start_at_s > 0.0 {
+        format!("setpts=PTS+{start_at_s:.3}/TB,subtitles={file},setpts=PTS-{start_at_s:.3}/TB")
+    } else {
+        format!("subtitles={file}")
+    }
 }
 
 pub fn segment_output_args(segment_seconds: u32, out_dir: &Path) -> Vec<OsString> {
@@ -261,6 +354,11 @@ pub fn segment_output_args(segment_seconds: u32, out_dir: &Path) -> Vec<OsString
 }
 
 pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
+    build_clip_args_ext(o, &ClipExtras::default())
+}
+
+/// [`build_clip_args`] with the advanced options of `x` (the default gives the same arguments).
+pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString> {
     let mut args = Vec::new();
     push_all(
         &mut args,
@@ -345,12 +443,21 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
             if o.info.portrait {
                 filters.push(LETTERBOX.to_string());
             }
+            if let Some((file, start_s)) = &x.subtitles {
+                filters.push(subtitles_filter(file, *start_s));
+            }
             if let Some(overlay) = &o.overlay {
                 filters.push(overlay.clone());
                 filters.push("format=yuv420p".to_string());
             }
+            if let Some(d) = x.fade_in_s {
+                filters.push(format!("fade=t=in:st=0:d={d}"));
+            }
+            if let Some((st, d)) = x.fade_out {
+                filters.push(format!("fade=t=out:st={st:.3}:d={d}"));
+            }
             push_all(&mut args, &["-vf", &filters.join(",")]);
-            args.extend(encoder_args(o.encoder));
+            args.extend(encoder_args_with(o.encoder, &x.rate.unwrap_or_default()));
             push_all(&mut args, &BT709_TAGS);
             push_all(
                 &mut args,
@@ -361,7 +468,17 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
             );
         }
     }
-    push_all(&mut args, &["-af", AUDIO_FILTER]);
+    let mut audio = vec![AUDIO_FILTER.to_string()];
+    if let Some(target) = x.loudness_target {
+        audio.push(loudness_filter(target));
+    }
+    if let Some(d) = x.fade_in_s {
+        audio.push(format!("afade=t=in:st=0:d={d}"));
+    }
+    if let Some((st, d)) = x.fade_out {
+        audio.push(format!("afade=t=out:st={st:.3}:d={d}"));
+    }
+    push_all(&mut args, &["-af", &audio.join(",")]);
     push_all(&mut args, &AUDIO_ARGS);
     if let Some(limit) = o.duration_limit_s.filter(|d| d.is_finite() && *d > 0.0) {
         push_all(&mut args, &["-t", &format!("{limit:.3}")]);
@@ -840,6 +957,67 @@ mod tests {
         assert!(pos(&args, "-readrate_catchup") < pos(&args, "-i"));
         // The usual read rate has no catch-up of its own.
         assert!(!build(&opts()).contains(&"-readrate_catchup".to_string()));
+    }
+
+    #[test]
+    fn default_extras_change_nothing() {
+        let mut o = opts();
+        for mode in [VideoMode::Copy, VideoMode::Transcode] {
+            o.mode = mode;
+            assert_eq!(
+                build_clip_args(&o),
+                build_clip_args_ext(&o, &ClipExtras::default())
+            );
+        }
+        assert_eq!(
+            RateLimit::from_settings(0.0, 2.0),
+            RateLimit::default(),
+            "automatic = today's 6M/12M"
+        );
+    }
+
+    #[test]
+    fn advanced_extras_add_fades_peak_loudness_and_subtitles() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        let (fade_in_s, fade_out) = clip_fades(1.0, Some(60.0));
+        let x = ClipExtras {
+            fade_in_s,
+            fade_out,
+            rate: Some(RateLimit::from_settings(4.5, 1.5)),
+            loudness_target: Some(-16),
+            subtitles: Some(("subs.vtt".into(), 30.0)),
+        };
+        let args = strs(&build_clip_args_ext(&o, &x));
+        let vf = value_after(&args, "-vf", 0).unwrap();
+        assert!(
+            vf.ends_with(
+                "setpts=PTS+30.000/TB,subtitles=subs.vtt,setpts=PTS-30.000/TB,\
+                 fade=t=in:st=0:d=1,fade=t=out:st=59.000:d=1"
+            ),
+            "{vf}"
+        );
+        assert_eq!(value_after(&args, "-b:v", 0).as_deref(), Some("4500k"));
+        assert_eq!(value_after(&args, "-maxrate", 0).as_deref(), Some("4500k"));
+        assert_eq!(value_after(&args, "-bufsize", 0).as_deref(), Some("6750k"));
+        let af = value_after(&args, "-af", 0).unwrap();
+        assert!(af.starts_with("aresample=async=1,dynaudnorm="), "{af}");
+        assert!(af.contains(":m=3.98:r=0.1585"), "{af}");
+        assert!(
+            af.ends_with("afade=t=in:st=0:d=1,afade=t=out:st=59.000:d=1"),
+            "{af}"
+        );
+        // A higher peak keeps the usual target.
+        let r = RateLimit::from_settings(10.0, 2.0);
+        assert_eq!(r.values(), ["6000k", "10000k", "20000k"]);
+    }
+
+    #[test]
+    fn fades_need_a_long_enough_clip() {
+        assert_eq!(clip_fades(1.0, None), (Some(1.0), None));
+        assert_eq!(clip_fades(1.0, Some(2.0)), (None, None));
+        assert_eq!(clip_fades(0.0, Some(60.0)), (None, None));
+        assert_eq!(subtitles_filter("subs.srt", 0.0), "subtitles=subs.srt");
     }
 
     #[test]
