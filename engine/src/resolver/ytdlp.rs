@@ -898,7 +898,10 @@ mod tests {
         let at = args.iter().position(|a| *a == "--playlist-end").unwrap();
         assert_eq!(args[at + 1], "2");
         assert!(args.contains(&"--flat-playlist"));
-        assert_eq!(args[args.len() - 2..], ["--", "https://youtube.com/playlist?list=x"]);
+        assert_eq!(
+            args[args.len() - 2..],
+            ["--", "https://youtube.com/playlist?list=x"]
+        );
     }
 
     #[test]

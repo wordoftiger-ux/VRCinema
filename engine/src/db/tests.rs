@@ -1274,12 +1274,16 @@ fn remove_where_takes_one_viewer_or_everything_and_restore_puts_it_back() {
 fn viewer_list_settings_are_stored_and_the_size_is_kept_within_1_to_50() {
     let conn = mem();
     let s = SettingsRepo::new(&conn);
-    let patch = sanitize_settings_patch(&json!({"viewerLists": true, "viewerListMax": 99})).unwrap();
+    let patch =
+        sanitize_settings_patch(&json!({"viewerLists": true, "viewerListMax": 99})).unwrap();
     let got = s.update(MAIN_CHANNEL_ID, &patch).unwrap();
     assert!(got.viewer_lists);
     assert_eq!(got.viewer_list_max, 50);
     let patch = sanitize_settings_patch(&json!({"viewerListMax": 0})).unwrap();
-    assert_eq!(s.update(MAIN_CHANNEL_ID, &patch).unwrap().viewer_list_max, 1);
+    assert_eq!(
+        s.update(MAIN_CHANNEL_ID, &patch).unwrap().viewer_list_max,
+        1
+    );
     assert!(sanitize_settings_patch(&json!({"viewerLists": "yes"})).is_err());
     assert!(sanitize_settings_patch(&json!({"viewerListMax": -1})).is_err());
 }
