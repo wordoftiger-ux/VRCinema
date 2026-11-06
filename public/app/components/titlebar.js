@@ -7,7 +7,7 @@
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
-import { Icon } from '../icons.js';
+import { AppIcon, Icon } from '../icons.js';
 import { showToast } from '../store.js';
 
 /** The page runs in the program's window (Tauri), not in a browser. */
@@ -65,7 +65,7 @@ export function Titlebar() {
 
   return html`
     <header class="titlebar" data-tauri-drag-region="deep">
-      <span class="tb-logo" aria-hidden="true"><${Icon} name="play" size=${11} /></span>
+      <${AppIcon} />
       <span class="tb-title">VRCinema</span>
       <div class="wc">
         ${button('minimize', 'minimize', 'titlebar.minimize')}

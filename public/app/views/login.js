@@ -6,7 +6,7 @@
 import { useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { lang, t } from '../i18n.js';
-import { Icon } from '../icons.js';
+import { AppIcon } from '../icons.js';
 import { api, errorText } from '../api.js';
 import { choosePanelLanguage, resumePolling } from '../store.js';
 import { inWindow } from '../components/titlebar.js';
@@ -14,7 +14,7 @@ import { focusOnMount } from '../focus.js';
 import { LanguageOptions } from './settings/common.js';
 
 function Brand() {
-  return html`<p class="login-brand"><span class="tb-logo" aria-hidden="true"><${Icon} name="play" size=${11} /></span>VRCinema</p>`;
+  return html`<p class="login-brand"><${AppIcon} />VRCinema</p>`;
 }
 
 function WindowSignedOut() {

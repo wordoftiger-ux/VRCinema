@@ -1,4 +1,9 @@
-// The producer's monitor ("Preview", left of "On air" in the Channel view): the newest clip
+// The producer's Preview (the main screen of the Channel view, window only). It plays the film
+// itself (sourceplayer.js: instant controls); for films without a file of their own (live
+// streams, too long, a viewer's film, a failed download, a file this window cannot decode) it
+// falls back to the segment monitor below, which is how the Preview worked before:
+//
+// The segment monitor: the newest clip
 // segments the engine has (/api/desktop/monitor.m3u8, the window only), played with hls.js in
 // real time, muted by default. After a seek, "play now", "from the beginning" or a skip the
 // picture changes as soon as ffmpeg wrote the first segment of the new clip (2–4 s), not after
@@ -28,6 +33,10 @@ import { html } from '../html.js';
 import { lang, t } from '../i18n.js';
 import { Icon } from '../icons.js';
 import { access, attachPreview, control, showToast } from '../store.js';
+import { airBehindS, sourcePlayer, sourceReason, sourceState } from './sourceplayer.js';
+import { monitorMuted, monitorVolume, nudgeMonitorVolume } from './volume.js';
+
+export { monitorMuted };
 
 const FEED = '/api/desktop/monitor.m3u8';
 const READ_EVERY_MS = 1000;
@@ -44,8 +53,8 @@ const EXPECT_MAX_MS = 60000;
 export const monitorState = signal('off');
 /** How many seconds the monitor plays ahead of on-air; null: not known. */
 export const monitorAheadS = signal(null);
-/** The monitor's own sound switch (it starts muted; the volume of the player bar is On air's). */
-export const monitorMuted = signal(true);
+/** `file` (the film itself, sourceplayer.js), `fallback` (the segments below) or `none`. */
+export const previewMode = signal('none');
 
 let current = null;
 
@@ -497,18 +506,96 @@ function caption(state, ahead) {
   return ahead >= 1 ? t('monitor.ahead', { seconds: Math.round(ahead) }) : t('monitor.in_sync');
 }
 
-/** The left screen of the Channel view. In a remote panel it stays grey with a note. */
-export function MonitorScreen() {
-  const video = useRef(null);
+/**
+ * The Preview of the window: the film player and, for films without a file, the segment
+ * monitor; one interface for store.js. Returns `{stop, retry}`.
+ */
+function preview(fileVideo, hlsVideo) {
+  let segments = null;
+  let mode = 'none';
+  const src = sourcePlayer(fileVideo, {
+    onMode(m) {
+      mode = m;
+      if (m === 'fallback') {
+        if (!segments && Hls.isSupported()) segments = watch(hlsVideo);
+        fileVideo.pause();
+      } else if (segments) {
+        segments.stop();
+        segments = null;
+        hlsVideo.pause();
+      }
+      previewMode.value = m;
+    },
+    onState(s) {
+      if (mode === 'fallback') return;
+      monitorState.value = s === 'fallback' ? 'none' : s;
+    },
+  });
+  const active = () => (mode === 'fallback' && segments ? segments : src);
+  return {
+    position: () => active().position(),
+    freeze: () => active().freeze(),
+    pauseAnswered: (ok) => active().pauseAnswered(ok),
+    resumed: () => active().resumed(),
+    expect: (toS) => active().expect(toS),
+    expectAnswered: (ok) => active().expectAnswered(ok),
+    expecting: () => active().expecting(),
+    // A film from the queue: the file player looks it up (it falls back by itself).
+    playNow: (itemId) => src.playNow(itemId),
+    playNowAnswered: (ok) => src.playNowAnswered(ok),
+    sync: () => active().sync(),
+    retry: () => segments?.retry(),
+    stop() {
+      segments?.stop();
+      segments = null;
+      src.stop();
+      previewMode.value = 'none';
+      monitorState.value = 'off';
+    },
+  };
+}
+
+/** What the Preview shows over its picture. */
+function Overlay({ inWindow, known, supported, state, mode }) {
+  if (!inWindow && known) return html`<div class="monitor-note">${t('ui.window_only')}</div>`;
+  if (!inWindow) return null;
+  if (mode === 'file' && sourceState.value === 'preparing') {
+    return html`<div class="monitor-note" role="status">${t('preview.preparing')}</div>`;
+  }
+  if (mode === 'fallback' && !supported) return html`<div class="monitor-note" role="alert">${t('monitor.unsupported')}</div>`;
+  if (state === 'none' || mode === 'none') return html`<div class="monitor-note">${t('monitor.none')}</div>`;
+  if (state === 'paused') {
+    return html`<div class="monitor-badge" role="status">
+      ${control.value?.pausePending ? t('player.pause_pending') : t('monitor.paused')}
+    </div>`;
+  }
+  if (state === 'failed') {
+    return html`<div class="preview-unavailable" role="alert">
+      <span>${t('monitor.unavailable')}</span>
+      <button type="button" class="btn" onClick=${() => current?.retry()}>${t('preview.retry')}</button>
+    </div>`;
+  }
+  return null;
+}
+
+/**
+ * The Preview screen of the Channel view. In a remote panel it stays grey with a note. `role`:
+ * `main`, `pip` (small, in the corner of On air) or `side`; `tools`: the layout buttons.
+ */
+export function MonitorScreen({ role = 'side', tools = null, onActivate = null }) {
+  const fileVideo = useRef(null);
+  const hlsVideo = useRef(null);
   const inWindow = access.value === 'window';
   const known = access.value !== 'unknown';
   const state = monitorState.value;
-  const muted = monitorMuted.value;
+  const mode = previewMode.value;
+  const muted = monitorMuted.value || monitorVolume.value === 0;
+  const volume = monitorVolume.value;
   const live = Boolean(control.value?.isLive);
 
   useEffect(() => {
-    if (!inWindow || !Hls.isSupported()) return undefined;
-    current = watch(video.current);
+    if (!inWindow) return undefined;
+    current = preview(fileVideo.current, hlsVideo.current);
     attachPreview(current);
     return () => {
       attachPreview(null);
@@ -518,47 +605,53 @@ export function MonitorScreen() {
   }, [inWindow]);
 
   useEffect(() => {
-    if (video.current) video.current.muted = muted;
-  }, [muted]);
+    for (const v of [fileVideo.current, hlsVideo.current]) {
+      if (!v) continue;
+      v.volume = volume;
+      v.muted = muted;
+    }
+  }, [volume, muted]);
+
+  // The mouse wheel over the Preview sets its volume.
+  const onWheel = (e) => {
+    if (!inWindow || e.ctrlKey) return;
+    e.preventDefault();
+    nudgeMonitorVolume(e.deltaY < 0 ? 0.05 : -0.05);
+  };
 
   const supported = Hls.isSupported();
-  const canSync = inWindow && supported && !live && state === 'playing';
+  const canSync = inWindow && !live && state === 'playing';
   const muteLabel = muted ? t('monitor.unmute') : t('monitor.mute');
+  const ahead = mode === 'file' ? airBehindS.value : monitorAheadS.value;
+  const fallbackNote = inWindow && mode === 'fallback' && !live && sourceReason.value !== 'live';
+  const pip = role === 'pip';
   return html`
-    <div class=${`screen screen-monitor${inWindow || !known ? '' : ' is-off'}`} data-state=${inWindow ? state : 'remote'}>
+    <div class=${`screen screen-monitor role-${role}${inWindow || !known ? '' : ' is-off'}`}
+      data-state=${inWindow ? state : 'remote'} data-mode=${inWindow ? mode : 'remote'}>
       <div class="screen-cap">
-        <span class="monitor-caption">${inWindow ? caption(state, monitorAheadS.value) : t('monitor.title')}</span>
-        ${inWindow
+        <span class="monitor-caption">${inWindow && !pip ? caption(state, ahead) : t('monitor.title')}</span>
+        ${inWindow && !pip
           ? html`<button type="button" class="icon-button monitor-mute" aria-label=${muteLabel} title=${muteLabel}
               onClick=${() => (monitorMuted.value = !monitorMuted.value)}>
               <${Icon} name=${muted ? 'muted' : 'volume'} size=${16} />
             </button>`
           : null}
       </div>
-      <div class="monitor-box" role="region" aria-label=${t('monitor.label')}>
-        <video ref=${video} muted playsinline></video>
-        ${!inWindow && known
-          ? html`<div class="monitor-note">${t('ui.window_only')}</div>`
-          : inWindow && !supported
-            ? html`<div class="monitor-note" role="alert">${t('monitor.unsupported')}</div>`
-            : state === 'none'
-            ? html`<div class="monitor-note">${t('monitor.none')}</div>`
-            : state === 'paused'
-              ? html`<div class="monitor-badge" role="status">
-                  ${control.value?.pausePending ? t('player.pause_pending') : t('monitor.paused')}
-                </div>`
-              : state === 'failed'
-                ? html`<div class="preview-unavailable" role="alert">
-                    <span>${t('monitor.unavailable')}</span>
-                    <button type="button" class="btn" onClick=${() => current?.retry()}>${t('preview.retry')}</button>
-                  </div>`
-                : null}
+      <div class="monitor-box" role="region" aria-label=${t('monitor.label')} onWheel=${onWheel}
+        onClick=${pip && onActivate ? onActivate : undefined}>
+        <video ref=${fileVideo} class=${`pv-file${mode === 'fallback' ? ' is-hidden' : ''}`} muted playsinline preload="auto"></video>
+        <video ref=${hlsVideo} class=${`pv-hls${mode === 'fallback' ? '' : ' is-hidden'}`} muted playsinline></video>
+        <${Overlay} inWindow=${inWindow} known=${known} supported=${supported} state=${state} mode=${mode} />
+        ${fallbackNote ? html`<div class="monitor-fallback" role="note" title=${t('preview.fallback_hint')}>${t('preview.fallback')}</div>` : null}
+        ${tools}
       </div>
-      <div class="screen-actions">
-        <button type="button" class="btn monitor-sync" disabled=${!canSync} aria-keyshortcuts="S"
-          title=${live ? t('monitor.sync_live') : undefined} onClick=${syncMonitor}>
-          <${Icon} name="sync" size=${16} /><span>${t('monitor.sync')}</span>
-        </button>
-      </div>
+      ${pip
+        ? null
+        : html`<div class="screen-actions">
+            <button type="button" class="btn monitor-sync" disabled=${!canSync} aria-keyshortcuts="S"
+              title=${live ? t('monitor.sync_live') : mode === 'file' ? t('preview.sync_hint') : undefined} onClick=${syncMonitor}>
+              <${Icon} name="sync" size=${16} /><span>${mode === 'file' ? t('preview.sync') : t('monitor.sync')}</span>
+            </button>
+          </div>`}
     </div>`;
 }

@@ -33,6 +33,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/", get(index))
         .route("/admin", get(admin_page))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/app-icon.png", get(app_icon))
         .route("/api/channels/main/state", get(channel_state))
         .route("/api/channels/main/requests", post(post_request))
         .route("/desktop-login", get(desktop_login))
@@ -48,6 +49,24 @@ fn page(file: &str) -> Response {
 
 async fn index() -> Response {
     page("index.html")
+}
+
+/// The program's icon, the one file the window shell's taskbar icon comes from too
+/// (`desktop/icons/icon.png`): the title bar and the page icon show it.
+pub(crate) const APP_ICON: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../desktop/icons/icon.png"
+));
+
+async fn app_icon() -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        APP_ICON,
+    )
+        .into_response()
 }
 
 /// The player interface: the program's window and the remote panel (which signs in there).
