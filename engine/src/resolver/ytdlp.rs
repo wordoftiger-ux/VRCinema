@@ -140,6 +140,7 @@ pub fn parse_ytdlp_meta(j: &Value) -> MediaMeta {
                     url: url.to_string(),
                     title: non_empty_title(e.get("title")),
                     duration_s: num(e.get("duration")),
+                    is_live: is_live(e),
                 })
             })
             .collect();
@@ -510,6 +511,23 @@ impl MediaResolver for YtDlpResolver {
         ))
     }
 
+    async fn fetch_meta_capped(
+        &self,
+        url: &str,
+        max_entries: usize,
+    ) -> Result<MediaMeta, ResolveError> {
+        let end = max_entries.max(1).to_string();
+        let mut meta = parse_ytdlp_meta(
+            &self
+                .exec(&["-J", "--flat-playlist", "--playlist-end", &end], url)
+                .await?,
+        );
+        if let Some(entries) = meta.entries.as_mut() {
+            entries.truncate(max_entries);
+        }
+        Ok(meta)
+    }
+
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError> {
         let json = self
             .exec(&["-j", "--no-playlist", "-f", FORMAT_SELECTOR], url)
@@ -658,6 +676,7 @@ mod tests {
                 url: "https://www.youtube.com/watch?v=fOT0BUpITw8".into(),
                 title: "BELLAKEO (Video Oficial) - Peso Pluma, Anitta".into(),
                 duration_s: Some(235.0),
+                is_live: false,
             }
         );
     }
@@ -858,6 +877,39 @@ mod tests {
                 "https://youtu.be/x"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_capped_fetch_asks_ytdlp_for_the_first_entries_only() {
+        let calls = Calls::default();
+        let runner = FakeRunner {
+            calls: calls.clone(),
+            reply: ok(fixture("ytdlp-meta-playlist.json").to_string()),
+        };
+        let r =
+            YtDlpResolver::new(PathBuf::from("yt-dlp"), None, None).with_runner(Box::new(runner));
+        let meta = r
+            .fetch_meta_capped("https://youtube.com/playlist?list=x", 2)
+            .await
+            .unwrap();
+        assert_eq!(meta.entries.unwrap().len(), 2, "kept to the cap");
+        let calls = calls.lock().unwrap();
+        let args: Vec<&str> = calls[0].1.iter().map(String::as_str).collect();
+        let at = args.iter().position(|a| *a == "--playlist-end").unwrap();
+        assert_eq!(args[at + 1], "2");
+        assert!(args.contains(&"--flat-playlist"));
+        assert_eq!(args[args.len() - 2..], ["--", "https://youtube.com/playlist?list=x"]);
+    }
+
+    #[test]
+    fn a_live_entry_of_a_flat_playlist_is_marked_live() {
+        let m = parse_ytdlp_meta(&json!({"_type": "playlist", "title": "P", "entries": [
+            {"url": "https://www.youtube.com/watch?v=a", "title": "A", "live_status": "is_live"},
+            {"url": "https://www.youtube.com/watch?v=b", "title": "B"}
+        ]}));
+        let e = m.entries.unwrap();
+        assert!(e[0].is_live);
+        assert!(!e[1].is_live);
     }
 
     #[tokio::test]

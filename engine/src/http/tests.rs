@@ -260,11 +260,13 @@ impl Harness {
                         url: "https://youtu.be/p1".into(),
                         title: "P1".into(),
                         duration_s: Some(10.0),
+                        is_live: false,
                     },
                     PlaylistEntry {
                         url: "https://youtu.be/p2".into(),
                         title: "P2".into(),
                         duration_s: Some(20.0),
+                        is_live: false,
                     },
                 ]),
             }),
@@ -1332,6 +1334,7 @@ async fn playlist_entries_with_file_urls_are_dropped_when_expanding() {
         url: url.into(),
         title: title.into(),
         duration_s: Some(5.0),
+        is_live: false,
     };
     let playlist = |entries| {
         Ok(MediaMeta {
