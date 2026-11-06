@@ -15,6 +15,7 @@
 // name to its tree and a file name to its size in bytes; `libraryAddError`: the code POST …/local
 // answers with.
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
+// Viewer lists: POST /api/channels/main/request-list (settings viewerLists / viewerListMax, scenario listDelayMs), the panel's pendingLists and POST /api/admin/channels/main/lists/{id}.
 // GET /__test/stats: {maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight}; GET /__test/hang never answers.
 // The producer's monitor (window only, 403 for a remote session or without a window; requests
 // record their query as `search`; maxMonitorInFlight counts the reads without `from`): GET
@@ -169,6 +170,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     tickerQr: 'with_ticker',
     tickerProgress: true,
     tickerMessages: ['Welcome to the Friday show!'],
+    viewerLists: false,
+    viewerListMax: 10,
   });
   const POPULAR = ['youtube.com', 'youtu.be', 'twitch.tv', 'kick.com', 'vimeo.com', 'pixeldrain.com', 'cda.pl'];
   const initialNicks = () => [
@@ -250,6 +253,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     s.tools = initialTools();
     s.toolsJob = null;
     s.pendingItems = [];
+    s.pendingLists = [];
     nextId = 100;
     maxPanelInFlight = 0;
     maxViewerInFlight = 0;
@@ -363,6 +367,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       playing: current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : [],
       queue: s.queue,
       pending: s.pendingItems,
+      pendingLists: s.pendingLists
+        .map((l) => ({ ...l, itemIds: l.itemIds.filter((id) => s.pendingItems.some((i) => i.id === id)) }))
+        .filter((l) => l.itemIds.length >= 2),
       history: s.history,
       settings: {},
       control: control(),
@@ -390,8 +397,62 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       queue: s.queue.map(publicItem),
       channelUrl: p.channelUrl,
       requestUrl: p.requestUrl,
-      rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation },
+      rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation, viewerLists: s.settings.viewerLists, viewerListMax: s.settings.viewerListMax },
     };
+  }
+
+  // Viewer lists (POST …/request-list) like the engine: 403 viewer_lists_off with the setting
+  // off; each line is a link (a line with "playlist" expands to three videos), a non-link is
+  // invalid_link, a 192.168. host local_address, a repeated one duplicate_link, beyond
+  // viewerListMax list_full. Scenario `listDelayMs` delays the answer.
+  const LIST_REASONS = {
+    invalid_link: ['That does not look like a valid link (http/https).', 'To nie wygląda na poprawny link (http/https).'],
+    local_address: ['Links to a local network or to this computer are not allowed.', 'Linki do sieci lokalnej lub do tego komputera są niedozwolone.'],
+    duplicate_link: ['This video is already in your list.', 'Ten film już jest na twojej liście.'],
+    list_full: ['Over the limit of videos in one list.', 'Ponad limit filmów na jedną listę.'],
+  };
+  async function viewerList(res, req, payload) {
+    const pl = req.headers['x-vrcinema-lang'] === 'pl';
+    if (!s.settings.viewerLists) return coded(res, 403, 'viewer_lists_off', pl ? 'Ten kanał przyjmuje jeden link naraz. Wyślij pojedynczy link.' : 'This channel takes one link at a time. Send a single link.');
+    const lines = Array.isArray(payload?.urls) ? payload.urls.map((u) => String(u).trim()).filter(Boolean) : [];
+    if (!lines.length) return coded(res, 400, 'invalid_link', LIST_REASONS.invalid_link[pl ? 1 : 0]);
+    if (s.listDelayMs) await sleep(s.listDelayMs);
+    const key = payload.deviceKey ?? null;
+    const nick = String(payload.name ?? '').trim();
+    const badge = key ? { hue: parseInt(key.slice(0, 3), 16) % 360, shape: parseInt(key[3], 16) % 12 } : null;
+    const pending = s.settings.moderation;
+    const status = pending ? 'pending_approval' : 'queued';
+    const results = [];
+    const added = [];
+    const seen = new Set();
+    let title = null;
+    const skip = (line, code, t = null) => results.push({ line, title: t, status: 'skipped', code, reason: LIST_REASONS[code][pl ? 1 : 0] });
+    const add = (line, t) => {
+      if (added.length >= s.settings.viewerListMax) return skip(line, 'list_full', t);
+      const item = queued(nextId++, t, { requesterName: nick || null, requesterBadge: badge, status });
+      added.push(item);
+      results.push({ line, title: t, status });
+    };
+    lines.forEach((text, i) => {
+      const line = i + 1;
+      if (!/^https?:\/\//.test(text)) return skip(line, 'invalid_link');
+      if (new URL(text).hostname.startsWith('192.168.')) return skip(line, 'local_address');
+      if (seen.has(text)) return skip(line, 'duplicate_link');
+      seen.add(text);
+      if (text.includes('playlist')) {
+        title = 'Fake playlist';
+        for (let n = 1; n <= 3; n += 1) add(line, `Playlist video ${n}`);
+      } else add(line, 'Added from ' + new URL(text).hostname);
+    });
+    if (pending) s.pendingItems.push(...added);
+    else s.queue.push(...added);
+    let listId = null;
+    if (added.length) {
+      listId = nextId++;
+      s.pendingLists.push({ id: listId, title, itemIds: added.map((i) => i.id) });
+    }
+    const skipped = results.filter((r) => r.status === 'skipped').length;
+    return json(res, 200, { status, added: added.length, skipped, listId, requesterBadge: badge, results });
   }
   const VIEWER_ERRORS = {
     domain_not_allowed: [400, 'This site is not allowed. Allowed: youtube.com, youtu.be.', 'Ten serwis nie jest dozwolony. Dozwolone: youtube.com, youtu.be.'],
@@ -883,6 +944,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       }
     }
     if (path === '/api/channels/main/requests' && req.method === 'POST') return viewerRequest(res, req, payload);
+    if (path === '/api/channels/main/request-list' && req.method === 'POST') return viewerList(res, req, payload);
     if (path === '/api/admin/login' && req.method === 'POST') {
       const pl = req.headers['x-vrcinema-lang'] === 'pl';
       if (s.remotePanelOff) return coded(res, 403, 'remote_panel_off', pl ? 'Panel zdalny jest wyłączony.' : 'The remote panel is switched off.');
@@ -1041,6 +1103,16 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     }
     if (req.method !== 'POST') return json(res, 404, { error: 'Not Found' });
     const action = path.slice(base.length + 1);
+    const listRoute = action.match(/^lists\/(\d+)$/);
+    if (listRoute) {
+      const list = s.pendingLists.find((l) => l.id === Number(listRoute[1]));
+      if (!list) return coded(res, 404, 'no_such_list', 'That list does not exist.');
+      const mine = s.pendingItems.filter((i) => list.itemIds.includes(i.id));
+      if (!mine.length) return coded(res, 409, 'not_pending', 'Not pending');
+      s.pendingItems = s.pendingItems.filter((i) => !list.itemIds.includes(i.id));
+      if (payload?.action === 'approve') s.queue.push(...mine.map((i) => ({ ...i, status: 'queued' })));
+      return json(res, 200, { changed: mine.length });
+    }
     const queueTool = queueTools(res, action, payload);
     if (queueTool) return queueTool;
     if (action === 'skip') return json(res, 200, { ok: true });

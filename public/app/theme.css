@@ -1880,6 +1880,15 @@ kbd {
   color: var(--red);
 }
 
+/* A viewer's list waiting for approval: a heading row, its videos indented under it. */
+.qi-list-head {
+  background: var(--hover-row);
+}
+
+.qi-list-items .qi {
+  padding-left: 28px;
+}
+
 .drop-overlay {
   position: fixed;
   inset: 0;

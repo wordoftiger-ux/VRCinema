@@ -454,6 +454,12 @@ const decide = (id, action) =>
 export const approveItem = (id) => decide(id, 'approve');
 export const rejectItem = (id) => decide(id, 'reject');
 
+/** Every waiting video of a viewer's list (`{id, itemIds}` of `pendingLists`) at once. */
+const decideList = (list, action) =>
+  mutate(() => api('POST', `${PANEL}/lists/${list.id}`, { action }), () => list.itemIds.forEach(dropPending));
+export const approveList = (list) => decideList(list, 'approve');
+export const rejectList = (list) => decideList(list, 'reject');
+
 /** Adds a link (a video or a playlist): resolves to `{added, title}`, throws `ApiError`. */
 export async function addLink(url) {
   try {
