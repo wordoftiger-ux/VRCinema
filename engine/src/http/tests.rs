@@ -37,6 +37,8 @@ use crate::pipeline::channel::{
 use crate::pipeline::monitor::{MonitorFeed, MonitorRow};
 use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream};
 
+mod lists;
+
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;
 
 struct TestResolver {

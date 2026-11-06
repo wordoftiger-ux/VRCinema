@@ -70,6 +70,7 @@
   "errors.download_incomplete": "Descarga interrumpida ({downloaded} de {total} bytes): {url}",
   "errors.download_interrupted": "Descarga interrumpida: {url}",
   "errors.download_unexpected_range": "El servidor devolvió un rango de datos inesperado: {url}",
+  "errors.duplicate_link": "Este video ya está en tu lista.",
   "errors.empty_json_body": "Body cannot be empty when content-type is set to 'application/json'",
   "errors.empty_playlist": "La lista de reproducción está vacía.",
   "errors.engine_unavailable": "El canal no acepta comandos en este momento. Vuelva a intentarlo en unos instantes.",
@@ -107,6 +108,7 @@
   "errors.item_id_required": "Indique itemId.",
   "errors.item_not_playable": "El elemento #{id} no se puede reproducir ahora (estado {status}).",
   "errors.library_disabled": "Los archivos del disco están desactivados. Configure MEDIA_DIRS en el archivo .env.",
+  "errors.list_full": "Supera el límite de videos de una lista.",
   "errors.live_item": "Una transmisión en vivo no admite pausas ni saltos.",
   "errors.live_owner_only": "Solo el propietario del canal puede agregar transmisiones en vivo.",
   "errors.local_address": "No se permiten enlaces a la red local ni a este equipo.",
@@ -132,6 +134,7 @@
   "errors.no_requester": "Este video no lo agregó un espectador con apodo o dispositivo.",
   "errors.no_segment": "No existe ese segmento",
   "errors.no_such_item": "No existe ese elemento.",
+  "errors.no_such_list": "No existe esa lista.",
   "errors.no_such_root": "No existe esa carpeta raíz.",
   "errors.no_update": "No hay ninguna actualización disponible.",
   "errors.no_videos_in_folder": "No hay archivos de video en esta carpeta.",
@@ -216,6 +219,7 @@
   "errors.update_sum_missing": "Falta el archivo de sumas de verificación ({file})",
   "errors.update_sum_unreadable": "No se puede leer el archivo de sumas de verificación ({file})",
   "errors.update_unavailable": "Las actualizaciones no están disponibles en esta versión del programa.",
+  "errors.viewer_lists_off": "Este canal acepta un enlace a la vez. Envía un solo enlace.",
   "errors.window_only": "Esta función solo está disponible en la ventana de la aplicación.",
   "errors.wrong_password": "Contraseña incorrecta.",
   "errors.ytdlp_bad_data": "yt-dlp devolvió datos no válidos.",
@@ -341,6 +345,7 @@
   "log.preview_download_failed": "Video #{id}: la descarga para la vista previa falló ({error}); la vista previa muestra en su lugar los segmentos del canal",
   "log.program_stopped": "Programa detenido.",
   "log.queue_error_prefetch": "Error de la cola al preparar el siguiente video: {error}",
+  "log.request_list_received": "Lista de solicitudes del espectador {viewer}: {added} agregados, {skipped} omitidos ({status})",
   "log.request_received": "Solicitud del espectador {viewer}: \"{title}\" ({status})",
   "log.restart_failed_reverting": "El servidor no se inició con la nueva configuración: {error}. Se restaura la anterior.",
   "log.resume": "Reanudación: video #{id} \"{title}\" desde {seconds} s",
@@ -578,6 +583,8 @@
   "queue.anonymous": "anónimo",
   "queue.approve": "Aprobar",
   "queue.approve_label": "Aprobar “{title}”",
+  "queue.approve_list": "Aprobar todo",
+  "queue.approve_list_label": "Aprobar todos los videos de esta lista",
   "queue.by_host": "agregado aquí",
   "queue.clear": "Vaciar la cola",
   "queue.clear_body": {
@@ -596,6 +603,11 @@
   "queue.empty": "La cola está vacía. Pegue un enlace para agregar un video.",
   "queue.from_disk": "del disco",
   "queue.include_on_air": "Detener también el video en emisión (“{title}”)",
+  "queue.list_heading": {
+    "one": "Lista: {count} video",
+    "many": "Lista: {count} videos",
+    "other": "Lista: {count} videos"
+  },
   "queue.menu": "Menú del video",
   "queue.more": "Más opciones para “{title}”",
   "queue.more_short": "Más",
@@ -606,6 +618,8 @@
   "queue.play_now": "Reproducir ahora",
   "queue.reject": "Rechazar",
   "queue.reject_label": "Rechazar “{title}”",
+  "queue.reject_list": "Rechazar todo",
+  "queue.reject_list_label": "Rechazar todos los videos de esta lista",
   "queue.remove": "Quitar de la cola",
   "queue.remove_confirm": "Quitar videos",
   "queue.remove_requester": "Quitar todo de este espectador",
@@ -1169,5 +1183,42 @@
   "screens.window": "Abrir en su propia ventana",
   "screens.away": "“En emisión” está en su propia ventana",
   "screens.bring_back": "Traer de vuelta",
-  "screens.on_top": "Siempre visible"
+  "screens.on_top": "Siempre visible",
+  "settings.channel.viewer_list_max": "Videos por lista",
+  "settings.channel.viewer_list_max_hint": "También es el máximo de elementos que se leen de una lista de reproducción (1–50).",
+  "settings.channel.viewer_list_max_invalid": "Escriba un número entero de 1 a 50.",
+  "settings.channel.viewer_list_max_saved": "Tamaño de lista guardado.",
+  "settings.channel.viewer_lists": "Permitir que los espectadores agreguen listas",
+  "settings.channel.viewer_lists_block": "Listas",
+  "settings.channel.viewer_lists_hint": "Los espectadores pueden pegar varios enlaces a la vez (uno por línea) y listas de reproducción. Cada video pasa las mismas comprobaciones y límites que un enlace suelto.",
+  "settings.channel.viewer_lists_off": "Los espectadores agregan un enlace a la vez.",
+  "settings.channel.viewer_lists_on": "Los espectadores pueden agregar listas.",
+  "viewer.checking_links": {
+    "one": "Comprobando {count} enlace…",
+    "many": "Comprobando {count} enlaces…",
+    "other": "Comprobando {count} enlaces…"
+  },
+  "viewer.links_hint": {
+    "one": "Un enlace por línea; también funcionan las listas de reproducción. Hasta {count} video a la vez.",
+    "many": "Un enlace por línea; también funcionan las listas de reproducción. Hasta {count} videos a la vez.",
+    "other": "Un enlace por línea; también funcionan las listas de reproducción. Hasta {count} videos a la vez."
+  },
+  "viewer.links_label": "Enlaces de videos",
+  "viewer.links_placeholder": "Pega los enlaces, uno por línea…",
+  "viewer.list_added": {
+    "one": "{count} video agregado",
+    "many": "{count} videos agregados",
+    "other": "{count} videos agregados"
+  },
+  "viewer.list_line": "Línea {line}",
+  "viewer.list_pending": {
+    "one": "{count} video pendiente de aprobación",
+    "many": "{count} videos pendientes de aprobación",
+    "other": "{count} videos pendientes de aprobación"
+  },
+  "viewer.list_skipped": {
+    "one": "{count} omitido",
+    "many": "{count} omitidos",
+    "other": "{count} omitidos"
+  }
 }

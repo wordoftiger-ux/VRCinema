@@ -39,6 +39,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/desktop-login", get(desktop_login))
         .route("/api/admin/login", post(login))
         .route("/api/admin/logout", post(logout))
+        .merge(super::viewer_lists::public_router())
 }
 
 fn page(file: &str) -> Response {
@@ -123,9 +124,9 @@ fn clean_name(raw: Option<&Value>) -> Option<String> {
 }
 
 /// The nick and device key of a request.
-struct Viewer {
-    nick: Option<String>,
-    key_hash: Option<String>,
+pub(super) struct Viewer {
+    pub(super) nick: Option<String>,
+    pub(super) key_hash: Option<String>,
 }
 
 fn nick_error(e: NickError) -> ApiError {
@@ -140,7 +141,7 @@ fn nick_error(e: NickError) -> ApiError {
 /// Reads the viewer's nick and device key and checks them without reserving anything: a
 /// malformed key is 400, a blocked device 403, a nick reserved for the owner or held by another
 /// device 409 (in the viewer's language).
-fn check_viewer(state: &AppState, body: &Value) -> Result<Viewer, ApiError> {
+pub(super) fn check_viewer(state: &AppState, body: &Value) -> Result<Viewer, ApiError> {
     let key_hash = match body.get("deviceKey") {
         None | Some(Value::Null) => None,
         Some(Value::String(key)) => {
@@ -180,7 +181,7 @@ fn check_viewer(state: &AppState, body: &Value) -> Result<Viewer, ApiError> {
 
 /// Reserves the nick for the device (or renews it). Only for a request that is going to be
 /// queued: one the limiter or the link validation refused must not reserve or refresh a nick.
-fn claim_viewer(state: &AppState, viewer: &Viewer) -> Result<(), ApiError> {
+pub(super) fn claim_viewer(state: &AppState, viewer: &Viewer) -> Result<(), ApiError> {
     let (Some(nick), Some(key)) = (&viewer.nick, &viewer.key_hash) else {
         return Ok(());
     };

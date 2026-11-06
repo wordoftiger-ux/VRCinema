@@ -8,6 +8,7 @@ mod routes_monitor;
 mod routes_public;
 mod routes_queue;
 mod routes_stream;
+mod viewer_lists;
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::Duration;
@@ -1075,6 +1076,7 @@ pub fn build_router(state: AppState) -> Router {
         routes_admin::router()
     }
     .merge(routes_queue::router())
+    .merge(viewer_lists::admin_router())
     .route_layer(middleware::from_fn_with_state(
         state.clone(),
         routes_admin::require_admin,

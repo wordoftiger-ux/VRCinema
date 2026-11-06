@@ -71,6 +71,7 @@
   "errors.download_incomplete": "Pobieranie przerwane ({downloaded} z {total} bajtów): {url}",
   "errors.download_interrupted": "Pobieranie przerwane: {url}",
   "errors.download_unexpected_range": "Serwer zwrócił nieoczekiwany zakres danych: {url}",
+  "errors.duplicate_link": "Ten film już jest na twojej liście.",
   "errors.empty_json_body": "Body cannot be empty when content-type is set to 'application/json'",
   "errors.empty_playlist": "Playlista jest pusta.",
   "errors.engine_unavailable": "Kanał nie przyjmuje teraz poleceń. Spróbuj za chwilę.",
@@ -108,6 +109,7 @@
   "errors.item_id_required": "Podaj itemId.",
   "errors.item_not_playable": "Pozycji #{id} nie można odtworzyć teraz (status {status}).",
   "errors.library_disabled": "Pliki z dysku są wyłączone. Ustaw MEDIA_DIRS w pliku .env.",
+  "errors.list_full": "Ponad limit filmów na jedną listę.",
   "errors.live_item": "Transmisji na żywo nie można wstrzymać ani przewinąć.",
   "errors.live_owner_only": "Transmisje na żywo może dodawać tylko właściciel kanału.",
   "errors.local_address": "Linki do sieci lokalnej lub do tego komputera są niedozwolone.",
@@ -133,6 +135,7 @@
   "errors.no_requester": "Tego filmu nie dodał widz z nickiem ani urządzeniem.",
   "errors.no_segment": "Brak fragmentu",
   "errors.no_such_item": "Nie ma takiej pozycji.",
+  "errors.no_such_list": "Nie ma takiej listy.",
   "errors.no_such_root": "Nie ma takiego folderu głównego.",
   "errors.no_update": "Brak dostępnej aktualizacji.",
   "errors.no_videos_in_folder": "W tym folderze nie ma plików wideo.",
@@ -218,6 +221,7 @@
   "errors.update_sum_missing": "Brak pliku sumy kontrolnej ({file})",
   "errors.update_sum_unreadable": "Nieczytelny plik sumy kontrolnej ({file})",
   "errors.update_unavailable": "Aktualizacja nie jest dostępna w tej wersji programu.",
+  "errors.viewer_lists_off": "Ten kanał przyjmuje jeden link naraz. Wyślij pojedynczy link.",
   "errors.window_only": "Ta funkcja jest dostępna tylko w oknie aplikacji.",
   "errors.wrong_password": "Złe hasło.",
   "errors.ytdlp_bad_data": "yt-dlp zwrócił niepoprawne dane.",
@@ -343,6 +347,7 @@
   "log.preview_download_failed": "Film #{id}: pobieranie dla Podglądu nie powiodło się ({error}); Podgląd pokazuje zamiast tego fragmenty kanału",
   "log.program_stopped": "Program zatrzymany.",
   "log.queue_error_prefetch": "Błąd kolejki przy wyprzedzaniu: {error}",
+  "log.request_list_received": "Lista zgłoszeń od widza {viewer}: dodano {added}, pominięto {skipped} ({status})",
   "log.request_received": "Zgłoszenie od widza {viewer}: „{title}” ({status})",
   "log.restart_failed_reverting": "Serwer nie wystartował z nowymi ustawieniami: {error}. Przywracam poprzednie.",
   "log.resume": "Wznowienie: film #{id} „{title}” od {seconds} s",
@@ -582,6 +587,8 @@
   "queue.anonymous": "anonimowo",
   "queue.approve": "Zatwierdź",
   "queue.approve_label": "Zatwierdź „{title}”",
+  "queue.approve_list": "Zatwierdź wszystkie",
+  "queue.approve_list_label": "Zatwierdź wszystkie filmy z tej listy",
   "queue.by_host": "dodane tutaj",
   "queue.clear": "Wyczyść kolejkę",
   "queue.clear_body": {
@@ -602,6 +609,12 @@
   "queue.empty": "Kolejka jest pusta. Wklej link, żeby dodać film.",
   "queue.from_disk": "z dysku",
   "queue.include_on_air": "Zatrzymaj też film na antenie („{title}”)",
+  "queue.list_heading": {
+    "one": "Lista: {count} film",
+    "few": "Lista: {count} filmy",
+    "many": "Lista: {count} filmów",
+    "other": "Lista: {count} filmu"
+  },
   "queue.menu": "Menu filmu",
   "queue.more": "Więcej dla „{title}”",
   "queue.more_short": "Więcej",
@@ -612,6 +625,8 @@
   "queue.play_now": "Odtwórz teraz",
   "queue.reject": "Odrzuć",
   "queue.reject_label": "Odrzuć „{title}”",
+  "queue.reject_list": "Odrzuć wszystkie",
+  "queue.reject_list_label": "Odrzuć wszystkie filmy z tej listy",
   "queue.remove": "Usuń z kolejki",
   "queue.remove_confirm": "Usuń filmy",
   "queue.remove_requester": "Usuń wszystko od tego widza",
@@ -1180,5 +1195,47 @@
   "screens.window": "Otwórz w osobnym oknie",
   "screens.away": "Antena jest w osobnym oknie",
   "screens.bring_back": "Przywróć",
-  "screens.on_top": "Zawsze na wierzchu"
+  "screens.on_top": "Zawsze na wierzchu",
+  "settings.channel.viewer_list_max": "Filmów na listę",
+  "settings.channel.viewer_list_max_hint": "To także limit pozycji odczytywanych z playlisty (1–50).",
+  "settings.channel.viewer_list_max_invalid": "Wpisz liczbę całkowitą od 1 do 50.",
+  "settings.channel.viewer_list_max_saved": "Zapisano rozmiar listy.",
+  "settings.channel.viewer_lists": "Pozwól widzom dodawać listy",
+  "settings.channel.viewer_lists_block": "Listy",
+  "settings.channel.viewer_lists_hint": "Widzowie mogą wkleić kilka linków naraz (każdy w osobnej linii) i playlisty. Każdy film przechodzi te same sprawdzenia i limity co pojedynczy link.",
+  "settings.channel.viewer_lists_off": "Widzowie dodają po jednym linku.",
+  "settings.channel.viewer_lists_on": "Widzowie mogą dodawać listy.",
+  "viewer.checking_links": {
+    "one": "Sprawdzam {count} link…",
+    "few": "Sprawdzam {count} linki…",
+    "many": "Sprawdzam {count} linków…",
+    "other": "Sprawdzam {count} linku…"
+  },
+  "viewer.links_hint": {
+    "one": "Każdy link w osobnej linii; playlisty też działają. Najwyżej {count} film naraz.",
+    "few": "Każdy link w osobnej linii; playlisty też działają. Najwyżej {count} filmy naraz.",
+    "many": "Każdy link w osobnej linii; playlisty też działają. Najwyżej {count} filmów naraz.",
+    "other": "Każdy link w osobnej linii; playlisty też działają. Najwyżej {count} filmu naraz."
+  },
+  "viewer.links_label": "Linki do filmów",
+  "viewer.links_placeholder": "Wklej linki, każdy w osobnej linii…",
+  "viewer.list_added": {
+    "one": "Dodano {count} film",
+    "few": "Dodano {count} filmy",
+    "many": "Dodano {count} filmów",
+    "other": "Dodano {count} filmu"
+  },
+  "viewer.list_line": "Linia {line}",
+  "viewer.list_pending": {
+    "one": "{count} film czeka na zatwierdzenie",
+    "few": "{count} filmy czekają na zatwierdzenie",
+    "many": "{count} filmów czeka na zatwierdzenie",
+    "other": "{count} filmu czeka na zatwierdzenie"
+  },
+  "viewer.list_skipped": {
+    "one": "Pominięto {count}",
+    "few": "Pominięto {count}",
+    "many": "Pominięto {count}",
+    "other": "Pominięto {count}"
+  }
 }

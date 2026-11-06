@@ -68,6 +68,7 @@
   "errors.download_incomplete": "ダウンロードが中断されました（{total}バイト中{downloaded}バイト）：{url}",
   "errors.download_interrupted": "ダウンロードが中断されました：{url}",
   "errors.download_unexpected_range": "サーバーから予期しない範囲のデータが返されました：{url}",
+  "errors.duplicate_link": "この動画はすでにリストに入っています。",
   "errors.empty_json_body": "Body cannot be empty when content-type is set to 'application/json'",
   "errors.empty_playlist": "再生リストが空です。",
   "errors.engine_unavailable": "チャンネルは現在コマンドを受け付けていません。しばらくしてからもう一度お試しください。",
@@ -105,6 +106,7 @@
   "errors.item_id_required": "itemIdを指定してください。",
   "errors.item_not_playable": "項目#{id}は現在再生できません（状態：{status}）。",
   "errors.library_disabled": "ディスク上のファイルは無効になっています。.envファイルでMEDIA_DIRSを設定してください。",
+  "errors.list_full": "1つのリストで追加できる動画の上限を超えています。",
   "errors.live_item": "ライブ配信は一時停止やシークができません。",
   "errors.live_owner_only": "ライブ配信を追加できるのはチャンネルのオーナーだけです。",
   "errors.local_address": "ローカルネットワークやこのPCへのリンクは使用できません。",
@@ -130,6 +132,7 @@
   "errors.no_requester": "この動画は、ニックネームまたはデバイスのある視聴者が追加したものではありません。",
   "errors.no_segment": "そのセグメントはありません",
   "errors.no_such_item": "その項目は存在しません。",
+  "errors.no_such_list": "そのリストは存在しません。",
   "errors.no_such_root": "そのルートフォルダーは存在しません。",
   "errors.no_update": "利用できるアップデートはありません。",
   "errors.no_videos_in_folder": "このフォルダーには動画ファイルがありません。",
@@ -212,6 +215,7 @@
   "errors.update_sum_missing": "チェックサムファイルがありません（{file}）",
   "errors.update_sum_unreadable": "チェックサムファイルを読み込めません（{file}）",
   "errors.update_unavailable": "このバージョンのプログラムではアップデートを利用できません。",
+  "errors.viewer_lists_off": "このチャンネルでは一度に1つのリンクしか送れません。リンクを1つだけ送ってください。",
   "errors.window_only": "この機能はアプリのウィンドウでのみ利用できます。",
   "errors.wrong_password": "パスワードが違います。",
   "errors.ytdlp_bad_data": "yt-dlpが無効なデータを返しました。",
@@ -337,6 +341,7 @@
   "log.preview_download_failed": "動画#{id}：プレビュー用のダウンロードに失敗しました（{error}）。プレビューには代わりにチャンネルのセグメントを表示します",
   "log.program_stopped": "プログラムを停止しました。",
   "log.queue_error_prefetch": "次の動画の事前準備中にキューのエラーが発生しました：{error}",
+  "log.request_list_received": "視聴者{viewer}からのリストのリクエスト：追加{added}件、スキップ{skipped}件（{status}）",
   "log.request_received": "視聴者{viewer}からのリクエスト：「{title}」（{status}）",
   "log.restart_failed_reverting": "新しい設定でサーバーが起動しませんでした：{error}。以前の設定に戻します。",
   "log.resume": "再開：動画#{id}「{title}」を{seconds}秒の位置から",
@@ -570,6 +575,8 @@
   "queue.anonymous": "匿名",
   "queue.approve": "承認",
   "queue.approve_label": "「{title}」を承認",
+  "queue.approve_list": "すべて承認",
+  "queue.approve_list_label": "このリストの動画をすべて承認",
   "queue.by_host": "パネルから追加",
   "queue.clear": "キューを空にする",
   "queue.clear_body": {
@@ -584,6 +591,9 @@
   "queue.empty": "キューは空です。リンクを貼り付けて動画を追加してください。",
   "queue.from_disk": "ディスクから",
   "queue.include_on_air": "放送中の動画も停止する（「{title}」）",
+  "queue.list_heading": {
+    "other": "リスト：{count}本"
+  },
   "queue.menu": "動画のメニュー",
   "queue.more": "「{title}」のその他の操作",
   "queue.more_short": "その他",
@@ -594,6 +604,8 @@
   "queue.play_now": "今すぐ再生",
   "queue.reject": "却下",
   "queue.reject_label": "「{title}」を却下",
+  "queue.reject_list": "すべて却下",
+  "queue.reject_list_label": "このリストの動画をすべて却下",
   "queue.remove": "キューから削除",
   "queue.remove_confirm": "動画を削除",
   "queue.remove_requester": "この視聴者の動画をすべて削除",
@@ -1147,5 +1159,32 @@
   "screens.window": "別ウィンドウで開く",
   "screens.away": "「放送中」は別ウィンドウにあります",
   "screens.bring_back": "元に戻す",
-  "screens.on_top": "常に手前に表示"
+  "screens.on_top": "常に手前に表示",
+  "settings.channel.viewer_list_max": "1リストあたりの動画数",
+  "settings.channel.viewer_list_max_hint": "再生リストから読み込むエントリの上限でもあります（1～50）。",
+  "settings.channel.viewer_list_max_invalid": "1～50の整数を入力してください。",
+  "settings.channel.viewer_list_max_saved": "リストのサイズを保存しました。",
+  "settings.channel.viewer_lists": "視聴者がリストを追加できるようにする",
+  "settings.channel.viewer_lists_block": "リスト",
+  "settings.channel.viewer_lists_hint": "視聴者は複数のリンク（1行に1つ）や再生リストを一度に貼り付けられます。どの動画も1つのリンクと同じ確認と制限を受けます。",
+  "settings.channel.viewer_lists_off": "視聴者はリンクを1つずつ追加します。",
+  "settings.channel.viewer_lists_on": "視聴者はリストを追加できます。",
+  "viewer.checking_links": {
+    "other": "{count}件のリンクを確認中…"
+  },
+  "viewer.links_hint": {
+    "other": "1行に1つのリンクを入力します。再生リストも使えます。一度に{count}本まで追加できます。"
+  },
+  "viewer.links_label": "動画のリンク（複数可）",
+  "viewer.links_placeholder": "リンクを1行に1つずつ貼り付け…",
+  "viewer.list_added": {
+    "other": "{count}本を追加しました"
+  },
+  "viewer.list_line": "{line}行目",
+  "viewer.list_pending": {
+    "other": "{count}本が承認待ちです"
+  },
+  "viewer.list_skipped": {
+    "other": "{count}本をスキップしました"
+  }
 }

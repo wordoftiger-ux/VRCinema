@@ -102,6 +102,10 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     body.insert("playing".into(), items_json(&playing, lang));
     body.insert("queue".into(), items_json(&queue, lang));
     body.insert("pending".into(), items_json(&pending, lang));
+    body.insert(
+        "pendingLists".into(),
+        super::viewer_lists::pending_lists_json(&state)?,
+    );
     body.insert("history".into(), items_json(&history, lang));
     body.insert("settings".into(), json!(settings));
     body.insert("control".into(), control_json(&snapshot.state));
