@@ -4531,3 +4531,58 @@ async fn queue_tools_remove_a_viewer_or_everything_block_undo_and_play_next() {
     assert_eq!(r.status, StatusCode::CONFLICT);
     assert_eq!(r.json()["code"], "not_playable_next");
 }
+
+#[tokio::test]
+async fn trim_and_schedule_set_in_out_points_and_a_start_time() {
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let film = h.add("film", ItemStatus::Queued);
+    h.with_db(|c| {
+        c.execute(
+            "UPDATE queue_items SET duration_s = 100 WHERE id = ?",
+            [film.id],
+        )
+        .unwrap()
+    });
+    h.commands();
+    let post = |path: &str, body: Value| {
+        h.send(
+            call("POST", &format!("/api/admin/channels/main/{path}"))
+                .cookie(&cookie)
+                .json(body),
+        )
+    };
+    let r = post("trim", json!({"itemId": film.id, "inS": 10, "outS": 60.5})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json(), json!({"inS": 10, "outS": 60.5}));
+    let r = post("trim", json!({"itemId": film.id, "inS": 50, "outS": 50.5})).await;
+    assert_eq!(r.json()["code"], "bad_trim");
+    let r = post("trim", json!({"itemId": film.id, "inS": -1})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    let r = post("schedule", json!({"itemId": film.id, "afterS": 120})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let at = r.json()["startAt"].as_i64().unwrap();
+    assert!((at - crate::db::now_ms() - 120_000).abs() < 5_000);
+    let r = post("schedule", json!({"itemId": film.id, "startAt": 1000})).await;
+    assert_eq!(r.json()["code"], "bad_start_time");
+
+    let r = h
+        .send(call("GET", "/api/admin/channels/main").cookie(&cookie))
+        .await;
+    let row = &r.json()["queue"][0];
+    assert_eq!(row["inS"], 10);
+    assert_eq!(row["outS"], 60.5);
+    assert_eq!(row["startAt"], at);
+
+    let r = post("schedule", json!({"itemId": film.id})).await;
+    assert_eq!(r.json(), json!({"startAt": null}));
+    assert_eq!(h.item(film.id).start_at, None);
+    h.with_db(|c| {
+        QueueRepo::new(c)
+            .set_status(film.id, ItemStatus::Played, None)
+            .unwrap()
+    });
+    let r = post("trim", json!({"itemId": film.id, "inS": 1})).await;
+    assert_eq!(r.json()["code"], "trim_not_allowed");
+}

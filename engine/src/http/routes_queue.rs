@@ -32,6 +32,115 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/api/admin/channels/main/undo", post(undo))
         .route("/api/admin/channels/main/play-next", post(play_next))
+        .route("/api/admin/channels/main/trim", post(trim))
+        .route("/api/admin/channels/main/schedule", post(schedule))
+}
+
+/// The shortest film left between the in and the out point.
+const MIN_TRIMMED_S: f64 = 1.0;
+/// How far ahead a start time may be set.
+const MAX_SCHEDULE_AHEAD_MS: i64 = 7 * 24 * 3600 * 1000;
+
+/// An optional number field: absent or `null` is `None`; anything but a finite number ≥ 0 is
+/// refused with `code`.
+fn seconds(body: &Value, key: &str, code: &'static str) -> ApiResult<Option<f64>> {
+    match body.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(|s| Some((s * 1000.0).round() / 1000.0))
+            .ok_or_else(|| ApiError::bad_request(code)),
+    }
+}
+
+/// The in and out points as stored: an in point of 0 is no in point, an out point at (or past)
+/// the end of a film of known length is none; the film between them lasts at least
+/// [`MIN_TRIMMED_S`] and the in point lies inside the film.
+pub(crate) fn trim_points(
+    in_s: Option<f64>,
+    out_s: Option<f64>,
+    duration_s: Option<f64>,
+) -> Result<(Option<f64>, Option<f64>), &'static str> {
+    let in_s = in_s.filter(|s| *s > 0.0);
+    let out_s = out_s.filter(|s| duration_s.is_none_or(|d| *s < d));
+    let start = in_s.unwrap_or(0.0);
+    let end = out_s.or(duration_s);
+    if end.is_some_and(|end| end - start < MIN_TRIMMED_S) {
+        return Err("bad_trim");
+    }
+    Ok((in_s, out_s))
+}
+
+/// `{"itemId": id, "inS": s|null, "outS": s|null}`: the in and out points of a queued or
+/// playing video (not a live stream). A playing film ends at its new out point; a new in point
+/// counts from its next start. Answers `{inS, outS}` as stored.
+async fn trim(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let item = find_item(&state, item_id(&body)?)?;
+    let in_s = seconds(&body, "inS", "bad_trim")?;
+    let out_s = seconds(&body, "outS", "bad_trim")?;
+    if item.is_live || !matches!(item.status, ItemStatus::Queued | ItemStatus::Playing) {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "trim_not_allowed",
+            &[],
+        ));
+    }
+    let (in_s, out_s) = trim_points(in_s, out_s, item.duration_s).map_err(ApiError::bad_request)?;
+    let changed = state.with_db(|c| QueueRepo::new(c).set_trim(item.id, in_s, out_s))?;
+    if !changed {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "trim_not_allowed",
+            &[],
+        ));
+    }
+    state.send_command(Command::QueueChanged);
+    Ok(json_ok(&json!({
+        "inS": in_s.map(super::num_json),
+        "outS": out_s.map(super::num_json),
+    })))
+}
+
+/// `{"itemId": id, "startAt": unixMs}` or `{"itemId": id, "afterS": seconds}` (from the
+/// server's clock), or neither to clear it: when a queued video starts. Until then the channel
+/// airs a countdown when the video is next. Answers `{startAt}`.
+async fn schedule(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+    let item = find_item(&state, item_id(&body)?)?;
+    let now = crate::db::now_ms();
+    let start_at = match (
+        body.get("startAt"),
+        seconds(&body, "afterS", "bad_start_time")?,
+    ) {
+        (Some(v), _) if !v.is_null() => Some(
+            v.as_f64()
+                .filter(|ms| ms.is_finite())
+                .map(|ms| ms.round() as i64)
+                .ok_or_else(|| ApiError::bad_request("bad_start_time"))?,
+        ),
+        (_, Some(after)) => Some(now + (after * 1000.0).round() as i64),
+        _ => None,
+    };
+    if start_at.is_some_and(|at| at <= now || at > now + MAX_SCHEDULE_AHEAD_MS) {
+        return Err(ApiError::bad_request("bad_start_time"));
+    }
+    if item.status != ItemStatus::Queued {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "schedule_only_queued",
+            &[],
+        ));
+    }
+    let changed = state.with_db(|c| QueueRepo::new(c).set_start_at(item.id, start_at))?;
+    if !changed {
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            "schedule_only_queued",
+            &[],
+        ));
+    }
+    state.send_command(Command::QueueChanged);
+    Ok(json_ok(&json!({ "startAt": start_at })))
 }
 
 /// One bulk removal: the items with the status they had, and the device it blocked (lifted
@@ -276,6 +385,27 @@ async fn play_next(State(state): State<AppState>, JsonBody(body): JsonBody) -> A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_points_are_stored_plainly_and_leave_at_least_a_second() {
+        assert_eq!(trim_points(Some(0.0), None, Some(100.0)), Ok((None, None)));
+        assert_eq!(
+            trim_points(Some(10.0), Some(100.0), Some(100.0)),
+            Ok((Some(10.0), None))
+        );
+        assert_eq!(
+            trim_points(Some(10.0), Some(50.0), None),
+            Ok((Some(10.0), Some(50.0)))
+        );
+        assert_eq!(trim_points(Some(10.0), Some(10.5), None), Err("bad_trim"));
+        assert_eq!(trim_points(Some(99.5), None, Some(100.0)), Err("bad_trim"));
+        assert_eq!(trim_points(None, Some(0.5), None), Err("bad_trim"));
+        // An unknown length: any in point.
+        assert_eq!(
+            trim_points(Some(500.0), None, None),
+            Ok((Some(500.0), None))
+        );
+    }
 
     #[test]
     fn a_removal_is_undone_once_and_only_while_it_is_kept() {

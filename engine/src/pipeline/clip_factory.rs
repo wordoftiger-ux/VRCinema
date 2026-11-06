@@ -1097,6 +1097,9 @@ mod tests {
             created_at: 0,
             started_at: None,
             finished_at: None,
+            in_s: None,
+            out_s: None,
+            start_at: None,
         }
     }
 

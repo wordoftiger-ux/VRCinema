@@ -152,6 +152,9 @@ fn the_requester_comes_from_the_queue_item() {
         created_at: 0,
         started_at: None,
         finished_at: None,
+        in_s: None,
+        out_s: None,
+        start_at: None,
     };
     assert_eq!(Requester::of(&item), Requester::Host);
     item.added_by = AddedBy::Public;
@@ -184,6 +187,9 @@ fn a_ticker_drawn_with_the_japanese_font_uses_the_arrow_that_font_has() {
         created_at: 0,
         started_at: None,
         finished_at: None,
+        in_s: None,
+        out_s: None,
+        start_at: None,
     };
     let schedule = Schedule {
         mode: TickerMode::Interval,

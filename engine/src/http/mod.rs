@@ -992,6 +992,9 @@ pub(crate) fn admin_item(i: &QueueItem, lang: Lang) -> Value {
         map.insert("error".into(), json!(i.error_text(lang)));
         map.insert("createdAt".into(), json!(i.created_at));
         map.insert("finishedAt".into(), json!(i.finished_at));
+        map.insert("inS".into(), opt_num_json(i.in_s));
+        map.insert("outS".into(), opt_num_json(i.out_s));
+        map.insert("startAt".into(), json!(i.start_at));
     }
     item
 }

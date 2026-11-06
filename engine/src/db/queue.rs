@@ -113,9 +113,39 @@ pub struct QueueItem {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// The in point: the film starts here (film seconds); `None`: from its start.
+    pub in_s: Option<f64>,
+    /// The out point: the film ends here (film seconds); `None`: at its end.
+    pub out_s: Option<f64>,
+    /// When the film starts (Unix ms): until then the channel airs a countdown; `None`: when
+    /// its turn comes.
+    pub start_at: Option<i64>,
 }
 
 impl QueueItem {
+    /// Where the film starts: its in point, else 0 (a live stream always from its start).
+    pub fn start_s(&self) -> f64 {
+        if self.is_live {
+            return 0.0;
+        }
+        self.in_s
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(0.0)
+    }
+
+    /// Where the film ends: its out point, else its length; `None` for a live stream or an
+    /// unknown length without an out point. `duration_s`: the length known (probed) if any.
+    pub fn end_s(&self, duration_s: Option<f64>) -> Option<f64> {
+        if self.is_live {
+            return None;
+        }
+        match (self.out_s.filter(|s| s.is_finite() && *s > 0.0), duration_s) {
+            (Some(out), Some(d)) => Some(out.min(d)),
+            (Some(out), None) => Some(out),
+            (None, d) => d,
+        }
+    }
+
     /// Why the film failed or was skipped, in `lang`. The channel keeps the reason as a message
     /// (key and fields, see `Msg::to_stored`); an older row holds plain text, shown as it is.
     pub fn error_text(&self, lang: Lang) -> Option<String> {
@@ -202,6 +232,9 @@ fn to_item(r: &Row<'_>) -> rusqlite::Result<QueueItem> {
         created_at: r.get("created_at")?,
         started_at: r.get("started_at")?,
         finished_at: r.get("finished_at")?,
+        in_s: r.get("in_s")?,
+        out_s: r.get("out_s")?,
+        start_at: r.get("start_at")?,
     })
 }
 
@@ -339,6 +372,30 @@ impl<'a> QueueRepo<'a> {
                started_at = COALESCE(started_at, ?)
              WHERE id = ? AND status = 'queued'",
             params![now_ms(), id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Sets the in and out points of a queued or playing item. Returns whether it changed.
+    pub fn set_trim(
+        &self,
+        id: i64,
+        in_s: Option<f64>,
+        out_s: Option<f64>,
+    ) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE queue_items SET in_s = ?, out_s = ?
+             WHERE id = ? AND status IN ('queued', 'playing')",
+            params![in_s, out_s, id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Sets (or clears) when a queued item starts. Returns whether it changed.
+    pub fn set_start_at(&self, id: i64, start_at: Option<i64>) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE queue_items SET start_at = ? WHERE id = ? AND status = 'queued'",
+            params![start_at, id],
         )?;
         Ok(changed > 0)
     }

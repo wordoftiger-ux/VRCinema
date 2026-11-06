@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS blocked_devices (
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(MIGRATIONS)?;
     add_column_if_missing(conn, "queue_items", "requester_key_hash", "TEXT")?;
+    // In and out points (film seconds) and the start time (Unix ms) of an item.
+    add_column_if_missing(conn, "queue_items", "in_s", "REAL")?;
+    add_column_if_missing(conn, "queue_items", "out_s", "REAL")?;
+    add_column_if_missing(conn, "queue_items", "start_at", "INTEGER")?;
     // The nick a blocked device used last (the block outlives the nick).
     add_column_if_missing(conn, "blocked_devices", "nick", "TEXT")
 }
