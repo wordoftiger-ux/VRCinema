@@ -181,7 +181,8 @@ impl PreviewSources {
         let _ = std::fs::create_dir_all(dir);
         // Room for every running download at its limit, this one and a margin.
         let needed = (preparing as u64 + 1) * PREVIEW_MAX_DOWNLOAD_BYTES + FREE_SPACE_MARGIN;
-        if (self.0.free_space)(dir).is_some_and(|free| free < needed) {
+        // Fail closed: free space that cannot be read is no room.
+        if (self.0.free_space)(dir).is_none_or(|free| free < needed) {
             return PreviewStatus::Unavailable { reason: "no_space" };
         }
         self.insert(item.id, Entry::Preparing);
@@ -504,7 +505,7 @@ mod tests {
 
     fn sources(dir: &Path, fake: Fake) -> PreviewSources {
         let downloads = TempDownloads::with_grace(dir.join("temp"), Duration::ZERO);
-        with_downloads(downloads, fake, None)
+        with_downloads(downloads, fake, Some(u64::MAX))
     }
 
     async fn until_ready(p: &PreviewSources, it: &QueueItem) -> PreviewStatus {
@@ -546,7 +547,7 @@ mod tests {
     async fn a_film_from_the_internet_is_prepared_then_ready_and_shared_with_the_air() {
         let dir = tempfile::tempdir().unwrap();
         let downloads = TempDownloads::with_grace(dir.path().join("temp"), Duration::ZERO);
-        let p = with_downloads(downloads.clone(), fake(50, false), None);
+        let p = with_downloads(downloads.clone(), fake(50, false), Some(u64::MAX));
         let web = item(7, "https://x.example/v");
         assert_eq!(p.status(&web).await, PreviewStatus::Preparing);
         assert_eq!(p.file(7), None);
@@ -597,7 +598,7 @@ mod tests {
         let downloads = TempDownloads::with_grace(dir.path().join("temp"), Duration::ZERO);
         let f = fake(0, false);
         let count = Arc::clone(&f.downloads);
-        let p = with_downloads(downloads.clone(), f, None);
+        let p = with_downloads(downloads.clone(), f, Some(u64::MAX));
         for it in [
             viewers(1, "http://home.example/v"),
             viewers(2, "https://x.example/v"),
@@ -652,5 +653,12 @@ mod tests {
             );
             assert_eq!(q.status(&item(61, "https://x.example/b")).await, expected);
         }
+        // Free space that cannot be read: no download (fail closed).
+        let downloads = TempDownloads::with_grace(dir.path().join("t3"), Duration::ZERO);
+        let unknown = with_downloads(downloads, fake(0, false), None);
+        assert_eq!(
+            unknown.status(&item(70, "https://x.example/c")).await,
+            PreviewStatus::Unavailable { reason: "no_space" }
+        );
     }
 }
