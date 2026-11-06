@@ -2775,10 +2775,6 @@ async fn the_preview_plays_a_disk_film_with_ranges_for_the_window_only() {
         .with_preview(crate::preview_source::PreviewSources::new(
             Arc::new(resolver),
             crate::pipeline::temp_downloads::TempDownloads::new(dir.path().join("temp")),
-            crate::preview_source::ViewerChecks {
-                host_resolver: Arc::new(crate::rules::TableHostResolver::new(&[])),
-                check_viewer_media: true,
-            },
             None,
         ));
     let router = super::routes_monitor::router(state.clone()).with_state(state);

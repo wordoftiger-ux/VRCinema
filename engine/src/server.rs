@@ -26,7 +26,7 @@ use crate::pipeline::slates::{
     RETAIN_S, SlateOptions, SlateSwapper, generate_slates, request_url, system_fonts_dir,
 };
 use crate::pipeline::temp_downloads::{TempDownloads, reset_dir};
-use crate::preview_source::{PreviewSources, ViewerChecks};
+use crate::preview_source::PreviewSources;
 use crate::resolver::fake::FakeResolver;
 use crate::resolver::file::FileResolver;
 use crate::resolver::local::{FileDurationProbe, LocalResolver};
@@ -489,10 +489,6 @@ pub async fn run(
     let preview = PreviewSources::new(
         Arc::clone(&resolver),
         downloads.clone(),
-        ViewerChecks {
-            host_resolver: Arc::new(crate::rules::SystemHostResolver),
-            check_viewer_media: fake_resolver.is_none(),
-        },
         Some(Arc::clone(&shared_log)),
     );
     let mut slates = None;

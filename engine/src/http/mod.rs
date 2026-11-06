@@ -1054,6 +1054,7 @@ pub(crate) fn air_json(state: &AppState, snapshot: &Snapshot) -> Value {
         "viewers": e.viewers,
         "itemId": e.item_id,
         "positionS": e.position_s.map(num_json),
+        "segmentS": num_json(snapshot.air.segment_s),
     })
 }
 

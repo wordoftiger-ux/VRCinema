@@ -9,12 +9,14 @@
 //! let go (its downloaded file goes [`crate::pipeline::temp_downloads::GRACE`] later unless a
 //! clip still plays it).
 //!
-//! A viewer's film is checked exactly like the air checks it before anything is fetched (the
-//! home-network protection, [`crate::rules::check_media_url`]): its link, then the media the
-//! resolver found. Every file in [`TempDownloads`] has passed these checks, so the air may play
-//! it again without them. Downloads are limited: [`MAX_DOWNLOADS`] at once, the byte limit of
-//! [`crate::resolver::ytdlp::PREVIEW_MAX_DOWNLOAD_BYTES`] on the files themselves, enough free
-//! disk space before one starts, and a viewer's film only with a known length.
+//! Only the owner's films are downloaded for the Preview. A viewer's film plays here only from
+//! a file the air itself downloaded (after the air's home-network checks of its link and
+//! media); otherwise the Preview shows the engine's segments. So nothing a viewer sends makes
+//! the program fetch more than the air does, and every file in [`TempDownloads`] went through
+//! the air's checks or belongs to the owner. Downloads are limited: [`MAX_DOWNLOADS`] at once,
+//! the byte limit [`PREVIEW_MAX_DOWNLOAD_BYTES`] on the files themselves (the whole yt-dlp
+//! process tree is stopped beyond it), and free disk space for every download running plus the
+//! new one before it starts.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,7 +30,6 @@ use crate::i18n::Msg;
 use crate::pipeline::temp_downloads::{Lease, TempDownloads};
 use crate::resolver::MediaResolver;
 use crate::resolver::ytdlp::PREVIEW_MAX_DOWNLOAD_BYTES;
-use crate::rules::{HostResolver, check_media_url, check_media_urls};
 
 /// Longer films are not downloaded for the Preview (time and disk space).
 pub const MAX_PREVIEW_DURATION_S: f64 = 3.0 * 3600.0;
@@ -36,18 +37,11 @@ pub const MAX_PREVIEW_DURATION_S: f64 = 3.0 * 3600.0;
 pub const MAX_ENTRIES: usize = 3;
 /// Downloads for the Preview at once.
 pub const MAX_DOWNLOADS: usize = 2;
-/// Free space a download needs beyond its byte limit.
+/// Free space a download needs beyond the byte limits of all running downloads and its own.
 pub const FREE_SPACE_MARGIN: u64 = 1024 * 1024 * 1024;
 
 /// Free bytes on the disk of a folder (`None`: not known).
 pub type FreeSpaceFn = Box<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
-
-/// How viewers' films are checked (the same as the air's clip factory).
-pub struct ViewerChecks {
-    pub host_resolver: Arc<dyn HostResolver>,
-    /// False only with the fake resolver of black-box tests (its media are local files).
-    pub check_viewer_media: bool,
-}
 
 /// What the Preview can play for a film.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -57,8 +51,8 @@ pub enum PreviewStatus {
     Ready,
     /// yt-dlp is downloading it.
     Preparing,
-    /// No file for the Preview: `live`, `too_long`, `failed`, `unsupported`, `refused` (a
-    /// viewer's link to the owner's network), `busy` (enough downloads run) or `no_space`.
+    /// No file for the Preview: `live`, `too_long`, `failed`, `unsupported`, `viewer` (a
+    /// viewer's film the air did not download), `busy` (enough downloads run) or `no_space`.
     Unavailable { reason: &'static str },
 }
 
@@ -80,7 +74,6 @@ struct Slot {
 struct Inner {
     resolver: Arc<dyn MediaResolver>,
     downloads: TempDownloads,
-    checks: ViewerChecks,
     free_space: FreeSpaceFn,
     slots: Mutex<HashMap<i64, Slot>>,
     log: Option<Arc<dyn Fn(Msg) + Send + Sync>>,
@@ -102,24 +95,21 @@ impl PreviewSources {
     pub fn new(
         resolver: Arc<dyn MediaResolver>,
         downloads: TempDownloads,
-        checks: ViewerChecks,
         log: Option<Arc<dyn Fn(Msg) + Send + Sync>>,
     ) -> Self {
-        Self::with_free_space(resolver, downloads, checks, log, Box::new(free_space))
+        Self::with_free_space(resolver, downloads, log, Box::new(free_space))
     }
 
     /// Tests: the free disk space from `free_space`.
     pub fn with_free_space(
         resolver: Arc<dyn MediaResolver>,
         downloads: TempDownloads,
-        checks: ViewerChecks,
         log: Option<Arc<dyn Fn(Msg) + Send + Sync>>,
         free_space: FreeSpaceFn,
     ) -> Self {
         Self(Arc::new(Inner {
             resolver,
             downloads,
-            checks,
             free_space,
             slots: Mutex::new(HashMap::new()),
             log,
@@ -138,11 +128,11 @@ impl PreviewSources {
         if let Some(known) = self.known(item.id) {
             return known;
         }
-        let viewer = item.added_by == AddedBy::Public && self.0.checks.check_viewer_media;
+        let viewer = item.added_by == AddedBy::Public;
         if is_disk_source(&item.source_url) {
             if viewer {
                 // Viewers cannot add disk files; one that says so is not believed.
-                return PreviewStatus::Unavailable { reason: "refused" };
+                return PreviewStatus::Unavailable { reason: "viewer" };
             }
             // The resolvers of disk files only check the file (no probe): quick.
             let entry = match self.0.resolver.resolve(&item.source_url).await {
@@ -158,15 +148,7 @@ impl PreviewSources {
             self.insert(item.id, entry);
             return self.known(item.id).unwrap_or(PreviewStatus::Preparing);
         }
-        let too_long = match item.duration_s {
-            Some(d) => d > MAX_PREVIEW_DURATION_S,
-            // A viewer's film of unknown length is not downloaded (it could be endless).
-            None => viewer,
-        };
-        if too_long {
-            return PreviewStatus::Unavailable { reason: "too_long" };
-        }
-        // Every file here passed the viewer checks (this module's and the air's).
+        // A film the air downloaded (or an earlier Preview download of the owner's film).
         if let Some(lease) = self.0.downloads.reuse(item.id) {
             let file = lease.path().to_path_buf();
             self.insert(
@@ -177,6 +159,14 @@ impl PreviewSources {
                 },
             );
             return PreviewStatus::Ready;
+        }
+        if viewer {
+            // Not fetched for the Preview: the engine's segments instead (asked again later,
+            // the air may have downloaded it by then).
+            return PreviewStatus::Unavailable { reason: "viewer" };
+        }
+        if item.duration_s.is_some_and(|d| d > MAX_PREVIEW_DURATION_S) {
+            return PreviewStatus::Unavailable { reason: "too_long" };
         }
         let preparing = self
             .slots()
@@ -189,25 +179,14 @@ impl PreviewSources {
         }
         let dir = self.0.downloads.dir();
         let _ = std::fs::create_dir_all(dir);
-        if (self.0.free_space)(dir)
-            .is_some_and(|free| free < PREVIEW_MAX_DOWNLOAD_BYTES + FREE_SPACE_MARGIN)
-        {
+        // Room for every running download at its limit, this one and a margin.
+        let needed = (preparing as u64 + 1) * PREVIEW_MAX_DOWNLOAD_BYTES + FREE_SPACE_MARGIN;
+        if (self.0.free_space)(dir).is_some_and(|free| free < needed) {
             return PreviewStatus::Unavailable { reason: "no_space" };
         }
         self.insert(item.id, Entry::Preparing);
-        self.download(item.id, item.source_url.clone(), viewer);
+        self.download(item.id, item.source_url.clone());
         PreviewStatus::Preparing
-    }
-
-    /// A viewer's link and the media its resolver finds, checked like the air checks them;
-    /// the address to download (the checked text).
-    async fn checked_source(&self, source: &str) -> Option<String> {
-        let hosts = self.0.checks.host_resolver.as_ref();
-        let source = check_media_url(source, hosts).await.ok()?;
-        let stream = self.0.resolver.resolve(&source).await.ok()?;
-        let inputs: Vec<&str> = stream.inputs.iter().map(|i| i.url.as_str()).collect();
-        check_media_urls(&inputs, hosts).await.ok()?;
-        Some(source)
     }
 
     /// The file of a ready film (the media route), while it is on disk.
@@ -251,24 +230,14 @@ impl PreviewSources {
         evict(&mut slots, MAX_ENTRIES);
     }
 
-    fn download(&self, item_id: i64, source: String, viewer: bool) {
+    /// Downloads the owner's film `source` in the background.
+    fn download(&self, item_id: i64, source: String) {
         let this = self.clone();
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
             self.finish(item_id, Entry::Failed("failed"));
             return;
         };
         rt.spawn(async move {
-            let source = if viewer {
-                match this.checked_source(&source).await {
-                    Some(checked) => checked,
-                    None => {
-                        this.finish(item_id, Entry::Failed("refused"));
-                        return;
-                    }
-                }
-            } else {
-                source
-            };
             let entry = match this.0.downloads.stem(item_id) {
                 Err(_) => Entry::Failed("failed"),
                 Ok(stem) => match this.0.resolver.download_preview(&source, &stem).await {
@@ -324,10 +293,24 @@ pub fn free_space(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-/// Free bytes on the disk holding `dir` (Windows; elsewhere not known).
+/// Free bytes on the disk holding `dir`, from `df -Pk` (POSIX output: the fourth field of the
+/// second line, in KiB).
 #[cfg(not(windows))]
-pub fn free_space(_dir: &Path) -> Option<u64> {
-    None
+pub fn free_space(dir: &Path) -> Option<u64> {
+    let out = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(dir)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kib: u64 = text
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(3)?
+        .parse()
+        .ok()?;
+    Some(kib * 1024)
 }
 
 /// Drops the least recently asked films beyond `max` (never one being downloaded).
@@ -515,25 +498,8 @@ mod tests {
         }
     }
 
-    fn checks() -> ViewerChecks {
-        ViewerChecks {
-            host_resolver: Arc::new(crate::rules::TableHostResolver::new(&[
-                ("x.example", &["93.184.216.34"]),
-                ("cdn.example", &["93.184.216.35"]),
-                ("home.example", &["192.168.0.5"]),
-            ])),
-            check_viewer_media: true,
-        }
-    }
-
     fn with_downloads(downloads: TempDownloads, fake: Fake, free: Option<u64>) -> PreviewSources {
-        PreviewSources::with_free_space(
-            Arc::new(fake),
-            downloads,
-            checks(),
-            None,
-            Box::new(move |_| free),
-        )
+        PreviewSources::with_free_space(Arc::new(fake), downloads, None, Box::new(move |_| free))
     }
 
     fn sources(dir: &Path, fake: Fake) -> PreviewSources {
@@ -626,56 +592,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_viewers_film_is_checked_like_on_air_before_anything_is_downloaded() {
+    async fn a_viewers_film_is_never_fetched_for_the_preview_only_the_airs_download_plays() {
         let dir = tempfile::tempdir().unwrap();
-        // A link into the owner's network.
+        let downloads = TempDownloads::with_grace(dir.path().join("temp"), Duration::ZERO);
         let f = fake(0, false);
         let count = Arc::clone(&f.downloads);
-        let p = sources(dir.path(), f);
-        let home = viewers(1, "http://home.example/v");
-        p.status(&home).await;
+        let p = with_downloads(downloads.clone(), f, None);
+        for it in [
+            viewers(1, "http://home.example/v"),
+            viewers(2, "https://x.example/v"),
+            viewers(3, "file:C:/secret.mp4"),
+        ] {
+            assert_eq!(
+                p.status(&it).await,
+                PreviewStatus::Unavailable { reason: "viewer" }
+            );
+        }
         assert_eq!(
-            until_ready(&p, &home).await,
-            PreviewStatus::Unavailable { reason: "refused" }
-        );
-        // A public link whose media lie in the owner's network.
-        let mut f = fake(0, false);
-        f.media = "http://192.168.0.5/v.mp4";
-        let count2 = Arc::clone(&f.downloads);
-        let p2 = sources(dir.path(), f);
-        let sneaky = viewers(2, "https://x.example/v");
-        p2.status(&sneaky).await;
-        assert_eq!(
-            until_ready(&p2, &sneaky).await,
-            PreviewStatus::Unavailable { reason: "refused" }
-        );
-        // A viewer's disk file, or a film of unknown length, is not taken.
-        let disk = viewers(3, "file:C:/secret.mp4");
-        assert_eq!(
-            p.status(&disk).await,
-            PreviewStatus::Unavailable { reason: "refused" }
-        );
-        let mut endless = viewers(4, "https://x.example/endless");
-        endless.duration_s = None;
-        assert_eq!(
-            p.status(&endless).await,
-            PreviewStatus::Unavailable { reason: "too_long" }
-        );
-        use std::sync::atomic::Ordering::SeqCst;
-        assert_eq!(
-            count.load(SeqCst) + count2.load(SeqCst),
+            count.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "nothing fetched"
         );
-        // A public film with public media is downloaded.
-        let fine = viewers(5, "https://x.example/v");
-        p.status(&fine).await;
-        assert_eq!(until_ready(&p, &fine).await, PreviewStatus::Ready);
-        assert_eq!(count.load(SeqCst), 1);
+        // The air downloaded the viewer's film (after its own checks): the Preview plays it.
+        let file = downloads.stem(2).unwrap().with_extension("mp4");
+        std::fs::write(&file, b"film").unwrap();
+        let _air = downloads.adopt(2, file.clone());
+        assert_eq!(
+            p.status(&viewers(2, "https://x.example/v")).await,
+            PreviewStatus::Ready
+        );
+        assert_eq!(p.file(2), Some(file));
     }
 
     #[tokio::test]
-    async fn downloads_are_limited_in_number_and_need_free_space() {
+    async fn downloads_are_limited_in_number_and_need_room_for_all_of_them() {
         let dir = tempfile::tempdir().unwrap();
         let p = sources(dir.path(), fake(300, false));
         for id in 0..MAX_DOWNLOADS as i64 {
@@ -688,11 +638,19 @@ mod tests {
             p.status(&item(50, "https://x.example/v")).await,
             PreviewStatus::Unavailable { reason: "busy" }
         );
-        let downloads = TempDownloads::with_grace(dir.path().join("t2"), Duration::ZERO);
-        let full = with_downloads(downloads, fake(0, false), Some(10 * 1024 * 1024));
-        assert_eq!(
-            full.status(&item(60, "https://x.example/v")).await,
-            PreviewStatus::Unavailable { reason: "no_space" }
-        );
+        // One download runs: the next one needs room for both and the margin.
+        let room = 2 * PREVIEW_MAX_DOWNLOAD_BYTES + FREE_SPACE_MARGIN;
+        for (free, expected) in [
+            (room - 1, PreviewStatus::Unavailable { reason: "no_space" }),
+            (room, PreviewStatus::Preparing),
+        ] {
+            let downloads = TempDownloads::with_grace(dir.path().join("t2"), Duration::ZERO);
+            let q = with_downloads(downloads, fake(300, false), Some(free));
+            assert_eq!(
+                q.status(&item(60, "https://x.example/a")).await,
+                PreviewStatus::Preparing
+            );
+            assert_eq!(q.status(&item(61, "https://x.example/b")).await, expected);
+        }
     }
 }

@@ -49,6 +49,8 @@ pub struct AirTimeline {
     pub edge_at: Option<Instant>,
     /// Where HLS players start behind the edge (seconds).
     pub nominal_latency_s: f64,
+    /// The playlist's target duration (the segment length).
+    pub segment_s: f64,
 }
 
 impl AirTimeline {
@@ -236,6 +238,7 @@ mod tests {
             edge_s: t,
             edge_at: Some(edge_at),
             nominal_latency_s: 3.0 * d,
+            segment_s: d,
         }
     }
 

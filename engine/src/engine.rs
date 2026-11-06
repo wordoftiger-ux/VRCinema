@@ -654,6 +654,7 @@ impl<C: ChannelControl> Core<C> {
                 edge_at: self.broadcaster.edge_at(),
                 nominal_latency_s: self.channel.viewer_lag_segments() as f64
                     * self.broadcaster.target_duration(),
+                segment_s: self.broadcaster.target_duration(),
             }),
         }
     }
