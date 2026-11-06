@@ -172,6 +172,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     tickerMessages: ['Welcome to the Friday show!'],
     viewerLists: false,
     viewerListMax: 10,
+    uploadMbps: 0,
   });
   const POPULAR = ['youtube.com', 'youtu.be', 'twitch.tv', 'kick.com', 'vimeo.com', 'pixeldrain.com', 'cda.pl'];
   const initialNicks = () => [
@@ -329,6 +330,19 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (removed.playing) s.playing = removed.playing;
       return send(200, { restored: removed.queue.length + removed.pending.length + (removed.playing ? 1 : 0) });
     }
+    // Broadcast: in/out points and the start time of a queued video (recorded for the checks).
+    if (action === 'trim' || action === 'schedule') {
+      const item = s.queue.find((i) => i.id === payload?.itemId);
+      if (!item) return fail(404, 'no_such_item', 'No such item');
+      (s.broadcastCalls ??= []).push({ action, ...payload });
+      if (action === 'trim') {
+        item.inS = payload.inS ?? null;
+        item.outS = payload.outS ?? null;
+        return send(200, { inS: item.inS, outS: item.outS });
+      }
+      item.startAt = payload.startAt ?? (Number.isFinite(payload.afterS) ? Date.now() + payload.afterS * 1000 : null);
+      return send(200, { startAt: item.startAt });
+    }
     if (action === 'play-next') {
       const inQueue = s.queue.findIndex((i) => i.id === payload?.itemId);
       if (inQueue >= 0) {
@@ -359,11 +373,14 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
           };
     const item = (id, title) => queued(id, title, { requesterBadge: null });
     return {
-      status: s.playing === 'none' ? 'idle' : s.paused ? 'paused' : 'playing',
+      status: s.countdown && s.playing === 'none' ? 'countdown' : s.playing === 'none' ? 'idle' : s.paused ? 'paused' : 'playing',
       current,
       paused: s.paused,
       pauseReasons: s.pauseReasons,
       prefetchedItemId: null,
+      // Broadcast: how ready the next video is, and the viewers' need against the upload.
+      next: s.next ?? null,
+      link: s.link ?? null,
       playing: current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : [],
       queue: s.queue,
       pending: s.pendingItems,

@@ -15,6 +15,7 @@ import { contextMenuHandlers } from './menu.js';
 import { monitorRunning, monitorState, previewPosition } from './monitor.js';
 import { sourceState, sourceUrl } from './sourceplayer.js';
 import { monitorMuted, monitorVolume, previewMuted, previewVolume } from './volume.js';
+import { countdownText } from './broadcast.js';
 import {
   channel,
   channelLink,
@@ -22,6 +23,7 @@ import {
   abilities,
   controlAt,
   netStatus,
+  queue,
   restart,
   seekBy,
   seekTo,
@@ -176,7 +178,14 @@ function NowPlaying({ current, c }) {
     sub = c.pauseReasons.map((r) => (PAUSE_REASON_KEYS[r] ? t(PAUSE_REASON_KEYS[r]) : r)).join(' · ');
   } else if (!current) sub = t('player.nothing_playing_hint');
   else if (current.requesterName) sub = t('player.added_by', { name: current.requesterName });
-  const title = current ? videoTitle(current.title) : t('player.nothing_playing');
+  // The stream counts down to a video's start time.
+  const countdown = current ? null : countdownText(queue.value);
+  if (countdown && !c?.paused) sub = countdown.text;
+  const title = current
+    ? videoTitle(current.title)
+    : countdown
+      ? videoTitle(countdown.title)
+      : t('player.nothing_playing');
   return html`
     <div class="nowp">
       <span class="thumb" aria-hidden="true"></span>

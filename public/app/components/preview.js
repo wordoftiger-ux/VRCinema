@@ -15,6 +15,7 @@ import { contextMenuHandlers } from './menu.js';
 import { monitorAheadS, previewMode } from './monitor.js';
 import { copyText, previewMuted, previewVolume } from './playerbar.js';
 import { airBehindS } from './sourceplayer.js';
+import { Meter, setListening } from './meters.js';
 import { StatsOverlay, previewShown, previewStats, statsOpen, toggleStats } from './stats.js';
 import {
   abilities,
@@ -266,8 +267,7 @@ export function Preview({ dual = false, role = 'side', tools = null, onActivate 
   }, []);
 
   useEffect(() => {
-    video.current.volume = volume;
-    video.current.muted = muted;
+    setListening(video.current, volume, muted);
   }, [volume, muted]);
 
   const menuItems = () => {
@@ -301,15 +301,16 @@ export function Preview({ dual = false, role = 'side', tools = null, onActivate 
       ${dual ? tools : stats}
     </div>`;
   const caption = pip ? t('monitor.on_air') : airCaption(delay);
+  const meter = pip ? null : html`<${Meter} video=${() => video.current} />`;
   if (dual) {
     return html`
       <div class=${`screen screen-air role-${role}`}>
-        <p class="stage-caption screen-cap">${caption}</p>
+        <p class="stage-caption screen-cap"><span>${caption}</span>${meter}</p>
         ${box}
         ${stats}
       </div>`;
   }
   return html`
     ${box}
-    <p class="stage-caption">${caption}</p>`;
+    <p class="stage-caption"><span>${caption}</span>${meter}</p>`;
 }

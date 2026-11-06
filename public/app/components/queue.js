@@ -21,6 +21,7 @@ import { Library } from './library.js';
 import { Approvals } from './approvals.js';
 import { RequesterBadge } from './badge.js';
 import { openDialog } from './dialog.js';
+import { RowMarks, openSchedule, openTrim } from './broadcast.js';
 import { copyText, formatTime } from './playerbar.js';
 import {
   access,
@@ -184,6 +185,9 @@ function menuFor(item, index, count) {
       action: () => copyText(item.sourceUrl).catch((e) => showToast(errorText(e))),
     },
     'separator',
+    { key: 'queue.trim', icon: 'trim', disabled: Boolean(item.isLive), action: () => openTrim(item) },
+    { key: 'queue.schedule', icon: 'clock', action: () => openSchedule(item) },
+    'separator',
     { key: 'queue.remove', icon: 'close', danger: true, action: () => removeItem(item.id) },
     ...(hasRequester(item)
       ? [{ key: 'queue.remove_requester', icon: 'close', danger: true, action: () => confirmRemoveRequester(item) }]
@@ -328,6 +332,7 @@ function QueueList({ items }) {
             onContextMenu=${(e) => onContextMenu(e, item, index)}>
             <${Thumb} id=${item.id} />
             <${ItemText} item=${item} />
+            <${RowMarks} item=${item} />
             <button type="button" class="icon-button qi-more" aria-label=${t('queue.more', { title: videoTitle(item.title) })}
               title=${t('queue.more_short')} aria-haspopup="menu"
               onClick=${(e) => openMenu(e.currentTarget, 'queue.menu', menuFor(item, index, items.length))}>

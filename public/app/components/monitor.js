@@ -35,6 +35,7 @@ import { Icon } from '../icons.js';
 import { access, attachPreview, control, showToast } from '../store.js';
 import { airBehindS, sourcePlayer, sourceReason, sourceState } from './sourceplayer.js';
 import { monitorMuted, monitorVolume, nudgeMonitorVolume } from './volume.js';
+import { Meter, setListening } from './meters.js';
 
 export { monitorMuted };
 
@@ -605,11 +606,7 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
   }, [inWindow]);
 
   useEffect(() => {
-    for (const v of [fileVideo.current, hlsVideo.current]) {
-      if (!v) continue;
-      v.volume = volume;
-      v.muted = muted;
-    }
+    for (const v of [fileVideo.current, hlsVideo.current]) setListening(v, volume, muted);
   }, [volume, muted]);
 
   // The mouse wheel over the Preview sets its volume.
@@ -630,6 +627,9 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
       data-state=${inWindow ? state : 'remote'} data-mode=${inWindow ? mode : 'remote'}>
       <div class="screen-cap">
         <span class="monitor-caption">${inWindow && !pip ? caption(state, ahead) : t('monitor.title')}</span>
+        ${inWindow && !pip
+          ? html`<${Meter} video=${() => (previewMode.peek() === 'fallback' ? hlsVideo.current : fileVideo.current)} />`
+          : null}
         ${inWindow && !pip
           ? html`<button type="button" class="icon-button monitor-mute" aria-label=${muteLabel} title=${muteLabel}
               onClick=${() => (monitorMuted.value = !monitorMuted.value)}>

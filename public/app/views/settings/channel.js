@@ -167,6 +167,27 @@ function ViewerLists({ settings, say }) {
     <//>`;
 }
 
+/** The owner's upload speed (Mbit/s, 0: not given): the panel warns when viewers need about that. */
+function Upload({ settings, say }) {
+  const current = String(settings.uploadMbps ?? 0);
+  const [mbps, setMbps] = useState(current);
+  useEffect(() => setMbps(current), [current]);
+  const submit = (e) => {
+    e.preventDefault();
+    const n = Number(String(mbps).replace(',', '.'));
+    if (!Number.isFinite(n) || n < 0) return say('err', t('settings.channel.upload_invalid'));
+    saveChannelWith(say, { uploadMbps: n }, t('settings.channel.upload_saved'));
+  };
+  return html`
+    <form class="limits" data-form="upload" onSubmit=${submit}>
+      <label class="limit"><span>${t('settings.channel.upload')}</span>
+        <input type="number" class="num" min="0" step="0.1" name="uploadMbps" value=${mbps}
+          onInput=${(e) => setMbps(e.target.value)} /></label>
+      <button type="submit" class="btn pri">${t('settings.save')}</button>
+    </form>
+    <p class="set-sub">${t('settings.channel.upload_hint')}</p>`;
+}
+
 export function ChannelSettings() {
   const settings = channelSettings.value;
   const [note, say] = useNote();
@@ -196,6 +217,7 @@ export function ChannelSettings() {
         <//>
         ${toggle('forceTranscode', t('settings.channel.force_transcode'), t('settings.channel.force_transcode_hint'), t('settings.channel.force_transcode_on'), t('settings.channel.force_transcode_off'))}
         ${toggle('discontinuityTags', t('settings.channel.discontinuity'), t('settings.channel.discontinuity_hint'), t('settings.channel.discontinuity_on'), t('settings.channel.discontinuity_off'))}
+        <${Upload} settings=${settings} say=${say} />
       <//>
       <${Note} note=${note} />
       <${Ticker} />

@@ -8,8 +8,13 @@ import { signal } from '/static/vendor/signals.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { Icon } from '../icons.js';
-import { access, environment, info, tunnel } from '../store.js';
+import { access, channel, environment, info, tunnel } from '../store.js';
 import { route } from './rail.js';
+
+/** `12.5` → `12.5`, in the interface's number format; `—` when not known. */
+function formatMbps(v) {
+  return Number.isFinite(v) ? new Intl.NumberFormat(document.documentElement.lang || undefined, { maximumFractionDigits: 1 }).format(v) : '—';
+}
 
 /** Dismissed notices by `kind:content` (for this page only). */
 const dismissed = signal(new Set());
@@ -19,10 +24,27 @@ const dismissed = signal(new Set());
  * `{kind, id, text, href, linkKey, level}`. Settings are linked where the program can be managed
  * (the window or a remote panel; a server without a window has no tools to fix).
  */
-export function notices({ i, env, tun, managed }) {
+export function notices({ i, env, tun, managed, link = null }) {
   const out = [];
   const add = (kind, content, text, href, linkKey, level = 'warn') =>
     out.push({ kind, id: `${kind}:${content}`, text, href, linkKey, level });
+  // Viewers × the stream's bitrate close to (or above) the upload: a warning, never a block.
+  if (link && (link.level === 'warn' || link.level === 'over')) {
+    const fields = {
+      viewers: link.viewers,
+      stream: formatMbps(link.streamMbps),
+      needed: formatMbps(link.neededMbps),
+      upload: formatMbps(link.uploadMbps),
+    };
+    add(
+      'link',
+      link.level,
+      t(link.level === 'over' ? 'banner.link_over' : 'banner.link_warn', fields),
+      managed ? '#/settings/channel' : null,
+      'banner.go_upload',
+      link.level === 'over' ? 'err' : 'warn',
+    );
+  }
   const src = i ?? env;
   if (!src) return out;
   const toolsMissing = Boolean(i && !i.toolsOk && !i.toolsRunning);
@@ -66,6 +88,7 @@ export function StatusStrip() {
     env: environment.value,
     tun: tunnel.value,
     managed: access.value === 'window' || access.value === 'remote',
+    link: channel.value?.link ?? null,
   }).filter((n) => !dismissed.value.has(n.id) && n.href !== here);
   if (!all.length) return null;
   const dismiss = (id) => (dismissed.value = new Set([...dismissed.value, id]));

@@ -333,7 +333,9 @@ export function seekBy(byS) {
 }
 export async function seekTo(toS) {
   const c = control.value;
-  const to = Math.max(0, Number.isFinite(c?.durationS) ? Math.min(toS, c.durationS) : toS);
+  // Inside the start and end points (the engine keeps seeks there too).
+  const end = Number.isFinite(c?.outS) ? c.outS : c?.durationS;
+  const to = Math.max(Number(c?.inS) || 0, Number.isFinite(end) ? Math.min(toS, end) : toS);
   seekTarget = to;
   seeksInFlight += 1;
   try {
@@ -342,7 +344,8 @@ export async function seekTo(toS) {
     seeksInFlight -= 1;
   }
 }
-export const restart = () => sought('restart', undefined, 0);
+/** From the beginning: the video's start point when it has one. */
+export const restart = () => sought('restart', undefined, Number(control.value?.inS) || 0);
 /** "Play now": the Preview switches to the film at once when its file is there. */
 export async function playNow(itemId) {
   preview?.playNow?.(itemId);
@@ -445,6 +448,17 @@ export async function undoRemoval(undo) {
   const ok = await mutate(async () => (answer = await api('POST', `${PANEL}/undo`, { undo })));
   return ok ? answer : null;
 }
+
+/** The in and out points of a waiting or playing video (seconds, null: none). Resolves to success. */
+export const trimItem = (itemId, inS, outS) =>
+  mutate(() => api('POST', `${PANEL}/trim`, { itemId, inS, outS }));
+
+/**
+ * When a waiting video starts: `{startAt}` (Unix ms), `{afterS}` (from the engine's clock) or
+ * `{}` (no start time). Resolves to success.
+ */
+export const scheduleItem = (itemId, when) =>
+  mutate(() => api('POST', `${PANEL}/schedule`, { itemId, ...when }));
 
 /** A queued video moves first; one from the history is queued again first. Resolves to success. */
 export const playNext = (itemId) => mutate(() => api('POST', `${PANEL}/play-next`, { itemId }));

@@ -2991,3 +2991,119 @@ kbd {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- Broadcast: level meters, queue marks, trim and start-time dialogs ---------- */
+
+.meter {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  vertical-align: middle;
+}
+.meter[data-active="no"] { opacity: 0.45; }
+.meter-bars {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 72px;
+}
+.meter-bars i {
+  --level: 0;
+  --hold: 0;
+  position: relative;
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--line-strong), var(--line-strong));
+}
+.meter-bars i::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--green) 0 70%, var(--amber) 70% 90%, var(--red) 90%);
+  clip-path: inset(0 calc((1 - var(--level)) * 100%) 0 0);
+}
+.meter-bars i::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--hold) * 100% - 2px);
+  width: 2px;
+  background: var(--text-soft);
+}
+.meter-lufs::after {
+  content: attr(data-lufs);
+  display: inline-block;
+  min-width: 54px;
+}
+.meter-clip {
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 1px solid var(--line-control);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+.meter.clipping .meter-clip {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.qi-marks {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  flex: none;
+  max-width: 45%;
+}
+.qi-mark {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--selected);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.qi-mark.mark-time {
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+.qi-mark.ready-ready {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.qi-mark.ready-failed {
+  background: var(--red-bg);
+  color: var(--red-text);
+}
+
+.dialog-fields {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+}
+.dialog-field {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.dialog-field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.dialog-field .txt {
+  max-width: 140px;
+}

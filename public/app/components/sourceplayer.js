@@ -18,7 +18,7 @@
 
 import { signal } from '/static/vendor/signals.mjs';
 import { api } from '../api.js';
-import { channel, control, controlAt } from '../store.js';
+import { channel, control, controlAt, queue } from '../store.js';
 
 /** `off`, `none` (nothing to play), `preparing`, `ready`, `fallback` (segments instead). */
 export const sourceState = signal('off');
@@ -267,6 +267,10 @@ export function sourcePlayer(video, { onMode, onState }) {
     }
     shownBehind = raw === null ? null : steadyBehind(shownBehind, raw);
     airBehindS.value = shownBehind;
+    // The film's end point: the Preview stops there (the engine moves on to the next film).
+    if (ready() && c?.itemId === item && Number.isFinite(c.outS) && video.currentTime >= c.outS && !video.paused) {
+      video.pause();
+    }
   };
   const ticker = setInterval(measure, TICK_MS);
   const unsubscribe = control.subscribe((c) => reconcile(c));
@@ -332,7 +336,9 @@ export function sourcePlayer(video, { onMode, onState }) {
       pendingUntil = performance.now() + PLAY_NOW_MS;
       ownUntil = performance.now() + OWN_ACTION_MS;
       if (undecodable.has(itemId)) return;
-      ask(itemId, { at: 0, paused: false });
+      // From the film's start point, where the engine starts it.
+      const inS = Number(queue.peek().find((i) => i.id === itemId)?.inS) || 0;
+      ask(itemId, { at: inS, paused: false });
     },
     playNowAnswered(ok) {
       if (ok) return;
