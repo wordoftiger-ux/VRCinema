@@ -76,6 +76,8 @@ const REASON_KEYS = {
   no_viewers: 'stats.reason_no_viewers',
 };
 const NEXT_KEYS = {
+  resolving: 'stats.v_next_preparing',
+  resolved: 'stats.v_next_preparing',
   preparing: 'stats.v_next_preparing',
   ready: 'stats.v_next_ready',
   failed: 'stats.v_next_failed',

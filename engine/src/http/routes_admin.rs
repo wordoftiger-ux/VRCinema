@@ -99,6 +99,14 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
         "prefetchedItemId".into(),
         json!(snapshot.prefetched_item_id),
     );
+    // How ready the next film is: resolving, resolved, preparing, ready or failed.
+    body.insert(
+        "next".into(),
+        snapshot.stats.next.as_ref().map_or(
+            Value::Null,
+            |n| json!({ "itemId": n.item_id, "state": n.state }),
+        ),
+    );
     body.insert("playing".into(), items_json(&playing, lang));
     body.insert("queue".into(), items_json(&queue, lang));
     body.insert("pending".into(), items_json(&pending, lang));

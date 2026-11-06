@@ -348,6 +348,8 @@
   "log.pause_reason_no_viewers": "no viewers",
   "log.pause_reason_tunnel": "tunnel",
   "log.play_now": "Play now: \"{title}\" (#{id})",
+  "log.prefetch_retry": "Video #{id} \"{title}\" failed to start ahead of its turn; trying once more.",
+  "log.prepare_failed": "Video #{id} \"{title}\" could not be prepared ahead ({error}); it is tried again when it starts.",
   "log.preview_download_failed": "Video #{id}: the download for the Preview failed ({error}); the Preview shows the channel's segments instead",
   "log.program_stopped": "Program stopped.",
   "log.queue_error_prefetch": "Queue error while looking ahead: {error}",

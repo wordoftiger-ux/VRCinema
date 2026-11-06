@@ -350,6 +350,8 @@
   "log.pause_reason_no_viewers": "sin espectadores",
   "log.pause_reason_tunnel": "túnel",
   "log.play_now": "Reproducir ahora: \"{title}\" (#{id})",
+  "log.prefetch_retry": "El video #{id} \"{title}\" no se pudo iniciar con antelación; se intenta una vez más.",
+  "log.prepare_failed": "No se pudo preparar con antelación el video #{id} \"{title}\" ({error}); se intentará de nuevo al empezar.",
   "log.preview_download_failed": "Video #{id}: la descarga para la vista previa falló ({error}); la vista previa muestra en su lugar los segmentos del canal",
   "log.program_stopped": "Programa detenido.",
   "log.queue_error_prefetch": "Error de la cola al preparar el siguiente video: {error}",

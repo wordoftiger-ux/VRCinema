@@ -292,6 +292,10 @@ pub struct OnAirInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NextState {
+    /// Resolving and analysing the source ahead of time (no clip yet).
+    Resolving,
+    /// Resolved and analysed ahead of time: its start skips that step.
+    Resolved,
     /// Resolving and analysing the source.
     Preparing,
     /// Cutting segments.
@@ -303,6 +307,7 @@ pub enum NextState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NextInfo {
+    pub item_id: i64,
     pub title: String,
     pub state: NextState,
     pub ready_segments: usize,

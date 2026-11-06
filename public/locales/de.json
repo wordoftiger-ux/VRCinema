@@ -348,6 +348,8 @@
   "log.pause_reason_no_viewers": "keine Zuschauer",
   "log.pause_reason_tunnel": "Tunnel",
   "log.play_now": "Jetzt abspielen: „{title}“ (#{id})",
+  "log.prefetch_retry": "Video #{id} „{title}“ konnte nicht vorab gestartet werden; ein weiterer Versuch.",
+  "log.prepare_failed": "Video #{id} „{title}“ konnte nicht vorbereitet werden ({error}); beim Start wird es erneut versucht.",
   "log.preview_download_failed": "Video #{id}: Der Download für die Vorschau ist fehlgeschlagen ({error}); die Vorschau zeigt stattdessen die Segmente des Kanals",
   "log.program_stopped": "Programm beendet.",
   "log.queue_error_prefetch": "Warteschlangenfehler beim Vorbereiten: {error}",

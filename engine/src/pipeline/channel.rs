@@ -79,6 +79,13 @@ pub trait ClipFactory: Send + Sync {
         self.create(item, start_at_s, 0)
     }
 
+    /// Resolves and analyses `item` ahead of its turn (the film on air still plays for a
+    /// while), so its start later skips that step. Default: nothing to do.
+    fn prepare(&self, item: QueueItem) -> BoxFuture<'static, Result<(), Msg>> {
+        let _ = item;
+        Box::pin(async { Ok(()) })
+    }
+
     /// A countdown of `seconds` before `item` (which starts at a set time): "Starting in 2:30"
     /// and its title, read at real time. `Err`: no countdown (the idle slate airs instead).
     fn create_countdown(
@@ -574,7 +581,28 @@ pub struct Channel {
     countdown: Option<Countdown>,
     /// Countdowns made so far (their source keys differ).
     countdowns: u64,
+    /// The queue head resolved ahead of its turn ([`ClipFactory::prepare`]).
+    preparing: Option<Preparing>,
+    prepare_tx: mpsc::UnboundedSender<(i64, Result<(), Msg>)>,
+    prepare_rx: mpsc::UnboundedReceiver<(i64, Result<(), Msg>)>,
+    /// The film whose prepared clip failed and was started once more.
+    prefetch_retried: Option<i64>,
 }
+
+/// The film resolved ahead of its turn, and how far it got.
+struct Preparing {
+    item_id: i64,
+    source_url: String,
+    title: String,
+    state: NextState,
+}
+
+/// The film on air has aired this long before the next one is resolved ahead.
+const PREPARE_AFTER_S: f64 = 10.0;
+/// A prepared clip that failed is started once more after this long.
+const PREFETCH_RETRY_MS: u64 = 10_000;
+/// Only a head starting within this time is resolved ahead (the address may expire).
+const PREPARE_AHEAD_MAX_MS: i64 = 15 * 60 * 1000;
 
 /// The countdown before a film with a start time (its clip's `item` is that film).
 struct Countdown {
@@ -593,6 +621,7 @@ impl Channel {
     pub fn new(mut o: ChannelOptions) -> Self {
         let now = o.now.take().unwrap_or_else(default_clock);
         let wall_now = o.wall_now.take().unwrap_or_else(system_wall_clock);
+        let (prepare_tx, prepare_rx) = mpsc::unbounded_channel();
         let (launch_tx, launch_rx) = mpsc::unbounded_channel();
         let monitor = o
             .monitor
@@ -623,6 +652,10 @@ impl Channel {
             wall_now,
             countdown: None,
             countdowns: 0,
+            preparing: None,
+            prepare_tx,
+            prepare_rx,
+            prefetch_retried: None,
         }
     }
 
@@ -1454,17 +1487,27 @@ impl Channel {
                 )
             })
         };
-        let next = self.prefetched.as_ref().map(|c| NextInfo {
-            title: c.item.title.clone(),
-            state: if c.failure().is_some() {
-                NextState::Failed
-            } else if c.is_starting() {
-                NextState::Preparing
-            } else {
-                NextState::Ready
-            },
-            ready_segments: c.ready.len(),
-        });
+        let next = match (&self.prefetched, &self.preparing) {
+            (Some(c), _) => Some(NextInfo {
+                item_id: c.item.id,
+                title: c.item.title.clone(),
+                state: if c.failure().is_some() {
+                    NextState::Failed
+                } else if c.is_starting() {
+                    NextState::Preparing
+                } else {
+                    NextState::Ready
+                },
+                ready_segments: c.ready.len(),
+            }),
+            (None, Some(p)) => Some(NextInfo {
+                item_id: p.item_id,
+                title: p.title.clone(),
+                state: p.state,
+                ready_segments: 0,
+            }),
+            (None, None) => None,
+        };
         let ffmpeg = on_air
             .as_ref()
             .and_then(|(_, clip)| Some((clip.pid?, clip.speed)))
@@ -1516,6 +1559,7 @@ impl Channel {
     /// Hands finished clip starts to their clips; a start whose clip was dropped meanwhile is
     /// disposed.
     pub fn poll_launches(&mut self) {
+        self.poll_prepared();
         while let Ok(launch) = self.launch_rx.try_recv() {
             let target = [
                 self.current.as_mut(),
@@ -1609,7 +1653,9 @@ impl Channel {
                 self.last_slate_kind = None;
                 self.previous_clip_segment = Some(seg.path.clone());
                 self.pending_meta.insert(seg.path, meta);
+                self.retry_failed_prefetch(remaining);
                 self.maybe_prefetch(remaining);
+                self.maybe_prepare();
                 return Ok(out);
             }
 
@@ -1766,6 +1812,13 @@ impl Channel {
             });
             match fresh {
                 Ok(Some(fresh)) => {
+                    if self
+                        .preparing
+                        .as_ref()
+                        .is_some_and(|p| p.item_id == fresh.id)
+                    {
+                        self.preparing = None;
+                    }
                     clip.item = fresh;
                     self.current = Some(clip);
                     return Ok(());
@@ -1897,6 +1950,106 @@ impl Channel {
             self.log(Msg::new("log.countdown_failed").arg_msg("error", error));
         }
         self.slate(SlateKind::Idle)
+    }
+
+    /// Once the film on air has aired a little, the queue head (not live, starting within
+    /// [`PREPARE_AHEAD_MAX_MS`]) is resolved and analysed ahead: one at a time, once per film
+    /// and link.
+    fn maybe_prepare(&mut self) {
+        let aired = self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.emitted_s >= PREPARE_AFTER_S || c.relaunches > 0);
+        if !aired || self.prefetched.is_some() {
+            return;
+        }
+        if self
+            .preparing
+            .as_ref()
+            .is_some_and(|p| p.state == NextState::Resolving)
+        {
+            return;
+        }
+        let channel_id = self.o.channel_id;
+        let Ok(Some(head)) = self.queue(|q| q.next_queued(channel_id)) else {
+            return;
+        };
+        let done = self
+            .preparing
+            .as_ref()
+            .is_some_and(|p| p.item_id == head.id && p.source_url == head.source_url);
+        let far = self
+            .ms_to_start(&head)
+            .is_some_and(|ms| ms > PREPARE_AHEAD_MAX_MS);
+        if done || far || head.is_live {
+            return;
+        }
+        self.preparing = Some(Preparing {
+            item_id: head.id,
+            source_url: head.source_url.clone(),
+            title: head.title.clone(),
+            state: NextState::Resolving,
+        });
+        let start = self.o.factory.prepare(head.clone());
+        let tx = self.prepare_tx.clone();
+        let id = head.id;
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let _ = tx.send((id, start.await));
+            });
+        }
+    }
+
+    /// Hands the results of resolving ahead to [`Self::preparing`].
+    fn poll_prepared(&mut self) {
+        while let Ok((id, result)) = self.prepare_rx.try_recv() {
+            let Some(p) = self.preparing.as_mut().filter(|p| p.item_id == id) else {
+                continue;
+            };
+            match result {
+                Ok(()) => p.state = NextState::Resolved,
+                Err(error) => {
+                    let title = p.title.clone();
+                    self.preparing_failed(id, &title, error);
+                }
+            }
+        }
+    }
+
+    fn preparing_failed(&mut self, id: i64, title: &str, error: Msg) {
+        if let Some(p) = self.preparing.as_mut() {
+            p.state = NextState::Failed;
+        }
+        self.log(
+            Msg::new("log.prepare_failed")
+                .arg("id", id)
+                .arg("title", title)
+                .arg_msg("error", error),
+        );
+    }
+
+    /// A clip prepared ahead whose start failed is started once more after a while, while
+    /// the film on air still has time left (no gap between the two).
+    fn retry_failed_prefetch(&mut self, remaining_s: Option<f64>) {
+        let now = (self.now)();
+        let due = self.prefetched.as_ref().is_some_and(|p| {
+            p.failure().is_some()
+                && self.prefetch_retried != Some(p.item.id)
+                && now.saturating_sub(p.started_at) >= PREFETCH_RETRY_MS
+        });
+        if !due || remaining_s.is_some_and(|r| r < PREPARE_AFTER_S) {
+            return;
+        }
+        if let Some(mut failed) = self.prefetched.take() {
+            failed.dispose();
+            self.prefetch_retried = Some(failed.item.id);
+            self.log(
+                Msg::new("log.prefetch_retry")
+                    .arg("id", failed.item.id)
+                    .arg("title", &failed.item.title),
+            );
+            self.prefetched = Some(self.launch_ahead(failed.item));
+        }
     }
 
     fn drop_countdown(&mut self) {
@@ -2304,6 +2457,8 @@ mod tests {
         ahead: Vec<i64>,
         /// Countdowns made: the film and the seconds.
         countdowns: Vec<(i64, f64)>,
+        /// Films resolved ahead (`prepare`).
+        prepared: Vec<i64>,
     }
 
     #[derive(Clone, Default)]
@@ -2332,6 +2487,11 @@ mod tests {
         ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
             self.lock().ahead.push(item.id);
             self.create(item, start_at_s, 0)
+        }
+
+        fn prepare(&self, item: QueueItem) -> BoxFuture<'static, Result<(), Msg>> {
+            self.lock().prepared.push(item.id);
+            Box::pin(async { Ok(()) })
         }
 
         /// A fake clip at "position -1" (its segment paths differ from the film's).
@@ -5190,6 +5350,46 @@ mod tests {
         assert_eq!(e.starts(), 2, "an earlier out point needs no new start");
         assert_eq!(e.key(), "idle");
         assert_eq!(e.get(a.id).status, ItemStatus::Played);
+    }
+
+    // ---------- The next film ready ----------
+
+    #[tokio::test]
+    async fn the_next_film_is_resolved_ahead_once_the_film_on_air_has_aired_a_while() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 2).await;
+        assert!(e.factory.lock().prepared.is_empty(), "8 s aired: not yet");
+        let h = e.factory.handle(0);
+        h.produce(2);
+        e.key();
+        e.key();
+        assert_eq!(e.factory.lock().prepared, vec![b.id]);
+        let next = e.channel.stats().next.unwrap();
+        assert_eq!((next.item_id, next.state), (b.id, NextState::Resolving));
+        e.flush().await;
+        assert_eq!(e.channel.stats().next.unwrap().state, NextState::Resolved);
+        h.produce(1);
+        e.key();
+        assert_eq!(e.factory.lock().prepared.len(), 1, "once per film");
+    }
+
+    #[tokio::test]
+    async fn a_prepared_clip_that_failed_is_started_once_more() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        // 48 s aired of 100: the next film is prepared.
+        let h = e.air(&a, 12).await;
+        assert_eq!(e.factory.lock().ahead, vec![b.id]);
+        e.flush().await;
+        e.factory.handle(1).set_state(SegmenterState::Failed);
+        e.advance(PREFETCH_RETRY_MS);
+        h.produce(1);
+        e.key();
+        assert_eq!(e.factory.lock().ahead, vec![b.id, b.id]);
+        assert_eq!(e.channel.stats().next.unwrap().state, NextState::Preparing);
     }
 
     // ---------- Start at a time ----------

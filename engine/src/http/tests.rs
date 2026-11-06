@@ -3066,7 +3066,8 @@ async fn pause_and_resume_send_the_manual_reason_and_answer_with_the_control_sta
         json!({"control": {
             "itemId": 7, "isLive": false, "positionS": 12, "durationS": 100,
             "canPause": true, "canSeek": true, "seekPending": false, "positionApprox": true,
-            "pausePending": false, "paused": true, "pauseReasons": ["tunnel", "manual"]
+            "pausePending": false, "inS": null, "outS": null, "paused": true,
+            "pauseReasons": ["tunnel", "manual"]
         }})
     );
     assert_eq!(h.commands(), [Command::Pause(PauseReason::Manual)]);
@@ -3488,6 +3489,7 @@ fn stats_snapshot(h: &Harness) -> Arc<Snapshot> {
             dts_continuous: true,
         }),
         next: Some(NextInfo {
+            item_id: 9,
             title: "Pies".into(),
             state: NextState::Preparing,
             ready_segments: 0,

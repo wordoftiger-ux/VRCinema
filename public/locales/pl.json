@@ -352,6 +352,8 @@
   "log.pause_reason_no_viewers": "brak widzów",
   "log.pause_reason_tunnel": "tunel",
   "log.play_now": "Odtwórz teraz: „{title}” (#{id})",
+  "log.prefetch_retry": "Film #{id} „{title}” nie wystartował z wyprzedzeniem; jeszcze jedna próba.",
+  "log.prepare_failed": "Nie udało się przygotować z wyprzedzeniem filmu #{id} „{title}” ({error}); ponowna próba przy starcie.",
   "log.preview_download_failed": "Film #{id}: pobieranie dla Podglądu nie powiodło się ({error}); Podgląd pokazuje zamiast tego fragmenty kanału",
   "log.program_stopped": "Program zatrzymany.",
   "log.queue_error_prefetch": "Błąd kolejki przy wyprzedzaniu: {error}",

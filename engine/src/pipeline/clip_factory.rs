@@ -26,7 +26,7 @@ use crate::pipeline::ticker::{
 };
 use crate::resolver::ytdlp::{FALLBACK_YOUTUBE_CLIENT, youtube_client};
 use crate::resolver::{MediaResolver, ResolvedStream, StreamInput};
-use crate::rules::{HostResolver, LinkError, check_media_url, check_media_urls};
+use crate::rules::{HostResolver, check_media_url, check_media_urls};
 use crate::stats::{ClipStats, ProbeSummary, StreamMode};
 
 /// Retries when removing a clip directory (Windows may hold a file lock for a moment).
@@ -395,6 +395,79 @@ pub struct RealClipFactory {
     rotation: Arc<AtomicUsize>,
     prober: Arc<dyn VideoProber>,
     downloads: TempDownloads,
+    /// Films resolved and analysed ahead of their turn ([`ClipFactory::prepare`]).
+    prepared: Arc<Mutex<Vec<PreparedFilm>>>,
+}
+
+/// How long a film resolved ahead stays usable (a site's address may expire).
+const PREPARED_KEEP: Duration = Duration::from_secs(20 * 60);
+/// Films resolved ahead kept at most.
+const PREPARED_MAX: usize = 4;
+
+/// A film resolved and analysed ahead of its turn, for its link.
+struct PreparedFilm {
+    item_id: i64,
+    source_url: String,
+    at: std::time::Instant,
+    probed: Probed,
+}
+
+impl RealClipFactory {
+    /// The film resolved ahead for `item` (its link unchanged, still fresh), taken out.
+    fn take_prepared(&self, item: &QueueItem) -> Option<Probed> {
+        let mut films = self.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+        films.retain(|f| f.at.elapsed() < PREPARED_KEEP);
+        let at = films
+            .iter()
+            .position(|f| f.item_id == item.id && f.source_url == item.source_url)?;
+        Some(films.remove(at).probed)
+    }
+
+    fn keep_prepared(&self, item: &QueueItem, probed: Probed) {
+        let mut films = self.prepared.lock().unwrap_or_else(PoisonError::into_inner);
+        films.retain(|f| f.at.elapsed() < PREPARED_KEEP && f.item_id != item.id);
+        if films.len() >= PREPARED_MAX {
+            films.remove(0);
+        }
+        films.push(PreparedFilm {
+            item_id: item.id,
+            source_url: item.source_url.clone(),
+            at: std::time::Instant::now(),
+            probed,
+        });
+    }
+}
+
+/// The link of `item` as the programs may see it: a viewer's link is looked up again first
+/// (its name may have started to point into the owner's network since the request).
+async fn checked_source(d: &ClipFactoryDeps, item: &QueueItem) -> Result<(String, bool), Msg> {
+    let viewer = item.added_by == AddedBy::Public && d.check_viewer_media;
+    let source = if viewer {
+        check_media_url(&item.source_url, d.host_resolver.as_ref())
+            .await
+            .map_err(|e| Msg::error(e.code()))?
+    } else {
+        item.source_url.clone()
+    };
+    Ok((source, viewer))
+}
+
+/// Resolves and analyses `item` ahead of its turn (the same checks as a start) and keeps the
+/// result for its start.
+async fn prepare_film(factory: RealClipFactory, item: QueueItem) -> Result<(), Msg> {
+    let d = Arc::clone(&factory.deps);
+    let (source, viewer) = checked_source(&d, &item).await?;
+    let probed = resolve_and_probe(
+        &d,
+        &factory.downloads,
+        factory.prober.as_ref(),
+        &item,
+        &source,
+        viewer,
+    )
+    .await?;
+    factory.keep_prepared(&item, probed);
+    Ok(())
 }
 
 pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
@@ -405,6 +478,7 @@ pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
         rotation: Arc::new(AtomicUsize::new(0)),
         prober: Arc::new(FfprobeProber),
         downloads,
+        prepared: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -910,28 +984,34 @@ async fn start_clip(
     attempt: u32,
     ahead: bool,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
+    // A retry resolves anew (the address resolved ahead may be what failed).
+    let prepared = if attempt == 0 {
+        factory.take_prepared(&item)
+    } else {
+        None
+    };
     let RealClipFactory {
         deps: d,
         counter,
         rotation,
         prober,
         downloads,
+        prepared: _,
     } = factory;
-    let viewer = item.added_by == AddedBy::Public && d.check_viewer_media;
-    let refused = |e: LinkError| Msg::error(e.code());
     // A viewer's link is looked up again now (yt-dlp fetches it anew): its name may have started
     // to point into the owner's network since the request. The owner's films are not limited.
-    let source = if viewer {
-        check_media_url(&item.source_url, d.host_resolver.as_ref())
-            .await
-            .map_err(refused)?
-    } else {
-        item.source_url.clone()
-    };
-    let (stream, info, download) = match downloads.reuse(item.id) {
+    let (source, viewer) = checked_source(&d, &item).await?;
+    let (stream, info, download) = match (downloads.reuse(item.id), prepared) {
         // A resume or a seek of a film downloaded for an earlier clip of the item.
-        Some(film) => probe_download(&d, prober.as_ref(), film, item.duration_s).await?,
-        None => resolve_and_probe(&d, &downloads, prober.as_ref(), &item, &source, viewer).await?,
+        (Some(film), _) => probe_download(&d, prober.as_ref(), film, item.duration_s).await?,
+        // Resolved ahead of its turn: the media addresses of a viewer's film are checked
+        // again now, as a fresh resolution would be.
+        (None, Some((stream, info, lease))) => {
+            (checked_inputs(&d, viewer, stream).await?, info, lease)
+        }
+        (None, None) => {
+            resolve_and_probe(&d, &downloads, prober.as_ref(), &item, &source, viewer).await?
+        }
     };
     let settings = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1180,6 +1260,10 @@ async fn start_countdown(
 }
 
 impl ClipFactory for RealClipFactory {
+    fn prepare(&self, item: QueueItem) -> BoxFuture<'static, Result<(), Msg>> {
+        Box::pin(prepare_film(self.clone(), item))
+    }
+
     fn create_countdown(
         &self,
         item: QueueItem,

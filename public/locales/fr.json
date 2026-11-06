@@ -350,6 +350,8 @@
   "log.pause_reason_no_viewers": "aucun spectateur",
   "log.pause_reason_tunnel": "tunnel",
   "log.play_now": "Lecture immédiate : \"{title}\" (#{id})",
+  "log.prefetch_retry": "La vidéo #{id} \"{title}\" n’a pas pu démarrer à l’avance ; nouvel essai.",
+  "log.prepare_failed": "Impossible de préparer à l’avance la vidéo #{id} \"{title}\" ({error}) ; nouvel essai au démarrage.",
   "log.preview_download_failed": "Vidéo #{id} : le téléchargement pour l’aperçu a échoué ({error}) ; l’aperçu affiche à la place les segments de la chaîne",
   "log.program_stopped": "Programme arrêté.",
   "log.queue_error_prefetch": "Erreur de la file d’attente lors de la préparation de la vidéo suivante : {error}",
