@@ -1422,6 +1422,7 @@ mod tests {
             buffering: slate_in(dir, "buffering.ts"),
             pause: slate_in(dir, "pause.ts"),
             generation: 0,
+            fallback: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         }
@@ -1563,6 +1564,7 @@ mod tests {
                 buffering: slate_in(&slates_dir, "buffering.ts"),
                 pause: slate_in(&slates_dir, "pause.ts"),
                 generation: 0,
+                fallback: Vec::new(),
                 japanese_font_missing: false,
                 font_missing: None,
             };
@@ -1713,6 +1715,7 @@ mod tests {
             buffering: two("buffering"),
             pause: two("pause"),
             generation,
+            fallback: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         }

@@ -944,6 +944,7 @@ mod tests {
             buffering: vec![slate("buffering.ts")],
             pause: vec![slate("pause.ts")],
             generation: 0,
+            fallback: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         };

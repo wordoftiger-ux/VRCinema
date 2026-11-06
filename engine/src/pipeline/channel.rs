@@ -274,6 +274,9 @@ struct ActiveClip {
     slow_logged: bool,
     /// Rows of the monitor for the first segments of `ready` (listed, not aired yet).
     monitor_listed: VecDeque<u64>,
+    /// The retry of a film that failed while on air: viewers see the fallback slate until it
+    /// produces again.
+    recovering: bool,
 }
 
 /// What the clip's analysis found out about a film.
@@ -330,6 +333,7 @@ impl ActiveClip {
         let position_s = self.position_s();
         self.emitted_s += seg.duration;
         self.stalled_since = None;
+        self.recovering = false;
         let out = SourceSegment {
             path: seg.path.clone(),
             duration: seg.duration,
@@ -470,6 +474,7 @@ fn slate_slot(kind: SlateKind) -> usize {
         SlateKind::Idle => 0,
         SlateKind::Buffering => 1,
         SlateKind::Pause => 2,
+        SlateKind::Fallback => 3,
     }
 }
 
@@ -495,7 +500,7 @@ pub struct Channel {
     pending_seek: Option<PendingSeek>,
     /// The owner's pause at a position not aired yet; the film airs up to it first.
     armed_pause: Option<ArmedPause>,
-    slate_index: [usize; 3],
+    slate_index: [usize; 4],
     last_slate_kind: Option<SlateKind>,
     previous_clip_segment: Option<PathBuf>,
     pending_meta: HashMap<PathBuf, SegmentMeta>,
@@ -534,7 +539,7 @@ impl Channel {
             pause_reasons: BTreeSet::new(),
             pending_seek: None,
             armed_pause: None,
-            slate_index: [0; 3],
+            slate_index: [0; 4],
             last_slate_kind: None,
             previous_clip_segment: None,
             pending_meta: HashMap::new(),
@@ -581,7 +586,7 @@ impl Channel {
     /// next slate segment comes from the new set, from its first segment, under a new source key.
     pub fn replace_slates(&mut self, slates: Slates) {
         self.o.slates = slates;
-        self.slate_index = [0; 3];
+        self.slate_index = [0; 4];
         self.last_slate_kind = None;
     }
 
@@ -635,7 +640,7 @@ impl Channel {
                     }
                     (_, None) => (ChannelStatus::Buffering, None),
                     (MetaKind::Clip, current) => (ChannelStatus::Playing, current),
-                    (MetaKind::Slate(SlateKind::Buffering), current) => {
+                    (MetaKind::Slate(SlateKind::Buffering | SlateKind::Fallback), current) => {
                         (ChannelStatus::Buffering, current)
                     }
                 }
@@ -1478,7 +1483,7 @@ impl Channel {
                         self.handle_failure(Msg::new(START_TIMEOUT_ERROR))?;
                         continue;
                     }
-                    return self.slate(SlateKind::Buffering);
+                    return self.waiting_slate();
                 }
             }
             let stalled_since = *c.stalled_since.get_or_insert(now);
@@ -1490,7 +1495,7 @@ impl Channel {
                 self.finish_current(ItemStatus::Failed, Some(&stalled))?;
                 continue;
             }
-            return self.slate(SlateKind::Buffering);
+            return self.waiting_slate();
         }
         self.slate(SlateKind::Idle)
     }
@@ -1507,11 +1512,29 @@ impl Channel {
         })
     }
 
+    /// What viewers see while the film is not producing: "Technical problem" while a film that
+    /// failed on air is started again, otherwise "Loading".
+    fn waiting_slate(&mut self) -> anyhow::Result<SourceSegment> {
+        let recovering = self.current.as_ref().is_some_and(|c| c.recovering);
+        self.slate(if recovering {
+            SlateKind::Fallback
+        } else {
+            SlateKind::Buffering
+        })
+    }
+
     fn slate(&mut self, kind: SlateKind) -> anyhow::Result<SourceSegment> {
+        // A set without the fallback slate shows the buffering one.
+        let kind = if kind == SlateKind::Fallback && self.o.slates.fallback.is_empty() {
+            SlateKind::Buffering
+        } else {
+            kind
+        };
         let list = match kind {
             SlateKind::Idle => &self.o.slates.idle,
             SlateKind::Buffering => &self.o.slates.buffering,
             SlateKind::Pause => &self.o.slates.pause,
+            SlateKind::Fallback => &self.o.slates.fallback,
         };
         if list.is_empty() {
             return Err(msg_error(
@@ -1527,7 +1550,9 @@ impl Channel {
         self.slate_index[slot] = index + 1;
         let seg = &list[index];
         let item = match kind {
-            SlateKind::Buffering => self.current.as_ref().map(|c| c.item.clone()),
+            SlateKind::Buffering | SlateKind::Fallback => {
+                self.current.as_ref().map(|c| c.item.clone())
+            }
             SlateKind::Pause => self.parked.as_ref().map(|p| p.item.clone()),
             SlateKind::Idle => None,
         };
@@ -1658,6 +1683,7 @@ impl Channel {
             start: None,
             slow_logged: false,
             monitor_listed: VecDeque::new(),
+            recovering: false,
         };
         let tx = self.launch_tx.clone();
         match tokio::runtime::Handle::try_current() {
@@ -1702,8 +1728,10 @@ impl Channel {
         if c.attempt == 0 && !refused {
             // One retry from where it stopped (resolved anew, the old address may have expired).
             let resume_at = if c.item.is_live { 0.0 } else { c.position_s() };
+            let on_air = c.emitted_s > 0.0 || c.recovering;
             let mut retry = self.launch(c.item, resume_at, 1);
             retry.earlier = probed;
+            retry.recovering = on_air;
             self.current = Some(retry);
             return Ok(());
         }
@@ -1848,6 +1876,7 @@ mod tests {
             buffering: vec![info("/slates/buf/0.ts", 0)],
             pause: vec![info("/slates/pause/0.ts", 0), info("/slates/pause/1.ts", 1)],
             generation: 0,
+            fallback: vec![info("/slates/fallback/0.ts", 0)],
             japanese_font_missing: false,
             font_missing: None,
         }
@@ -2280,7 +2309,9 @@ mod tests {
         e.next();
         h0.set_state(SegmenterState::Failed);
         h0.set_error("Connection reset");
-        assert_eq!(e.key(), "buffering");
+        // Failed on air: "Technical problem" while it is started again.
+        assert_eq!(e.key(), "fallback");
+        assert_eq!(e.key(), "fallback");
         e.flush().await;
         assert_eq!(
             e.factory.calls()[1],
@@ -2648,7 +2679,7 @@ mod tests {
             e.next();
         }
         h.set_state(SegmenterState::Failed);
-        assert_eq!(e.key(), "buffering");
+        assert_eq!(e.key(), "fallback");
         assert_eq!(
             e.factory.calls()[1],
             Call {
@@ -2805,6 +2836,7 @@ mod tests {
                 info(&format!("{dir}/pause/1.ts"), 1),
             ],
             generation,
+            fallback: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         }
@@ -3201,7 +3233,7 @@ mod tests {
         let a = e.add_item("a");
         let h0 = e.air(&a, 2).await;
         h0.set_state(SegmenterState::Failed);
-        assert_eq!(e.key(), "buffering");
+        assert_eq!(e.key(), "fallback");
         e.flush().await;
         let h1 = e.factory.handle(1);
         h1.produce(1);
