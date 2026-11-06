@@ -205,7 +205,7 @@ try {
   await page.click('.qi[data-id="8"]', { button: 'right' });
   await page.waitForSelector('.menu [role=menuitem]');
   const items = await page.$$eval('.menu [role=menuitem]', (els) => els.map((e) => [e.textContent.trim(), e.getAttribute('aria-disabled')]));
-  check(JSON.stringify(items) === JSON.stringify([['Play now', 'false'], ['Move to the top', 'true'], ['Move up', 'true'], ['Move down', 'false'], ['Copy link', 'false'], ['Remove from the queue', 'false']]), 'right click opens the menu (the first row cannot go to the top or up)', items);
+  check(JSON.stringify(items) === JSON.stringify([['Play now', 'false'], ['Move to the top', 'true'], ['Move up', 'true'], ['Move down', 'false'], ['Copy link', 'false'], ['Remove from the queue', 'false'], ['Remove all from this viewer', 'false']]), 'right click opens the menu (the first row cannot go to the top or up)', items);
   check((await page.$eval('.menu', (e) => e.getAttribute('aria-label'))) === 'Video menu', 'the menu has an accessible name');
   await page.screenshot({ path: join(shots, 'after-channel-menu-en.png') });
   m = await mark();
@@ -216,7 +216,7 @@ try {
   await page.focus('.qi[data-id="10"]');
   await page.keyboard.press('ContextMenu');
   await page.waitForSelector('.menu');
-  check((await page.$$('.menu [role=menuitem]')).length === 6, 'the Menu key opens the menu of the focused row');
+  check((await page.$$('.menu [role=menuitem]')).length === 7, 'the Menu key opens the menu of the focused row');
   await page.keyboard.press('Escape');
   check(await page.evaluate(() => document.activeElement?.dataset.id === '10'), 'focus returns to the row when the menu closes');
   await page.keyboard.press('Shift+F10');
@@ -272,6 +272,70 @@ try {
   check(a.method === 'DELETE' && a.path === '/api/admin/items/11', '"Remove from the queue" → DELETE /items/11', a);
   await waitFor(async () => JSON.stringify(await ids(page)) === '[9,10,8]', 'removed');
   check(true, 'the row disappears');
+  await page.click('.qi[data-id="9"]', { button: 'right' });
+  check(!(await page.$$eval('.menu [role=menuitem]', (els) => els.some((e) => e.textContent.includes('this viewer')))), 'a video the owner added has no "Remove all from this viewer"');
+  await page.keyboard.press('Escape');
+
+  // ---------- Queue tools: clear, remove a viewer's videos, undo, drop tip ----------
+  await reset();
+  await scenario({ pending: 1 });
+  await page.reload();
+  await page.waitForSelector('.qi');
+  check((await text(page, '[data-drop-hint]')).startsWith('Tip: drag video files'), 'the window shows the drop tip under the queue');
+  await page.click('[data-clear-queue]');
+  await page.waitForSelector('.dialog');
+  check((await text(page, '#dialog-title')) === 'Clear the queue?', 'Clear queue asks first');
+  check((await text(page, '.dialog-intro')) === '5 waiting videos will be removed from the queue.', 'the dialog counts the queue and the approvals', await text(page, '.dialog-intro'));
+  check((await text(page, '.dialog-check')).includes('Never Gonna Give You Up') && !(await page.$eval('[data-include-on-air]', (e) => e.checked)), 'the film on air is named and not ticked');
+  await page.screenshot({ path: join(shots, 'after-queue-clear-dialog.png') });
+  m = await mark();
+  await page.click('.dialog-foot .danger');
+  a = await lastAction(m, 'clear');
+  check(a.path.endsWith('/clear') && JSON.stringify(a.body) === '{"includePlaying":false}', 'Clear queue → POST …/clear {includePlaying: false}', a);
+  await waitFor(async () => (await ids(page)).length === 0 && !(await page.$('.approvals .qi')), 'the queue and the approvals are empty');
+  check((await text(page, '.q-undo span')) === '5 videos removed.', 'an Undo strip says what went', await text(page, '.q-undo span'));
+  check(Boolean(await page.$('.player .play, .player .pause')), 'the film on air stays');
+  m = await mark();
+  await page.click('[data-undo]');
+  a = await lastAction(m, 'undo');
+  check(a.path.endsWith('/undo') && a.body.undo === 1, 'Undo → POST …/undo {undo}', a);
+  await waitFor(async () => (await ids(page)).length === 4, 'the videos come back');
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('5 videos restored.'));
+  check(!(await page.$('.q-undo')), 'the strip goes after the undo');
+
+  // Kasia's video (her film is on air too): remove both and block her device.
+  m = await mark();
+  await page.click('.qi[data-id="10"]', { button: 'right' });
+  await page.click('.menu [role=menuitem]:nth-child(8)');
+  await page.waitForSelector('.dialog [data-also-block]');
+  a = (await actionsSince(m)).find((x) => x.path.endsWith('/remove-requester'));
+  check(a?.body.dryRun === true && a.body.itemId === 10, 'the dialog first asks the engine what would go (dryRun)', a);
+  check((await text(page, '.dialog-who')) === 'Kasia', 'the dialog names the viewer');
+  check((await text(page, '.dialog-intro')) === '1 waiting video of this viewer will be removed from the queue.', 'and counts their waiting videos', await text(page, '.dialog-intro'));
+  check((await text(page, '.dialog-check')).includes('Never Gonna Give You Up'), 'their film on air is named, to tick or not');
+  await page.screenshot({ path: join(shots, 'after-queue-remove-viewer-dialog.png') });
+  await page.check('[data-include-on-air]');
+  await page.check('[data-also-block]');
+  m = await mark();
+  await page.click('.dialog-foot .danger');
+  a = await lastAction(m, 'remove requester');
+  check(JSON.stringify(a.body) === '{"itemId":10,"includePlaying":true,"block":true}', 'Remove videos → POST …/remove-requester with the ticks', a);
+  await waitFor(async () => JSON.stringify(await ids(page)) === '[8,9,11]', 'her video is gone');
+  check((await text(page, '.q-undo span')) === '2 videos removed. The device is blocked.', 'the strip says the device is blocked too', await text(page, '.q-undo span'));
+  await page.click('[data-undo]');
+  await waitFor(async () => (await ids(page)).length === 4, 'the undo puts her video back');
+
+  // A remote panel cannot take a drop: no tip there.
+  const errorsBefore = page.__errors.length;
+  await scenario({ headless: true });
+  await page.reload();
+  await page.waitForSelector('.qi');
+  await page.waitForTimeout(500);
+  check(!(await page.$('[data-drop-hint]')), 'without the window the drop tip is not shown');
+  await scenario({ headless: false });
+  // Without a window the window's routes answer 403 / 404 on purpose.
+  const expected = (e) => /status of 40[34]/.test(e);
+  page.__errors.splice(errorsBefore, Infinity, ...page.__errors.slice(errorsBefore).filter((e) => !expected(e)));
 
   // ---------- Approvals ----------
   await reset();

@@ -1299,6 +1299,76 @@ kbd {
   text-align: right;
 }
 
+/* Queue tools: "Clear queue" under the list, the "Undo" strip, the drop tip. */
+.q-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin: 10px 14px 0;
+}
+
+.q-clear {
+  max-width: 100%;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--text-mute);
+}
+
+.q-undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px 10px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius);
+  background: var(--card);
+  font-size: 12.5px;
+}
+
+.q-undo span {
+  flex: 1;
+  min-width: 0;
+}
+
+.q-undo .btn {
+  flex: none;
+  padding: 2px 10px;
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.q-drop-hint {
+  margin: 12px 14px 0;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dialog-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.dialog-check input {
+  margin-top: 3px;
+  flex: none;
+}
+
+.dialog-note {
+  margin: 0 0 10px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+
+.dialog-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
 .addf {
   margin: 0 14px 10px;
 }

@@ -263,6 +263,71 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     };
   }
 
+  // The queue tools (POST clear | remove-requester | undo | play-next), like the engine: a bulk
+  // removal takes the queue and the approvals (the film on air with includePlaying) and can be
+  // undone once. A viewer is the same nick and icon (the fake has no device keys); the film on
+  // air is Kasia's. Answers undefined for any other action.
+  function queueTools(res, action, payload) {
+    const send = (status, body) => (json(res, status, body), true);
+    const fail = (status, code, error) => (coded(res, status, code, error), true);
+    const onAir = { requesterName: 'Kasia', requesterBadge: { hue: 40, shape: 3 } };
+    const same = (a, b) =>
+      a.requesterBadge !== 'host' && (a.requesterName || a.requesterBadge) &&
+      a.requesterName === b.requesterName && JSON.stringify(a.requesterBadge) === JSON.stringify(b.requesterBadge);
+    const take = (keep, includePlaying, block = false) => {
+      const removed = { queue: s.queue.filter((i) => !keep(i)), pending: s.pendingItems.filter((i) => !keep(i)), playing: null };
+      s.queue = s.queue.filter(keep);
+      s.pendingItems = s.pendingItems.filter(keep);
+      if (includePlaying && s.playing !== 'none') {
+        removed.playing = s.playing;
+        s.playing = 'none';
+      }
+      const count = removed.queue.length + removed.pending.length + (removed.playing ? 1 : 0);
+      const undo = count || block ? (s.nextUndo = (s.nextUndo ?? 0) + 1) : null;
+      if (undo) (s.undos ??= new Map()).set(undo, removed);
+      return send(200, { removed: count, blocked: block, undo });
+    };
+    if (action === 'clear') return take(() => false, payload?.includePlaying === true);
+    if (action === 'remove-requester') {
+      const item = [...s.queue, ...s.pendingItems].find((i) => i.id === payload?.itemId);
+      if (!item) return fail(404, 'no_such_item', 'No such item');
+      if (item.requesterBadge === 'host' || !(item.requesterName || item.requesterBadge)) return fail(409, 'no_requester', 'No viewer');
+      const canBlock = item.requesterBadge !== null;
+      const mine = (i) => same(i, item);
+      const playing = s.playing !== 'none' && same(onAir, item) ? { itemId: 7, title: panel().current.title } : null;
+      if (payload?.dryRun) {
+        return send(200, {
+          name: item.requesterName, queued: s.queue.filter(mine).length, pending: s.pendingItems.filter(mine).length,
+          playing, canBlock, blocked: false,
+        });
+      }
+      if (payload?.block && !canBlock) return fail(409, 'cannot_block', 'Cannot block');
+      return take((i) => !mine(i), Boolean(playing) && payload?.includePlaying === true, payload?.block === true);
+    }
+    if (action === 'undo') {
+      const removed = s.undos?.get(payload?.undo);
+      if (!removed) return fail(404, 'undo_expired', 'It is too late to undo this.');
+      s.undos.delete(payload.undo);
+      s.queue = [...removed.queue, ...s.queue];
+      s.pendingItems = [...removed.pending, ...s.pendingItems];
+      if (removed.playing) s.playing = removed.playing;
+      return send(200, { restored: removed.queue.length + removed.pending.length + (removed.playing ? 1 : 0) });
+    }
+    if (action === 'play-next') {
+      const inQueue = s.queue.findIndex((i) => i.id === payload?.itemId);
+      if (inQueue >= 0) {
+        s.queue.unshift(...s.queue.splice(inQueue, 1));
+        return send(200, { itemId: payload.itemId });
+      }
+      const old = s.history.find((i) => i.id === payload?.itemId);
+      if (!old) return fail(409, 'not_playable_next', 'Not playable next');
+      const again = { ...old, id: nextId++, status: 'queued', error: null, finishedAt: null };
+      s.queue.unshift(again);
+      return send(200, { itemId: again.id });
+    }
+    return undefined;
+  }
+
   function panel() {
     const current =
       s.playing === 'none'
@@ -917,6 +982,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     }
     if (req.method !== 'POST') return json(res, 404, { error: 'Not Found' });
     const action = path.slice(base.length + 1);
+    const queueTool = queueTools(res, action, payload);
+    if (queueTool) return queueTool;
     if (action === 'skip') return json(res, 200, { ok: true });
     if (action === 'items') {
       if (s.addError) {

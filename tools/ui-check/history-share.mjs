@@ -102,8 +102,8 @@ try {
   check(JSON.stringify(rows.map((r) => r.outcome)) === '["played","skipped","failed","played","failed"]', 'outcomes: played, skipped (played with a reason), failed', rows.map((r) => r.outcome));
   check(JSON.stringify(rows.map((r) => r.status)) === '["Played","Skipped","Error","Played","Error"]', 'status labels', rows.map((r) => r.status));
   check(rows[2].title === 'Untitled', 'the stored default title "Bez tytułu" shows the localized "Untitled"', rows[2].title);
-  check(rows[0].buttons.join('|') === 'Play now|Add to queue' && rows[2].buttons.join('|') === 'Try again|Add to queue', 'buttons: Play now / Try again, Add to queue', rows.map((r) => r.buttons));
-  check(rows[3].disabled[1] === true && rows[0].disabled[1] === false, 'a file from disk cannot be added to the queue again');
+  check(rows[0].buttons.join('|') === 'Play now|Play next|Add to queue' && rows[2].buttons.join('|') === 'Try again|Play next|Add to queue', 'buttons: Play now / Try again, Play next, Add to queue', rows.map((r) => r.buttons));
+  check(rows[3].disabled[2] === true && rows[0].disabled[2] === false && rows[3].disabled[1] === false, 'a file from disk cannot be added to the queue again, but can play next');
   check(rows[2].sub.includes('The file does not exist') && rows[4].sub.includes('Nie udało się pobrać filmu (stary wpis).'), 'a failure shows its reason; an old plain-text reason is shown as it is', [rows[2].sub, rows[4].sub]);
   check(rows[0].sub.startsWith('5:20 · Tomek'), 'details: length · requester · time', rows[0].sub);
   check(!rows[1].sub.includes('Skipped by the owner') && (await page.$eval('.hist-row[data-id="2"] .stt', (e) => e.title)) === 'Skipped by the owner', 'a skipped video keeps its reason in the label tooltip');
@@ -123,6 +123,12 @@ try {
   check(act.path === '/api/admin/channels/main/items' && act.body.url === 'https://pixeldrain.com/u/aB3x', 'Add to queue adds the video\'s link', act);
   await page.waitForSelector('.toast');
   check((await text(page, '.toast')).startsWith('Added'), 'a message says it was added', await text(page, '.toast'));
+  m = await mark();
+  await page.click('.hist-row[data-id="4"] .hist-next');
+  act = await lastAction(m, 'play next request');
+  check(act.path === '/api/admin/channels/main/play-next' && act.body.itemId === 4, 'Play next asks the engine to queue that history item first (a file from disk too)', act);
+  await page.waitForFunction(() => document.querySelector('.toast')?.textContent.includes('Up next: “Shrek (2001).mkv”'));
+  check(true, 'a message says what plays next');
 
   await setLanguage(page, 'pl');
   await page.waitForFunction(() => document.querySelector('.hist-row .stt')?.textContent === 'Odtworzony');

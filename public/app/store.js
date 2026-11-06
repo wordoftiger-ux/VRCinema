@@ -400,6 +400,48 @@ export const removeItem = (id) =>
     },
   );
 
+/**
+ * Removes every waiting video (`includePlaying`: the one on air too). Resolves to the engine's
+ * `{removed, blocked, undo}` (`undo`: the id for `undoRemoval`), or null after a failure (shown).
+ */
+export async function clearQueue(includePlaying) {
+  let answer = null;
+  const ok = await mutate(
+    async () => (answer = await api('POST', `${PANEL}/clear`, { includePlaying })),
+    () => {
+      queue.value = [];
+      const c = channel.value;
+      if (c?.pending) channel.value = { ...c, pending: [] };
+    },
+  );
+  return ok ? answer : null;
+}
+
+/**
+ * What removing the viewer behind `itemId` would take: `{name, queued, pending, playing,
+ * canBlock, blocked}`; throws `ApiError`.
+ */
+export const requesterPreview = (itemId) => api('POST', `${PANEL}/remove-requester`, { itemId, dryRun: true });
+
+/** Removes the waiting videos of the viewer behind `itemId` (`{includePlaying, block}`); like `clearQueue`. */
+export async function removeRequester(itemId, { includePlaying = false, block = false } = {}) {
+  let answer = null;
+  const ok = await mutate(async () => {
+    answer = await api('POST', `${PANEL}/remove-requester`, { itemId, includePlaying, block });
+  });
+  return ok ? answer : null;
+}
+
+/** Puts back what a bulk removal took: resolves to `{restored}`, or null after a failure (shown). */
+export async function undoRemoval(undo) {
+  let answer = null;
+  const ok = await mutate(async () => (answer = await api('POST', `${PANEL}/undo`, { undo })));
+  return ok ? answer : null;
+}
+
+/** A queued video moves first; one from the history is queued again first. Resolves to success. */
+export const playNext = (itemId) => mutate(() => api('POST', `${PANEL}/play-next`, { itemId }));
+
 const decide = (id, action) =>
   mutate(() => api('PATCH', `/api/admin/items/${id}`, { action }), () => dropPending(id));
 export const approveItem = (id) => decide(id, 'approve');

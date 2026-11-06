@@ -1,12 +1,12 @@
 // The History view: what has already been on the channel, with its outcome, and the buttons
-// that put a video on air again or back in the queue.
+// that put a video on air again, next in the queue (also a file from disk), or at its end.
 
 import { useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
-import { lang, t } from '../i18n.js';
+import { lang, t, videoTitle } from '../i18n.js';
 import { ItemText, Thumb, isWeb, itemDetails } from '../components/item.js';
 import { queueLink } from '../components/addlink.js';
-import { history, playNow } from '../store.js';
+import { history, playNext, playNow, showToast } from '../store.js';
 
 /**
  * How the video ended: `failed` is an error; `played` with a reason is a skipped one (the
@@ -52,6 +52,15 @@ function Row({ item }) {
       setBusy(false);
     }
   };
+  const next = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      if (await playNext(item.id)) showToast(t('history.play_next_done', { title: videoTitle(item.title) }), 'info');
+    } finally {
+      setBusy(false);
+    }
+  };
   const addable = isWeb(item);
   return html`
     <li class="qi hist-row" data-id=${item.id} data-outcome=${kind}>
@@ -62,6 +71,7 @@ function Row({ item }) {
         <button type="button" class="btn hist-play" disabled=${busy} onClick=${again}>
           ${kind === 'failed' ? t('history.retry') : t('history.play_now')}
         </button>
+        <button type="button" class="btn hist-next" disabled=${busy} onClick=${next}>${t('history.play_next')}</button>
         <button type="button" class="btn hist-queue" disabled=${!addable}
           title=${addable ? undefined : t('history.to_queue_local')} onClick=${() => queueLink(item.sourceUrl)}>
           ${t('history.to_queue')}

@@ -3,20 +3,38 @@
 // dragging a row with the mouse (pointer events: the window's native file-drop handler leaves
 // no HTML5 drag and drop to the page) or with Alt+↑/↓; the context menu (right click, Menu
 // key, Shift+F10, a long press on a touch screen, or the ⋮ button on a phone) plays a video
-// now, moves it up, down or to the top, copies its link or removes it.
+// now, moves it up, down or to the top, copies its link, removes it or everything of its
+// viewer (asked first; optionally blocking the device). "Clear queue" in the heading removes
+// every waiting video; both bulk removals can be undone for a few seconds and touch the video
+// on air only when the owner ticks it in the dialog. In the program's window a tip under the
+// list says that video files can be dropped on it (a remote panel cannot take a drop).
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { Icon } from '../icons.js';
-import { t, tn, videoTitle } from '../i18n.js';
+import { sentences, t, tn, videoTitle } from '../i18n.js';
 import { ItemText, Thumb, isWeb } from './item.js';
 import { contextMenuHandlers, openMenu } from './menu.js';
 import { AddLink } from './addlink.js';
 import { Library } from './library.js';
 import { Approvals } from './approvals.js';
+import { RequesterBadge } from './badge.js';
+import { openDialog } from './dialog.js';
 import { copyText, formatTime } from './playerbar.js';
-import { channel, moveItem, playNow, queue, removeItem, showToast } from '../store.js';
+import {
+  access,
+  channel,
+  clearQueue,
+  moveItem,
+  playNow,
+  queue,
+  removeItem,
+  removeRequester,
+  requesterPreview,
+  showToast,
+  undoRemoval,
+} from '../store.js';
 import { errorText } from '../api.js';
 
 /** A pointer must move this far before a press on a row becomes a drag. */
@@ -26,8 +44,115 @@ const EDGE_PX = 32;
 /** A touch held this long on a row opens its menu. */
 const LONG_PRESS_MS = 500;
 
+/** How long the "Undo" of a bulk removal stays (the engine keeps it longer). */
+const UNDO_SHOW_MS = 8000;
+
 /** Said to screen readers after a move made with the keyboard. */
 const announcement = signal('');
+
+/** The last bulk removal while it can be undone here: `{text, undo}` or null. */
+const removal = signal(null);
+let removalTimer = 0;
+/** The ticks of the open bulk-removal dialog. */
+const includeOnAir = signal(false);
+const alsoBlock = signal(false);
+
+function showRemoval(answer) {
+  if (!answer) return;
+  clearTimeout(removalTimer);
+  const text = sentences(
+    tn('queue.removed_count', answer.removed),
+    answer.blocked ? t('queue.removed_blocked') : '',
+  );
+  removal.value = answer.undo == null ? null : { text, undo: answer.undo };
+  if (answer.undo == null) showToast(text, 'info');
+  else removalTimer = setTimeout(() => (removal.value = null), UNDO_SHOW_MS);
+}
+
+async function undoLast() {
+  const r = removal.value;
+  if (!r) return;
+  clearTimeout(removalTimer);
+  removal.value = null;
+  const answer = await undoRemoval(r.undo);
+  if (answer) showToast(tn('queue.restored_count', answer.restored), 'info');
+}
+
+/** A video a viewer added (with a nick or a device), not the owner's. */
+export const hasRequester = (item) =>
+  item.requesterBadge !== 'host' &&
+  (Boolean(item.requesterName) || (item.requesterBadge !== null && typeof item.requesterBadge === 'object'));
+
+function OnAirTick({ title }) {
+  return html`
+    <label class="dialog-check">
+      <input type="checkbox" data-include-on-air checked=${includeOnAir.value}
+        onChange=${(e) => (includeOnAir.value = e.currentTarget.checked)} />
+      <span>${t('queue.include_on_air', { title: videoTitle(title) })}</span>
+    </label>`;
+}
+
+/** "Clear queue": every waiting video (the queue and the approvals); the one on air only when ticked. */
+export function confirmClear() {
+  const waiting = queue.value.length + (channel.value?.pending?.length ?? 0);
+  const onAir = channel.value?.current ?? null;
+  includeOnAir.value = false;
+  openDialog({
+    title: () => t('queue.clear_title'),
+    body: () => html`
+      <p class="dialog-intro">${tn('queue.clear_body', waiting)}</p>
+      ${onAir ? html`<${OnAirTick} title=${onAir.title} />` : null}
+      <p class="dialog-note">${t('queue.undo_hint')}</p>`,
+    buttons: [
+      { key: 'queue.clear', danger: true, action: async () => showRemoval(await clearQueue(onAir ? includeOnAir.value : false)) },
+      { key: 'settings.cancel' },
+    ],
+  });
+}
+
+/** "Remove all from this viewer": asks the engine what would go, then asks the owner. */
+async function confirmRemoveRequester(item) {
+  let preview;
+  try {
+    preview = await requesterPreview(item.id);
+  } catch (e) {
+    showToast(errorText(e));
+    return;
+  }
+  includeOnAir.value = false;
+  alsoBlock.value = false;
+  const count = preview.queued + preview.pending;
+  openDialog({
+    title: () => t('queue.remove_requester_title'),
+    body: () => html`
+      <p class="dialog-who"><${RequesterBadge} badge=${item.requesterBadge} /><b>${preview.name ?? t('queue.anonymous')}</b></p>
+      <p class="dialog-intro">${tn('queue.remove_requester_body', count)}</p>
+      ${preview.playing ? html`<${OnAirTick} title=${preview.playing.title} />` : null}
+      ${preview.canBlock && !preview.blocked
+        ? html`<label class="dialog-check">
+            <input type="checkbox" data-also-block checked=${alsoBlock.value}
+              onChange=${(e) => (alsoBlock.value = e.currentTarget.checked)} />
+            <span>${t('queue.also_block')}</span>
+          </label>`
+        : null}
+      ${preview.blocked ? html`<p class="dialog-note">${t('queue.already_blocked')}</p>` : null}
+      <p class="dialog-note">${t('queue.undo_hint')}</p>`,
+    buttons: [
+      {
+        key: 'queue.remove_confirm',
+        danger: true,
+        action: async () =>
+          showRemoval(
+            await removeRequester(item.id, {
+              includePlaying: Boolean(preview.playing) && includeOnAir.value,
+              block: preview.canBlock && !preview.blocked && alsoBlock.value,
+            }),
+          ),
+      },
+      { key: 'settings.cancel' },
+    ],
+  });
+}
 
 function summary(items) {
   let total = 0;
@@ -60,6 +185,9 @@ function menuFor(item, index, count) {
     },
     'separator',
     { key: 'queue.remove', icon: 'close', danger: true, action: () => removeItem(item.id) },
+    ...(hasRequester(item)
+      ? [{ key: 'queue.remove_requester', icon: 'close', danger: true, action: () => confirmRemoveRequester(item) }]
+      : []),
   ];
 }
 
@@ -215,10 +343,17 @@ export function QueuePanel() {
   const items = queue.value;
   const pending = channel.value?.pending ?? [];
   const { text, title } = summary(items);
+  const undo = removal.value;
   return html`
     <aside class="q" aria-labelledby="queue-title">
       <h2 class="q-head"><span id="queue-title">${t('queue.title')}</span><span class="q-count" title=${title}>${text}</span></h2>
       <${AddLink} />
+      ${undo
+        ? html`<div class="q-undo" role="status">
+            <span>${undo.text}</span>
+            <button type="button" class="btn" data-undo onClick=${undoLast}>${t('queue.undo')}</button>
+          </div>`
+        : null}
       <div class="qscroll">
         <${Library} />
         ${pending.length ? html`<${Approvals} items=${pending} />` : null}
@@ -226,6 +361,12 @@ export function QueuePanel() {
         ${items.length
           ? html`<${QueueList} items=${items} />`
           : html`<p class="q-empty">${t('queue.empty')}</p>`}
+        ${items.length || pending.length
+          ? html`<div class="q-tools">
+              <button type="button" class="btn q-clear" data-clear-queue onClick=${confirmClear}>${t('queue.clear')}</button>
+            </div>`
+          : null}
+        ${access.value === 'window' ? html`<p class="q-drop-hint" data-drop-hint>${t('queue.drop_hint')}</p>` : null}
       </div>
       <p id="queue-hint" class="sr-only">${t('queue.reorder_hint')}</p>
       <div class="sr-only" role="status" aria-live="polite">${announcement.value}</div>
