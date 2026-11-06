@@ -1059,7 +1059,135 @@ async fn start_clip(
     }))
 }
 
+/// The countdown's timer as drawtext's text: `m:ss`, or `h:mm:ss` for an hour or more, of the
+/// seconds left (`total_s` minus the frame time, rounded up).
+pub fn countdown_timer_text(total_s: f64) -> String {
+    let left = format!("ceil({total_s:.3}-t)");
+    if total_s >= 3600.0 {
+        format!(
+            "%{{eif:trunc({left}/3600):d}}:%{{eif:mod(trunc({left}/60),60):d:2}}:%{{eif:mod({left},60):d:2}}"
+        )
+    } else {
+        format!("%{{eif:trunc({left}/60):d}}:%{{eif:mod({left},60):d:2}}")
+    }
+}
+
+/// lavfi graph of the countdown: the slate's background, "Starting in", the timer and the
+/// film's title (read from files in ffmpeg's folder; the title without `%` expansion), and
+/// silence of the same length (one input, so the real-time pace holds for both).
+pub fn countdown_graph(font: Option<&str>, total_s: f64) -> String {
+    let mut chain = vec![format!("color=c=0x14161c:s=1920x1080:r=30:d={total_s:.3}")];
+    if let Some(font) = font {
+        let common = format!("fontfile={font}:x=(w-text_w)/2");
+        chain.push(format!(
+            "drawtext={common}:fontcolor=0xb8bcc8:textfile=title.txt:fontsize=64:y=(h/2)-260"
+        ));
+        chain.push(format!(
+            "drawtext={common}:fontcolor=white:textfile=timer.txt:fontsize=220:y=(h/2)-150"
+        ));
+        chain.push(format!(
+            "drawtext={common}:fontcolor=0xb8bcc8:textfile=film.txt:expansion=none:fontsize=48:y=(h/2)+150"
+        ));
+    }
+    format!(
+        "{}[out0];anullsrc=channel_layout=stereo:sample_rate=48000,atrim=end={total_s:.3}[out1]",
+        chain.join(",")
+    )
+}
+
+/// The countdown before `item`: ffmpeg draws it at real time from a lavfi graph.
+async fn start_countdown(
+    factory: RealClipFactory,
+    item: QueueItem,
+    total_s: f64,
+) -> Result<Box<dyn ClipHandle>, Msg> {
+    let d = factory.deps;
+    let lang = {
+        let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+        SettingsRepo::new(&conn)
+            .get(d.channel_id)
+            .map_err(Msg::text)?
+            .slate_language
+    };
+    let n = factory.counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let out_dir = d.clips_dir.join(format!("countdown-{}-{n}", item.id));
+    let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
+    std::fs::create_dir_all(&out_dir).map_err(Msg::text)?;
+    let title = crate::i18n::t(lang, "slates.countdown_title", &[]);
+    let film = item.title.replace(['\r', '\n'], " ");
+    let font = font_for(
+        lang,
+        &format!("{title} {film}"),
+        &d.font_file,
+        &system_fonts_dir(),
+    );
+    let font_name = if font.file().is_file() {
+        let name = place_ticker_font(font.file(), &d.clips_dir).map_err(Msg::text)?;
+        for (file, text) in [
+            ("title.txt", title),
+            ("timer.txt", countdown_timer_text(total_s)),
+            ("film.txt", film),
+        ] {
+            std::fs::write(out_dir.join(file), text).map_err(Msg::text)?;
+        }
+        Some(name)
+    } else {
+        None
+    };
+    let args = build_clip_args(&ClipArgsOptions {
+        inputs: vec![StreamInput {
+            url: countdown_graph(font_name.as_deref(), total_s),
+            headers: Vec::new(),
+        }],
+        input_format: Some("lavfi".into()),
+        mode: VideoMode::Transcode,
+        info: VideoInfo {
+            codec: "rawvideo".into(),
+            height: 1080,
+            pix_fmt: "yuv420p".into(),
+            fps: 30.0,
+            has_audio: true,
+            duration_s: Some(total_s),
+            ..VideoInfo::default()
+        },
+        encoder: VideoEncoder::Libx264,
+        segment_seconds: d.segment_seconds,
+        out_dir: out_dir.clone(),
+        start_at_s: 0.0,
+        readrate: Some(ReadRate::new(TICKER_READRATE)),
+        overlay: None,
+        duration_limit_s: None,
+    });
+    let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), Some(out_dir.clone()));
+    Ok(Box::new(RealClipHandle {
+        seg: Arc::new(seg),
+        out_dir,
+        ffmpeg_path: d.ffmpeg_path.clone(),
+        duration_s: Some(total_s),
+        copies_video: false,
+        probe: ProbeSummary::default(),
+        mode: StreamMode::Transcode,
+        encoder: Some(VideoEncoder::Libx264),
+        ticker: None,
+        fallback: None,
+        produced: false,
+        item_id: item.id,
+        title: item.title.clone(),
+        log: d.log.clone(),
+        disposed: false,
+        _download: None,
+    }))
+}
+
 impl ClipFactory for RealClipFactory {
+    fn create_countdown(
+        &self,
+        item: QueueItem,
+        seconds: f64,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        Box::pin(start_countdown(self.clone(), item, seconds))
+    }
+
     fn create(
         &self,
         item: QueueItem,
@@ -1940,6 +2068,24 @@ mod tests {
         settings.ticker.enabled = false;
         settings.force_transcode = true;
         assert_eq!(clip_video_mode(&info, &settings), VideoMode::Transcode);
+    }
+
+    #[test]
+    fn the_countdown_shows_minutes_or_hours_and_an_out_point_limits_a_clip() {
+        assert_eq!(
+            countdown_timer_text(150.0),
+            "%{eif:trunc(ceil(150.000-t)/60):d}:%{eif:mod(ceil(150.000-t),60):d:2}"
+        );
+        assert!(countdown_timer_text(3600.0).matches("%{eif").count() == 3);
+        let graph = countdown_graph(Some("../_fonts/f.ttf"), 90.0);
+        assert!(graph.contains("d=90.000") && graph.contains("atrim=end=90.000[out1]"));
+        assert!(graph.contains("textfile=film.txt:expansion=none"));
+        assert!(!countdown_graph(None, 5.0).contains("drawtext"));
+        let mut film = item(1, "a");
+        film.out_s = Some(50.0);
+        assert_eq!(out_point_limit(&film, false, 20.0), Some(30.0));
+        assert_eq!(out_point_limit(&film, false, 60.0), None);
+        assert_eq!(out_point_limit(&film, true, 20.0), None);
     }
 
     #[test]

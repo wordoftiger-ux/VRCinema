@@ -242,7 +242,7 @@ pub struct HlsCounters {
 }
 
 /// Parsed analysis of the source of the film being cut.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeSummary {
     pub codec: String,

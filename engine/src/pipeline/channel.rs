@@ -78,6 +78,17 @@ pub trait ClipFactory: Send + Sync {
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
         self.create(item, start_at_s, 0)
     }
+
+    /// A countdown of `seconds` before `item` (which starts at a set time): "Starting in 2:30"
+    /// and its title, read at real time. `Err`: no countdown (the idle slate airs instead).
+    fn create_countdown(
+        &self,
+        item: QueueItem,
+        seconds: f64,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        let _ = (item, seconds);
+        Box::pin(async { Err(Msg::new(COUNTDOWN_UNAVAILABLE)) })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +99,8 @@ pub enum ChannelStatus {
     Buffering,
     /// Viewers see the pause slate. The queue item stays `playing` in the database.
     Paused,
+    /// A countdown airs before a film that starts at a set time.
+    Countdown,
 }
 
 impl ChannelStatus {
@@ -98,6 +111,7 @@ impl ChannelStatus {
             Self::Playing => "playing",
             Self::Buffering => "buffering",
             Self::Paused => "paused",
+            Self::Countdown => "countdown",
         }
     }
 }
@@ -204,6 +218,8 @@ pub struct ChannelOptions {
     /// The producer's monitor ([`crate::pipeline::monitor`]): its links' folder and who watches
     /// it (the program's window has one); `None`: no monitor, nothing listed.
     pub monitor: Option<MonitorOptions>,
+    /// Wall clock in Unix milliseconds (start times of films); default: the system clock.
+    pub wall_now: Option<ClockFn>,
 }
 
 impl ChannelOptions {
@@ -227,6 +243,7 @@ impl ChannelOptions {
             prefetch_s: None,
             viewer_lag_segments: None,
             monitor: None,
+            wall_now: None,
         }
     }
 }
@@ -246,6 +263,12 @@ const SEEK_END_MARGIN_S: f64 = 1.0;
 /// A film whose position is this close to its out point has reached it (segment lengths are
 /// not exact to the millisecond).
 const OUT_POINT_SLACK_S: f64 = 0.05;
+/// A film with a start time starts when it is this close (the countdown's last segment may
+/// end a little early).
+const START_SLACK_MS: i64 = 1000;
+/// A start time closer than this gets no countdown: the film just waits.
+const MIN_COUNTDOWN_S: f64 = 3.0;
+const COUNTDOWN_UNAVAILABLE: &str = "log.countdown_unavailable";
 
 // Why a film ended without playing to the end (kept with it in the history as a message, shown
 // in the reader's language).
@@ -403,6 +426,8 @@ impl ActiveClip {
 enum MetaKind {
     Clip,
     Slate(SlateKind),
+    /// The countdown before a film with a start time.
+    Countdown,
 }
 
 #[derive(Debug, Clone)]
@@ -544,11 +569,30 @@ pub struct Channel {
     monitor_watch: Option<Arc<MonitorWatch>>,
     /// The monitor's newest row handed to the broadcaster.
     monitor_aired: Option<u64>,
+    wall_now: ClockFn,
+    /// The countdown airing (or starting) before the queue head's start time.
+    countdown: Option<Countdown>,
+    /// Countdowns made so far (their source keys differ).
+    countdowns: u64,
+}
+
+/// The countdown before a film with a start time (its clip's `item` is that film).
+struct Countdown {
+    clip: ActiveClip,
+    start_at: i64,
+    n: u64,
+    /// Its failure was logged.
+    failure_logged: bool,
+}
+
+fn system_wall_clock() -> ClockFn {
+    Box::new(|| u64::try_from(crate::db::now_ms()).unwrap_or_default())
 }
 
 impl Channel {
     pub fn new(mut o: ChannelOptions) -> Self {
         let now = o.now.take().unwrap_or_else(default_clock);
+        let wall_now = o.wall_now.take().unwrap_or_else(system_wall_clock);
         let (launch_tx, launch_rx) = mpsc::unbounded_channel();
         let monitor = o
             .monitor
@@ -576,6 +620,9 @@ impl Channel {
             next_clip_id: 0,
             launch_tx,
             launch_rx,
+            wall_now,
+            countdown: None,
+            countdowns: 0,
         }
     }
 
@@ -589,6 +636,7 @@ impl Channel {
         self.parked = None;
         self.pending_seek = None;
         self.armed_pause = None;
+        self.drop_countdown();
         for mut clip in [self.current.take(), self.prefetched.take()]
             .into_iter()
             .flatten()
@@ -710,6 +758,7 @@ impl Channel {
                 });
                 match (meta.kind, now_playing) {
                     (MetaKind::Slate(SlateKind::Idle), _) => (ChannelStatus::Idle, None),
+                    (MetaKind::Countdown, _) => (ChannelStatus::Countdown, None),
                     (MetaKind::Slate(SlateKind::Pause), current) => {
                         (ChannelStatus::Paused, current)
                     }
@@ -1121,7 +1170,11 @@ impl Channel {
             .ok_or_else(|| msg_error(Msg::error("no_such_item")))?;
         let chosen = match item.status {
             ItemStatus::Queued => {
-                self.queue(|q| q.move_item(item.id, 0))?;
+                // "Now" wins over a start time set before.
+                self.queue(|q| {
+                    q.set_start_at(item.id, None)?;
+                    q.move_item(item.id, 0)
+                })?;
                 item.id
             }
             ItemStatus::Played | ItemStatus::Failed => {
@@ -1464,10 +1517,14 @@ impl Channel {
     /// disposed.
     pub fn poll_launches(&mut self) {
         while let Ok(launch) = self.launch_rx.try_recv() {
-            let target = [self.current.as_mut(), self.prefetched.as_mut()]
-                .into_iter()
-                .flatten()
-                .find(|c| c.id == launch.clip_id);
+            let target = [
+                self.current.as_mut(),
+                self.prefetched.as_mut(),
+                self.countdown.as_mut().map(|c| &mut c.clip),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|c| c.id == launch.clip_id);
             match (target, launch.result) {
                 (Some(clip), Ok(handle)) => clip.handle = Some(handle),
                 (Some(clip), Err(e)) => {
@@ -1516,12 +1573,14 @@ impl Channel {
             self.fire_armed_pause();
             if self.current.is_none() {
                 if !self.pause_reasons.is_empty() {
+                    // A countdown made before the pause would be out of date after it.
+                    self.drop_countdown();
                     return self.paused_slate();
                 }
                 self.promote()?;
             }
             let Some(c) = self.current.as_mut() else {
-                return self.slate(SlateKind::Idle);
+                return self.countdown_or_idle();
             };
 
             if let Some(error) = c.start_error.clone() {
@@ -1685,6 +1744,11 @@ impl Channel {
             let Some(head) = head else {
                 return Ok(());
             };
+            // A film with a start time waits for it (the countdown airs meanwhile).
+            if self.waits_for_start(&head) {
+                return Ok(());
+            }
+            self.drop_countdown();
             let mut clip = match self.prefetched.take() {
                 Some(clip) => clip,
                 None => {
@@ -1719,6 +1783,128 @@ impl Channel {
         Ok(())
     }
 
+    /// Milliseconds until `item`'s start time (negative: past); `None`: no start time.
+    fn ms_to_start(&self, item: &QueueItem) -> Option<i64> {
+        let now = i64::try_from((self.wall_now)()).unwrap_or(i64::MAX);
+        item.start_at.map(|at| at.saturating_sub(now))
+    }
+
+    /// `head` has a start time still ahead: not yet, unless its countdown has run out (its last
+    /// segment may end a little before the time).
+    fn waits_for_start(&self, head: &QueueItem) -> bool {
+        let Some(ms) = self.ms_to_start(head) else {
+            return false;
+        };
+        if ms <= START_SLACK_MS {
+            return false;
+        }
+        let countdown_over = self.countdown.as_ref().is_some_and(|cd| {
+            cd.clip.item.id == head.id
+                && cd.start_at == head.start_at.unwrap_or_default()
+                && cd.clip.ready.is_empty()
+                && cd
+                    .clip
+                    .handle
+                    .as_ref()
+                    .is_some_and(|h| h.state() == SegmenterState::Done)
+        });
+        !countdown_over
+    }
+
+    /// Nothing airs: the countdown before the queue head's start time (made when needed, the
+    /// head prepared during its last minute), else the idle slate.
+    fn countdown_or_idle(&mut self) -> anyhow::Result<SourceSegment> {
+        let channel_id = self.o.channel_id;
+        let head = self
+            .queue(|q| q.next_queued(channel_id))?
+            .filter(|h| self.ms_to_start(h).is_some_and(|ms| ms > START_SLACK_MS));
+        let Some(head) = head else {
+            self.drop_countdown();
+            return self.slate(SlateKind::Idle);
+        };
+        let start_at = head.start_at.unwrap_or_default();
+        let ms = self.ms_to_start(&head).unwrap_or_default();
+        let stale = self
+            .countdown
+            .as_ref()
+            .is_some_and(|cd| cd.clip.item.id != head.id || cd.start_at != start_at);
+        if stale {
+            self.drop_countdown();
+        }
+        let seconds = ms as f64 / 1000.0;
+        if self.countdown.is_none() && seconds >= MIN_COUNTDOWN_S {
+            self.countdowns += 1;
+            let n = self.countdowns;
+            self.log(
+                Msg::new("log.countdown")
+                    .arg("id", head.id)
+                    .arg("title", &head.title)
+                    .arg("seconds", format!("{seconds:.0}")),
+            );
+            let start = self.o.factory.create_countdown(head.clone(), seconds);
+            let clip = self.launch_with(head.clone(), 0.0, 0, start);
+            self.countdown = Some(Countdown {
+                clip,
+                start_at,
+                n,
+                failure_logged: false,
+            });
+        }
+        // The film is prepared during the countdown's last minute.
+        if self.prefetched.is_none()
+            && !head.is_live
+            && seconds <= self.o.prefetch_s.unwrap_or(DEFAULT_PREFETCH_S)
+        {
+            self.prefetched = Some(self.launch_ahead(head.clone()));
+        }
+        let failure = {
+            let Some(cd) = self.countdown.as_mut() else {
+                return self.slate(SlateKind::Idle);
+            };
+            if let Some(handle) = cd.clip.handle.as_mut() {
+                let fresh = handle.poll();
+                cd.clip.ready.extend(fresh);
+            }
+            if let Some(seg) = cd.clip.ready.pop_front() {
+                let out = SourceSegment {
+                    path: seg.path.clone(),
+                    duration: seg.duration,
+                    source_key: format!("countdown-{}-{}", head.id, cd.n),
+                    index: seg.index as u64,
+                };
+                self.last_slate_kind = None;
+                self.previous_clip_segment = Some(seg.path.clone());
+                self.pending_meta.insert(
+                    seg.path,
+                    SegmentMeta {
+                        kind: MetaKind::Countdown,
+                        item: Some(head),
+                        position_s: 0.0,
+                        monitor_seq: None,
+                    },
+                );
+                return Ok(out);
+            }
+            match (cd.clip.failure(), cd.failure_logged) {
+                (Some(error), false) => {
+                    cd.failure_logged = true;
+                    Some(error)
+                }
+                _ => None,
+            }
+        };
+        if let Some(error) = failure {
+            self.log(Msg::new("log.countdown_failed").arg_msg("error", error));
+        }
+        self.slate(SlateKind::Idle)
+    }
+
+    fn drop_countdown(&mut self) {
+        if let Some(mut cd) = self.countdown.take() {
+            cd.clip.dispose();
+        }
+    }
+
     fn maybe_prefetch(&mut self, remaining_s: Option<f64>) {
         if self.prefetched.is_some() {
             return;
@@ -1726,11 +1912,20 @@ impl Channel {
         let Some(remaining_s) = remaining_s else {
             return;
         };
-        if remaining_s > self.o.prefetch_s.unwrap_or(DEFAULT_PREFETCH_S) {
+        let prefetch_s = self.o.prefetch_s.unwrap_or(DEFAULT_PREFETCH_S);
+        if remaining_s > prefetch_s {
             return;
         }
         let channel_id = self.o.channel_id;
-        match self.queue(|q| q.next_queued(channel_id)) {
+        // A head whose start time is further off than the end of this film plus the prefetch
+        // window is prepared during its countdown instead.
+        let head = self.queue(|q| q.next_queued(channel_id)).map(|head| {
+            head.filter(|h| {
+                self.ms_to_start(h)
+                    .is_none_or(|ms| ms as f64 / 1000.0 <= remaining_s + prefetch_s)
+            })
+        });
+        match head {
             Ok(Some(head)) => self.prefetched = Some(self.launch_ahead(head)),
             Ok(None) => {}
             Err(e) => self.log_error("log.queue_error_prefetch", &e),
@@ -1933,7 +2128,10 @@ impl SegmentSource for Channel {
         });
         let meta = match self.pending_meta.get(&seg.path) {
             None => return,
-            Some(meta) if meta.kind == MetaKind::Clip => self.pending_meta.remove(&seg.path),
+            // Slate files air again and again; clip and countdown files only once.
+            Some(meta) if !matches!(meta.kind, MetaKind::Slate(_)) => {
+                self.pending_meta.remove(&seg.path)
+            }
             Some(meta) => Some(meta.clone()),
         };
         if let Some(meta) = meta {
@@ -1954,6 +2152,9 @@ mod tests {
     use crate::stats::StreamMode;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::sync::oneshot;
+
+    /// The tests' wall clock at their start (Unix ms).
+    const WALL0: u64 = 1_800_000_000_000;
 
     fn info(path: &str, index: usize) -> SegmentInfo {
         SegmentInfo {
@@ -2101,6 +2302,8 @@ mod tests {
         copies_video: bool,
         /// Items started ahead of their turn (`create_ahead`).
         ahead: Vec<i64>,
+        /// Countdowns made: the film and the seconds.
+        countdowns: Vec<(i64, f64)>,
     }
 
     #[derive(Clone, Default)]
@@ -2129,6 +2332,18 @@ mod tests {
         ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
             self.lock().ahead.push(item.id);
             self.create(item, start_at_s, 0)
+        }
+
+        /// A fake clip at "position -1" (its segment paths differ from the film's).
+        fn create_countdown(
+            &self,
+            item: QueueItem,
+            seconds: f64,
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+            self.lock().countdowns.push((item.id, seconds));
+            let start = self.create(item, -1.0, 0);
+            self.lock().calls.pop();
+            start
         }
 
         fn create(
@@ -2212,6 +2427,8 @@ mod tests {
         );
         let clock = Arc::clone(now);
         o.now = Some(Box::new(move || clock.load(Ordering::SeqCst)));
+        let wall = Arc::clone(now);
+        o.wall_now = Some(Box::new(move || WALL0 + wall.load(Ordering::SeqCst)));
         let removed = Arc::clone(removed);
         o.remove_file = Some(Box::new(move |p: &Path| {
             removed.lock().unwrap().push(p.to_path_buf())
@@ -4973,5 +5190,75 @@ mod tests {
         assert_eq!(e.starts(), 2, "an earlier out point needs no new start");
         assert_eq!(e.key(), "idle");
         assert_eq!(e.get(a.id).status, ItemStatus::Played);
+    }
+
+    // ---------- Start at a time ----------
+
+    fn schedule(e: &Env, id: i64, in_ms: u64) {
+        let conn = e.db.lock().unwrap();
+        let at = i64::try_from(WALL0 + e.now.load(Ordering::SeqCst) + in_ms).unwrap();
+        assert!(QueueRepo::new(&conn).set_start_at(id, Some(at)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_film_with_a_start_time_waits_behind_a_countdown_and_starts_on_time_prepared() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        schedule(&e, a.id, 120_000);
+        assert_eq!(e.key(), "idle", "the countdown is being made");
+        e.flush().await;
+        assert_eq!(e.factory.lock().countdowns, vec![(a.id, 120.0)]);
+        assert_eq!(e.starts(), 0, "the film waits");
+        let countdown = e.factory.handle(0);
+        countdown.produce(30);
+        let s = e.publish();
+        assert_eq!(s.source_key, format!("countdown-{}-1", a.id));
+        e.publish();
+        e.publish();
+        assert_eq!(e.channel.state().status, ChannelStatus::Countdown);
+        // The last minute: the film is prepared from its in point.
+        e.advance(61_000);
+        assert_eq!(e.key(), format!("countdown-{}-1", a.id));
+        assert_eq!(e.factory.lock().ahead, vec![a.id]);
+        // Its time: the prepared film airs at once, the countdown goes.
+        e.advance(59_500);
+        e.flush().await;
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert!(countdown.disposed());
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn a_countdown_that_ran_out_starts_the_film_and_a_pause_or_play_now_drops_it() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        schedule(&e, a.id, 30_000);
+        e.next();
+        e.flush().await;
+        let countdown = e.factory.handle(0);
+        countdown.produce(1);
+        assert_eq!(e.key(), format!("countdown-{}-1", a.id));
+        // Its segments are all out a little before the time: the film starts.
+        countdown.set_state(SegmenterState::Done);
+        e.advance(28_500);
+        e.next();
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+
+        let b = e.add_item("b");
+        e.channel.skip().unwrap();
+        schedule(&e, b.id, 60_000);
+        e.next();
+        e.flush().await;
+        e.channel.pause(PauseReason::Manual);
+        assert_eq!(e.key(), "pause");
+        assert!(
+            e.factory.handle(2).disposed(),
+            "a paused countdown is dropped"
+        );
+        e.channel.play_now(b.id).unwrap();
+        assert_eq!(e.get(b.id).start_at, None, "now wins over the start time");
+        e.next();
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing);
     }
 }
