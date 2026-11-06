@@ -86,6 +86,8 @@ pub struct Broadcaster {
     dts: DtsMonitor,
     /// Milliseconds on the `now` clock; fractional, so 4.004 s segments do not drift.
     next_publish_at: f64,
+    /// When the newest segment was published (the air clock's edge, wall time).
+    edge_at: Option<std::time::Instant>,
 }
 
 impl Broadcaster {
@@ -107,7 +109,19 @@ impl Broadcaster {
             discontinuities: 0,
             dts: DtsMonitor::new(),
             next_publish_at: 0.0,
+            edge_at: None,
         }
+    }
+
+    /// When the newest segment was published (`None`: none yet).
+    pub fn edge_at(&self) -> Option<std::time::Instant> {
+        self.edge_at
+    }
+
+    /// The playlist's target duration (seconds): the configured segment length, or the longest
+    /// segment published so far when that was longer.
+    pub fn target_duration(&self) -> f64 {
+        self.target_duration
     }
 
     fn log(&self, msg: Msg) {
@@ -280,6 +294,7 @@ impl Broadcaster {
         }
         self.last = Some(seg.clone());
         self.clock += seg.duration;
+        self.edge_at = Some(std::time::Instant::now());
         // HLS: EXTINF rounded to an integer must not exceed TARGETDURATION.
         self.target_duration = self.target_duration.max(seg.duration.round());
         let discontinuity = source_changed && (self.o.discontinuity_tags)();

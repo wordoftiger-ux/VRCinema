@@ -1,5 +1,6 @@
 //! Media pipeline building blocks (ports of `src/pipeline/*.ts`).
 
+pub mod air;
 pub mod broadcaster;
 pub mod channel;
 pub mod clip_factory;

@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 use crate::i18n::{Msg, error_msg};
+use crate::pipeline::air::{AirSegment, AirTimeline};
 use crate::pipeline::broadcaster::{Broadcaster, SegmentSource};
 use crate::pipeline::channel::{Channel, ChannelState, ChannelStatus, PauseReason};
 use crate::pipeline::monitor::MonitorFeed;
@@ -82,6 +83,8 @@ pub struct Snapshot {
     pub stats: ChannelStats,
     /// What the producer's monitor lists (the window's `/api/desktop/monitor*`).
     pub monitor: Arc<MonitorFeed>,
+    /// The recent stream, for the air clock ([`crate::pipeline::air`]).
+    pub air: Arc<AirTimeline>,
 }
 
 /// HTTP's side of the engine. Dropping every handle stops the loop.
@@ -125,6 +128,14 @@ pub trait ChannelControl: SegmentSource + Send {
     /// What the producer's monitor lists (test doubles: nothing).
     fn monitor_feed(&self) -> MonitorFeed {
         MonitorFeed::default()
+    }
+    /// The published segments of the last minutes (test doubles: none).
+    fn air_segments(&self) -> Vec<AirSegment> {
+        Vec::new()
+    }
+    /// How many segments viewers lag behind the newest one (where HLS players start).
+    fn viewer_lag_segments(&self) -> usize {
+        3
     }
     /// The queue item being aired right now (not the one viewers see, which lags behind).
     fn current_item_id(&self) -> Option<i64>;
@@ -189,6 +200,12 @@ impl ChannelControl for Channel {
     }
     fn monitor_feed(&self) -> MonitorFeed {
         Channel::monitor_feed(self)
+    }
+    fn air_segments(&self) -> Vec<AirSegment> {
+        Channel::air_segments(self)
+    }
+    fn viewer_lag_segments(&self) -> usize {
+        Channel::viewer_lag_segments(self)
     }
     fn current_item_id(&self) -> Option<i64> {
         Channel::current_item_id(self)
@@ -322,6 +339,7 @@ impl Snapshot {
             prefetched_item_id: None,
             stats: ChannelStats::default(),
             monitor: Arc::default(),
+            air: Arc::default(),
         }
     }
 }
@@ -630,6 +648,13 @@ impl<C: ChannelControl> Core<C> {
                 ..self.channel.stats()
             },
             monitor: Arc::new(self.channel.monitor_feed()),
+            air: Arc::new(AirTimeline {
+                segments: self.channel.air_segments(),
+                edge_s: self.broadcaster.channel_time(),
+                edge_at: self.broadcaster.edge_at(),
+                nominal_latency_s: self.channel.viewer_lag_segments() as f64
+                    * self.broadcaster.target_duration(),
+            }),
         }
     }
 }

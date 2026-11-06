@@ -194,8 +194,30 @@ pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(100);
 /// longer films than the air's own downloads (a larger one plays from the engine's segments).
 pub const PREVIEW_MAX_DOWNLOAD_SIZE: &str = "2G";
 
+/// [`PREVIEW_MAX_DOWNLOAD_SIZE`] in bytes, enforced on the files themselves while yt-dlp
+/// writes them (`--max-filesize` trusts the size a site announces, which may be missing).
+pub const PREVIEW_MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// How long a download for the Preview may take (it runs beside the air, not before it).
 pub const PREVIEW_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// How often the files of a download are measured against its byte limit.
+const SIZE_CHECK_EVERY: Duration = Duration::from_millis(500);
+
+/// Waits until the files of the download `stem` grow beyond `max_bytes` together.
+async fn grown_beyond(stem: &Path, max_bytes: u64) {
+    loop {
+        tokio::time::sleep(SIZE_CHECK_EVERY).await;
+        let total: u64 = files_of(stem)
+            .iter()
+            .filter_map(|f| std::fs::metadata(f).ok())
+            .map(|m| m.len())
+            .sum();
+        if total > max_bytes {
+            return;
+        }
+    }
+}
 
 /// yt-dlp's output template for the file `<stem>.<ext>`; a `%` of the path is doubled (yt-dlp
 /// would read it as the start of a field).
@@ -394,14 +416,24 @@ impl YtDlpResolver {
         stem: &Path,
         max_size: &str,
         timeout: Duration,
+        max_bytes: Option<u64>,
     ) -> Result<PathBuf, ResolveError> {
         let args = self.download_argv(url, stem, max_size);
         let mut leftovers = Leftovers { stem, keep: None };
-        let out = self
-            .runner
-            .run(&self.path, &args, timeout)
-            .await
-            .map_err(process_error)?;
+        let run = self.runner.run(&self.path, &args, timeout);
+        let out = match max_bytes {
+            None => run.await,
+            // Dropping the run kills yt-dlp (`kill_on_drop`); `leftovers` removes its files.
+            Some(max) => tokio::select! {
+                out = run => out,
+                () = grown_beyond(stem, max) => {
+                    return Err(ResolveError::new(format!(
+                        "File is larger than max-filesize ({max_size}). Aborting."
+                    )));
+                }
+            },
+        }
+        .map_err(process_error)?;
         let film = finished_download(stem, &files_of(stem))
             .filter(|f| std::fs::metadata(f).is_ok_and(|m| m.len() > 0));
         match film {
@@ -455,7 +487,7 @@ impl MediaResolver for YtDlpResolver {
 
     async fn download(&self, url: &str, stem: &Path) -> Option<Result<PathBuf, ResolveError>> {
         Some(
-            self.download_to(url, stem, MAX_DOWNLOAD_SIZE, DOWNLOAD_TIMEOUT)
+            self.download_to(url, stem, MAX_DOWNLOAD_SIZE, DOWNLOAD_TIMEOUT, None)
                 .await,
         )
     }
@@ -471,9 +503,58 @@ impl MediaResolver for YtDlpResolver {
                 stem,
                 PREVIEW_MAX_DOWNLOAD_SIZE,
                 PREVIEW_DOWNLOAD_TIMEOUT,
+                Some(PREVIEW_MAX_DOWNLOAD_BYTES),
             )
             .await,
         )
+    }
+}
+
+#[cfg(test)]
+mod size_limit_tests {
+    use super::*;
+    /// "Downloads" by writing ever more bytes into `<stem>.mp4.part` and never ends.
+    struct Endless;
+
+    #[async_trait]
+    impl ProcessRunner for Endless {
+        async fn run(
+            &self,
+            _cmd: &Path,
+            args: &[OsString],
+            _timeout: Duration,
+        ) -> Result<ProcessOutput, ProcessError> {
+            let at = args.iter().position(|a| a == "-o").unwrap();
+            let template = args[at + 1].to_string_lossy().into_owned();
+            let file = template.replace("%(ext)s", "mp4.part");
+            loop {
+                let mut bytes = std::fs::read(&file).unwrap_or_default();
+                bytes.extend(std::iter::repeat_n(0u8, 4096));
+                std::fs::write(&file, bytes).unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_download_growing_beyond_its_byte_limit_is_stopped_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("7-1");
+        let mut y = YtDlpResolver::new(PathBuf::from("yt-dlp"), None, None);
+        y.runner = Box::new(Endless);
+        let started = std::time::Instant::now();
+        let result = y
+            .download_to(
+                "https://x.example/v",
+                &stem,
+                "2G",
+                Duration::from_secs(60),
+                Some(10_000),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(files_of(&stem).is_empty(), "the part file was removed");
     }
 }
 

@@ -17,6 +17,7 @@ use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::{ApiError, AppState};
+use crate::db::ItemStatus;
 use crate::preview_source::{PreviewStatus, Unsatisfiable, byte_range, content_type};
 
 pub(super) fn router(state: AppState) -> Router<AppState> {
@@ -109,7 +110,9 @@ async fn preview_status(
         return no_item();
     };
     let item = match state.with_db(|c| crate::db::QueueRepo::new(c).get(id)) {
-        Ok(Some(item)) => item,
+        // Only films that will air (not requests waiting for approval, nor the history).
+        Ok(Some(item)) if matches!(item.status, ItemStatus::Playing | ItemStatus::Queued) => item,
+        Ok(Some(_)) => return no_item(),
         Ok(None) => return no_item(),
         Err(e) => return e.into_response(),
     };

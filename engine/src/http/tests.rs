@@ -124,6 +124,7 @@ fn snapshot(live_dir: &Path, segments: &[&str], state: ChannelState) -> Arc<Snap
         prefetched_item_id: None,
         stats: Default::default(),
         monitor: Default::default(),
+        air: Default::default(),
     })
 }
 
@@ -2774,6 +2775,10 @@ async fn the_preview_plays_a_disk_film_with_ranges_for_the_window_only() {
         .with_preview(crate::preview_source::PreviewSources::new(
             Arc::new(resolver),
             crate::pipeline::temp_downloads::TempDownloads::new(dir.path().join("temp")),
+            crate::preview_source::ViewerChecks {
+                host_resolver: Arc::new(crate::rules::TableHostResolver::new(&[])),
+                check_viewer_media: true,
+            },
             None,
         ));
     let router = super::routes_monitor::router(state.clone()).with_state(state);
@@ -2823,10 +2828,17 @@ async fn the_preview_plays_a_disk_film_with_ranges_for_the_window_only() {
     assert_eq!(beyond.status, StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(beyond.header("content-range"), "bytes */100");
 
-    // Unknown items and films never asked for have no media.
+    // Unknown items, requests waiting for approval and films never asked for have no media.
     let res = send_to(
         router.clone(),
         get("/api/desktop/preview?item=999").cookie(&desktop),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    let waiting = a.h.add("request", ItemStatus::PendingApproval);
+    let res = send_to(
+        router.clone(),
+        get(&format!("/api/desktop/preview?item={}", waiting.id)).cookie(&desktop),
     )
     .await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);

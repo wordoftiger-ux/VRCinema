@@ -105,6 +105,7 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     body.insert("history".into(), items_json(&history, lang));
     body.insert("settings".into(), json!(settings));
     body.insert("control".into(), control_json(&snapshot.state));
+    body.insert("air".into(), super::air_json(&state, &snapshot));
     body.insert(
         "channelUrl".into(),
         json!(format!("{}/live/main.m3u8", ctx.base_url)),

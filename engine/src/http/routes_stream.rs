@@ -34,7 +34,12 @@ fn is_segment_name(name: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-async fn segment(State(state): State<AppState>, ctx: Ctx, Path(name): Path<String>) -> Response {
+async fn segment(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
     let missing = || ApiError::coded(StatusCode::NOT_FOUND, "no_segment", &[]).into_response();
     let snapshot = state.snapshot();
     if !is_segment_name(&name) || !snapshot.segments.contains(&name) {
@@ -47,6 +52,16 @@ async fn segment(State(state): State<AppState>, ctx: Ctx, Path(name): Path<Strin
     // An address that does not parse (a forged header) is not remembered, the fetch still counts.
     let viewer = ctx.ip.parse().ok();
     state.viewers.record(viewer, bytes.len() as u64);
+    // The air clock measures the viewers' players, not the window's own On air screen (it is
+    // placed by that measure).
+    let own_screen = headers.contains_key("x-vrcinema-air");
+    if let (Some(ip), false) = (viewer, own_screen)
+        && let Some(seq) = name.strip_suffix(".ts").and_then(|n| n.parse::<u64>().ok())
+    {
+        state
+            .air_viewers
+            .record(ip, seq, &snapshot.air, std::time::Instant::now());
+    }
     let mut res = bytes.into_response();
     let headers = res.headers_mut();
     headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
