@@ -14,6 +14,30 @@ import { fileURLToPath } from 'node:url';
 
 const FFMPEG = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', 'bin', 'ffmpeg.exe');
 
+/** A 4-minute MP4 film (test picture with its own clock, a tone; fast start) for the Preview. */
+export async function makeTestFilm() {
+  if (!existsSync(FFMPEG)) throw new Error(`bin/ffmpeg.exe not found (${FFMPEG})`);
+  const dir = mkdtempSync(join(tmpdir(), 'ui-check-film-'));
+  const file = join(dir, 'film.mp4');
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=25',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    '-t', '240',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '25', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-movflags', '+faststart',
+    file,
+  ];
+  await new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', reject);
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err}`))));
+  });
+  return { file, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 export async function makeTestStream({ color = null } = {}) {
   if (!existsSync(FFMPEG)) throw new Error(`bin/ffmpeg.exe not found (${FFMPEG})`);
   const dir = mkdtempSync(join(tmpdir(), 'ui-check-hls-'));

@@ -12,11 +12,13 @@ import Hls from '/static/vendor/hls.mjs';
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { contextMenuHandlers } from './menu.js';
-import { monitorAheadS } from './monitor.js';
+import { monitorAheadS, previewMode } from './monitor.js';
 import { copyText, previewMuted, previewVolume } from './playerbar.js';
+import { airBehindS } from './sourceplayer.js';
 import { StatsOverlay, previewShown, previewStats, statsOpen, toggleStats } from './stats.js';
 import {
   abilities,
+  channel,
   channelLink,
   previewDelayS,
   seekBubble,
@@ -24,6 +26,22 @@ import {
   showToast,
   togglePause,
 } from '../store.js';
+
+/**
+ * On air stands where a typical viewer is: moved when it is further off than half a segment
+ * (at least 1.5 s) for OFF_MEASURES measures in a row.
+ */
+function latencyTolerance() {
+  const seg = channel.peek()?.air?.segmentS;
+  return Math.max(1.5, Number.isFinite(seg) ? seg / 2 : 2);
+}
+const OFF_MEASURES = 3;
+
+/** How far behind the stream's edge a typical viewer plays (the engine's air clock); null: not known. */
+function airLatency() {
+  const s = channel.peek()?.air?.latencyS;
+  return Number.isFinite(s) && s > 0 ? s : null;
+}
 
 const SOURCE = '/live/main.m3u8';
 const MEASURE_EVERY_MS = 1000;
@@ -64,6 +82,7 @@ function play(video) {
   let mediaRecoveries = 0;
   let retries = 0;
   let lastTime = -1;
+  let offCount = 0;
 
   const start = () => {
     if (stopped) return;
@@ -71,7 +90,15 @@ function play(video) {
       waitingForVisible = true;
       return;
     }
-    hls = new Hls({ lowLatencyMode: false });
+    // Not hls.js's own start point: where the engine says a typical viewer is (VRChat's
+    // players), kept there by `measure` below. The window's own requests are marked so the
+    // engine does not count them as a viewer's position.
+    const latency = airLatency();
+    hls = new Hls({
+      lowLatencyMode: false,
+      ...(latency ? { liveSyncDuration: latency, liveMaxLatencyDuration: latency + 30 } : {}),
+      xhrSetup: (xhr) => xhr.setRequestHeader('X-VRCinema-Air', '1'),
+    });
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       // A browser may refuse sound before the first click: play muted rather than not at all.
       video.play().catch(() => {
@@ -129,6 +156,19 @@ function play(video) {
       if (Number.isFinite(latency) && latency > 0) {
         lastGoodDelayS = latency;
         previewDelayS.value = latency;
+        // Off the typical viewer's position by more than the tolerance for a few measures in a
+        // row (hls.js sees the stream's edge only when it reloads the list): moved there.
+        const target = airLatency();
+        const off = target === null ? 0 : latency - target;
+        offCount = Math.abs(off) > latencyTolerance() ? offCount + 1 : 0;
+        if (offCount >= OFF_MEASURES) {
+          offCount = 0;
+          const to = video.currentTime + off;
+          const range = video.seekable;
+          const start = range.length ? range.start(0) : 0;
+          const end = range.length ? range.end(range.length - 1) : to;
+          video.currentTime = Math.min(Math.max(to, start), end);
+        }
       } else {
         previewDelayS.value = null;
       }
@@ -181,7 +221,7 @@ function SeekBubble() {
     // behind as the Preview is ahead of the air (its caption), never sooner than the air's own
     // delay (a Preview in sync with the air jumps ahead to the new clip).
     const latency = previewDelayS.peek() ?? lastGoodDelayS;
-    const ahead = monitorAheadS.peek();
+    const ahead = previewMode.peek() === 'file' ? airBehindS.peek() : monitorAheadS.peek();
     const known = [latency, ahead].filter(Number.isFinite);
     const delay = known.length ? Math.max(...known) : null;
     setBubble({ seconds: delay === null ? null : Math.max(1, Math.round(delay)) });
@@ -195,11 +235,20 @@ function SeekBubble() {
   return html`<div class="seek-bubble" role="status">⏩ ${text}</div>`;
 }
 
+/** The air's caption: how far behind the Preview (the window), else behind the server. */
+function airCaption(delay) {
+  const behind = previewMode.value === 'file' ? airBehindS.value : null;
+  if (Number.isFinite(behind)) return t('monitor.air_behind', { seconds: behind });
+  const seconds = Number.isFinite(delay) ? Math.max(1, Math.round(delay)) : null;
+  return seconds === null ? t('monitor.on_air') : t('monitor.on_air_caption', { seconds });
+}
+
 /**
- * The channel as the viewers get it. `dual`: the right screen "On air" beside the monitor
- * (its caption above it); otherwise the only screen (phone), caption below.
+ * The channel as the viewers get it. `dual`: a screen of the Channel view with its caption
+ * above it (`role`: `main`, `pip` or `side`, `tools`: the layout buttons, `onActivate`: a click
+ * on the small screen); otherwise the only screen (phone, the air's own window), caption below.
  */
-export function Preview({ dual = false }) {
+export function Preview({ dual = false, role = 'side', tools = null, onActivate = null }) {
   const video = useRef(null);
   const player = useRef(null);
   const volume = previewVolume.value;
@@ -234,11 +283,12 @@ export function Preview({ dual = false }) {
     ];
   };
 
-  const seconds = Number.isFinite(delay) ? Math.max(1, Math.round(delay)) : null;
   // Beside the monitor the screen is narrow: the stats overlay then spreads over the stage.
   const stats = statsOpen.value ? html`<${StatsOverlay} delayS=${delay} />` : null;
+  const pip = dual && role === 'pip';
   const box = html`
     <div class="video" tabindex="0" aria-label=${t('preview.label')}
+      onClick=${pip && onActivate ? onActivate : undefined}
       ...${contextMenuHandlers('preview.menu', menuItems)}>
       <video ref=${video} playsinline></video>
       ${previewFailed.value
@@ -247,13 +297,13 @@ export function Preview({ dual = false }) {
             <button type="button" class="btn" onClick=${() => player.current?.retry()}>${t('preview.retry')}</button>
           </div>`
         : null}
-      <${SeekBubble} />
-      ${dual ? null : stats}
+      ${pip ? null : html`<${SeekBubble} />`}
+      ${dual ? tools : stats}
     </div>`;
-  const caption = seconds === null ? t('monitor.on_air') : t('monitor.on_air_caption', { seconds });
+  const caption = pip ? t('monitor.on_air') : airCaption(delay);
   if (dual) {
     return html`
-      <div class="screen screen-air">
+      <div class=${`screen screen-air role-${role}`}>
         <p class="stage-caption screen-cap">${caption}</p>
         ${box}
         ${stats}

@@ -6,13 +6,15 @@
 // from `control` — the server's position (a few segments ahead of what viewers see), "≈" when a
 // seek lands on a keyframe. Controls the engine does not allow now are greyed out.
 
-import { signal, effect } from '/static/vendor/signals.mjs';
-import { useRef, useState } from '/static/vendor/hooks.mjs';
+import { signal } from '/static/vendor/signals.mjs';
+import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t, videoTitle } from '../i18n.js';
 import { Icon } from '../icons.js';
 import { contextMenuHandlers } from './menu.js';
-import { monitorState, previewPosition } from './monitor.js';
+import { monitorRunning, monitorState, previewPosition } from './monitor.js';
+import { sourceState, sourceUrl } from './sourceplayer.js';
+import { monitorMuted, monitorVolume, previewMuted, previewVolume } from './volume.js';
 import {
   channel,
   channelLink,
@@ -28,27 +30,98 @@ import {
   togglePause,
 } from '../store.js';
 
-// ---------- Preview volume (the preview itself comes with the channel view) ----------
+// The volumes live in volume.js (On air's keeps its old names, re-exported here).
+export { previewMuted, previewVolume };
 
-function stored(key, fallback) {
-  try {
-    const value = localStorage.getItem(key);
-    return value === null ? fallback : JSON.parse(value);
-  } catch {
-    return fallback;
-  }
+// ---------- Thumbnails of the seek bar (the Preview's own file) ----------
+
+const THUMB_W = 160;
+const THUMB_H = 90;
+/** Thumbnails kept, by 2-second step. */
+const THUMB_CACHE = 240;
+
+/**
+ * Frames of the Preview's film for the seek bar, taken from a second, hidden <video> of the same
+ * file (one seek at a time; the newest wish wins).
+ */
+function thumbnailer(url) {
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'auto';
+  video.src = url;
+  const canvas = document.createElement('canvas');
+  canvas.width = THUMB_W;
+  canvas.height = THUMB_H;
+  const cache = new Map();
+  let busy = false;
+  let wanted = null;
+  let onFrame = null;
+  const step = (s) => Math.max(0, Math.round(s / 2) * 2);
+  const next = () => {
+    if (busy || wanted === null || video.readyState < 1) return;
+    const at = wanted;
+    wanted = null;
+    if (cache.has(at)) {
+      onFrame?.(at, cache.get(at));
+      next();
+      return;
+    }
+    busy = true;
+    const done = () => {
+      video.removeEventListener('seeked', done);
+      busy = false;
+      try {
+        canvas.getContext('2d').drawImage(video, 0, 0, THUMB_W, THUMB_H);
+        const img = canvas.toDataURL('image/jpeg', 0.7);
+        cache.set(at, img);
+        if (cache.size > THUMB_CACHE) cache.delete(cache.keys().next().value);
+        onFrame?.(at, img);
+      } catch {
+        // Not drawable (yet): no thumbnail.
+      }
+      next();
+    };
+    video.addEventListener('seeked', done);
+    video.currentTime = Math.min(at, Math.max(0, (video.duration || at) - 0.1));
+  };
+  video.addEventListener('loadedmetadata', next);
+  return {
+    want(s, cb) {
+      onFrame = cb;
+      const at = step(s);
+      if (cache.has(at)) cb(at, cache.get(at));
+      else {
+        wanted = at;
+        next();
+      }
+    },
+    stop() {
+      video.removeAttribute('src');
+      video.load();
+    },
+  };
 }
 
-export const previewVolume = signal(stored('vrcinema.previewVolume', 0.6));
-export const previewMuted = signal(stored('vrcinema.previewMuted', false));
-effect(() => {
-  try {
-    localStorage.setItem('vrcinema.previewVolume', JSON.stringify(previewVolume.value));
-    localStorage.setItem('vrcinema.previewMuted', JSON.stringify(previewMuted.value));
-  } catch {
-    // No storage (private mode): the volume is not remembered.
-  }
-});
+/** The thumbnail of the film at `seconds` (only while the Preview plays its own file). */
+function Thumb({ seconds, left }) {
+  const url = sourceState.value === 'ready' ? sourceUrl.value : null;
+  const grabber = useRef(null);
+  const [frame, setFrame] = useState(null);
+  useEffect(() => {
+    if (!url) return undefined;
+    grabber.current = thumbnailer(url);
+    return () => {
+      grabber.current?.stop();
+      grabber.current = null;
+      setFrame(null);
+    };
+  }, [url]);
+  useEffect(() => {
+    grabber.current?.want(seconds, (_at, img) => setFrame(img));
+  }, [seconds, url]);
+  if (!url || !frame) return null;
+  return html`<img class="tl-thumb" alt="" aria-hidden="true" src=${frame} style=${`left:${left}%`} />`;
+}
 
 // ---------- Time ----------
 
@@ -145,7 +218,7 @@ function Timeline({ pos, dur, approx, seekable, live }) {
   const cancel = () => setDrag(null);
   const onKeyDown = (e) => {
     if (!seekable) return;
-    const step = e.shiftKey ? 60 : 10;
+    const step = e.shiftKey ? 60 : 5;
     const keys = {
       ArrowLeft: () => seekBy(-step),
       ArrowRight: () => seekBy(step),
@@ -186,6 +259,7 @@ function Timeline({ pos, dur, approx, seekable, live }) {
           ${known && !live ? html`<em class="knob" style=${`left:${played}%`}></em>` : null}
           ${hover !== null && known && !live
             ? html`<span class="hv" style=${`left:${hover * 100}%`}></span>
+                <${Thumb} seconds=${hover * dur} left=${hover * 100} />
                 <span class="tip" style=${`left:${hover * 100}%`}>${formatTime(hover * dur)}</span>`
             : null}
         </div>
@@ -194,22 +268,46 @@ function Timeline({ pos, dur, approx, seekable, live }) {
     </div>`;
 }
 
-function Volume() {
-  const muted = previewMuted.value || previewVolume.value === 0;
-  const label = muted ? t('player.unmute') : t('player.mute');
+/**
+ * One volume: `level`/`muted` signals, the slider's name, the mute button's names and a short
+ * tag shown before it (two sliders side by side: which is which).
+ */
+function VolumeSlider({ level, muted: mutedSig, label, mute, unmute, tag, cls }) {
+  const muted = mutedSig.value || level.value === 0;
+  const buttonLabel = muted ? unmute : mute;
+  const value = mutedSig.value ? 0 : level.value;
   return html`
-    <span class="vol">
-      <button type="button" class="icon-button" aria-label=${label} title=${label}
-        onClick=${() => (previewMuted.value = !previewMuted.value)}>
+    <span class=${`vol ${cls}`}>
+      ${tag ? html`<small class="vol-tag" aria-hidden="true">${tag}</small>` : null}
+      <button type="button" class="icon-button" aria-label=${buttonLabel} title=${buttonLabel}
+        onClick=${() => (mutedSig.value = !mutedSig.value)}>
         <${Icon} name=${muted ? 'muted' : 'volume'} size=${18} />
       </button>
-      <input type="range" min="0" max="1" step="0.05" aria-label=${t('player.volume')}
-        value=${previewMuted.value ? 0 : previewVolume.value}
-        style=${`--fill:${(previewMuted.value ? 0 : previewVolume.value) * 100}%`}
+      <input type="range" min="0" max="1" step="0.05" aria-label=${label} title=${label}
+        value=${value} style=${`--fill:${value * 100}%`}
         onInput=${(e) => {
-          previewVolume.value = Number(e.currentTarget.value);
-          previewMuted.value = false;
+          level.value = Number(e.currentTarget.value);
+          mutedSig.value = false;
         }} />
+    </span>`;
+}
+
+/** On air's volume, for the air's own window too. */
+export function AirVolume() {
+  return html`<${VolumeSlider} level=${previewVolume} muted=${previewMuted} cls="vol-air"
+    label=${t('player.volume')} mute=${t('player.mute')} unmute=${t('player.unmute')} />`;
+}
+
+function Volume() {
+  // With the Preview in this window: two sliders (Preview, On air), each with its tag.
+  const both = monitorRunning() || monitorState.value !== 'off';
+  if (!both) return html`<${AirVolume} />`;
+  return html`
+    <span class="vols">
+      <${VolumeSlider} level=${monitorVolume} muted=${monitorMuted} cls="vol-preview" tag=${t('volume.preview_tag')}
+        label=${t('volume.preview')} mute=${t('monitor.mute')} unmute=${t('monitor.unmute')} />
+      <${VolumeSlider} level=${previewVolume} muted=${previewMuted} cls="vol-air" tag=${t('volume.air_tag')}
+        label=${t('player.volume')} mute=${t('player.mute')} unmute=${t('player.unmute')} />
     </span>`;
 }
 

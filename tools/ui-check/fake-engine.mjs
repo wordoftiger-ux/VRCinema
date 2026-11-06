@@ -24,6 +24,12 @@
 // engine (2 s rows, #VRCINEMA-AT/ANTENNA/AIRED, EXT-X-START for `from`); GET
 // /api/desktop/monitor/<clip>/<n>.ts serves its segments; `monitorDelayMs` delays the list;
 // `monitorPlayerFail`: the list loads of the player (with `from`) answer 500.
+// The Preview's own film (window only): GET /api/desktop/preview?item=<id> answers scenario
+// `previewSource[id]` ('ready' by default, 'preparing', 'unavailable') and
+// /api/desktop/preview/<id>/media serves `options.previewFile` with Range. `itemId` is the film
+// the controls act on (POST …/play-now switches it, position 0); `seekPending` the control flag;
+// the panel carries `air` (`airLatencyS`). GET /__test/live lists the /live requests with
+// their X-VRCinema-Air header. GET /app-icon.png serves desktop/icons/icon.png.
 // Controls: `controlDelayMs` delays the answers of …/pause, …/resume and …/seek; with `armPause`
 // a pause with `atS` only arms (`pausePending`, like the engine before the segment end).
 // Scenario `viewerStateDelayMs`: GET /api/channels/main/state answers that late (setting it
@@ -72,9 +78,10 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } = {}) {
+export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, previewFile = null } = {}) {
   if (port === 8080) throw new Error('never port 8080');
   let requests = [];
+  let liveRequests = [];
   let monitorInFlight = 0;
   let maxMonitorInFlight = 0;
   // Rows the engine still keeps after they left the list (it serves them for a while).
@@ -178,7 +185,12 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
 
   function reset() {
     requests = [];
+    liveRequests = [];
     s = {
+      itemId: 7,
+      previewSource: {},
+      airLatencyS: 12,
+      seekPending: false,
       language: 'en',
       playing: 'film',
       canSeek: true,
@@ -249,13 +261,13 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     const film = s.playing === 'film';
     const live = s.playing === 'live';
     return {
-      itemId: s.playing === 'none' ? null : 7,
+      itemId: s.playing === 'none' ? null : s.itemId,
       isLive: live,
       positionS: film ? s.positionS : live ? 40 : 0,
       durationS: film ? s.durationS : null,
       canPause: film,
       canSeek: film && s.canSeek,
-      seekPending: false,
+      seekPending: s.seekPending,
       positionApprox: s.positionApprox,
       pausePending: s.pausePending,
       paused: s.paused,
@@ -354,6 +366,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
       history: s.history,
       settings: {},
       control: control(),
+      // The engine's air clock: a typical viewer `airLatencyS` behind the edge, 12 s of film
+      // behind the server's position.
+      air: { latencyS: s.airLatencyS, source: 'nominal', viewers: 0, itemId: current ? s.itemId : null, positionS: s.playing === 'film' ? s.positionS - 12 : null, segmentS: 4 },
       channelUrl: `http://127.0.0.1:${port}/live/main.m3u8`,
       requestUrl: `http://127.0.0.1:${port}/`,
     };
@@ -446,6 +461,38 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     } catch {
       json(res, 404, { error: 'Not Found' });
     }
+  }
+
+  // The Preview's own film (window only): scenario `previewSource` per item id ('ready',
+  // 'preparing', 'unavailable'; default 'ready'); the media is `options.previewFile` with Range.
+  function previewStatus(res, params) {
+    const id = Number(params.get('item'));
+    const known = id === s.itemId || s.queue.some((i) => i.id === id);
+    if (!known) return coded(res, 404, 'no_such_item', 'No such item');
+    const state = s.previewSource?.[id] ?? 'ready';
+    if (state === 'ready' && previewFile) return json(res, 200, { itemId: id, state, url: `/api/desktop/preview/${id}/media` });
+    if (state === 'preparing') return json(res, 200, { itemId: id, state });
+    return json(res, 200, { itemId: id, state: 'unavailable', reason: 'failed' });
+  }
+
+  async function previewMedia(req, res, id) {
+    if (!previewFile || (s.previewSource?.[id] ?? 'ready') !== 'ready') return coded(res, 404, 'no_such_item', 'No such item');
+    const bytes = await readFile(previewFile);
+    const len = bytes.length;
+    const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
+    const head = { 'content-type': 'video/mp4', 'accept-ranges': 'bytes', 'cache-control': 'no-store' };
+    if (!m) {
+      res.writeHead(200, { ...head, 'content-length': len });
+      return res.end(bytes);
+    }
+    let first = m[1] === '' ? len - Number(m[2]) : Number(m[1]);
+    let last = m[1] === '' || m[2] === '' ? len - 1 : Math.min(Number(m[2]), len - 1);
+    if (first >= len || first < 0 || last < first) {
+      res.writeHead(416, { 'content-range': `bytes */${len}` });
+      return res.end();
+    }
+    res.writeHead(206, { ...head, 'content-range': `bytes ${first}-${last}/${len}`, 'content-length': last - first + 1 });
+    return res.end(bytes.subarray(first, last + 1));
   }
 
   // The producer's monitor (window only): the list of `monitorFeed` and its segments.
@@ -794,7 +841,16 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
       res.writeHead(204);
       return res.end();
     }
-    if (path.startsWith('/live/')) return serveLive(res, path.slice('/live/'.length));
+    if (path.startsWith('/live/')) {
+      // The window's own On air screen marks its requests (the engine's air clock skips them).
+      liveRequests.push({ path, air: req.headers['x-vrcinema-air'] ?? null });
+      return serveLive(res, path.slice('/live/'.length));
+    }
+    if (path === '/app-icon.png') {
+      res.writeHead(200, { 'content-type': 'image/png' });
+      return res.end(await readFile(join(PUBLIC, '..', 'desktop', 'icons', 'icon.png')));
+    }
+    if (path === '/__test/live') return json(res, 200, liveRequests);
     if (path.startsWith('/static/')) return serveFile(res, decodeURIComponent(path.slice('/static/'.length)));
     if (path === '/__test/requests') return json(res, 200, requests);
     if (path === '/__test/stats') return json(res, 200, { maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight });
@@ -896,6 +952,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
     if (route.startsWith('/api/desktop/')) {
       if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
       if (route === '/api/desktop/monitor.m3u8' && req.method === 'GET') return monitorList(res, url.searchParams);
+      if (route === '/api/desktop/preview' && req.method === 'GET') return previewStatus(res, url.searchParams);
+      const media = route.match(/^\/api\/desktop\/preview\/(\d+)\/media$/);
+      if (media && req.method === 'GET') return previewMedia(req, res, Number(media[1]));
       const monitorSeg = route.match(/^\/api\/desktop\/monitor\/([a-z0-9-]+)\/(\d+\.ts)$/);
       if (monitorSeg && req.method === 'GET') return monitorSegment(res, monitorSeg[1], monitorSeg[2]);
       if (await desktopRoute(res, req, route, payload)) return undefined;
@@ -1027,6 +1086,12 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null } =
         s.positionS = 0;
         break;
       case 'play-now':
+        if (Number.isInteger(payload?.itemId)) {
+          s.itemId = payload.itemId;
+          s.positionS = 0;
+          s.paused = false;
+          s.pauseReasons = [];
+        }
         break;
       default:
         return json(res, 404, { error: 'Not Found' });

@@ -420,6 +420,86 @@ pub async fn run_process(
     }
 }
 
+/// Like [`run_process`], but the program and everything it started (yt-dlp's ffmpeg) are
+/// stopped when `stop` completes or `timeout` elapses; their exit is awaited before this
+/// returns, so their files can be removed. `Ok(None)`: stopped by `stop`.
+pub async fn run_process_stoppable(
+    cmd: &Path,
+    args: &[OsString],
+    timeout: Duration,
+    stop: impl std::future::Future<Output = ()>,
+) -> Result<Option<ProcessOutput>, ProcessError> {
+    let mut command = command(cmd);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Its own process group, so the whole tree can be stopped (Windows: `taskkill /T`).
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = spawn(&mut command)?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let total = AtomicUsize::new(0);
+    let outcome = {
+        let work = async {
+            let (status, out, err) = tokio::join!(
+                child.wait(),
+                collect_opt(stdout, &total),
+                collect_opt(stderr, &total)
+            );
+            status.map(|status| ProcessOutput {
+                code: status.code(),
+                stdout: String::from_utf8_lossy(&out).into_owned(),
+                stderr: String::from_utf8_lossy(&err).into_owned(),
+            })
+        };
+        tokio::pin!(work);
+        tokio::pin!(stop);
+        tokio::select! {
+            r = tokio::time::timeout(timeout, &mut work) => Some(r),
+            () = &mut stop => None,
+        }
+    };
+    let timed_out = match outcome {
+        Some(Ok(result)) => return Ok(Some(result?)),
+        Some(Err(_)) => true,
+        None => false,
+    };
+    kill_tree(&mut child).await;
+    if timed_out {
+        return Err(ProcessError::Timeout {
+            secs: timeout.as_secs_f64().round() as u64,
+            cmd: cmd.display().to_string(),
+        });
+    }
+    Ok(None)
+}
+
+/// Stops `child` and the processes it started, and waits for it to exit.
+async fn kill_tree(child: &mut Child) {
+    if let Some(pid) = child.id() {
+        #[cfg(windows)]
+        let mut killer = {
+            let mut c = command(Path::new("taskkill"));
+            c.args(["/T", "/F", "/PID", &pid.to_string()]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut killer = {
+            let mut c = command(Path::new("kill"));
+            c.args(["-KILL", "--", &format!("-{pid}")]);
+            c
+        };
+        killer.stdout(Stdio::null()).stderr(Stdio::null());
+        if let Ok(mut k) = spawn(&mut killer) {
+            let _ = tokio::time::timeout(Duration::from_secs(10), k.wait()).await;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +526,45 @@ mod tests {
     #[cfg(unix)]
     fn sleeper() -> (std::path::PathBuf, Vec<OsString>) {
         ("sleep".into(), vec!["60".into()])
+    }
+
+    #[tokio::test]
+    async fn a_stoppable_run_stops_the_whole_tree_and_waits_for_it() {
+        // A shell that starts a long sleeper: stopping the shell stops its child too, and the
+        // shell's output pipe (held by the child as well) closes, so this returns at once.
+        #[cfg(windows)]
+        let (cmd, args) = shell("ping -n 60 127.0.0.1");
+        #[cfg(unix)]
+        let (cmd, args) = shell("sleep 60; echo done");
+        let started = Instant::now();
+        let stop = tokio::time::sleep(Duration::from_millis(300));
+        let out = run_process_stoppable(&cmd, &args, Duration::from_secs(60), stop)
+            .await
+            .unwrap();
+        assert!(out.is_none());
+        assert!(started.elapsed() < Duration::from_secs(15));
+        // Finished before the stop: its output.
+        let (cmd, args) = shell("echo hi");
+        let out = run_process_stoppable(
+            &cmd,
+            &args,
+            Duration::from_secs(60),
+            tokio::time::sleep(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.stdout.trim(), "hi");
+        // The time limit stops it too.
+        let (cmd, args) = sleeper();
+        let err = run_process_stoppable(
+            &cmd,
+            &args,
+            Duration::from_millis(300),
+            std::future::pending(),
+        )
+        .await;
+        assert!(matches!(err, Err(ProcessError::Timeout { .. })));
     }
 
     #[tokio::test]

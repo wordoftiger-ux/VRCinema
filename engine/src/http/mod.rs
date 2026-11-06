@@ -105,6 +105,10 @@ pub struct AppState {
     pub(crate) monitor_watch: Arc<crate::pipeline::monitor::MonitorWatch>,
     /// The owner's bulk removals that can still be undone.
     pub(crate) queue_undo: Arc<routes_queue::UndoStore>,
+    /// The films the window's Preview plays itself (`None`: only the monitor's segments).
+    pub(crate) preview: Option<crate::preview_source::PreviewSources>,
+    /// Each viewer's latency, from its segment requests (the air clock).
+    pub(crate) air_viewers: Arc<crate::pipeline::air::AirViewers>,
 }
 
 impl AppState {
@@ -166,6 +170,8 @@ impl AppState {
             ticker_redraws: Arc::default(),
             monitor_watch: Arc::default(),
             queue_undo: Arc::default(),
+            preview: None,
+            air_viewers: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -202,6 +208,12 @@ impl AppState {
         watch: Arc<crate::pipeline::monitor::MonitorWatch>,
     ) -> Self {
         self.monitor_watch = watch;
+        self
+    }
+
+    /// The films the window's Preview plays (`/api/desktop/preview*`).
+    pub fn with_preview(mut self, preview: crate::preview_source::PreviewSources) -> Self {
+        self.preview = Some(preview);
         self
     }
 
@@ -1031,6 +1043,22 @@ pub(crate) fn control_json(state: &ChannelState) -> Value {
         "pausePending": c.pause_pending,
         "paused": state.paused,
         "pauseReasons": state.pause_reasons.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+    })
+}
+
+/// The air clock for the panel: where a typical viewer is (`latencyS` behind the stream's
+/// edge, `source` `viewers` or `nominal`) and the film position on its screen.
+pub(crate) fn air_json(state: &AppState, snapshot: &Snapshot) -> Value {
+    let now = std::time::Instant::now();
+    let latencies = state.air_viewers.latencies(now);
+    let e = crate::pipeline::air::estimate(&snapshot.air, &latencies, now);
+    json!({
+        "latencyS": num_json(e.latency_s),
+        "source": e.source,
+        "viewers": e.viewers,
+        "itemId": e.item_id,
+        "positionS": e.position_s.map(num_json),
+        "segmentS": num_json(snapshot.air.segment_s),
     })
 }
 

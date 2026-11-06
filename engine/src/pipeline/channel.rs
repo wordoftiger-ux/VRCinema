@@ -500,6 +500,8 @@ pub struct Channel {
     previous_clip_segment: Option<PathBuf>,
     pending_meta: HashMap<PathBuf, SegmentMeta>,
     aired: VecDeque<SegmentMeta>,
+    /// Every published segment of the last minutes (the air clock, [`crate::pipeline::air`]).
+    air_log: crate::pipeline::air::AirLog,
     next_clip_id: u64,
     launch_tx: mpsc::UnboundedSender<Launch>,
     launch_rx: mpsc::UnboundedReceiver<Launch>,
@@ -537,6 +539,7 @@ impl Channel {
             previous_clip_segment: None,
             pending_meta: HashMap::new(),
             aired: VecDeque::new(),
+            air_log: Default::default(),
             next_clip_id: 0,
             launch_tx,
             launch_rx,
@@ -1339,6 +1342,18 @@ impl Channel {
         }
     }
 
+    /// The published segments of the last minutes, oldest first (the air clock).
+    pub fn air_segments(&self) -> Vec<crate::pipeline::air::AirSegment> {
+        self.air_log.segments()
+    }
+
+    /// How many segments viewers lag behind the newest published one.
+    pub fn viewer_lag_segments(&self) -> usize {
+        self.o
+            .viewer_lag_segments
+            .unwrap_or(DEFAULT_VIEWER_LAG_SEGMENTS)
+    }
+
     /// The item being started in the background ahead of time (shown in the admin panel).
     pub fn prefetched_item_id(&self) -> Option<i64> {
         self.prefetched.as_ref().map(|c| c.item.id)
@@ -1783,6 +1798,18 @@ impl SegmentSource for Channel {
     }
 
     fn on_published(&mut self, seg: &PublishedSegment) {
+        let film = self
+            .pending_meta
+            .get(&seg.path)
+            .filter(|m| m.kind == MetaKind::Clip)
+            .and_then(|m| Some((m.item.as_ref()?.id, m.position_s)));
+        self.air_log.push(crate::pipeline::air::AirSegment {
+            seq: seg.seq,
+            channel_time: seg.channel_time,
+            duration: seg.duration,
+            item_id: film.map(|f| f.0),
+            position_s: film.map(|f| f.1),
+        });
         let meta = match self.pending_meta.get(&seg.path) {
             None => return,
             Some(meta) if meta.kind == MetaKind::Clip => self.pending_meta.remove(&seg.path),

@@ -282,13 +282,68 @@ fn allow_navigation(app: &AppHandle, url: &Url) -> bool {
     }
 }
 
-/// `target="_blank"` and `window.open`: never a second app window; web addresses (the
-/// app's own pages included) open in the browser.
+/// `target="_blank"` and `window.open`: never a second app window, but the On air screen's
+/// own one ([`is_air_window_url`]); other web addresses (the app's own pages included) open in
+/// the browser.
 fn new_window(app: &AppHandle, url: Url) -> NewWindowResponse<tauri::Wry> {
-    if link_policy(&url, &app_ports(app)) != LinkPolicy::Block {
+    let ports = app_ports(app);
+    if is_air_window_url(&url, &ports) {
+        open_air_window(app, url);
+    } else if link_policy(&url, &ports) != LinkPolicy::Block {
         crate::open_in_browser(url.as_str());
     }
     NewWindowResponse::Deny
+}
+
+/// The label of the On air screen's own window (spec `2026-11-06-preview-player-design.md`).
+pub const AIR: &str = "air";
+
+/// What the On air window's page may ask of its window: staying on top.
+const AIR_CONTROLS: [&str; 1] = ["core:window:allow-set-always-on-top"];
+
+/// The interface's On air page (`/admin?window=air`) of the app's own server.
+pub fn is_air_window_url(url: &Url, app_ports: &[u16]) -> bool {
+    link_policy(url, app_ports) == LinkPolicy::InApp
+        && url.path() == "/admin"
+        && url.query_pairs().any(|(k, v)| k == "window" && v == "air")
+}
+
+/// Opens (or brings forward) the On air window: a framed window of the same WebView2 profile
+/// as the panel (its session cookie), allowed to stay on top.
+fn open_air_window(app: &AppHandle, url: Url) {
+    if let Some(w) = app.get_webview_window(AIR) {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let app = app.clone();
+    // Not inside the WebView's own callback: a window made there can wait on itself.
+    tauri::async_runtime::spawn(async move {
+        if let Some(port) = url.port() {
+            let capability = AIR_CONTROLS.iter().fold(
+                CapabilityBuilder::new(format!("air-controls-{port}"))
+                    .window(AIR)
+                    .remote(engine_origin(port)),
+                |c, permission| c.permission(*permission),
+            );
+            // Already granted for this port: nothing to add.
+            let _ = app.add_capability(capability);
+        }
+        let nav_app = app.clone();
+        let built = WebviewWindowBuilder::new(&app, AIR, WebviewUrl::External(url))
+            .title("VRCinema")
+            .inner_size(640.0, 400.0)
+            .min_inner_size(240.0, 160.0)
+            .on_navigation(move |url| allow_navigation(&nav_app, url))
+            .on_new_window(|_url, _features| NewWindowResponse::Deny)
+            .data_directory(app.state::<Shell>().home.join(WEBVIEW_DIR))
+            .build();
+        if let Err(e) = built {
+            app.state::<Shell>()
+                .log(Msg::new("log.window_create_failed").arg("error", e));
+        }
+    });
 }
 
 /// `http://127.0.0.1:<port>/desktop-login?key=<key>`
@@ -548,6 +603,17 @@ mod tests {
             ),
             LinkPolicy::InApp
         );
+    }
+
+    #[test]
+    fn only_the_apps_own_on_air_page_gets_a_window_of_its_own() {
+        let air = |url: &str| is_air_window_url(&Url::parse(url).unwrap(), &[8181]);
+        assert!(air("http://127.0.0.1:8181/admin?window=air"));
+        assert!(!air("http://127.0.0.1:8181/admin"));
+        assert!(!air("http://127.0.0.1:8181/admin?window=other"));
+        assert!(!air("http://127.0.0.1:8181/wizard?window=air"));
+        assert!(!air("http://127.0.0.1:8080/admin?window=air"));
+        assert!(!air("https://example.com/admin?window=air"));
     }
 
     #[test]

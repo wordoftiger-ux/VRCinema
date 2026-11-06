@@ -29,8 +29,21 @@ const PATHS = {
   logout: 'M4 4h9v2H6v12h7v2H4zm11.6 3.6L20 12l-4.4 4.4-1.4-1.4 2-2H9v-2h7.2l-2-2z',
   keyboard: 'M3 6h18v12H3zm2 2v8h14V8zm1 1h2v2H6zm3 0h2v2H9zm3 0h2v2h-2zm3 0h3v2h-3zM7 13h10v2H7z',
   folder: 'M3 5h7l2 2h9v12H3zm2 4v8h14V9z',
+  pip: 'M3 5h18v14H3zm2 2v10h14V7zm7 5h6v4h-6z',
+  swap: 'M7 7h10l-3-3 1.4-1.4L20.8 8l-5.4 5.4L14 12l3-3H7zm10 10H7l3 3-1.4 1.4L3.2 16l5.4-5.4L10 12l-3 3h10z',
+  dock: 'M3 5h18v14H3zm2 2v10h6V7zm8 0v10h6V7z',
+  popout: 'M14 3h7v7h-2V6.4l-7.3 7.3-1.4-1.4L17.6 5H14zM5 5h6v2H7v10h10v-4h2v6H5z',
   sync: 'M12 4a8 8 0 0 1 7.6 5.5h-2.2A6 6 0 0 0 7.8 7.8L10 10H4V4l2.4 2.4A8 8 0 0 1 12 4zM4.4 14.5h2.2a6 6 0 0 0 9.6 1.7L14 14h6v6l-2.4-2.4a8 8 0 0 1-13.2-3.1z',
 };
+
+/**
+ * The program's icon (the engine serves `desktop/icons/icon.png`, the file the window shell's
+ * taskbar icon comes from): title bar, phone header, sign-in screen.
+ */
+export function AppIcon({ size = 16 }) {
+  return html`<img class="app-icon" src="/app-icon.png" alt="" aria-hidden="true" width=${size} height=${size}
+    onError=${(e) => (e.currentTarget.hidden = true)} />`;
+}
 
 /** `<svg>` of the icon `name`, hidden from screen readers (the button carries the label). */
 export function Icon({ name, size = 20 }) {

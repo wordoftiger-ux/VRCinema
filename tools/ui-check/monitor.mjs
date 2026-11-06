@@ -47,8 +47,15 @@ const requests = () => call('/__test/requests');
 const scenario = (s) => call('/__test/scenario', s);
 const reset = () => call('/__test/reset', {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The segment Preview (the fake engine has no film file: every film falls back to segments),
+// with the two screens side by side as this check was written for.
 const FAKE_TAURI = () => {
   window.__TAURI_INTERNALS__ = { invoke: (cmd) => Promise.resolve(cmd === 'plugin:window|is_maximized' ? false : null) };
+  try {
+    localStorage.setItem('vrcinema.screens', JSON.stringify({ layout: 'side', docked: 'side' }));
+  } catch {
+    // No storage.
+  }
 };
 const text = (page, sel) => page.$eval(sel, (e) => e.textContent.trim());
 // The window's own reads of the list (hls.js reloads it with `?from=`).
@@ -58,7 +65,7 @@ const stateOf = (page) => page.evaluate(async () => (await import('/static/app/c
 const aheadOf = (page) => page.evaluate(async () => (await import('/static/app/components/monitor.js')).monitorAheadS.value);
 /** The colour in the middle of the monitor's picture. */
 const pixel = (page) =>
-  page.$eval('.monitor-box video', (v) => {
+  page.$eval('.monitor-box video.pv-hls', (v) => {
     if (v.readyState < 2) return null;
     const c = document.createElement('canvas');
     c.width = 32;
@@ -159,10 +166,10 @@ try {
   check(steady.drifted, 'a real change (a jump ahead) shows within a segment', steady);
   // ---------- Two screens, the monitor plays from the newest aired segment ----------
   await waitFor(async () => (await stateOf(page)) === 'playing', 'the monitor plays');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => v.currentTime > 0 && !v.paused), 'the monitor picture moves');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime > 0 && !v.paused), 'the monitor picture moves');
   const firstSegs = await monitorSegments();
   check(firstSegs[0] === 'clip-7-0/5.ts', 'a fresh monitor starts at the newest aired segment (row 105), not at the end of the list', firstSegs.slice(0, 3));
-  check(await page.$eval('.monitor-box video', (v) => v.muted), 'the monitor starts muted');
+  check(await page.$eval('.monitor-box video.pv-hls', (v) => v.muted), 'the monitor starts muted');
   let lay = await layout(page);
   check(lay.monitor && lay.air && lay.monitor.left < lay.air.left && Math.abs(lay.monitor.top - lay.air.top) < 1, '1100x680: Preview on the left, On air on the right, side by side', lay);
   check(lay.monitor.width >= 300 && lay.air.width >= 300, '1100x680: each screen at least 300 px wide', lay);
@@ -177,11 +184,11 @@ try {
   // The monitor's own sound switch.
   check((await page.getAttribute('.monitor-mute', 'aria-label')) === 'Unmute “Preview”', 'the sound button says it unmutes');
   await page.click('.monitor-mute');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.muted), 'the monitor has sound');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.muted), 'the monitor has sound');
   check((await page.getAttribute('.monitor-mute', 'aria-label')) === 'Mute “Preview”', 'unmuted: the button mutes again');
-  check(await page.$eval('.video video', (v) => v !== document.querySelector('.monitor-box video')), 'the On air screen has its own video');
+  check(await page.$eval('.video video', (v) => v !== document.querySelector('.monitor-box video.pv-hls')), 'the On air screen has its own video');
   await page.click('.monitor-mute');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => v.muted), 'muted again');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => v.muted), 'muted again');
   check(true, 'mute / unmute toggles the monitor only');
 
   // ---------- A seek: the new clip appears and the picture changes at once ----------
@@ -194,9 +201,9 @@ try {
   check(took < 4000, `after the list changed the monitor shows the new clip in ${took} ms (< 4 s, from its first segment)`, took);
   const newSegs = (await monitorSegments()).slice(segsBefore);
   check(newSegs.find((s) => s.startsWith('clip-7-0-r1/')) === 'clip-7-0-r1/0.ts', 'it starts at the first segment of the new clip', newSegs);
-  const t1 = await page.$eval('.monitor-box video', (v) => v.currentTime);
+  const t1 = await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime);
   await sleep(4000);
-  const t2 = await page.$eval('.monitor-box video', (v) => v.currentTime);
+  const t2 = await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime);
   check(t2 - t1 > 2.5 && t2 - t1 < 5.5, 'it plays in real time (not a jump to the end of the list)', t2 - t1);
   await page.screenshot({ path: join(shots, 'monitor-after-seek-en-1100x680.png') });
 
@@ -260,30 +267,35 @@ try {
   const clipC = { ...clipA, key: 'clip-7-0-r5', baseS: 60 };
   await scenario({ monitorFeed: { clips: [clipA, clipB, clipC], firstSeq: 100, antenna: 104, aired: 106 }, positionS: 50 });
   await waitFor(async () => (await monitorSegments()).includes('clip-7-0-r5/0.ts'), 'the Preview plays the newest clip (60 s on)');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 1.5), 'and moves');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.paused && v.currentTime > 1.5), 'and moves');
   const previewAt = () => page.evaluate(async () => (await import('/static/app/components/monitor.js')).previewPosition());
   const shownAt = await previewAt();
-  check(shownAt >= 60 && shownAt < 80, 'the Preview knows the film position it shows (clip from 60 s)', shownAt);
+  const modes = await page.evaluate(async () => {
+    const m = await import('/static/app/components/monitor.js');
+    const sp = await import('/static/app/components/sourceplayer.js');
+    return { mode: m.previewMode.value, state: m.monitorState.value, source: sp.sourceState.value };
+  });
+  check(shownAt >= 60 && shownAt < 80, 'the Preview knows the film position it shows (clip from 60 s)', { shownAt, ...modes });
   await waitFor(async () => /^1:[01]\d$/.test(await text(page, '.tl-pos')), 'the player bar shows the Preview\'s position (1:0x), not the server\'s 0:50');
   await scenario({ controlDelayMs: 1500, armPause: true });
   const pausesBefore = (await requests()).filter((r) => r.path.endsWith('/pause')).length;
   await page.click('.player .play');
-  const instant = await page.$eval('.monitor-box video', (v) => ({ paused: v.paused, t: v.currentTime }));
+  const instant = await page.$eval('.monitor-box video.pv-hls', (v) => ({ paused: v.paused, t: v.currentTime }));
   check(instant.paused, 'pause: the Preview stops at once (the engine answers 1.5 s later)', instant);
   const pauseReq = await waitFor(async () => (await requests()).filter((r) => r.path.endsWith('/pause'))[pausesBefore], 'the pause request is sent');
   const frozenAt = await previewAt();
   check(Number.isFinite(pauseReq.body?.atS) && Math.abs(pauseReq.body.atS - frozenAt) < 0.01 && frozenAt >= 60 && frozenAt < 80, 'the pause carries atS = the frozen Preview position', { body: pauseReq.body, frozenAt });
   await sleep(1000);
-  check((await page.$eval('.monitor-box video', (v) => v.currentTime)) === instant.t, 'the Preview stays frozen while the answer is under way');
+  check((await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime)) === instant.t, 'the Preview stays frozen while the answer is under way');
   await waitFor(async () => (await text(page, '.nowp-sub')) === 'Pause pending — On air stops at the end of this segment', 'answered (armed): the player bar says the pause is pending', 4000);
   check((await text(page, '.monitor-badge')) === 'Pause pending — On air stops at the end of this segment', 'the frozen Preview says so too');
   check((await page.getAttribute('.player .play', 'aria-label')) === 'Resume', 'the button resumes');
-  check((await page.$eval('.monitor-box video', (v) => v.paused)), 'the Preview is still frozen after the answer');
+  check((await page.$eval('.monitor-box video.pv-hls', (v) => v.paused)), 'the Preview is still frozen after the answer');
   const frozenText = await text(page, '.tl-pos');
   await sleep(1200);
   check((await text(page, '.tl-pos')) === frozenText, 'the player bar stands on the frozen position', frozenText);
   await page.click('.player .play');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused), 'resume: the Preview plays on at once', 1000);
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.paused), 'resume: the Preview plays on at once', 1000);
   await waitFor(async () => (await requests()).some((r) => r.path.endsWith('/resume')), 'the resume request is sent');
   await waitFor(async () => (await page.getAttribute('.player .play', 'aria-label')) === 'Pause', 'resumed: the button pauses again', 4000);
   check(true, 'pause / resume from the Preview');
@@ -306,14 +318,14 @@ try {
   check(fwd.body?.byS === undefined && Math.abs(fwd.body?.toS - target) < 0.01, '+10 s sends toS = Preview position + 10', { body: fwd.body, fwdFrom });
   await sleep(1800);
   // Answered, the old picture still runs (no new clip yet): the bar and a step count from the target.
-  check(await page.$eval('.monitor-box video', (v) => !v.paused), 'the old picture plays on until the new clip is there');
+  check(await page.$eval('.monitor-box video.pv-hls', (v) => !v.paused), 'the old picture plays on until the new clip is there');
   const bubbleN = Number((await text(page, '.seek-bubble')).match(/(\d+) s$/)?.[1]);
   check(Number.isFinite(aheadAtSeek) && aheadAtSeek >= 1 && bubbleN >= Math.round(aheadAtSeek), 'the seek bubble is at least as far as the Preview is ahead of the air', { bubbleN, aheadAtSeek });
   check((await previewAt()) === target && (await text(page, '.tl-pos')) === fmt(target), 'until then the Preview\'s position stays the target (no jump back to the old picture)', await previewAt());
   await page.click('.stage-caption');
-  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('j');
   const back = await waitFor(async () => (await seeks())[seeksBefore + 1], 'the ← seek is sent');
-  check(back.body?.byS === undefined && Math.abs(back.body?.toS - (target - 10)) < 0.01, '← right after counts from the target (toS = target − 10), not from the old picture', { body: back.body, target });
+  check(back.body?.byS === undefined && Math.abs(back.body?.toS - (target - 10)) < 0.01, 'J right after counts from the target (toS = target − 10), not from the old picture', { body: back.body, target });
   // The new clip arrives (it starts at the target): the Preview counts from its picture again.
   const backTo = back.body.toS;
   await scenario({ controlDelayMs: 0, monitorFeed: { clips: [clipA, clipB, clipC, { ...clipB, key: 'clip-7-0-r6', baseS: backTo }], firstSeq: 100, antenna: 104, aired: 106 } });
@@ -335,11 +347,11 @@ try {
   check(Math.abs(pausedSeek.body?.toS - (pausedAt + 10)) < 0.01, 'a seek while paused counts from the frozen position', { body: pausedSeek.body, pausedAt });
   check((await previewAt()) === pausedSeek.body.toS, 'the frozen position moves to the target', await previewAt());
   await sleep(1200);
-  check(await page.$eval('.monitor-box video', (v) => v.paused), 'the Preview stays frozen (no play after the seek)');
+  check(await page.$eval('.monitor-box video.pv-hls', (v) => v.paused), 'the Preview stays frozen (no play after the seek)');
   check((await page.getAttribute('.player .play', 'aria-label')) === 'Resume', 'still paused: the button resumes');
   check((await text(page, '.tl-pos')) === fmt(pausedSeek.body.toS), 'the player bar shows the new paused position', await text(page, '.tl-pos'));
   await page.click('.player .play');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused), 'resume: the Preview plays at once');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.paused), 'resume: the Preview plays at once');
   check((await previewAt()) === pausedSeek.body.toS, 'resumed before the new clip: the position is the target, not the old picture', await previewAt());
   await scenario({ armPause: false });
 
@@ -347,23 +359,23 @@ try {
   await scenario({ paused: true, pauseReasons: ['manual'], positionS: 36 });
   await waitFor(async () => (await stateOf(page)) === 'paused', 'paused: the monitor stands still');
   await waitFor(async () => isRed(await pixel(page)), 'the still picture is the paused clip (row of 36 s)', 6000);
-  check(await page.$eval('.monitor-box video', (v) => v.paused), 'the video is paused');
+  check(await page.$eval('.monitor-box video.pv-hls', (v) => v.paused), 'the video is paused');
   check((await text(page, '.monitor-badge')) === 'Paused — the video resumes from here', 'with a label');
   check(await page.$eval('.monitor-sync', (b) => b.disabled), 'paused: nothing to sync');
-  const stillAt = await page.$eval('.monitor-box video', (v) => v.currentTime);
+  const stillAt = await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime);
   const loadsPaused = (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length;
   await page.click('.stage-caption');
   await page.keyboard.press('s');
   await sleep(1500);
   check((await page.$('.toast')) === null, 'paused: the key S shows no message');
   check((await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length === loadsPaused, 'paused: the key S starts no player (no blip)');
-  check((await page.$eval('.monitor-box video', (v) => v.currentTime)) === stillAt, 'it does not move while paused');
+  check((await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime)) === stillAt, 'it does not move while paused');
   await scenario({ paused: false, pauseReasons: [] });
   await sleep(1500);
   check((await stateOf(page)) === 'paused', 'resumed: the still waits for the film\'s next clip');
   await scenario({ monitorFeed: { clips: [clipA, clipB, { ...clipA, key: 'clip-7-0-r2', baseS: 36 }], firstSeq: 100, antenna: 104, aired: 106 } });
   await waitFor(async () => (await stateOf(page)) === 'playing', 'the relaunched clip plays');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 0), 'and moves');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.paused && v.currentTime > 0), 'and moves');
   check(true, 'after the resume the monitor plays the new clip');
   await page.screenshot({ path: join(shots, 'monitor-resumed-en-1100x680.png') });
 
@@ -378,7 +390,7 @@ try {
   const hiddenAt = (await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length;
   await sleep(3500);
   check((await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length === hiddenAt, 'hidden window: no monitor requests (0 in 3.5 s)');
-  check(await page.$eval('.monitor-box video', (v) => v.paused), 'hidden window: the monitor is stopped');
+  check(await page.$eval('.monitor-box video.pv-hls', (v) => v.paused), 'hidden window: the monitor is stopped');
   await setHidden(false);
   await waitFor(async () => (await stateOf(page)) === 'playing', 'visible again: the monitor plays');
   check(true, 'visible again: reading and playing resume');
@@ -396,7 +408,7 @@ try {
   await scenario({ monitorPlayerFail: false });
   await page.click('.monitor-box .preview-unavailable .btn');
   await waitFor(async () => (await stateOf(page)) === 'playing', 'Try again plays the monitor again', 10000);
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 0), 'and it moves');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.paused && v.currentTime > 0), 'and it moves');
   check((await page.$('.monitor-box .preview-unavailable')) === null, 'Try again: the message goes away');
   // The failed loads above were meant to fail.
   page.__errors.length = 0;
@@ -406,7 +418,7 @@ try {
   await scenario({ monitorFeed: { clips: [clipA, clipB, { ...clipA, key: 'clip-7-0-r3', baseS: 50 }], firstSeq: 0, antenna: 4, aired: 6 } });
   await waitFor(async () => (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).slice(loadsBefore).some((r) => r.search === '?from=20'), 'lower numbers: the monitor starts its player again (at the newest clip, row 20)');
   await waitFor(async () => (await stateOf(page)) === 'playing', 'and plays');
-  await waitFor(() => page.$eval('.monitor-box video', (v) => !v.paused && v.currentTime > 0), 'and it moves');
+  await waitFor(() => page.$eval('.monitor-box video.pv-hls', (v) => !v.paused && v.currentTime > 0), 'and it moves');
   check(true, 'a restarted engine: the monitor follows its new numbers');
 
   // ---------- Nothing on air ----------

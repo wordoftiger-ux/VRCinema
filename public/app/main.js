@@ -2,9 +2,10 @@
 // the player bar at the bottom, keyboard shortcuts, menus and dialogs.
 
 import { render } from '/static/vendor/preact.mjs';
+import { signal } from '/static/vendor/signals.mjs';
 import { html } from './html.js';
 import { browserLang, chosenLang, loadLang, t } from './i18n.js';
-import { Icon } from './icons.js';
+import { AppIcon, Icon } from './icons.js';
 import {
   abilities,
   access,
@@ -22,7 +23,9 @@ import {
 } from './store.js';
 import { Titlebar, inWindow } from './components/titlebar.js';
 import { Rail, narrow, route } from './components/rail.js';
-import { PlayerBar } from './components/playerbar.js';
+import { AirVolume, PlayerBar } from './components/playerbar.js';
+import { Preview } from './components/preview.js';
+import { announceAirWindow } from './components/screens.js';
 import { MenuLayer, menu } from './components/menu.js';
 import { DialogLayer, dialog, openDialog } from './components/dialog.js';
 import { DropZone } from './components/dropzone.js';
@@ -44,9 +47,11 @@ const either = (...keys) => keys.map((k, i) => html`${i ? ' / ' : ''}${kbd(k)}`)
 
 function openShortcuts() {
   const rows = () => [
-    [plus(t('shortcuts.key_space')), 'shortcuts.play_pause'],
-    [either('←', '→'), 'shortcuts.seek_10'],
+    [either(t('shortcuts.key_space'), 'K'), 'shortcuts.play_pause'],
+    [either('←', '→'), 'shortcuts.seek_5'],
+    [either('J', 'L'), 'shortcuts.seek_10'],
     [[...plus(t('shortcuts.key_shift'), '←'), ' / ', kbd('→')], 'shortcuts.seek_60'],
+    [plus(t('shortcuts.key_wheel')), 'shortcuts.wheel'],
     [plus(t('shortcuts.key_home')), 'shortcuts.restart'],
     [plus('N'), 'shortcuts.next'],
     [plus('I'), 'shortcuts.stats'],
@@ -94,11 +99,15 @@ function onKeyDown(e) {
   // be paused or seeked; nothing playing has nothing to skip).
   const can = abilities.value;
   let action = null;
-  if (e.key === ' ' && plain && !e.shiftKey && !pressable(e.target)) {
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if ((e.key === ' ' && plain && !e.shiftKey && !pressable(e.target)) || (key === 'k' && plain && !e.shiftKey)) {
     if (can.canToggle) action = togglePause;
   } else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && plain && !adjustable(e.target)) {
-    const step = (e.shiftKey ? 60 : 10) * (e.key === 'ArrowLeft' ? -1 : 1);
+    const step = (e.shiftKey ? 60 : 5) * (e.key === 'ArrowLeft' ? -1 : 1);
     if (can.canSeek) action = () => seekBy(step);
+  } else if ((key === 'j' || key === 'l') && plain && !e.shiftKey) {
+    // J / L: 10 s back / forward (like the video sites).
+    if (can.canSeek) action = () => seekBy(key === 'j' ? -10 : 10);
   } else if (e.key === 'Home' && plain && !e.shiftKey && !adjustable(e.target)) {
     if (can.canSeek) action = restart;
   } else if ((e.key === 'n' || e.key === 'N') && plain) {
@@ -160,7 +169,7 @@ function PhoneTop() {
   const password = access.value === 'remote' || access.value === 'headless';
   return html`
     <header class="ptop">
-      <span class="tb-logo" aria-hidden="true"><${Icon} name="play" size=${11} /></span>
+      <${AppIcon} />
       <b class="ptop-title">VRCinema</b>
       ${net ? html`<span class=${`pill net-${net}`} role="status"><span class="dot" aria-hidden="true"></span>${t(NET_KEYS[net])}</span>` : null}
       ${password
@@ -210,7 +219,72 @@ function App() {
     </div>`;
 }
 
+// ---------- On air in a window of its own ----------
+
+const ON_TOP_KEY = 'vrcinema.airOnTop';
+
+function storedOnTop() {
+  try {
+    return localStorage.getItem(ON_TOP_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/** Keeps the air's window above the others (only in the program's window shell). */
+function applyOnTop(value) {
+  try {
+    localStorage.setItem(ON_TOP_KEY, String(value));
+  } catch {
+    // Not remembered.
+  }
+  if (!inWindow()) return;
+  window.__TAURI_INTERNALS__
+    .invoke('plugin:window|set_always_on_top', { label: 'air', value })
+    .catch((e) => console.error('VRCinema: always on top failed:', String(e?.message ?? e)));
+}
+
+const onTop = signal(storedOnTop());
+
+function AirWindowApp() {
+  return html`
+    <div class="app air-window">
+      <header class="aw-bar">
+        <${AppIcon} />
+        <b class="aw-title">${t('monitor.on_air')}</b>
+        <${AirVolume} />
+        ${inWindow()
+          ? html`<label class="aw-top">
+              <input type="checkbox" checked=${onTop.value}
+                onChange=${(e) => {
+                  onTop.value = e.currentTarget.checked;
+                  applyOnTop(onTop.value);
+                }} />
+              <span>${t('screens.on_top')}</span>
+            </label>`
+          : null}
+      </header>
+      <section class="stage"><${Preview} /></section>
+      <${Toast} />
+    </div>`;
+}
+
+async function startAirWindow() {
+  const info = await firstInfo();
+  const program = info?.language ?? environment.value?.language;
+  await loadLang(access.value === 'window' ? program : (chosenLang() ?? program ?? browserLang()));
+  document.title = `VRCinema · ${t('monitor.on_air')}`;
+  render(html`<${AirWindowApp} />`, document.getElementById('root'));
+  startPolling();
+  announceAirWindow();
+  if (onTop.peek()) applyOnTop(true);
+}
+
 async function start() {
+  if (new URLSearchParams(location.search).get('window') === 'air') {
+    await startAirWindow();
+    return;
+  }
   // The program's language in its window. Elsewhere (remote panel, a server without a window,
   // the sign-in screen): the language picked in this browser, else the program's, else the
   // browser's.

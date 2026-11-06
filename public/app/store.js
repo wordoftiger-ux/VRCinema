@@ -272,8 +272,9 @@ async function send(action, body) {
  * The producer's Preview while it runs (monitor.js): `position()` (the film position it shows,
  * or null), `freeze()` (stops its picture now; that position or null), `pauseAnswered(ok)`,
  * `resumed()`, `expect(toS)` (a seek of the owner: its target is the Preview's position until
- * the new clip plays), `expectAnswered(ok)` and `expecting()`. The owner's controls count from
- * what it shows.
+ * the new clip plays), `expectAnswered(ok)`, `expecting()` and `playNow(itemId)` /
+ * `playNowAnswered(ok)` (the film player switches films at once). The owner's controls count
+ * from what it shows.
  */
 let preview = null;
 export function attachPreview(p) {
@@ -342,7 +343,13 @@ export async function seekTo(toS) {
   }
 }
 export const restart = () => sought('restart', undefined, 0);
-export const playNow = (itemId) => send('play-now', { itemId });
+/** "Play now": the Preview switches to the film at once when its file is there. */
+export async function playNow(itemId) {
+  preview?.playNow?.(itemId);
+  const ok = await send('play-now', { itemId });
+  preview?.playNowAnswered?.(ok);
+  return ok;
+}
 export async function skip() {
   try {
     await api('POST', `${PANEL}/skip`);

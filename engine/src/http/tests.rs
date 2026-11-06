@@ -124,6 +124,7 @@ fn snapshot(live_dir: &Path, segments: &[&str], state: ChannelState) -> Arc<Snap
         prefetched_item_id: None,
         stats: Default::default(),
         monitor: Default::default(),
+        air: Default::default(),
     })
 }
 
@@ -2741,6 +2742,109 @@ impl AppHarness {
 }
 
 const MONITOR_LIST: &str = "/api/desktop/monitor.m3u8";
+
+#[tokio::test]
+async fn the_preview_plays_a_disk_film_with_ranges_for_the_window_only() {
+    let (a, key) = app_harness(remote_on("sekret"));
+    let desktop = window_cookie(&a, &key).await;
+    let remote = cookie_of(&remote_login(&a, "sekret").await);
+    let dir = tempfile::tempdir().unwrap();
+    let film = dir.path().join("Film 1.mp4");
+    std::fs::write(&film, (0u8..100).collect::<Vec<u8>>()).unwrap();
+    let source = crate::resolver::file::file_source_url(&film).unwrap();
+    let item = a.h.with_db(|c| {
+        QueueRepo::new(c)
+            .add(&NewItem {
+                channel_id: MAIN_CHANNEL_ID,
+                source_url: source,
+                title: "Film 1".into(),
+                duration_s: Some(10.0),
+                is_live: false,
+                status: ItemStatus::Playing,
+                added_by: AddedBy::Admin,
+                requester_name: None,
+                requester_ip: None,
+                requester_key_hash: None,
+            })
+            .unwrap()
+    });
+    let resolver = crate::resolver::file::FileResolver::new(Box::new(|_| Box::pin(async { None })));
+    let state = a
+        .state
+        .clone()
+        .with_preview(crate::preview_source::PreviewSources::new(
+            Arc::new(resolver),
+            crate::pipeline::temp_downloads::TempDownloads::new(dir.path().join("temp")),
+            None,
+        ));
+    let router = super::routes_monitor::router(state.clone()).with_state(state);
+    let status_url = format!("/api/desktop/preview?item={}", item.id);
+    let media_url = format!("/api/desktop/preview/{}/media", item.id);
+
+    let res = send_to(router.clone(), get(&status_url).cookie(&remote)).await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    let res = send_to(router.clone(), get(&media_url)).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+
+    let res = send_to(router.clone(), get(&status_url).cookie(&desktop)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.json()["state"], "ready");
+    assert_eq!(res.json()["url"], media_url.as_str());
+
+    let whole = send_to(router.clone(), get(&media_url).cookie(&desktop)).await;
+    assert_eq!(whole.status, StatusCode::OK);
+    assert_eq!(whole.body.len(), 100);
+    assert_eq!(whole.header("accept-ranges"), "bytes");
+    assert_eq!(whole.header("content-type"), "video/mp4");
+    let part = send_to(
+        router.clone(),
+        get(&media_url)
+            .cookie(&desktop)
+            .header("range", "bytes=10-19"),
+    )
+    .await;
+    assert_eq!(part.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(part.body, (10u8..20).collect::<Vec<u8>>());
+    assert_eq!(part.header("content-range"), "bytes 10-19/100");
+    let tail = send_to(
+        router.clone(),
+        get(&media_url)
+            .cookie(&desktop)
+            .header("range", "bytes=95-"),
+    )
+    .await;
+    assert_eq!(tail.body.len(), 5);
+    let beyond = send_to(
+        router.clone(),
+        get(&media_url)
+            .cookie(&desktop)
+            .header("range", "bytes=100-"),
+    )
+    .await;
+    assert_eq!(beyond.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(beyond.header("content-range"), "bytes */100");
+
+    // Unknown items, requests waiting for approval and films never asked for have no media.
+    let res = send_to(
+        router.clone(),
+        get("/api/desktop/preview?item=999").cookie(&desktop),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    let waiting = a.h.add("request", ItemStatus::PendingApproval);
+    let res = send_to(
+        router.clone(),
+        get(&format!("/api/desktop/preview?item={}", waiting.id)).cookie(&desktop),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    let res = send_to(
+        router,
+        get("/api/desktop/preview/999/media").cookie(&desktop),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+}
 
 #[tokio::test]
 async fn the_monitor_is_for_the_window_only() {

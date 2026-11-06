@@ -3,6 +3,10 @@
 //! address was refused to ffprobe (HTTP 403/401). One file per queue item in `<DATA_DIR>/temp`, shared by
 //! that item's clips (a resume or a seek starts a new clip from the same file) and removed
 //! [`GRACE`] after the last of them is gone; the server empties the folder when it starts.
+//!
+//! The window's Preview downloads into the same store ([`crate::preview_source`]). Invariant:
+//! a viewer's film is only adopted here after the home-network checks of its link and media
+//! (the clip factory's and the Preview's), so [`TempDownloads::reuse`] needs no check.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -102,6 +106,11 @@ impl TempDownloads {
         let slot = slots.get_mut(&item_id)?;
         slot.users += 1;
         Some(self.lease(item_id, file))
+    }
+
+    /// The folder of the downloads.
+    pub fn dir(&self) -> &Path {
+        &self.0.dir
     }
 
     /// Where the next download of `item_id` goes: `<dir>/<item>-<n>`, without its extension
