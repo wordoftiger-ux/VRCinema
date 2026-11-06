@@ -1320,7 +1320,15 @@ kbd {
 }
 
 .air-window .stage {
+  flex: 1;
+  min-height: 0;
   padding: 8px;
+}
+
+.air-window .video {
+  flex: 1;
+  min-height: 0;
+  aspect-ratio: auto;
 }
 
 .preview-unavailable {
@@ -2818,6 +2826,11 @@ kbd {
   .right .pill,
   .vol input[type="range"] {
     display: none;
+  }
+
+  /* The air's own window may be narrow: its volume stays. */
+  .air-window .vol input[type="range"] {
+    display: block;
   }
 
   .copy-link {
