@@ -1241,6 +1241,7 @@ async fn a_gpu_encoder_cuts_the_converted_film_into_four_second_segments() {
                 has_audio: true,
                 duration_s: Some(13.0),
                 portrait: false,
+                ..Default::default()
             },
             encoder,
             segment_seconds: 4,
@@ -1248,6 +1249,7 @@ async fn a_gpu_encoder_cuts_the_converted_film_into_four_second_segments() {
             start_at_s: 0.0,
             readrate: None,
             overlay: None,
+            duration_limit_s: None,
         },
     );
     let out = Command::new(&cfg.ffmpeg_path).args(&args).output().unwrap();

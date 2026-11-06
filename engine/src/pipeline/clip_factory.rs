@@ -976,6 +976,7 @@ async fn start_clip(
         start_at_s,
         readrate: clip_readrate(live, ticker.is_some(), ahead),
         overlay: None,
+        duration_limit_s: None,
     };
     let (seg, ticker, fallback) = match ticker {
         Some(prepared) => {
@@ -1108,6 +1109,7 @@ mod tests {
             has_audio,
             duration_s: Some(60.0),
             portrait: false,
+            ..VideoInfo::default()
         }
     }
 
@@ -2123,6 +2125,7 @@ mod tests {
             start_at_s: 0.0,
             readrate: None,
             overlay: Some("drawtext=textfile=brak.txt".into()),
+            duration_limit_s: None,
         };
         let fallback = PlainRestart {
             args: build_clip_args(&ClipArgsOptions {
@@ -2369,6 +2372,7 @@ mod tests {
             start_at_s: 0.0,
             readrate: None,
             overlay: Some("drawbox=x=0:y=0:w=10:h=10:t=fill".into()),
+            duration_limit_s: None,
         };
         let lines = Arc::new(Mutex::new(Vec::new()));
         let mut handle = test_handle(

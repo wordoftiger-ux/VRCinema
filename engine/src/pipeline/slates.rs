@@ -393,6 +393,7 @@ async fn generate_one(
             has_audio: false,
             duration_s: Some(f64::from(SLATE_SECONDS)),
             portrait: false,
+            ..VideoInfo::default()
         },
         encoder: VideoEncoder::Libx264,
         segment_seconds: o.segment_seconds,
@@ -400,6 +401,7 @@ async fn generate_one(
         start_at_s: 0.0,
         readrate: None,
         overlay: None,
+        duration_limit_s: None,
     });
     let seg = ClipSegmenter::start(&o.ffmpeg_path, args, dir.clone(), Some(dir));
     // Dropped before the end (the generation aborted: a swap cancelled, the app quitting):

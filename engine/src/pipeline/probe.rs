@@ -7,12 +7,12 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::i18n::Msg;
-use crate::pipeline::ffmpeg_args::input_options;
+use crate::pipeline::ffmpeg_args::{MAX_FPS, input_options};
 use crate::process::{ProcessError, run_process};
 use crate::redact::redact_urls;
 use crate::resolver::types::StreamInput;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct VideoInfo {
     pub codec: String,
     pub height: u32,
@@ -23,6 +23,18 @@ pub struct VideoInfo {
     /// Taller than wide as shown (rotation included), e.g. a 9:16 phone video: it is
     /// converted and letterboxed into a 16:9 picture.
     pub portrait: bool,
+    /// The H.264 profile as ffprobe names it (`High`, `Main`, ...); empty: not known.
+    pub profile: String,
+    /// The codec level (H.264: 41 = 4.1); 0 or less: not known.
+    pub level: i64,
+    /// The frames are interlaced (fields): converted and deinterlaced.
+    pub interlaced: bool,
+    /// HDR (PQ or HLG transfer): converted and tonemapped to SDR.
+    pub hdr: bool,
+    /// The frame rate is not constant (average and real rates differ): converted.
+    pub vfr: bool,
+    /// The colour matrix (`bt709`, `smpte170m`, ...); empty: not tagged.
+    pub colorspace: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,19 +105,52 @@ const COPYABLE_PIX_FMTS: [&str; 2] = ["yuv420p", "yuvj420p"];
 const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 const DURATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// H.264 profiles every player decodes; another one (High 10, 4:2:2, ...) is converted.
+const COPYABLE_PROFILES: [&str; 4] = ["Baseline", "Constrained Baseline", "Main", "High"];
+/// Highest H.264 level copied (4.2: 1080p at up to 60 frames per second).
+const MAX_COPY_LEVEL: i64 = 42;
+/// Highest frame rate copied (the converted picture has at most [`MAX_FPS`] frames a second).
+const MAX_COPY_FPS: f64 = MAX_FPS as f64 + 0.5;
+
+/// Copy only a source that already is what a converted film would be (one look across films):
+/// H.264 in a common profile and level, 8-bit 4:2:0, at most 1080 lines and 30 frames a second
+/// at a constant rate, progressive, SDR, BT.709 or untagged. Anything else is converted.
 pub fn decide_video_mode(info: &VideoInfo, force_transcode: bool) -> VideoMode {
     if force_transcode || info.portrait {
         return VideoMode::Transcode;
     }
-    if info.codec == "h264"
+    let uniform = info.codec == "h264"
         && info.height > 0
         && info.height <= 1080
         && COPYABLE_PIX_FMTS.contains(&info.pix_fmt.as_str())
-    {
+        && info.fps <= MAX_COPY_FPS
+        && !info.vfr
+        && !info.interlaced
+        && !info.hdr
+        && (info.profile.is_empty() || COPYABLE_PROFILES.contains(&info.profile.as_str()))
+        && info.level <= MAX_COPY_LEVEL
+        && matches!(info.colorspace.as_str(), "" | "unknown" | "bt709");
+    if uniform {
         VideoMode::Copy
     } else {
         VideoMode::Transcode
     }
+}
+
+/// ffprobe's field order of an interlaced stream.
+fn is_interlaced(field_order: &str) -> bool {
+    matches!(field_order, "tt" | "bb" | "tb" | "bt")
+}
+
+/// ffprobe's transfer of an HDR stream (PQ, HLG).
+fn is_hdr(color_transfer: &str) -> bool {
+    matches!(color_transfer, "smpte2084" | "arib-std-b67")
+}
+
+/// The average and the real frame rate differ by more than 1 %: a variable frame rate. Either
+/// unknown: taken as constant.
+fn is_vfr(avg: f64, real: f64) -> bool {
+    avg > 0.0 && real > 0.0 && (avg - real).abs() / real > 0.01
 }
 
 /// JavaScript `Number(value)` for the JSON values ffprobe produces (NaN when not numeric).
@@ -172,18 +217,22 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
             .to_string()
     };
     let avg = parse_rate(video.get("avg_frame_rate"));
+    let real = parse_rate(video.get("r_frame_rate"));
     let width = js_number(video.get("width"));
+    let level = js_number(video.get("level"));
     Ok(VideoInfo {
+        profile: text("profile"),
+        level: if level.is_finite() { level as i64 } else { 0 },
+        interlaced: is_interlaced(&text("field_order")),
+        hdr: is_hdr(&text("color_transfer")),
+        vfr: is_vfr(avg, real),
+        colorspace: text("color_space"),
         portrait: is_portrait(width, height, rotation(video)),
         codec: text("codec_name"),
         // Saturating float-to-int cast: NaN and negatives become 0.
         height: height as u32,
         pix_fmt: text("pix_fmt"),
-        fps: if avg != 0.0 {
-            avg
-        } else {
-            parse_rate(video.get("r_frame_rate"))
-        },
+        fps: if avg != 0.0 { avg } else { real },
         has_audio: streams.iter().any(|s| is_type(s, "audio")),
         duration_s: (duration.is_finite() && duration > 0.0).then_some(duration),
     })
@@ -304,6 +353,7 @@ mod tests {
             has_audio: true,
             duration_s: Some(60.0),
             portrait: false,
+            ..VideoInfo::default()
         }
     }
 
@@ -390,8 +440,60 @@ mod tests {
                 has_audio: true,
                 duration_s: Some(123.45),
                 portrait: false,
+                ..VideoInfo::default()
             }
         );
+    }
+
+    #[test]
+    fn parses_profile_level_fields_hdr_frame_rate_and_matrix() {
+        let info = parse_probe_output(&json!({
+            "streams": [{"codec_type": "video", "codec_name": "h264", "height": 1080,
+                "pix_fmt": "yuv420p", "profile": "High", "level": 40, "field_order": "tt",
+                "color_transfer": "smpte2084", "color_space": "bt2020nc",
+                "avg_frame_rate": "24000/1001", "r_frame_rate": "30/1"}],
+            "format": {}
+        }))
+        .unwrap();
+        assert_eq!(info.profile, "High");
+        assert_eq!(info.level, 40);
+        assert!(info.interlaced && info.hdr && info.vfr);
+        assert_eq!(info.colorspace, "bt2020nc");
+        let plain = parse_probe_output(&json!({
+            "streams": [{"codec_type": "video", "field_order": "progressive",
+                "color_transfer": "bt709", "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}],
+            "format": {}
+        }))
+        .unwrap();
+        assert!(!plain.interlaced && !plain.hdr && !plain.vfr);
+        assert_eq!(plain.level, 0);
+    }
+
+    #[test]
+    fn only_a_uniform_source_is_copied() {
+        let mode = |change: fn(&mut VideoInfo)| {
+            let mut info = h264();
+            info.profile = "High".into();
+            info.level = 41;
+            info.colorspace = "bt709".into();
+            change(&mut info);
+            decide_video_mode(&info, false)
+        };
+        assert_eq!(mode(|_| {}), VideoMode::Copy);
+        assert_eq!(mode(|i| i.colorspace.clear()), VideoMode::Copy);
+        assert_eq!(mode(|i| i.profile = "Main".into()), VideoMode::Copy);
+        let converted: [fn(&mut VideoInfo); 7] = [
+            |i| i.fps = 60.0,
+            |i| i.vfr = true,
+            |i| i.interlaced = true,
+            |i| i.hdr = true,
+            |i| i.profile = "High 10".into(),
+            |i| i.level = 51,
+            |i| i.colorspace = "smpte170m".into(),
+        ];
+        for change in converted {
+            assert_eq!(mode(change), VideoMode::Transcode);
+        }
     }
 
     #[test]

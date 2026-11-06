@@ -430,6 +430,7 @@ mod tests {
             has_audio,
             duration_s: Some(10.0),
             portrait: false,
+            ..VideoInfo::default()
         }
     }
 
@@ -728,6 +729,7 @@ mod tests {
             start_at_s: 0.0,
             readrate: None,
             overlay: None,
+            duration_limit_s: None,
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, dir.path().to_path_buf(), None);
         assert_eq!(seg.wait().await, SegmenterState::Done);
@@ -759,6 +761,7 @@ mod tests {
             start_at_s: 0.0,
             readrate: None,
             overlay: None,
+            duration_limit_s: None,
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, dir.path().to_path_buf(), None);
         assert_eq!(seg.wait().await, SegmenterState::Failed);
@@ -815,6 +818,7 @@ mod tests {
             start_at_s: 0.0,
             readrate: None,
             overlay: None,
+            duration_limit_s: None,
         });
         let seg = ClipSegmenter::start(&ffmpeg, args, out_dir, None);
         let state = seg.wait().await;

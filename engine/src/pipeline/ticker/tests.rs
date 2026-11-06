@@ -559,6 +559,7 @@ mod drawn {
                 has_audio: false,
                 duration_s: Some(f64::from(seconds)),
                 portrait: false,
+                ..VideoInfo::default()
             },
             encoder: VideoEncoder::Libx264,
             segment_seconds: 4,
@@ -566,6 +567,7 @@ mod drawn {
             start_at_s: 0.0,
             readrate: None,
             overlay: Some(overlay),
+            duration_limit_s: None,
         });
         ClipSegmenter::start(&ffmpeg().unwrap(), args, c.dir.clone(), Some(c.dir.clone()))
     }

@@ -16,6 +16,47 @@ pub const MAX_FPS: u32 = 30;
 pub const LETTERBOX: &str = "pad=w='trunc(ih*16/9/2)*2':h=ih:x='(ow-iw)/2':y=0:color=black";
 
 pub const AUDIO_ARGS: [&str; 8] = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"];
+/// Audio follows its timestamps (a source with gaps or drift gets silence or a stretch), so it
+/// stays in step with the picture across a whole film.
+pub const AUDIO_FILTER: &str = "aresample=async=1";
+
+/// The one H.264 level of every converted film (High profile).
+pub const H264_LEVEL: &str = "4.1";
+
+/// BT.709 tags of every converted picture (the matrix itself is converted to it as well).
+pub const BT709_TAGS: [&str; 8] = [
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+    "-colorspace",
+    "bt709",
+    "-color_range",
+    "tv",
+];
+
+/// Interlaced frames (only those) become progressive ones.
+pub const DEINTERLACE: &str = "bwdif=mode=send_frame:parity=auto:deint=interlaced";
+
+/// HDR (PQ or HLG) to SDR BT.709: linear light, BT.709 primaries, Hable tonemapping, back to
+/// the BT.709 transfer and matrix at TV range (zimg, in every ffmpeg the program uses).
+pub const TONEMAP: &str = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,\
+     tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p";
+
+/// The constant frame rate of a converted film: the source's (common NTSC rates exactly), at
+/// most [`MAX_FPS`]; 30 when the source does not say.
+pub fn output_fps(fps: f64) -> String {
+    if fps.is_nan() || fps <= 0.0 || fps > f64::from(MAX_FPS) + 0.5 {
+        return MAX_FPS.to_string();
+    }
+    for (rate, exact) in [(23.976, "24000/1001"), (29.97, "30000/1001")] {
+        if (fps - rate).abs() < 0.01 {
+            return exact.to_string();
+        }
+    }
+    let rounded = (fps * 1000.0).round() / 1000.0;
+    rounded.to_string()
+}
 
 /// The pace a source is read at, relative to real time.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +100,8 @@ pub struct ClipArgsOptions {
     /// Filters drawn on the converted picture after scaling (the info ticker, see
     /// `ticker::overlay_filter`); ignored when the video is copied.
     pub overlay: Option<String>,
+    /// Stop after this many seconds of output (the film's out point); `None`: to the end.
+    pub duration_limit_s: Option<f64>,
 }
 
 fn is_network(url: &str) -> bool {
@@ -119,6 +162,8 @@ pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
                 "p4",
                 "-profile:v",
                 "high",
+                "-level",
+                H264_LEVEL,
                 "-rc",
                 "cbr",
                 "-forced-idr",
@@ -145,6 +190,10 @@ pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
                 "h264_amf",
                 "-quality",
                 "speed",
+                "-profile:v",
+                "high",
+                "-level",
+                H264_LEVEL,
                 "-rc",
                 "cbr",
                 "-forced_idr",
@@ -161,7 +210,7 @@ pub fn encoder_args(encoder: VideoEncoder) -> Vec<OsString> {
                 "-profile:v",
                 "high",
                 "-level:v",
-                "4.1",
+                H264_LEVEL,
                 "-sc_threshold",
                 "0",
             ],
@@ -278,9 +327,19 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
     match o.mode {
         VideoMode::Copy => push_all(&mut args, &["-c:v", "copy"]),
         VideoMode::Transcode => {
-            let mut filters = vec![format!("scale=-2:'min({MAX_HEIGHT},ih)'")];
-            if o.info.fps > f64::from(MAX_FPS) + 0.5 {
-                filters.push(format!("fps={MAX_FPS}"));
+            let mut filters = Vec::new();
+            if o.info.interlaced {
+                filters.push(DEINTERLACE.to_string());
+            }
+            if o.info.hdr {
+                filters.push(TONEMAP.to_string());
+            }
+            filters.push(format!(
+                "scale=-2:'min({MAX_HEIGHT},ih)':out_color_matrix=bt709:out_range=tv"
+            ));
+            // A constant frame rate: a variable one is made constant, a faster one capped.
+            if o.info.vfr || o.info.fps > f64::from(MAX_FPS) + 0.5 {
+                filters.push(format!("fps={}", output_fps(o.info.fps)));
             }
             filters.push("format=yuv420p".to_string());
             if o.info.portrait {
@@ -292,6 +351,7 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
             }
             push_all(&mut args, &["-vf", &filters.join(",")]);
             args.extend(encoder_args(o.encoder));
+            push_all(&mut args, &BT709_TAGS);
             push_all(
                 &mut args,
                 &[
@@ -301,7 +361,11 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
             );
         }
     }
+    push_all(&mut args, &["-af", AUDIO_FILTER]);
     push_all(&mut args, &AUDIO_ARGS);
+    if let Some(limit) = o.duration_limit_s.filter(|d| d.is_finite() && *d > 0.0) {
+        push_all(&mut args, &["-t", &format!("{limit:.3}")]);
+    }
     args.extend(segment_output_args(o.segment_seconds, &o.out_dir));
     args
 }
@@ -320,6 +384,7 @@ mod tests {
             has_audio: true,
             duration_s: Some(60.0),
             portrait: false,
+            ..VideoInfo::default()
         }
     }
 
@@ -348,6 +413,7 @@ mod tests {
             start_at_s: 0.0,
             readrate: Some(ReadRate::new(1.5)),
             overlay: None,
+            duration_limit_s: None,
         }
     }
 
@@ -525,7 +591,7 @@ mod tests {
         assert_eq!(value_after(&args, "-c:v", 0).as_deref(), Some("libx264"));
         assert_eq!(
             value_after(&args, "-vf", 0).as_deref(),
-            Some("scale=-2:'min(1080,ih)',format=yuv420p")
+            Some("scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,format=yuv420p")
         );
         assert_eq!(
             value_after(&args, "-force_key_frames", 0).as_deref(),
@@ -543,7 +609,7 @@ mod tests {
         assert_eq!(
             value_after(&build(&o), "-vf", 0).as_deref(),
             Some(
-                "scale=-2:'min(1080,ih)',fps=30,format=yuv420p,\
+                "scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,fps=30,format=yuv420p,\
                  drawbox=x=0[a];movie=qr.png[b];[a][b]overlay,format=yuv420p"
             )
         );
@@ -560,7 +626,7 @@ mod tests {
         assert_eq!(
             value_after(&build(&o), "-vf", 0).as_deref(),
             Some(
-                "scale=-2:'min(1080,ih)',format=yuv420p,\
+                "scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,format=yuv420p,\
                  pad=w='trunc(ih*16/9/2)*2':h=ih:x='(ow-iw)/2':y=0:color=black,\
                  drawbox=x=0,format=yuv420p"
             )
@@ -574,17 +640,21 @@ mod tests {
         o.info.fps = 59.94;
         assert_eq!(
             value_after(&build(&o), "-vf", 0).as_deref(),
-            Some("scale=-2:'min(1080,ih)',fps=30,format=yuv420p")
+            Some(
+                "scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,fps=30,format=yuv420p"
+            )
         );
         o.info.fps = 30.5;
         assert_eq!(
             value_after(&build(&o), "-vf", 0).as_deref(),
-            Some("scale=-2:'min(1080,ih)',format=yuv420p")
+            Some("scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,format=yuv420p")
         );
         o.info.fps = 30.51;
         assert_eq!(
             value_after(&build(&o), "-vf", 0).as_deref(),
-            Some("scale=-2:'min(1080,ih)',fps=30,format=yuv420p")
+            Some(
+                "scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,fps=30,format=yuv420p"
+            )
         );
     }
 
@@ -597,6 +667,58 @@ mod tests {
         assert_eq!(value_after(&args, "-c:v", 0).as_deref(), Some("h264_nvenc"));
         assert_eq!(value_after(&args, "-rc", 0).as_deref(), Some("cbr"));
         assert_eq!(value_after(&args, "-preset", 0).as_deref(), Some("p4"));
+        assert_eq!(value_after(&args, "-level", 0).as_deref(), Some("4.1"));
+    }
+
+    #[test]
+    fn a_converted_picture_is_deinterlaced_tonemapped_constant_and_tagged_bt709() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.info.interlaced = true;
+        o.info.hdr = true;
+        o.info.vfr = true;
+        o.info.fps = 29.97;
+        let args = build(&o);
+        assert_eq!(
+            value_after(&args, "-vf", 0),
+            Some(format!(
+                "{DEINTERLACE},{TONEMAP},scale=-2:'min(1080,ih)':out_color_matrix=bt709:\
+                 out_range=tv,fps=30000/1001,format=yuv420p"
+            ))
+        );
+        for (flag, value) in [
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-colorspace", "bt709"),
+            ("-color_range", "tv"),
+        ] {
+            assert_eq!(value_after(&args, flag, 0).as_deref(), Some(value));
+        }
+        // A copied picture keeps its own tags.
+        assert!(!build(&opts()).contains(&"-colorspace".to_string()));
+    }
+
+    #[test]
+    fn output_frame_rates_are_constant_and_at_most_30() {
+        assert_eq!(output_fps(23.98), "24000/1001");
+        assert_eq!(output_fps(29.97), "30000/1001");
+        assert_eq!(output_fps(25.0), "25");
+        assert_eq!(output_fps(0.0), "30");
+        assert_eq!(output_fps(59.94), "30");
+    }
+
+    #[test]
+    fn audio_follows_its_timestamps_and_an_out_point_limits_the_output() {
+        let mut o = opts();
+        let args = build(&o);
+        assert_eq!(value_after(&args, "-af", 0).as_deref(), Some(AUDIO_FILTER));
+        assert!(!args.contains(&"-t".to_string()));
+        o.duration_limit_s = Some(42.5);
+        let args = build(&o);
+        assert_eq!(value_after(&args, "-t", 0).as_deref(), Some("42.500"));
+        // An output option: after the inputs, before the output.
+        assert!(pos(&args, "-t") > pos(&args, "-i"));
+        assert!(pos(&args, "-t") < pos(&args, "-f"));
     }
 
     /// The forced key frames of a GPU encoder are plain I frames unless asked for IDR frames;
@@ -655,6 +777,10 @@ mod tests {
                 "h264_amf",
                 "-quality",
                 "speed",
+                "-profile:v",
+                "high",
+                "-level",
+                "4.1",
                 "-rc",
                 "cbr",
                 "-forced_idr",
