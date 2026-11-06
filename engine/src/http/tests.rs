@@ -4543,6 +4543,28 @@ async fn queue_tools_remove_a_viewer_or_everything_block_undo_and_play_next() {
     assert_eq!(r.json()["code"], "not_playable_next");
 }
 
+#[test]
+fn the_link_warning_compares_viewers_times_the_measured_bitrate_with_the_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("1.ts"), vec![0u8; 1_000_000]).unwrap();
+    std::fs::write(dir.path().join("2.ts"), vec![0u8; 3_000_000]).unwrap();
+    let playlist = "#EXTM3U\n#EXTINF:4.000,\n1.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:4.000,\n2.ts\n";
+    // 4 MB in 8 s: 4 Mbit/s; only the newest segment: 6 Mbit/s.
+    assert_eq!(
+        super::stream_bitrate(playlist, dir.path(), 5),
+        Some(4_000_000.0)
+    );
+    assert_eq!(
+        super::stream_bitrate(playlist, dir.path(), 1),
+        Some(6_000_000.0)
+    );
+    assert_eq!(super::stream_bitrate("#EXTM3U\n", dir.path(), 5), None);
+    assert_eq!(super::link_level(30.0, 0.0), "unknown");
+    assert_eq!(super::link_level(30.0, 40.0), "ok");
+    assert_eq!(super::link_level(33.0, 40.0), "warn");
+    assert_eq!(super::link_level(41.0, 40.0), "over");
+}
+
 #[tokio::test]
 async fn trim_and_schedule_set_in_out_points_and_a_start_time() {
     let mut h = Harness::new();

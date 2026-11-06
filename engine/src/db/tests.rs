@@ -427,6 +427,7 @@ fn settings_serialize_with_camel_case_keys() {
             "tickerMessages": [],
             "viewerLists": false,
             "viewerListMax": 10,
+            "uploadMbps": 0,
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -455,7 +456,8 @@ fn settings_serialize_with_camel_case_keys() {
             "tickerProgress",
             "tickerMessages",
             "viewerLists",
-            "viewerListMax"
+            "viewerListMax",
+            "uploadMbps"
         ]
     );
 }

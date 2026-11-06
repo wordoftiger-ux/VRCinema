@@ -1068,6 +1068,74 @@ pub(crate) fn air_json(state: &AppState, snapshot: &Snapshot) -> Value {
     })
 }
 
+/// Segments of the playlist the stream's bitrate is measured from.
+const BITRATE_SEGMENTS: usize = 5;
+/// Above this share of the upload the panel warns.
+const LINK_WARN_SHARE: f64 = 0.8;
+
+/// The stream's bitrate in bits per second, measured from the newest `n` segments of the
+/// playlist (their size on disk over their length); `None` while there are none.
+pub(crate) fn stream_bitrate(playlist: &str, dir: &std::path::Path, n: usize) -> Option<f64> {
+    let mut segments = Vec::new();
+    let mut duration = None;
+    for line in playlist.lines() {
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            duration = rest
+                .split(',')
+                .next()
+                .and_then(|d| d.trim().parse::<f64>().ok());
+        } else if !line.starts_with('#')
+            && !line.trim().is_empty()
+            && let Some(d) = duration.take()
+        {
+            segments.push((line.trim().to_string(), d));
+        }
+    }
+    let (mut bytes, mut seconds) = (0u64, 0.0);
+    for (name, d) in segments.iter().rev().take(n) {
+        // Only a plain file name of the playlist's folder.
+        let name = name.rsplit('/').next().unwrap_or(name);
+        if let Ok(meta) = std::fs::metadata(dir.join(name)) {
+            bytes += meta.len();
+            seconds += d;
+        }
+    }
+    (seconds > 0.0).then(|| bytes as f64 * 8.0 / seconds)
+}
+
+/// `ok`, `warn` (above 80 % of the upload), `over` (above the upload) or `unknown` (no upload
+/// speed given).
+pub(crate) fn link_level(needed_mbps: f64, upload_mbps: f64) -> &'static str {
+    if upload_mbps <= 0.0 {
+        "unknown"
+    } else if needed_mbps > upload_mbps {
+        "over"
+    } else if needed_mbps > upload_mbps * LINK_WARN_SHARE {
+        "warn"
+    } else {
+        "ok"
+    }
+}
+
+/// What the viewers take from the owner's link: viewers fetching segments, the stream's
+/// measured bitrate, what they need together, what is being sent and the upload given in
+/// the settings (Mbit/s). Never used to refuse anything.
+pub(crate) fn link_json(state: &AppState, snapshot: &Snapshot, upload_mbps: f64) -> Value {
+    let viewers = state.viewers.stats(std::time::Instant::now());
+    let stream_mbps =
+        stream_bitrate(&snapshot.playlist, &snapshot.live_dir, BITRATE_SEGMENTS).map(|b| b / 1e6);
+    let needed = stream_mbps.map(|s| s * viewers.watching as f64);
+    let round = |v: f64| (v * 10.0).round() / 10.0;
+    json!({
+        "viewers": viewers.watching,
+        "streamMbps": stream_mbps.map(|v| num_json(round(v))),
+        "neededMbps": needed.map(|v| num_json(round(v))),
+        "sendingMbps": num_json(round(viewers.bytes_per_s as f64 * 8.0 / 1e6)),
+        "uploadMbps": num_json(upload_mbps),
+        "level": link_level(needed.unwrap_or(0.0), upload_mbps),
+    })
+}
+
 // ---------- Router ----------
 
 pub fn build_router(state: AppState) -> Router {

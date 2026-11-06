@@ -119,6 +119,10 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     body.insert("control".into(), control_json(&snapshot.state));
     body.insert("air".into(), super::air_json(&state, &snapshot));
     body.insert(
+        "link".into(),
+        super::link_json(&state, &snapshot, settings.upload_mbps),
+    );
+    body.insert(
         "channelUrl".into(),
         json!(format!("{}/live/main.m3u8", ctx.base_url)),
     );
