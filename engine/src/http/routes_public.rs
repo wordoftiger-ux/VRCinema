@@ -95,6 +95,8 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
             "allowedDomains": settings.allowed_domains,
             "maxDurationS": num_json(settings.max_duration_s),
             "moderation": settings.moderation,
+            "viewerLists": settings.viewer_lists,
+            "viewerListMax": settings.viewer_list_max,
         }),
     );
     Ok(json_ok(&Value::Object(body)))

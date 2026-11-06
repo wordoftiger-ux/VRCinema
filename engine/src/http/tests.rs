@@ -932,7 +932,9 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
             "linkMode": "all",
             "allowedDomains": ["youtube.com", "youtu.be", "pixeldrain.com", "cda.pl"],
             "maxDurationS": 7200,
-            "moderation": false
+            "moderation": false,
+            "viewerLists": false,
+            "viewerListMax": 10
         })
     );
     let keys: Vec<&String> = body.as_object().unwrap().keys().collect();

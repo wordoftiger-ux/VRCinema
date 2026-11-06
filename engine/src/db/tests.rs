@@ -354,6 +354,8 @@ fn default_settings_match_spec() {
     assert_eq!(d.request_limit_window_s, 600);
     assert_eq!(d.max_active_per_requester, 5);
     assert!(!d.moderation);
+    assert!(!d.viewer_lists);
+    assert_eq!(d.viewer_list_max, 10);
     assert!(!d.force_transcode);
     assert!(d.discontinuity_tags);
     assert_eq!(d.slate_language, crate::i18n::Lang::En);
@@ -423,6 +425,8 @@ fn settings_serialize_with_camel_case_keys() {
             "tickerQr": "with_ticker",
             "tickerProgress": true,
             "tickerMessages": [],
+            "viewerLists": false,
+            "viewerListMax": 10,
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -449,7 +453,9 @@ fn settings_serialize_with_camel_case_keys() {
             "tickerShowAddress",
             "tickerQr",
             "tickerProgress",
-            "tickerMessages"
+            "tickerMessages",
+            "viewerLists",
+            "viewerListMax"
         ]
     );
 }
@@ -1262,4 +1268,18 @@ fn remove_where_takes_one_viewer_or_everything_and_restore_puts_it_back() {
         Some(device)
     );
     assert_eq!(Requester::of(&q.add(&item("x")).unwrap()), None);
+}
+
+#[test]
+fn viewer_list_settings_are_stored_and_the_size_is_kept_within_1_to_50() {
+    let conn = mem();
+    let s = SettingsRepo::new(&conn);
+    let patch = sanitize_settings_patch(&json!({"viewerLists": true, "viewerListMax": 99})).unwrap();
+    let got = s.update(MAIN_CHANNEL_ID, &patch).unwrap();
+    assert!(got.viewer_lists);
+    assert_eq!(got.viewer_list_max, 50);
+    let patch = sanitize_settings_patch(&json!({"viewerListMax": 0})).unwrap();
+    assert_eq!(s.update(MAIN_CHANNEL_ID, &patch).unwrap().viewer_list_max, 1);
+    assert!(sanitize_settings_patch(&json!({"viewerLists": "yes"})).is_err());
+    assert!(sanitize_settings_patch(&json!({"viewerListMax": -1})).is_err());
 }
