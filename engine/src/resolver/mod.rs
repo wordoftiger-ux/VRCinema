@@ -103,6 +103,18 @@ pub trait MediaResolver: Send + Sync {
     ) -> Option<Result<PathBuf, ResolveError>> {
         None
     }
+
+    /// Fetches the subtitles of `url` in `lang` (Settings → Advanced) into a file next to
+    /// `stem` and returns its path; `Some(Ok(None))`: the film has none in that language;
+    /// `None`: this resolver cannot (everything but yt-dlp).
+    async fn subtitles(
+        &self,
+        _url: &str,
+        _lang: &str,
+        _stem: &Path,
+    ) -> Option<Result<Option<PathBuf>, ResolveError>> {
+        None
+    }
 }
 
 /// Routes disk files (`local:` library files, `file:` absolute paths) to the file modules, pixeldrain hosts to their own module and
@@ -199,6 +211,15 @@ impl MediaResolver for CompositeResolver {
         stem: &Path,
     ) -> Option<Result<PathBuf, ResolveError>> {
         self.pick(url).ok()?.download_preview(url, stem).await
+    }
+
+    async fn subtitles(
+        &self,
+        url: &str,
+        lang: &str,
+        stem: &Path,
+    ) -> Option<Result<Option<PathBuf>, ResolveError>> {
+        self.pick(url).ok()?.subtitles(url, lang, stem).await
     }
 }
 

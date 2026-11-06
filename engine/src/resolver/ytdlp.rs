@@ -455,6 +455,25 @@ impl YtDlpResolver {
         self.argv(&mode, url)
     }
 
+    /// The arguments fetching the subtitles of `url` in `lang` into `<stem>.<lang>.<ext>`:
+    /// the film's own subtitles first, its automatic captions when it has none.
+    fn subtitles_argv(&self, url: &str, lang: &str, stem: &Path) -> Vec<OsString> {
+        let langs = format!("{lang},{lang}-.*");
+        let mode: Vec<OsString> = vec![
+            "--skip-download".into(),
+            "--no-playlist".into(),
+            "--write-subs".into(),
+            "--write-auto-subs".into(),
+            "--sub-langs".into(),
+            langs.into(),
+            "--sub-format".into(),
+            "vtt/srt/ass/best".into(),
+            "-o".into(),
+            output_template(stem),
+        ];
+        self.argv(&mode, url)
+    }
+
     async fn download_to(
         &self,
         url: &str,
@@ -582,6 +601,40 @@ impl MediaResolver for YtDlpResolver {
             .await,
         )
     }
+
+    async fn subtitles(
+        &self,
+        url: &str,
+        lang: &str,
+        stem: &Path,
+    ) -> Option<Result<Option<PathBuf>, ResolveError>> {
+        let args = self.subtitles_argv(url, lang, stem);
+        let out = match self.runner.run(&self.path, &args, SUBTITLES_TIMEOUT).await {
+            Ok(out) => out,
+            Err(e) => return Some(Err(process_error(e))),
+        };
+        if out.code != Some(0) {
+            return Some(Err(ytdlp_error_message(&out.stderr)));
+        }
+        Some(Ok(subtitle_file(&files_of(stem), lang)))
+    }
+}
+
+/// How long fetching a film's subtitles may take (the clip waits for it).
+pub const SUBTITLES_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The subtitle file among what yt-dlp wrote: the exact language before a variant
+/// (`en` before `en-GB`), a format libass reads.
+pub fn subtitle_file(files: &[PathBuf], lang: &str) -> Option<PathBuf> {
+    let readable = |p: &&PathBuf| {
+        p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            ["vtt", "srt", "ass", "ssa"].contains(&e.to_ascii_lowercase().as_str())
+        }) && std::fs::metadata(p).is_ok_and(|m| m.len() > 0)
+    };
+    let exact = format!(".{lang}.");
+    let mut found: Vec<&PathBuf> = files.iter().filter(readable).collect();
+    found.sort_by_key(|p| !p.to_string_lossy().contains(&exact));
+    found.first().map(|p| (*p).clone())
 }
 
 #[cfg(test)]
@@ -819,6 +872,34 @@ mod tests {
         )
         .with_runner(Box::new(runner));
         (r, calls)
+    }
+
+    #[tokio::test]
+    async fn subtitles_are_fetched_without_the_film_and_the_exact_language_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("12");
+        for (name, body) in [
+            ("12.en-GB.vtt", "WEBVTT"),
+            ("12.en.vtt", "WEBVTT"),
+            ("12.en.json", "{}"),
+            ("12.pl.vtt", ""),
+        ] {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let (r, calls) = resolver(ok(String::new()));
+        let got = r.subtitles("https://youtu.be/x", "en", &stem).await;
+        assert_eq!(got.unwrap().unwrap(), Some(dir.path().join("12.en.vtt")));
+        let args = calls.lock().unwrap()[0].1.clone();
+        let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+        assert!(args.contains(&"--skip-download".to_string()));
+        assert!(args.contains(&"--write-auto-subs".to_string()));
+        assert_eq!(at("--sub-langs"), "en,en-.*");
+        assert_eq!(args.last().unwrap(), "https://youtu.be/x");
+        assert_eq!(
+            subtitle_file(&[dir.path().join("12.pl.vtt")], "pl"),
+            None,
+            "empty"
+        );
     }
 
     #[tokio::test]

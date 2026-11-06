@@ -13,8 +13,12 @@ use crate::config::VideoEncoder;
 use crate::db::{AddedBy, ChannelSettings, ItemStatus, QueueItem, QueueRepo, SettingsRepo};
 use crate::i18n::{Lang, Msg};
 use crate::live::LiveValue;
+use crate::pipeline::advanced::AdvancedSettings;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
-use crate::pipeline::ffmpeg_args::{ClipArgsOptions, MAX_HEIGHT, ReadRate, build_clip_args};
+use crate::pipeline::ffmpeg_args::{
+    ClipArgsOptions, ClipExtras, MAX_HEIGHT, RateLimit, ReadRate, build_clip_args,
+    build_clip_args_ext, clip_fades,
+};
 use crate::pipeline::probe::{ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
@@ -134,7 +138,7 @@ pub fn clip_readrate(live: bool, ticker: bool, ahead: bool) -> Option<ReadRate> 
 /// Marks in ffmpeg's error output of the ticker's filters (ffmpeg names a filter of a graph
 /// `Parsed_<filter>_<n>`) and of the files they read: only such a failure starts the clip
 /// again without the ticker. Plain words ("movie", "font") would also match a film's file name.
-const TICKER_ERROR_MARKS: [&str; 8] = [
+const TICKER_ERROR_MARKS: [&str; 10] = [
     "[parsed_drawtext_",
     "[parsed_drawbox_",
     "[parsed_movie_",
@@ -143,7 +147,88 @@ const TICKER_ERROR_MARKS: [&str; 8] = [
     "'ticker.txt'",
     "'qr.txt'",
     "'qr.png'",
+    // The burned-in subtitles (Settings → Advanced) share the plain restart.
+    "[parsed_subtitles_",
+    "no such filter: 'subtitles'",
 ];
+
+/// Settings → Advanced for one clip of `clip_len_s` seconds (`None`: a live stream or an
+/// unknown end) starting at film second `start_at_s`, with the subtitle file `subtitles` in the
+/// clip folder.
+pub fn clip_extras(
+    adv: &AdvancedSettings,
+    clip_len_s: Option<f64>,
+    subtitles: Option<String>,
+    start_at_s: f64,
+) -> ClipExtras {
+    let (fade_in_s, fade_out) = if adv.transitions_enabled {
+        clip_fades(adv.transition_s, clip_len_s)
+    } else {
+        (None, None)
+    };
+    let rate = RateLimit::from_settings(adv.peak_mbps, adv.peak_buffer_s);
+    ClipExtras {
+        fade_in_s,
+        fade_out,
+        rate: (rate != RateLimit::default()).then_some(rate),
+        loudness_target: adv.loudness_enabled.then_some(adv.loudness_target),
+        subtitles: subtitles.map(|file| (file, start_at_s)),
+    }
+}
+
+/// The film's subtitles in `lang` copied into the clip folder as `subs.<ext>`; `None` (logged
+/// when it is not just a disk file): the film airs without them. Fetched once per film and
+/// language (`clips/_subs`, emptied at every start of the server), a film without any is
+/// remembered too.
+async fn fetch_subtitles(
+    d: &ClipFactoryDeps,
+    item: &QueueItem,
+    lang: &str,
+    out_dir: &Path,
+) -> Option<String> {
+    let cache = d.clips_dir.join("_subs");
+    std::fs::create_dir_all(&cache).ok()?;
+    let stem = cache.join(format!("{}-{lang}", item.id));
+    let none_mark = cache.join(format!("{}-{lang}.none", item.id));
+    if none_mark.exists() {
+        return None;
+    }
+    let log = |msg: Msg| {
+        if let Some(log) = &d.log {
+            log(msg);
+        }
+    };
+    let cached =
+        crate::resolver::ytdlp::subtitle_file(&crate::resolver::ytdlp::files_of(&stem), lang);
+    let file = match cached {
+        Some(file) => file,
+        None => match d.resolver.subtitles(&item.source_url, lang, &stem).await {
+            None => return None,
+            Some(Ok(Some(file))) => file,
+            Some(Ok(None)) => {
+                let _ = std::fs::write(&none_mark, b"");
+                log(Msg::new("log.subtitles_none")
+                    .arg("lang", lang)
+                    .arg("title", &item.title));
+                return None;
+            }
+            Some(Err(e)) => {
+                log(Msg::new("log.subtitles_failed")
+                    .arg("title", &item.title)
+                    .arg_msg("error", e.0));
+                return None;
+            }
+        },
+    };
+    let ext = file
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| "vtt".into());
+    let name = format!("subs.{ext}");
+    std::fs::create_dir_all(out_dir).ok()?;
+    std::fs::copy(&file, out_dir.join(&name)).ok()?;
+    Some(name)
+}
 
 /// ffmpeg's last error lines say the ticker's filters failed (not the source or the encoder).
 pub fn ticker_failure(stderr_tail: &[String]) -> bool {
@@ -260,9 +345,14 @@ impl RealClipHandle {
             .seg
             .error()
             .unwrap_or_else(|| Msg::new("item_errors.ffmpeg_stopped"));
+        let key = if self.ticker.is_some() {
+            "log.ticker_failed_plain"
+        } else {
+            "log.subtitles_failed_plain"
+        };
         self.stop_ticker();
         if let Some(log) = &self.log {
-            log(Msg::new("log.ticker_failed_plain")
+            log(Msg::new(key)
                 .arg("id", self.item_id)
                 .arg("title", &self.title)
                 .arg_msg("error", error));
@@ -1043,11 +1133,31 @@ async fn start_clip(
     } else {
         None
     };
-    let plain_mode = decide_video_mode(&info, settings.force_transcode);
+    // Settings → Advanced: subtitles (fetched now, cached per film), fades, peak, loudness.
+    let adv = &settings.advanced;
+    let subs = if adv.subtitles_enabled && !live {
+        fetch_subtitles(&d, &item, &adv.subtitles_language, &out_dir).await
+    } else {
+        None
+    };
+    let clip_len_s = item
+        .end_s(duration_s.or(item.duration_s))
+        .filter(|_| !live)
+        .map(|end| end - start_at_s);
+    let extras = clip_extras(adv, clip_len_s, subs.clone(), start_at_s);
+    // Fades are drawn on a converted picture, so they force the conversion like the ticker.
+    let plain_mode = decide_video_mode(&info, settings.force_transcode || adv.transitions_enabled);
     let mode = if ticker.is_some() {
         clip_video_mode(&info, &settings)
+    } else if subs.is_some() {
+        decide_video_mode(&info, true)
     } else {
         plain_mode
+    };
+    // Without the ticker and the subtitles (the fallback when ffmpeg cannot draw them).
+    let plain_extras = ClipExtras {
+        subtitles: None,
+        ..extras.clone()
     };
     if let Some(log) = &d.log {
         log(clip_start_line(&item, mode, &info, start_at_s));
@@ -1070,20 +1180,26 @@ async fn start_clip(
         Some(prepared) => {
             let plain_dir = PathBuf::from(format!("{}-plain", out_dir.display()));
             let fallback = PlainRestart {
-                args: build_clip_args(&ClipArgsOptions {
-                    mode: plain_mode,
-                    out_dir: plain_dir.clone(),
-                    readrate: clip_readrate(live, false, ahead),
-                    ..options.clone()
-                }),
+                args: build_clip_args_ext(
+                    &ClipArgsOptions {
+                        mode: plain_mode,
+                        out_dir: plain_dir.clone(),
+                        readrate: clip_readrate(live, false, ahead),
+                        ..options.clone()
+                    },
+                    &plain_extras,
+                ),
                 out_dir: plain_dir,
                 mode: plain_mode,
                 encoder,
             };
-            let args = build_clip_args(&ClipArgsOptions {
-                overlay: Some(prepared.overlay),
-                ..options
-            });
+            let args = build_clip_args_ext(
+                &ClipArgsOptions {
+                    overlay: Some(prepared.overlay),
+                    ..options
+                },
+                &extras,
+            );
             let seg = Arc::new(ClipSegmenter::start(
                 &d.ffmpeg_path,
                 args,
@@ -1107,9 +1223,28 @@ async fn start_clip(
             (seg, Some(run), Some(fallback))
         }
         None => {
-            let args = build_clip_args(&options);
-            let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), None);
-            (Arc::new(seg), None, None)
+            // Burned-in subtitles are read from ffmpeg's working folder (the clip folder),
+            // with a plain restart should ffmpeg fail to draw them.
+            let fallback = subs.as_ref().map(|_| {
+                let plain_dir = PathBuf::from(format!("{}-plain", out_dir.display()));
+                PlainRestart {
+                    args: build_clip_args_ext(
+                        &ClipArgsOptions {
+                            mode: plain_mode,
+                            out_dir: plain_dir.clone(),
+                            ..options.clone()
+                        },
+                        &plain_extras,
+                    ),
+                    out_dir: plain_dir,
+                    mode: plain_mode,
+                    encoder,
+                }
+            });
+            let args = build_clip_args_ext(&options, &extras);
+            let cwd = subs.as_ref().map(|_| out_dir.clone());
+            let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), cwd);
+            (Arc::new(seg), None, fallback)
         }
     };
     Ok(Box::new(RealClipHandle {
@@ -2671,6 +2806,35 @@ mod tests {
         assert!(!ticker_failure(&lines(&[
             "[https @ 0001] HTTP error 403 Forbidden"
         ])));
+        // A broken subtitle file or an ffmpeg without libass restarts the clip plainly too.
+        assert!(ticker_failure(&lines(&[
+            "[Parsed_subtitles_4 @ 0001] Unable to open subs.vtt"
+        ])));
+        assert!(ticker_failure(&lines(&[
+            "[AVFilterGraph @ 0001] No such filter: 'subtitles'"
+        ])));
+    }
+
+    #[test]
+    fn advanced_settings_become_the_extras_of_a_clip() {
+        let mut adv = AdvancedSettings::default();
+        assert_eq!(
+            clip_extras(&adv, Some(60.0), None, 0.0),
+            ClipExtras::default()
+        );
+        adv.transitions_enabled = true;
+        adv.transition_s = 1.5;
+        adv.loudness_enabled = true;
+        adv.peak_mbps = 3.0;
+        let x = clip_extras(&adv, Some(100.0), Some("subs.vtt".into()), 20.0);
+        assert_eq!(x.fade_in_s, Some(1.5));
+        assert_eq!(x.fade_out, Some((98.5, 1.5)));
+        assert_eq!(x.loudness_target, Some(-16));
+        assert_eq!(x.rate, Some(RateLimit::from_settings(3.0, 2.0)));
+        assert_eq!(x.subtitles, Some(("subs.vtt".into(), 20.0)));
+        // A live stream: only the fade-in.
+        let live = clip_extras(&adv, None, None, 0.0);
+        assert_eq!((live.fade_in_s, live.fade_out), (Some(1.5), None));
     }
 
     /// A handle as the factory makes it for a clip with the ticker (without its text task).
