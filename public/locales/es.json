@@ -333,6 +333,7 @@
   "log.named_remove_files_failed": "Enlace permanente: no se pudieron eliminar los archivos de {path}: {error}",
   "log.named_tunnel_exists": "Enlace permanente: el túnel {tunnel} ya existe en Cloudflare; se usará ese.",
   "log.named_tunnel_ready": "Enlace permanente: túnel {tunnel} ({id}), credenciales en {path}.",
+  "log.out_point_moved": "Video #{id} \"{title}\": el punto final ahora es posterior; el video se reinicia desde donde está.",
   "log.panel_open_failed": "No se pudo abrir el panel: {error}",
   "log.pause": "Pausa ({reason}): video #{id} \"{title}\" detenido en {seconds} s",
   "log.pause_armed": "Pausa solicitada en {seconds} s: el video #{id} \"{title}\" sigue desde {from} s hasta el final de ese segmento y luego se detiene",

@@ -331,6 +331,7 @@
   "log.named_remove_files_failed": "Dauerhafter Link: Die Dateien konnten nicht aus {path} entfernt werden: {error}",
   "log.named_tunnel_exists": "Dauerhafter Link: Der Tunnel {tunnel} existiert in Cloudflare bereits – er wird verwendet.",
   "log.named_tunnel_ready": "Dauerhafter Link: Tunnel {tunnel} ({id}), Zugangsdaten in {path}.",
+  "log.out_point_moved": "Video #{id} „{title}“: Das Ende liegt jetzt später; das Video startet erneut ab der aktuellen Stelle.",
   "log.panel_open_failed": "Das Panel konnte nicht geöffnet werden: {error}",
   "log.pause": "Pause ({reason}): Video #{id} „{title}“ angehalten bei {seconds} s",
   "log.pause_armed": "Pause bei {seconds} s angefordert: Video #{id} „{title}“ läuft ab {from} s bis zum Ende dieses Segments weiter und hält dann an",

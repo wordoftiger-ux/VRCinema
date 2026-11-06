@@ -331,6 +331,7 @@
   "log.named_remove_files_failed": "Permanent link: could not remove the files from {path}: {error}",
   "log.named_tunnel_exists": "Permanent link: the tunnel {tunnel} already exists in Cloudflare — using it.",
   "log.named_tunnel_ready": "Permanent link: tunnel {tunnel} ({id}), credentials in {path}.",
+  "log.out_point_moved": "Video #{id} \"{title}\": the end point is later now; the video starts again from where it is.",
   "log.panel_open_failed": "Could not open the panel: {error}",
   "log.pause": "Pause ({reason}): video #{id} \"{title}\" held at {seconds} s",
   "log.pause_armed": "Pause requested at {seconds} s: video #{id} \"{title}\" airs on from {from} s to the end of that segment, then pauses",

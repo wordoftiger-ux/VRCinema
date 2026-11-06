@@ -329,6 +329,7 @@
   "log.named_remove_files_failed": "固定リンク：{path}からファイルを削除できませんでした：{error}",
   "log.named_tunnel_exists": "固定リンク：トンネル{tunnel}はすでにCloudflareにあるため、それを使用します。",
   "log.named_tunnel_ready": "固定リンク：トンネル{tunnel}（{id}）、資格情報の場所：{path}。",
+  "log.out_point_moved": "動画#{id}「{title}」：終了位置が後ろに移動しました。現在の位置から再開します。",
   "log.panel_open_failed": "パネルを開けませんでした：{error}",
   "log.pause": "一時停止（{reason}）：動画#{id}「{title}」を{seconds}秒の位置で停止",
   "log.pause_armed": "{seconds}秒での一時停止を予約：動画#{id}「{title}」は{from}秒からそのセグメントの終わりまで放送を続けてから停止",

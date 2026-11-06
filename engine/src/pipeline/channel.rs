@@ -69,13 +69,14 @@ pub trait ClipFactory: Send + Sync {
         attempt: u32,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>>;
 
-    /// Like [`Self::create`] from the start, for the next film prepared ahead of its turn
-    /// (the current one still airs for up to a minute).
+    /// Like [`Self::create`] from `start_at_s` (the film's in point), for the next film
+    /// prepared ahead of its turn (the current one still airs for up to a minute).
     fn create_ahead(
         &self,
         item: QueueItem,
+        start_at_s: f64,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
-        self.create(item, 0.0, 0)
+        self.create(item, start_at_s, 0)
     }
 }
 
@@ -180,6 +181,9 @@ pub struct ControlState {
     /// The owner paused at a position the channel has not aired yet ([`Channel::pause_at`]):
     /// the film keeps airing up to the end of the segment holding it, then pauses there.
     pub pause_pending: bool,
+    /// The film's in and out points (film seconds), when set.
+    pub in_s: Option<f64>,
+    pub out_s: Option<f64>,
 }
 
 pub struct ChannelOptions {
@@ -239,6 +243,9 @@ const NEXT_GUARD: usize = 50;
 const SEEK_QUIET_MS: u64 = 700;
 /// A seek target this close to the end ends the film (like a skip).
 const SEEK_END_MARGIN_S: f64 = 1.0;
+/// A film whose position is this close to its out point has reached it (segment lengths are
+/// not exact to the millisecond).
+const OUT_POINT_SLACK_S: f64 = 0.05;
 
 // Why a film ended without playing to the end (kept with it in the history as a message, shown
 // in the reader's language).
@@ -277,6 +284,8 @@ struct ActiveClip {
     /// The retry of a film that failed while on air: viewers see the fallback slate until it
     /// produces again.
     recovering: bool,
+    /// The out point its process was started with (ffmpeg stops there).
+    started_out_s: Option<f64>,
 }
 
 /// What the clip's analysis found out about a film.
@@ -323,9 +332,25 @@ impl ActiveClip {
         }
     }
 
-    /// Seconds left until the end of the film; `None` for live streams and unknown durations.
+    /// Where the film ends: its out point, else its length (`None`: live or unknown).
+    fn end_s(&self) -> Option<f64> {
+        self.item.end_s(self.duration_s())
+    }
+
+    /// Seconds left until the end of the film (its out point); `None` for live streams and
+    /// unknown durations.
     fn remaining_s(&self) -> Option<f64> {
-        Some(self.duration_s()? - self.position_s())
+        Some(self.end_s()? - self.position_s())
+    }
+
+    /// The film has aired up to its out point (a point set or moved while it plays; a process
+    /// started with it stops there by itself).
+    fn past_out_point(&self) -> bool {
+        !self.item.is_live
+            && self
+                .item
+                .out_s
+                .is_some_and(|out| self.position_s() >= out - OUT_POINT_SLACK_S)
     }
 
     /// Accounts one aired segment of this clip.
@@ -427,6 +452,9 @@ struct PendingSeek {
     /// A new ticker look asked for it: no target of its own, the film starts again from where
     /// the channel is when it runs (and the log says why).
     ticker: bool,
+    /// A restart for a later out point ([`Channel::retrim_current`], already logged): the
+    /// ticker's line is not written.
+    quiet: bool,
 }
 
 /// A manual pause waiting for the film to reach `at_s` (see [`Channel::pause_at`]).
@@ -444,10 +472,10 @@ enum SeekRequest {
 }
 
 impl SeekRequest {
-    /// The target from `from_s`, never before the start; `None` when the request is not finite
-    /// or the film's length is unknown and the request is not a forward relative seek (or a
-    /// seek back to the start).
-    fn target(self, from_s: f64, duration_s: Option<f64>) -> Option<f64> {
+    /// The target from `from_s`, never before the film's start (its in point); `None` when the
+    /// request is not finite or the film's end is unknown and the request is not a forward
+    /// relative seek (or a seek back to the start).
+    fn target(self, from_s: f64, start_s: f64, end_s: Option<f64>) -> Option<f64> {
         let target = match self {
             Self::To(to) => to,
             Self::By(delta) => from_s + delta,
@@ -455,12 +483,12 @@ impl SeekRequest {
         if !target.is_finite() {
             return None;
         }
-        let allowed = duration_s.is_some()
+        let allowed = end_s.is_some()
             || match self {
-                Self::To(to) => to <= 0.0,
+                Self::To(to) => to <= start_s,
                 Self::By(delta) => delta >= 0.0,
             };
-        allowed.then_some(target.max(0.0))
+        allowed.then_some(target.max(start_s))
     }
 }
 
@@ -593,25 +621,72 @@ impl Channel {
     /// Called after queue changes (removal, reorder, approval).
     pub fn on_queue_changed(&mut self) -> anyhow::Result<()> {
         if let Some(id) = self.current.as_ref().map(|c| c.item.id) {
-            let fresh = self.queue(|q| q.get(id))?;
-            if fresh.is_none_or(|f| f.status != ItemStatus::Playing) {
-                self.drop_current();
+            match self
+                .queue(|q| q.get(id))?
+                .filter(|f| f.status == ItemStatus::Playing)
+            {
+                None => self.drop_current(),
+                Some(fresh) => self.retrim_current(&fresh),
             }
         }
         if let Some(id) = self.parked.as_ref().map(|p| p.item.id) {
-            let fresh = self.queue(|q| q.get(id))?;
-            if fresh.is_none_or(|f| f.status != ItemStatus::Playing) {
-                self.parked = None;
+            match self
+                .queue(|q| q.get(id))?
+                .filter(|f| f.status == ItemStatus::Playing)
+            {
+                None => self.parked = None,
+                Some(fresh) => {
+                    if let Some(p) = self.parked.as_mut() {
+                        p.item.in_s = fresh.in_s;
+                        p.item.out_s = fresh.out_s;
+                    }
+                }
             }
         }
-        if let Some(id) = self.prefetched.as_ref().map(|c| c.item.id) {
+        if let Some(prepared) = self.prefetched.as_ref().map(|c| c.item.clone()) {
             let channel_id = self.o.channel_id;
             let head = self.queue(|q| q.next_queued(channel_id))?;
-            if head.is_none_or(|h| h.id != id) {
+            // Another head, or new in/out points or start time: prepared again.
+            if head.is_none_or(|h| {
+                h.id != prepared.id
+                    || h.in_s != prepared.in_s
+                    || h.out_s != prepared.out_s
+                    || h.start_at != prepared.start_at
+            }) {
                 self.drop_prefetched();
             }
         }
         Ok(())
+    }
+
+    /// New in/out points of the film on air: a new out point counts at once (the channel ends
+    /// the film there); a later one than its process was started with (or none) starts the
+    /// film again from where it is, so ffmpeg does not stop at the old one. A new in point
+    /// counts from the film's next start.
+    fn retrim_current(&mut self, fresh: &QueueItem) {
+        let Some(c) = self.current.as_mut() else {
+            return;
+        };
+        if c.item.is_live || (c.item.in_s == fresh.in_s && c.item.out_s == fresh.out_s) {
+            return;
+        }
+        c.item.in_s = fresh.in_s;
+        c.item.out_s = fresh.out_s;
+        let extended = c
+            .started_out_s
+            .is_some_and(|old| fresh.out_s.is_none_or(|new| new > old + OUT_POINT_SLACK_S));
+        if extended && !c.is_starting() {
+            let (id, title) = (c.item.id, c.item.title.clone());
+            self.log(
+                Msg::new("log.out_point_moved")
+                    .arg("id", id)
+                    .arg("title", title),
+            );
+            self.request(SeekRequest::By(0.0), true);
+            if let Some(seek) = self.pending_seek.as_mut().filter(|s| s.ticker) {
+                seek.quiet = true;
+            }
+        }
     }
 
     /// What viewers see, `viewer_lag_segments` behind the newest published segment.
@@ -667,6 +742,8 @@ impl Channel {
                 seek_pending: false,
                 position_approx: p.probed.copies_video.unwrap_or(false),
                 pause_pending: false,
+                in_s: p.item.in_s,
+                out_s: p.item.out_s,
             };
         }
         let Some(c) = &self.current else {
@@ -678,7 +755,7 @@ impl Channel {
         let armed = self.armed_pause.as_ref().filter(|a| a.item_id == c.item.id);
         // A seek during a pending pause: where the film resumes, as for a parked film.
         let position_s = match pending.or(armed.and_then(|a| a.resume_at)) {
-            Some(target) => probed.duration_s.map_or(target, |d| target.min(d)),
+            Some(target) => c.end_s().map_or(target, |d| target.min(d)),
             None => c.position_s(),
         };
         ControlState {
@@ -691,6 +768,8 @@ impl Channel {
             seek_pending: pending.is_some(),
             position_approx: !live && probed.copies_video.unwrap_or(false),
             pause_pending: armed.is_some(),
+            in_s: c.item.in_s.filter(|_| !live),
+            out_s: c.item.out_s.filter(|_| !live),
         }
     }
 
@@ -731,12 +810,12 @@ impl Channel {
                 .current
                 .as_ref()
                 .filter(|c| !c.item.is_live)
-                .map(|c| (c.item.id, c.duration_s()));
-            if let (Some(armed), Some((id, duration_s))) = (self.armed_pause.as_mut(), film)
+                .map(|c| (c.item.id, c.item.start_s(), c.end_s()));
+            if let (Some(armed), Some((id, start_s, end_s))) = (self.armed_pause.as_mut(), film)
                 && armed.item_id == id
             {
                 let from = armed.resume_at.unwrap_or(armed.at_s);
-                match request.target(from, duration_s) {
+                match request.target(from, start_s, end_s) {
                     Some(target) => armed.resume_at = Some(target),
                     None => self.log(
                         Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")),
@@ -747,11 +826,12 @@ impl Channel {
             self.armed_pause = None;
         }
         if let Some(p) = &self.parked {
-            let Some(target) = request.target(p.position_s, p.probed.duration_s) else {
+            let end_s = p.item.end_s(p.probed.duration_s);
+            let Some(target) = request.target(p.position_s, p.item.start_s(), end_s) else {
                 self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
                 return;
             };
-            if ends_film(target, p.probed.duration_s) {
+            if ends_film(target, end_s) {
                 self.log(
                     Msg::new("log.seek_to_end_paused")
                         .arg("id", p.item.id)
@@ -772,7 +852,7 @@ impl Channel {
         let from = self
             .pending_seek_of(c.item.id)
             .unwrap_or_else(|| c.position_s());
-        let Some(target_s) = request.target(from, c.duration_s()) else {
+        let Some(target_s) = request.target(from, c.item.start_s(), c.end_s()) else {
             self.log(Msg::new("log.seek_not_allowed").arg("request", format!("{request:?}")));
             return;
         };
@@ -787,6 +867,7 @@ impl Channel {
             target_s,
             due_at: (self.now)().saturating_add(SEEK_QUIET_MS),
             ticker,
+            quiet: false,
         });
     }
 
@@ -974,14 +1055,14 @@ impl Channel {
         } else {
             seek.target_s
         };
-        if seek.ticker && ends_film(target_s, c.duration_s()) {
+        if seek.ticker && ends_film(target_s, c.end_s()) {
             // Not worth a restart: the film plays out with the old look. The next film,
             // prepared with the old look, is prepared again with the new one.
             self.current = Some(c);
             self.drop_prefetched();
             return Ok(());
         }
-        if ends_film(target_s, c.duration_s()) {
+        if ends_film(target_s, c.end_s()) {
             self.log(
                 Msg::new("log.seek_to_end")
                     .arg("id", c.item.id)
@@ -1001,18 +1082,20 @@ impl Channel {
             return self.handle_failure(error);
         }
         let mut off = Parked::off_air(c);
-        self.log(if seek.ticker {
-            Msg::new("log.ticker_applied")
-                .arg("id", off.item.id)
-                .arg("title", &off.item.title)
-                .arg("seconds", format!("{target_s:.0}"))
-        } else {
-            Msg::new("log.seek")
-                .arg("id", off.item.id)
-                .arg("title", &off.item.title)
-                .arg("from", format!("{:.0}", off.position_s))
-                .arg("to", format!("{target_s:.0}"))
-        });
+        if !seek.quiet {
+            self.log(if seek.ticker {
+                Msg::new("log.ticker_applied")
+                    .arg("id", off.item.id)
+                    .arg("title", &off.item.title)
+                    .arg("seconds", format!("{target_s:.0}"))
+            } else {
+                Msg::new("log.seek")
+                    .arg("id", off.item.id)
+                    .arg("title", &off.item.title)
+                    .arg("from", format!("{:.0}", off.position_s))
+                    .arg("to", format!("{target_s:.0}"))
+            });
+        }
         off.position_s = target_s;
         self.current = Some(self.relaunch(off));
         Ok(())
@@ -1117,7 +1200,7 @@ impl Channel {
                 .filter(|a| a.item_id == c.item.id)
                 .and_then(|a| a.resume_at));
         if let Some(target) = target
-            && ends_film(target, c.duration_s())
+            && ends_film(target, c.end_s())
         {
             let skipped = Msg::new(SKIPPED);
             if let Err(e) = self.finish(c, ItemStatus::Played, Some(&skipped)) {
@@ -1449,6 +1532,11 @@ impl Channel {
                 let fresh = handle.poll();
                 c.ready.extend(fresh);
             }
+            if c.past_out_point() {
+                // Aired up to its out point (set or moved while it plays).
+                self.finish_current(ItemStatus::Played, None)?;
+                continue;
+            }
 
             if let Some(seg) = c.ready.pop_front() {
                 let now = (self.now)();
@@ -1599,7 +1687,10 @@ impl Channel {
             };
             let mut clip = match self.prefetched.take() {
                 Some(clip) => clip,
-                None => self.launch(head.clone(), 0.0, 0),
+                None => {
+                    let start_at_s = head.start_s();
+                    self.launch(head.clone(), start_at_s, 0)
+                }
             };
             let id = head.id;
             let fresh = self.queue(|q| {
@@ -1648,8 +1739,9 @@ impl Channel {
 
     /// Starts the next film ahead of its turn (see [`ClipFactory::create_ahead`]).
     fn launch_ahead(&mut self, item: QueueItem) -> ActiveClip {
-        let start = self.o.factory.create_ahead(item.clone());
-        self.launch_with(item, 0.0, 0, start)
+        let start_at_s = item.start_s();
+        let start = self.o.factory.create_ahead(item.clone(), start_at_s);
+        self.launch_with(item, start_at_s, 0, start)
     }
 
     /// Starts the clip in a background task; the result arrives through `poll_launches`.
@@ -1684,6 +1776,7 @@ impl Channel {
             slow_logged: false,
             monitor_listed: VecDeque::new(),
             recovering: false,
+            started_out_s: item.out_s.filter(|_| !item.is_live),
         };
         let tx = self.launch_tx.clone();
         match tokio::runtime::Handle::try_current() {
@@ -2032,9 +2125,10 @@ mod tests {
         fn create_ahead(
             &self,
             item: QueueItem,
+            start_at_s: f64,
         ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
             self.lock().ahead.push(item.id);
-            self.create(item, 0.0, 0)
+            self.create(item, start_at_s, 0)
         }
 
         fn create(
@@ -4794,5 +4888,90 @@ mod tests {
         e.tick();
         let feed = e.channel.monitor_feed();
         assert!(feed.rows.is_empty() && feed.antenna_seq.is_none());
+    }
+
+    // ---------- In and out points ----------
+
+    fn trim(e: &Env, id: i64, in_s: Option<f64>, out_s: Option<f64>) {
+        let conn = e.db.lock().unwrap();
+        assert!(QueueRepo::new(&conn).set_trim(id, in_s, out_s).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_trimmed_film_starts_at_its_in_point_and_ends_at_its_out_point() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        trim(&e, a.id, Some(10.0), Some(30.0));
+        e.next();
+        e.flush().await;
+        assert_eq!(e.factory.calls()[0].start_at_s, 10.0);
+        let h = e.factory.handle(0);
+        h.produce(8);
+        // 10, 14, 18, 22, 26 (up to 30), then the out point ends it.
+        for _ in 0..5 {
+            assert_eq!(e.key(), clip_key(&a, 0));
+        }
+        assert_eq!(e.control().out_s, Some(30.0));
+        assert_eq!(e.key(), "idle");
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+    }
+
+    #[tokio::test]
+    async fn seeks_stay_inside_the_points_and_the_restart_goes_to_the_in_point() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        trim(&e, a.id, Some(10.0), Some(50.0));
+        e.air(&a, 2).await;
+        e.channel.seek_to(0.0);
+        assert_eq!(e.control().position_s, 10.0);
+        e.advance(SEEK_QUIET_MS);
+        e.tick();
+        assert_eq!(e.factory.calls()[1].start_at_s, 10.0);
+        e.flush().await;
+        // The last second before the out point ends the film like a skip.
+        e.channel.seek_to(49.5);
+        e.advance(SEEK_QUIET_MS);
+        e.tick();
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+    }
+
+    #[tokio::test]
+    async fn the_next_film_is_prepared_from_its_in_point_before_the_out_point() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        trim(&e, a.id, None, Some(70.0));
+        trim(&e, b.id, Some(5.0), None);
+        // 0..12 aired: 58 s left before the out point, within the minute of the prefetch.
+        e.air(&a, 3).await;
+        let ahead = e.factory.calls();
+        assert_eq!(ahead.len(), 2);
+        assert_eq!((ahead[1].item_id, ahead[1].start_at_s), (b.id, 5.0));
+        // A new in point of the prepared film prepares it again.
+        trim(&e, b.id, Some(6.0), None);
+        e.channel.on_queue_changed().unwrap();
+        assert_eq!(e.channel.prefetched_item_id(), None);
+    }
+
+    #[tokio::test]
+    async fn a_later_out_point_starts_the_film_again_where_it_is_an_earlier_one_ends_it() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        trim(&e, a.id, None, Some(30.0));
+        e.air(&a, 2).await;
+        trim(&e, a.id, None, Some(60.0));
+        e.channel.on_queue_changed().unwrap();
+        e.advance(SEEK_QUIET_MS);
+        e.tick();
+        assert_eq!(e.factory.calls()[1].start_at_s, 8.0);
+        e.flush().await;
+        let h = e.factory.handle(1);
+        h.produce(2);
+        assert_eq!(e.key(), relaunched_key(&a, 0, 1));
+        trim(&e, a.id, None, Some(12.0));
+        e.channel.on_queue_changed().unwrap();
+        assert_eq!(e.starts(), 2, "an earlier out point needs no new start");
+        assert_eq!(e.key(), "idle");
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
     }
 }

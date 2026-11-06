@@ -153,6 +153,13 @@ pub fn ticker_failure(stderr_tail: &[String]) -> bool {
     })
 }
 
+/// How long ffmpeg cuts a clip started at `start_at_s`: up to the film's out point (`None`: to
+/// the end, also for a live stream or a start at or past the out point).
+pub fn out_point_limit(item: &QueueItem, live: bool, start_at_s: f64) -> Option<f64> {
+    let out = item.out_s.filter(|_| !live)?;
+    (out > start_at_s).then_some(out - start_at_s)
+}
+
 /// Length of the film for the progress line: none for a live stream.
 pub fn progress_duration(live: bool, duration_s: Option<f64>) -> Option<f64> {
     if live { None } else { duration_s }
@@ -947,7 +954,8 @@ async fn start_clip(
                 item: &item,
                 settings: &settings,
                 info: &info,
-                duration_s: progress_duration(live, duration_s.or(item.duration_s)),
+                // The progress line ends at the out point.
+                duration_s: progress_duration(live, item.end_s(duration_s.or(item.duration_s))),
                 start_at_s,
                 out_dir: &out_dir,
             },
@@ -976,7 +984,7 @@ async fn start_clip(
         start_at_s,
         readrate: clip_readrate(live, ticker.is_some(), ahead),
         overlay: None,
-        duration_limit_s: None,
+        duration_limit_s: out_point_limit(&item, live, start_at_s),
     };
     let (seg, ticker, fallback) = match ticker {
         Some(prepared) => {
@@ -1064,8 +1072,9 @@ impl ClipFactory for RealClipFactory {
     fn create_ahead(
         &self,
         item: QueueItem,
+        start_at_s: f64,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
-        Box::pin(start_clip(self.clone(), item, 0.0, 0, true))
+        Box::pin(start_clip(self.clone(), item, start_at_s, 0, true))
     }
 }
 

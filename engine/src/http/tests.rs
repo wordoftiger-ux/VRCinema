@@ -2990,6 +2990,8 @@ fn film_control(duration_s: Option<f64>, is_live: bool) -> ControlState {
         seek_pending: false,
         position_approx: false,
         pause_pending: false,
+        in_s: None,
+        out_s: None,
     }
 }
 

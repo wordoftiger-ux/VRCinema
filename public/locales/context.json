@@ -325,6 +325,7 @@
   "log.named_remove_files_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text).",
   "log.named_tunnel_exists": "Log entry (Settings, Log tab; the log file on disk keeps the English text).",
   "log.named_tunnel_ready": "Log entry (Settings, Log tab; the log file on disk keeps the English text).",
+  "log.out_point_moved": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The owner moved the end point of the video on air to a later time; the video is restarted from where it was so it does not stop at the old end point.",
   "log.panel_open_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {error} is the system error.",
   "log.pause": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {reason} is a technical word (manual, tunnel, no-viewers), keep it.",
   "log.pause_armed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The owner paused at a moment of the Preview the viewers have not got yet: the video goes on to the end of the segment (a few seconds of video) holding {seconds}, then pauses. {from} is where the channel was.",

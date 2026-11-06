@@ -335,6 +335,7 @@
   "log.named_remove_files_failed": "Stały link: nie udało się usunąć plików z {path}: {error}",
   "log.named_tunnel_exists": "Stały link: tunel {tunnel} już istnieje w Cloudflare — używam go.",
   "log.named_tunnel_ready": "Stały link: tunel {tunnel} ({id}), poświadczenia w {path}.",
+  "log.out_point_moved": "Film #{id} „{title}”: koniec przesunięty dalej; film startuje ponownie od miejsca, w którym jest.",
   "log.panel_open_failed": "Nie udało się otworzyć panelu: {error}",
   "log.pause": "Pauza ({reason}): film #{id} „{title}” wstrzymany na {seconds} s",
   "log.pause_armed": "Wstrzymanie zamówione na {seconds} s: film #{id} \"{title}\" leci dalej od {from} s do końca tego segmentu, potem się zatrzyma",

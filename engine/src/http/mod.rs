@@ -1044,6 +1044,8 @@ pub(crate) fn control_json(state: &ChannelState) -> Value {
         "seekPending": c.seek_pending,
         "positionApprox": c.position_approx,
         "pausePending": c.pause_pending,
+        "inS": opt_num_json(c.in_s),
+        "outS": opt_num_json(c.out_s),
         "paused": state.paused,
         "pauseReasons": state.pause_reasons.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
     })

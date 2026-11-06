@@ -333,6 +333,7 @@
   "log.named_remove_files_failed": "Lien permanent : impossible de supprimer les fichiers de {path} : {error}",
   "log.named_tunnel_exists": "Lien permanent : le tunnel {tunnel} existe déjà dans Cloudflare ; il est réutilisé.",
   "log.named_tunnel_ready": "Lien permanent : tunnel {tunnel} ({id}), identifiants dans {path}.",
+  "log.out_point_moved": "Vidéo #{id} \"{title}\" : la fin est maintenant plus tard ; la vidéo reprend là où elle est.",
   "log.panel_open_failed": "Impossible d’ouvrir le panneau : {error}",
   "log.pause": "Pause ({reason}) : vidéo #{id} \"{title}\" arrêtée à {seconds} s",
   "log.pause_armed": "Pause demandée à {seconds} s : la vidéo #{id} \"{title}\" continue de {from} s jusqu’à la fin de ce segment, puis s’arrête",
