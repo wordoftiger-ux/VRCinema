@@ -3,9 +3,11 @@
 // while the tunnel is off). Choosing the cookies file stays in the window (the file dialog opens
 // on the computer); a remote panel can clear it and set the key. The pixeldrain key is
 // write-only: the engine only says whether one is saved; a new one replaces it, "Remove"
-// clears it.
+// clears it. Below them the broadcast options (transitions, peak limit, subtitles, loudness,
+// alarms, journal: `broadcast-options.js`).
 
 import { useState } from '/static/vendor/hooks.mjs';
+import { BroadcastOptions } from './broadcast-options.js';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
@@ -61,5 +63,6 @@ export function Advanced() {
         </form>
       <//>
       <${Note} note=${note} />
+      <${BroadcastOptions} />
     </div>`;
 }

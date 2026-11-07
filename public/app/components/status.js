@@ -74,6 +74,10 @@ export function notices({ i, env, tun, managed, link = null }) {
     );
   }
   if (src.tickerSlow) add('ticker_slow', '', t('banner.ticker_slow'), '#/settings/channel', 'banner.go_ticker');
+  // Alarms of Settings → Advanced (black picture, silence on air).
+  const settingsLink = managed ? '#/settings/advanced' : null;
+  if (src.alarms?.black) add('alarm_black', '', t('banner.alarm_black'), settingsLink, 'banner.go_advanced', 'err');
+  if (src.alarms?.silence) add('alarm_silence', '', t('banner.alarm_silence'), settingsLink, 'banner.go_advanced', 'err');
   if (i?.update?.version) {
     add('update', i.update.version, t('banner.update', { version: i.update.version }), '#/settings/about', 'banner.go_update', 'info');
   }
