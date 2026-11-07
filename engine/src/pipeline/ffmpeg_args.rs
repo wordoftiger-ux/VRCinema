@@ -291,7 +291,7 @@ pub struct ClipExtras {
 /// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
 /// fade-out when the end is known; nothing when the clip is shorter than three fades.
 pub fn clip_fades(fade_s: f64, length_s: Option<f64>) -> (Option<f64>, Option<(f64, f64)>) {
-    if !(fade_s > 0.0) {
+    if fade_s.is_nan() || fade_s <= 0.0 {
         return (None, None);
     }
     match length_s {

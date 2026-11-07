@@ -359,13 +359,11 @@ async fn analyse_loop(
         }
         let before = board.get();
         let now = runs.feed(duration, parse_findings(&out.stderr, duration), &adv);
-        if now.black && !before.black {
-            if let Some(log) = &log {
+        if let Some(log) = &log {
+            if now.black && !before.black {
                 log(Msg::new("log.alarm_black").arg("seconds", runs.black_s.round() as i64));
             }
-        }
-        if now.silence && !before.silence {
-            if let Some(log) = &log {
+            if now.silence && !before.silence {
                 log(Msg::new("log.alarm_silence").arg("seconds", runs.silence_s.round() as i64));
             }
         }
