@@ -1089,8 +1089,8 @@ pub(crate) fn air_json(state: &AppState, snapshot: &Snapshot) -> Value {
     })
 }
 
-/// Segments of the playlist the stream's bitrate is measured from.
-const BITRATE_SEGMENTS: usize = 5;
+/// Segments of the playlist the stream's bitrate is measured from (the newest 20 s).
+const BITRATE_SEGMENTS: usize = crate::pipeline::segments_for(20);
 /// Above this share of the upload the panel warns.
 const LINK_WARN_SHARE: f64 = 0.8;
 

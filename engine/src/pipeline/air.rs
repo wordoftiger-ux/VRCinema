@@ -22,8 +22,18 @@ pub const SEEN_WINDOW: Duration = Duration::from_secs(30);
 pub const KEEP_S: f64 = 180.0;
 /// Addresses remembered at once.
 const MAX_VIEWERS: usize = 4096;
-/// A request further ahead than this many segments is a new join (the player jumped).
-const JUMP_SEGMENTS: u64 = 3;
+/// A request further ahead than this many seconds of segments is a new join (the player
+/// jumped); counted in seconds so it does not depend on the segment length.
+const JUMP_S: f64 = 12.0;
+
+/// [`JUMP_S`] in segments of `segment_s` seconds (at least 1).
+fn jump_segments(segment_s: f64) -> u64 {
+    if segment_s.is_finite() && segment_s > 0.0 {
+        ((JUMP_S / segment_s).ceil() as u64).max(1)
+    } else {
+        1
+    }
+}
 
 /// One published segment of the stream.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +59,7 @@ pub struct AirTimeline {
     pub edge_at: Option<Instant>,
     /// Where HLS players start behind the edge (seconds).
     pub nominal_latency_s: f64,
-    /// The playlist's target duration (the segment length).
+    /// The segment length (seconds; the playlist's target duration may be longer).
     pub segment_s: f64,
 }
 
@@ -153,7 +163,7 @@ impl AirViewers {
             Some(s) => {
                 now.saturating_duration_since(s.last_at) > SEEN_WINDOW
                     || seq < s.last_seq
-                    || seq > s.last_seq + JUMP_SEGMENTS
+                    || seq > s.last_seq + jump_segments(timeline.segment_s)
             }
         };
         if joined {
@@ -298,6 +308,21 @@ mod tests {
             v.latencies(now + SEEN_WINDOW + Duration::from_secs(5))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn with_one_second_segments_a_jump_is_still_twelve_seconds() {
+        assert_eq!(jump_segments(4.0), 3);
+        assert_eq!(jump_segments(1.0), 12);
+        let now = Instant::now();
+        let tl = timeline(1.0, now);
+        let v = AirViewers::default();
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        // Joins at seq 10 (0 s) with the edge at 10 s.
+        v.record(ip, 10, &tl, now);
+        // Nine one-second segments further (a burst of buffering) is no jump.
+        v.record(ip, 19, &tl, now + Duration::from_secs(1));
+        assert_eq!(v.latencies(now + Duration::from_secs(1)), vec![10.0]);
     }
 
     #[test]

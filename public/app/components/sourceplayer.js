@@ -38,10 +38,10 @@ const PLAY_NOW_MS = 8000;
 const DRIFT_S = 20;
 const TICK_MS = 500;
 
-/** The channel's segment length (seconds), from the air clock; 4 s until it is known. */
+/** The channel's segment length (seconds), from the air clock; 1 s (the engine's SEGMENT_S) until it is known. */
 function segmentS() {
   const s = channel.peek()?.air?.segmentS;
-  return Number.isFinite(s) && s > 0 ? s : 4;
+  return Number.isFinite(s) && s > 0 ? s : 1;
 }
 
 /**

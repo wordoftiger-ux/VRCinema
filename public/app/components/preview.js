@@ -34,7 +34,7 @@ import {
  */
 function latencyTolerance() {
   const seg = channel.peek()?.air?.segmentS;
-  return Math.max(1.5, Number.isFinite(seg) ? seg / 2 : 2);
+  return Math.max(1.5, Number.isFinite(seg) ? seg / 2 : 0.5);
 }
 const OFF_MEASURES = 3;
 

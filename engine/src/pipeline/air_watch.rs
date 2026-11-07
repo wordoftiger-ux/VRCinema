@@ -31,8 +31,9 @@ pub type SharedLog = Arc<dyn Fn(Msg) + Send + Sync>;
 const COVERED: f64 = 0.9;
 /// Longest analysis of one segment.
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(20);
-/// Segments waiting for analysis at most (more are skipped: the computer is behind).
-const QUEUE: usize = 4;
+/// Segments waiting for analysis at most, 16 s of them (more are skipped: the computer is
+/// behind).
+const QUEUE: usize = crate::pipeline::segments_for(16);
 /// How often the settings are read again.
 const SETTINGS_EVERY: Duration = Duration::from_secs(2);
 

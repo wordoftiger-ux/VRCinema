@@ -133,7 +133,9 @@ pub trait ChannelControl: SegmentSource + Send {
     fn air_segments(&self) -> Vec<AirSegment> {
         Vec::new()
     }
-    /// How many segments viewers lag behind the newest one (where HLS players start).
+    /// How many segments viewers lag behind the newest one (where HLS players start). The
+    /// default is for the test doubles, which cut 4 s segments (12 s); the real channel's is
+    /// [`crate::pipeline::VIEWER_LAG_SEGMENTS`].
     fn viewer_lag_segments(&self) -> usize {
         3
     }
@@ -653,9 +655,11 @@ impl<C: ChannelControl> Core<C> {
                 segments: self.channel.air_segments(),
                 edge_s: self.broadcaster.channel_time(),
                 edge_at: self.broadcaster.edge_at(),
+                // In segments of their real length (1 s), not the announced target duration
+                // (4 s): 12 segments are the viewers' 12 s.
                 nominal_latency_s: self.channel.viewer_lag_segments() as f64
-                    * self.broadcaster.target_duration(),
-                segment_s: self.broadcaster.target_duration(),
+                    * self.broadcaster.segment_seconds(),
+                segment_s: self.broadcaster.segment_seconds(),
             }),
         }
     }

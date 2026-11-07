@@ -1618,6 +1618,7 @@ mod tests {
             has_audio,
             duration_s: Some(60.0),
             portrait: false,
+            keyframe_gap_s: Some(1.0),
             ..VideoInfo::default()
         }
     }
@@ -2337,7 +2338,7 @@ mod tests {
             "-pix_fmt",
             "yuv420p",
             "-g",
-            "50",
+            "25",
         ]
         .iter()
         .map(OsString::from)

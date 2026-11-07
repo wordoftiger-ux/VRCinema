@@ -6,7 +6,7 @@
 // The segment monitor: the newest clip
 // segments the engine has (/api/desktop/monitor.m3u8, the window only), played with hls.js in
 // real time, muted by default. After a seek, "play now", "from the beginning" or a skip the
-// picture changes as soon as ffmpeg wrote the first segment of the new clip (2–4 s), not after
+// picture changes as soon as ffmpeg wrote the first segment of the new clip (1–2 s), not after
 // the viewers' delay. "Sync with on-air" (key S) shows what the viewers see now.
 //
 // The list is read here once a second, one read at a time; a new clip in it starts the player
