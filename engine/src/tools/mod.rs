@@ -4,6 +4,7 @@
 pub mod download;
 pub mod encoder;
 pub mod install;
+pub mod platform;
 #[cfg(test)]
 pub(crate) mod test_server;
 
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 
 pub use encoder::detect_encoder;
+pub use platform::Platform;
 
 use crate::i18n::{Msg, MsgContext, error_msg, msg_error};
 use crate::process::run_process;
@@ -48,13 +50,23 @@ impl Tool {
         }
     }
 
-    /// The executable that must exist for the tool to count as installed.
+    /// The executable that must exist for the tool to count as installed (on this system).
     pub fn exe(self) -> &'static str {
-        match self {
-            Tool::YtDlp => "yt-dlp.exe",
-            Tool::Ffmpeg => "ffmpeg.exe",
-            Tool::Deno => "deno.exe",
-            Tool::Cloudflared => "cloudflared.exe",
+        self.exe_for(Platform::current())
+    }
+
+    /// [Tool::exe] on platform: yt-dlp.exe on Windows, yt-dlp elsewhere.
+    pub fn exe_for(self, platform: Platform) -> &'static str {
+        let windows = platform.exe_suffix() == ".exe";
+        match (self, windows) {
+            (Tool::YtDlp, true) => "yt-dlp.exe",
+            (Tool::YtDlp, false) => "yt-dlp",
+            (Tool::Ffmpeg, true) => "ffmpeg.exe",
+            (Tool::Ffmpeg, false) => "ffmpeg",
+            (Tool::Deno, true) => "deno.exe",
+            (Tool::Deno, false) => "deno",
+            (Tool::Cloudflared, true) => "cloudflared.exe",
+            (Tool::Cloudflared, false) => "cloudflared",
         }
     }
 
@@ -113,34 +125,27 @@ struct Download {
 }
 
 impl ToolSources {
-    fn download(&self, tool: Tool) -> Download {
-        let (base, file, sums) = match tool {
-            Tool::Cloudflared => {
-                let file = "cloudflared-windows-amd64.exe";
-                return Download {
-                    file,
-                    url: format!("{}/{file}", self.cloudflared_base.trim_end_matches('/')),
-                    sums: Sums::ReleaseNotes(self.cloudflared_release_api.clone()),
-                };
-            }
-            Tool::YtDlp => (&self.ytdlp_base, "yt-dlp.exe", "SHA2-256SUMS"),
-            Tool::Ffmpeg => (
-                &self.ffmpeg_base,
-                "ffmpeg-master-latest-win64-gpl-shared.zip",
-                "checksums.sha256",
-            ),
-            Tool::Deno => (
-                &self.deno_base,
-                "deno-x86_64-pc-windows-msvc.zip",
-                "deno-x86_64-pc-windows-msvc.zip.sha256sum",
-            ),
-        };
-        let base = base.trim_end_matches('/');
-        Download {
-            file,
-            url: format!("{base}/{file}"),
-            sums: Sums::File(format!("{base}/{sums}")),
+    /// What to download for `tool` on `platform`; `None`: nothing is published for it.
+    fn download(&self, tool: Tool, platform: Platform) -> Option<Download> {
+        let asset = platform.asset(tool)?;
+        let base = match tool {
+            Tool::YtDlp => &self.ytdlp_base,
+            Tool::Ffmpeg => &self.ffmpeg_base,
+            Tool::Deno => &self.deno_base,
+            Tool::Cloudflared => &self.cloudflared_base,
         }
+        .trim_end_matches('/');
+        let sums = match asset.sums {
+            platform::SumsSource::File(name) => Sums::File(format!("{base}/{name}")),
+            platform::SumsSource::ReleaseNotes => {
+                Sums::ReleaseNotes(self.cloudflared_release_api.clone())
+            }
+        };
+        Some(Download {
+            file: asset.file,
+            url: format!("{base}/{}", asset.file),
+            sums,
+        })
     }
 }
 
@@ -190,6 +195,8 @@ pub struct ToolsManager {
     busy: Mutex<()>,
     /// Where notes go (desktop app: its log); stderr by default.
     log: crate::pipeline::clip_factory::SharedLogFn,
+    /// Whose programs are installed (this system's; tests pick one).
+    platform: Platform,
 }
 
 impl ToolsManager {
@@ -209,6 +216,7 @@ impl ToolsManager {
             progress,
             busy: Mutex::new(()),
             log: std::sync::Arc::new(|m: Msg| eprintln!("{m}")),
+            platform: Platform::current(),
         }
     }
 
@@ -216,6 +224,17 @@ impl ToolsManager {
     pub fn with_log(mut self, log: crate::pipeline::clip_factory::SharedLogFn) -> Self {
         self.log = log;
         self
+    }
+
+    /// Installs the programs of `platform` instead of this system's (tests).
+    pub fn with_platform(mut self, platform: Platform) -> Self {
+        self.platform = platform;
+        self
+    }
+
+    /// Where `tool`'s program is (or will be) installed.
+    pub fn exe_path(&self, tool: Tool) -> PathBuf {
+        self.tools_dir.join(tool.exe_for(self.platform))
     }
 
     pub fn tools_dir(&self) -> &Path {
@@ -270,13 +289,16 @@ impl ToolsManager {
         let has = |name: &str| self.tools_dir.join(name).is_file();
         match tool {
             Tool::Ffmpeg => {
-                has("ffmpeg.exe") && has("ffprobe.exe") && self.has_dll_with_prefix("avcodec")
+                let ffprobe = format!("ffprobe{}", self.platform.exe_suffix());
+                has(tool.exe_for(self.platform))
+                    && has(&ffprobe)
+                    && (!self.platform.shared_ffmpeg() || self.has_dll_with_prefix("avcodec"))
             }
-            _ => has(tool.exe()),
+            _ => has(tool.exe_for(self.platform)),
         }
     }
 
-    /// The shared ffmpeg build is useless without its DLLs.
+    /// The shared ffmpeg build (Windows) is useless without its DLLs.
     fn has_dll_with_prefix(&self, prefix: &str) -> bool {
         fs::read_dir(&self.tools_dir).is_ok_and(|rd| {
             rd.flatten().any(|e| {
@@ -316,7 +338,13 @@ impl ToolsManager {
     }
 
     async fn install_one(&self, tool: Tool) -> Result<()> {
-        let source = self.sources.download(tool);
+        let source = self.sources.download(tool, self.platform).ok_or_else(|| {
+            msg_error(
+                Msg::error("tools_unsupported_platform")
+                    .arg("tool", tool.name())
+                    .arg("platform", self.platform),
+            )
+        })?;
         let download_dir = self.tools_dir.join(DOWNLOAD_DIR);
         fs::create_dir_all(&download_dir)
             .msg_context(Msg::error("cannot_create_dir").arg("path", download_dir.display()))?;
@@ -391,8 +419,9 @@ impl ToolsManager {
         fs::rename(&part, &complete)?;
         let tools_dir = self.tools_dir.clone();
         let file = complete.clone();
+        let platform = self.platform;
         let installed = tokio::task::spawn_blocking(move || {
-            install::install_downloaded(tool, &file, &tools_dir)
+            install::install_downloaded(tool, &file, &tools_dir, platform)
         })
         .await?;
         let _ = fs::remove_file(&complete);
@@ -407,7 +436,7 @@ impl ToolsManager {
     /// First line of the tool's version output, or `unknown` if it cannot be run.
     async fn query_version(&self, tool: Tool) -> String {
         let args: Vec<OsString> = tool.version_args().iter().map(OsString::from).collect();
-        let exe = self.tools_dir.join(tool.exe());
+        let exe = self.exe_path(tool);
         match run_process(&exe, &args, VERSION_TIMEOUT).await {
             Ok(out) if out.code == Some(0) => out
                 .stdout
@@ -551,6 +580,7 @@ mod tests {
 
         fn manager(&self) -> ToolsManager {
             ToolsManager::with_sources(self.tools.clone(), reqwest::Client::new(), self.sources())
+                .with_platform(Platform::WINDOWS_X64)
         }
 
         /// A manager whose notes are collected in the returned list.
@@ -569,7 +599,7 @@ mod tests {
     #[test]
     fn default_sources_point_at_the_real_publishers() {
         let s = ToolSources::default();
-        let yt = s.download(Tool::YtDlp);
+        let yt = s.download(Tool::YtDlp, Platform::WINDOWS_X64).unwrap();
         assert_eq!(
             yt.url,
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
@@ -578,13 +608,13 @@ mod tests {
             &yt.sums,
             Sums::File(u) if u == "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
         ));
-        let ff = s.download(Tool::Ffmpeg);
+        let ff = s.download(Tool::Ffmpeg, Platform::WINDOWS_X64).unwrap();
         assert_eq!(
             ff.url,
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
         );
         assert!(matches!(&ff.sums, Sums::File(u) if u.ends_with("/latest/checksums.sha256")));
-        let dn = s.download(Tool::Deno);
+        let dn = s.download(Tool::Deno, Platform::WINDOWS_X64).unwrap();
         assert_eq!(
             dn.url,
             "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
@@ -593,7 +623,9 @@ mod tests {
             &dn.sums,
             Sums::File(u) if u.ends_with("deno-x86_64-pc-windows-msvc.zip.sha256sum")
         ));
-        let cf = s.download(Tool::Cloudflared);
+        let cf = s
+            .download(Tool::Cloudflared, Platform::WINDOWS_X64)
+            .unwrap();
         assert_eq!(
             cf.url,
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
@@ -792,7 +824,8 @@ mod tests {
                 deno_base: format!("{}/dn-nosums", server.base),
                 ..f.sources()
             },
-        );
+        )
+        .with_platform(Platform::WINDOWS_X64);
         server.put(
             "dn-nosums/deno-x86_64-pc-windows-msvc.zip",
             f.deno_zip.clone(),
@@ -1001,6 +1034,7 @@ mod tests {
                 ..f.sources()
             },
         )
+        .with_platform(Platform::WINDOWS_X64)
         .with_log(std::sync::Arc::new(|_: Msg| {}));
         m.update(Tool::Cloudflared).await.unwrap();
         assert!(f.tools.join("cloudflared.exe").is_file());

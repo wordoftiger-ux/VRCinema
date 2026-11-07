@@ -6,22 +6,31 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::Tool;
+use super::{Platform, Tool};
 use crate::i18n::{Msg, MsgContext, msg_error};
-use crate::setup::{extract_zip, find_file};
+use crate::setup::{extract_tar_xz, extract_zip, find_file, make_executable};
 
 const STAGE_PREFIX: &str = ".install-";
 const BACKUP_DIR: &str = ".backup";
 
-/// Installs the downloaded `file` (the bare exe for yt-dlp and cloudflared, the zip for ffmpeg and Deno) into
-/// `tools_dir`. Everything is first extracted into a temporary folder inside `tools_dir`;
-/// only a complete, valid result is moved into place (with rollback if a move fails).
-pub fn install_downloaded(tool: Tool, file: &Path, tools_dir: &Path) -> Result<()> {
+/// Installs the downloaded `file` (the bare program for yt-dlp and cloudflared, the archive for
+/// ffmpeg and Deno) of `platform` into `tools_dir`. Everything is first extracted into a
+/// temporary folder inside `tools_dir`; only a complete, valid result is moved into place (with
+/// rollback if a move fails). On unix the programs are made executable.
+pub fn install_downloaded(
+    tool: Tool,
+    file: &Path,
+    tools_dir: &Path,
+    platform: Platform,
+) -> Result<()> {
     let stage = tools_dir.join(format!("{STAGE_PREFIX}{}", tool.name()));
     let _ = fs::remove_dir_all(&stage);
     fs::create_dir_all(&stage)?;
     let result = (|| {
-        let items = stage_files(tool, file, &stage, tools_dir)?;
+        let items = stage_files(tool, file, &stage, tools_dir, platform)?;
+        for (staged, _) in &items {
+            make_executable(staged)?;
+        }
         swap_in(&items, tools_dir)
     })();
     let _ = fs::remove_dir_all(&stage);
@@ -39,27 +48,43 @@ fn stage_files(
     file: &Path,
     stage: &Path,
     tools_dir: &Path,
+    platform: Platform,
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let exe = tool.exe_for(platform);
     match tool {
         // Single executables (no archive): the download is the program.
         Tool::YtDlp | Tool::Cloudflared => {
-            let exe = tool.exe();
             let staged = stage.join(exe);
             fs::rename(file, &staged).or_else(|_| fs::copy(file, &staged).map(|_| ()))?;
             Ok(vec![(staged, tools_dir.join(exe))])
         }
         Tool::Deno => {
             extract_zip(file, stage).msg_context(Msg::error("deno_unpack_failed"))?;
-            let exe = find_file(stage, "deno.exe").ok_or_else(|| archive_lacks("deno.exe"))?;
-            Ok(vec![(exe, tools_dir.join("deno.exe"))])
+            let found = find_file(stage, exe).ok_or_else(|| archive_lacks(exe))?;
+            Ok(vec![(found, tools_dir.join(exe))])
         }
         Tool::Ffmpeg => {
-            extract_zip(file, stage).msg_context(Msg::error("ffmpeg_unpack_failed"))?;
-            let ffmpeg =
-                find_file(stage, "ffmpeg.exe").ok_or_else(|| archive_lacks("ffmpeg.exe"))?;
+            let is_zip = file
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().ends_with(".zip"));
+            if is_zip {
+                extract_zip(file, stage)
+            } else {
+                extract_tar_xz(file, stage)
+            }
+            .msg_context(Msg::error("ffmpeg_unpack_failed"))?;
+            let ffmpeg = find_file(stage, exe).ok_or_else(|| archive_lacks(exe))?;
             let bin = ffmpeg.parent().expect("file has a parent");
-            if !bin.join("ffprobe.exe").is_file() {
-                return Err(archive_lacks("ffprobe.exe"));
+            let ffprobe = format!("ffprobe{}", platform.exe_suffix());
+            if !bin.join(&ffprobe).is_file() {
+                return Err(archive_lacks(&ffprobe));
+            }
+            if !platform.shared_ffmpeg() {
+                // A static build: the two programs are all it needs.
+                return Ok(vec![
+                    (ffmpeg.clone(), tools_dir.join(exe)),
+                    (bin.join(&ffprobe), tools_dir.join(&ffprobe)),
+                ]);
             }
             // The shared build needs its DLLs next to the exes: take the whole `bin` folder.
             let mut items = Vec::new();
@@ -159,6 +184,8 @@ mod tests {
     use super::*;
     use crate::tools::test_server::build_zip;
 
+    const WIN: Platform = Platform::WINDOWS_X64;
+
     fn dir_names(dir: &Path) -> Vec<String> {
         let mut v: Vec<_> = fs::read_dir(dir)
             .unwrap()
@@ -206,7 +233,7 @@ mod tests {
         )
         .unwrap();
 
-        install_downloaded(Tool::Ffmpeg, &zip, &tools).unwrap();
+        install_downloaded(Tool::Ffmpeg, &zip, &tools, WIN).unwrap();
 
         assert_eq!(
             dir_names(&tools),
@@ -222,6 +249,77 @@ mod tests {
         assert_eq!(fs::read(tools.join("avcodec-62.dll")).unwrap(), b"DLL1");
     }
 
+    /// A `.tar.xz` archive like BtbN's Linux builds.
+    fn build_tar_xz(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        for (name, data) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, name, *data).unwrap();
+        }
+        let tar = tar.into_inner().unwrap();
+        let mut xz = xz2::write::XzEncoder::new(Vec::new(), 1);
+        std::io::Write::write_all(&mut xz, &tar).unwrap();
+        xz.finish().unwrap()
+    }
+
+    /// Linux (tested on any system): the static ffmpeg build gives just its two programs, the
+    /// other tools have no `.exe`; on unix they are made executable.
+    #[test]
+    fn linux_tools_install_from_a_static_tar_xz_and_bare_programs() {
+        let linux = Platform::LINUX_ARM64;
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = tmp.path().join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        let archive = tmp
+            .path()
+            .join("ffmpeg-master-latest-linuxarm64-gpl.tar.xz");
+        let dir = "ffmpeg-master-latest-linuxarm64-gpl";
+        fs::write(
+            &archive,
+            build_tar_xz(&[
+                (&format!("{dir}/LICENSE.txt"), b"lic"),
+                (&format!("{dir}/bin/ffmpeg"), b"FFMPEG"),
+                (&format!("{dir}/bin/ffprobe"), b"FFPROBE"),
+                (&format!("{dir}/bin/ffplay"), b"FFPLAY"),
+                (&format!("{dir}/man/man1/ffmpeg.1"), b"man"),
+            ]),
+        )
+        .unwrap();
+        install_downloaded(Tool::Ffmpeg, &archive, &tools, linux).unwrap();
+        assert_eq!(dir_names(&tools), ["ffmpeg", "ffprobe"]);
+        assert_eq!(fs::read(tools.join("ffprobe")).unwrap(), b"FFPROBE");
+
+        let deno = tmp.path().join("deno.zip");
+        fs::write(&deno, build_zip(&[("deno", b"DENO")])).unwrap();
+        install_downloaded(Tool::Deno, &deno, &tools, linux).unwrap();
+        let yt = tmp.path().join("yt-dlp_linux_aarch64");
+        fs::write(&yt, b"YT").unwrap();
+        install_downloaded(Tool::YtDlp, &yt, &tools, linux).unwrap();
+        let cf = tmp.path().join("cloudflared-linux-arm64");
+        fs::write(&cf, b"CF").unwrap();
+        install_downloaded(Tool::Cloudflared, &cf, &tools, linux).unwrap();
+        assert_eq!(
+            dir_names(&tools),
+            ["cloudflared", "deno", "ffmpeg", "ffprobe", "yt-dlp"]
+        );
+        #[cfg(unix)]
+        for name in ["cloudflared", "deno", "ffmpeg", "ffprobe", "yt-dlp"] {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(tools.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{name}");
+        }
+
+        // A Linux archive without ffprobe changes nothing.
+        let bad = tmp.path().join("bad.tar.xz");
+        fs::write(&bad, build_tar_xz(&[("x/bin/ffmpeg", b"NEW")])).unwrap();
+        let err = install_downloaded(Tool::Ffmpeg, &bad, &tools, linux).unwrap_err();
+        assert_eq!(err.to_string(), "The downloaded archive has no ffprobe.");
+        assert_eq!(fs::read(tools.join("ffmpeg")).unwrap(), b"FFMPEG");
+    }
+
     #[test]
     fn deno_and_ytdlp_install_and_replace() {
         let tmp = tempfile::tempdir().unwrap();
@@ -231,12 +329,12 @@ mod tests {
 
         let deno = tmp.path().join("deno.zip");
         fs::write(&deno, build_zip(&[("deno.exe", b"DENO")])).unwrap();
-        install_downloaded(Tool::Deno, &deno, &tools).unwrap();
+        install_downloaded(Tool::Deno, &deno, &tools, WIN).unwrap();
         assert_eq!(fs::read(tools.join("deno.exe")).unwrap(), b"DENO");
 
         let yt = tmp.path().join("yt-dlp.exe.download");
         fs::write(&yt, b"NEW").unwrap();
-        install_downloaded(Tool::YtDlp, &yt, &tools).unwrap();
+        install_downloaded(Tool::YtDlp, &yt, &tools, WIN).unwrap();
         assert_eq!(fs::read(tools.join("yt-dlp.exe")).unwrap(), b"NEW");
         assert_eq!(
             dir_names(&tools),
@@ -255,11 +353,11 @@ mod tests {
 
         let corrupt = tmp.path().join("corrupt.zip");
         fs::write(&corrupt, b"this is not a zip").unwrap();
-        assert!(install_downloaded(Tool::Ffmpeg, &corrupt, &tools).is_err());
+        assert!(install_downloaded(Tool::Ffmpeg, &corrupt, &tools, WIN).is_err());
 
         let no_probe = tmp.path().join("noprobe.zip");
         fs::write(&no_probe, build_zip(&[("x/bin/ffmpeg.exe", b"NEW")])).unwrap();
-        let err = install_downloaded(Tool::Ffmpeg, &no_probe, &tools).unwrap_err();
+        let err = install_downloaded(Tool::Ffmpeg, &no_probe, &tools, WIN).unwrap_err();
         assert_eq!(
             err.to_string(),
             "The downloaded archive has no ffprobe.exe."
