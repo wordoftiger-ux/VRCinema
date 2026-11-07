@@ -92,6 +92,9 @@ pub struct AppState {
     /// The slate swapper of the running channel (`None` without a channel). The app swaps
     /// through [`crate::app::AppCore`]; a server without a window swaps from the settings route.
     slates: Option<Arc<crate::pipeline::slates::SlateSwapper>>,
+    /// Where the owner's slate background lives and the tools that make it (None: no
+    /// background can be set, e.g. in tests).
+    pub(crate) slate_media: Option<Arc<crate::pipeline::slate_look::SlateMedia>>,
     /// Read per request (`trust_cloudflare`, `public_url`): HttpConfig keeps the start values.
     live: LiveSettings,
     /// Segment fetches (viewers), for the automatic pause of the app.
@@ -153,6 +156,7 @@ impl AppState {
             desktop_key: Arc::new(DesktopKey::generate().0),
             desktop: None,
             slates: None,
+            slate_media: None,
             live: LiveSettings {
                 trust_cloudflare: LiveValue::new(config.trust_cloudflare),
                 cloudflare_from_loopback_only: LiveValue::new(false),
@@ -248,6 +252,12 @@ impl AppState {
         self
     }
 
+    /// The data folder and tools of the owner's slate background.
+    pub fn with_slate_media(mut self, media: crate::pipeline::slate_look::SlateMedia) -> Self {
+        self.slate_media = Some(Arc::new(media));
+        self
+    }
+
     pub(crate) fn slates(&self) -> Option<Arc<crate::pipeline::slates::SlateSwapper>> {
         self.slates.clone()
     }
@@ -268,6 +278,7 @@ impl AppState {
                 public_url: state.live.public_url.get(),
                 connecting: false,
                 lang: state.slate_language(),
+                look: state.slate_look(),
             };
             use crate::pipeline::slates::SwapOutcome;
             match swapper.swap_to(address, &state.engine.commands).await {
@@ -369,6 +380,24 @@ impl AppState {
         SettingsRepo::new(&conn)
             .get(self.channel_id)
             .map_or_else(|_| crate::i18n::Lang::default(), |s| s.slate_language)
+    }
+
+    /// The slates' look: the channel's settings and the owner's background in the data folder.
+    pub(crate) fn slate_look(&self) -> crate::pipeline::slate_look::SlateLook {
+        let settings = {
+            let conn = self.db.lock().unwrap_or_else(PoisonError::into_inner);
+            SettingsRepo::new(&conn)
+                .get(self.channel_id)
+                .map(|s| s.slate_look)
+                .unwrap_or_default()
+        };
+        match &self.slate_media {
+            Some(media) => crate::pipeline::slate_look::SlateLook::read(&media.data_dir, &settings),
+            None => crate::pipeline::slate_look::SlateLook {
+                frame_style: settings.slate_frame_style,
+                ..Default::default()
+            },
+        }
     }
 
     /// A new slate set went on air. For another public address the QR code the info ticker

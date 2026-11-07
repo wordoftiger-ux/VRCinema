@@ -327,12 +327,13 @@ async fn start_channel_loop(
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
-    let slate_language = {
+    let (slate_language, look_settings) = {
         let conn = db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
             .get(MAIN_CHANNEL_ID)
-            .map_or_else(|_| Lang::default(), |s| s.slate_language)
+            .map_or_else(|_| Default::default(), |s| (s.slate_language, s.slate_look))
     };
+    let look = crate::pipeline::slate_look::SlateLook::read(&config.data_dir, &look_settings);
     let slates = generate_slates(&SlateOptions {
         ffmpeg_path: config.ffmpeg_path.clone(),
         font_file: config.font_file.clone(),
@@ -343,13 +344,19 @@ async fn start_channel_loop(
         generation: 0,
         lang: slate_language,
         japanese_font_dir: system_fonts_dir(),
+        look: look.clone(),
     })
     .await?;
     for notice in slates.notices() {
         shared_log(notice);
     }
     // The swapper starts with what the start-up set was really made for.
-    let swapper = Arc::new(SlateSwapper::for_config(config, connecting, slate_language));
+    let swapper = Arc::new(SlateSwapper::for_config(
+        config,
+        connecting,
+        slate_language,
+        look,
+    ));
 
     let build = {
         let db = Arc::clone(db);
@@ -576,6 +583,12 @@ pub async fn run(
         .with_log(Arc::clone(&shared_log))
         .with_live(live.clone())
         .with_slates(slates)
+        .with_slate_media(crate::pipeline::slate_look::SlateMedia {
+            data_dir: config.data_dir.clone(),
+            ffmpeg: config.ffmpeg_path.clone(),
+            ffprobe: config.ffprobe_path.clone(),
+            font_file: config.font_file.clone(),
+        })
         .with_monitor_watch(monitor_watch)
         .with_alarms(Arc::clone(&alarms))
         .with_preview(preview)

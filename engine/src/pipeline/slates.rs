@@ -13,6 +13,10 @@ use crate::i18n::{self, Lang, Msg};
 use crate::pipeline::ffmpeg_args::{ClipArgsOptions, build_clip_args};
 use crate::pipeline::probe::{VideoInfo, VideoMode};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
+use crate::pipeline::slate_look::{
+    Backdrop, Background, CountdownBackdrop, FrameStyle, SlateLook, Tone, backdrop_source,
+    extract_last_frame, text_shadow,
+};
 use crate::resolver::types::StreamInput;
 
 const SLATE_SECONDS: u32 = 8;
@@ -160,6 +164,60 @@ pub struct Slates {
     pub japanese_font_missing: bool,
     /// The font file that was not there (the set has no text at all).
     pub font_missing: Option<PathBuf>,
+    /// How the channel draws the waiting slates over the last frame (and the countdown over
+    /// the owner's background); `None`: plain slates only (sets made by tests).
+    pub backdrop: Option<BackdropSpec>,
+}
+
+/// What the channel needs to draw a waiting slate over the last frame of the film (see
+/// [`render_backdrop`]) and the countdown over the owner's background.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackdropSpec {
+    pub ffmpeg_path: PathBuf,
+    /// The set's folder (absolute); frame slates are made in its `frames` folder.
+    pub dir: PathBuf,
+    /// The font placed in the set's folder (`font.ttf` / `font.ttc`); `None`: no text.
+    pub font_file_name: Option<String>,
+    /// The language the set's texts are in.
+    pub lang: Lang,
+    pub segment_seconds: u32,
+    pub style: FrameStyle,
+    pub background: Option<Background>,
+}
+
+/// The film segment kept for the last frame (a hard link) in a set's folder.
+const FRAME_LINK: &str = "last-frame.ts";
+/// The folder of a set's frame slates.
+const FRAMES_DIR: &str = "frames";
+
+impl BackdropSpec {
+    /// Where the channel keeps the newest film segment (a hard link) for the last frame.
+    pub fn frame_link(&self) -> PathBuf {
+        self.dir.join(FRAME_LINK)
+    }
+
+    /// The folder of the frame slate `kind` number `n` ([`render_backdrop`]).
+    pub fn frame_slate_dir(&self, kind: SlateKind, n: u64) -> PathBuf {
+        self.dir
+            .join(FRAMES_DIR)
+            .join(format!("{}-{n}", kind.as_str()))
+    }
+
+    /// The last frame shows behind the waiting slates.
+    pub fn frames_on(&self) -> bool {
+        Tone::of_frame(self.style).is_some()
+    }
+
+    /// The countdown's backdrop: the last frame (`frame`: the kept segment and its length)
+    /// when it shows, else the owner's background.
+    pub fn countdown(&self, frame: Option<(PathBuf, f64)>) -> CountdownBackdrop {
+        CountdownBackdrop {
+            frame: frame
+                .filter(|_| self.frames_on())
+                .map(|(path, duration)| (path, duration, self.style)),
+            background: self.background.clone(),
+        }
+    }
 }
 
 impl Slates {
@@ -202,10 +260,13 @@ pub struct SlateOptions {
     pub lang: Lang,
     /// Where the Japanese system fonts are (see [`system_fonts_dir`]; tests use their own).
     pub japanese_font_dir: PathBuf,
+    /// The last frame's style and the owner's background (default: plain slates).
+    pub look: SlateLook,
 }
 
 /// What a slate set is made for: the public address (QR code and text of the request page)
-/// or none, and then whether the tunnel is still connecting; and the language of the texts.
+/// or none, and then whether the tunnel is still connecting; the language of the texts and
+/// the look (last frame, owner's background).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SlateAddress {
     /// No trailing slash; empty: no public address.
@@ -213,6 +274,7 @@ pub struct SlateAddress {
     pub connecting: bool,
     /// The channel's slate language.
     pub lang: Lang,
+    pub look: SlateLook,
 }
 
 impl From<String> for SlateAddress {
@@ -221,6 +283,7 @@ impl From<String> for SlateAddress {
             public_url,
             connecting: false,
             lang: Lang::default(),
+            look: SlateLook::default(),
         }
     }
 }
@@ -345,7 +408,17 @@ pub fn qr_image(text: &str, target_px: u32) -> Result<(Vec<u8>, u32), SlateError
 /// when `with_qr`. Texts, font and code are read from files in ffmpeg's working directory,
 /// which sidesteps path and character escaping.
 pub fn slate_filter(font_name: Option<&str>, with_qr: bool, seconds: u32) -> String {
-    let base = format!("color=c=0x14161c:s=1920x1080:r=30:d={seconds}");
+    slate_filter_on(Backdrop::Plain, font_name, with_qr, seconds)
+}
+
+/// Like [`slate_filter`], drawn on `backdrop` (the texts get a shadow over a picture).
+pub fn slate_filter_on(
+    backdrop: Backdrop<'_>,
+    font_name: Option<&str>,
+    with_qr: bool,
+    seconds: u32,
+) -> String {
+    let base = backdrop_source(backdrop, &seconds.to_string());
     let (title_y, subtitle_y) = if with_qr {
         ("110", "700")
     } else {
@@ -353,7 +426,8 @@ pub fn slate_filter(font_name: Option<&str>, with_qr: bool, seconds: u32) -> Str
     };
     let mut chain = vec![base];
     if let Some(font_name) = font_name {
-        let common = format!("fontfile={font_name}:x=(w-text_w)/2");
+        let shadow = text_shadow(backdrop);
+        let common = format!("fontfile={font_name}{shadow}:x=(w-text_w)/2");
         chain.push(format!(
             "drawtext={common}:fontcolor=white:textfile=title.txt:fontsize=72:y={title_y}"
         ));
@@ -379,33 +453,19 @@ impl Drop for StopOnDrop<'_> {
     }
 }
 
-/// `lang`: the language the texts are written in (English when Japanese has no font);
-/// `font_name`: the placed font as the slate folder sees it (`None`: no font, no text).
-async fn generate_one(
+/// Cuts the slate drawn by the lavfi `filter` (`seconds` long, silent) into segments in `dir`
+/// (ffmpeg's working directory).
+async fn cut_slate(
+    ffmpeg_path: &Path,
+    segment_seconds: u32,
+    filter: String,
+    seconds: u32,
+    dir: PathBuf,
     kind: SlateKind,
-    o: &SlateOptions,
-    lang: Lang,
-    font_name: Option<&str>,
 ) -> Result<Vec<SegmentInfo>, SlateError> {
-    // ffmpeg runs with cwd = the slate dir, so the dir handed to it must not be relative.
-    let dir = std::path::absolute(o.dir.join(kind.as_str()))?;
-    match std::fs::remove_dir_all(&dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
-    std::fs::create_dir_all(&dir)?;
-    if font_name.is_some() {
-        let (title, subtitle) = texts(lang, kind, &o.request_url, o.connecting);
-        std::fs::write(dir.join("title.txt"), title)?;
-        std::fs::write(dir.join("subtitle.txt"), subtitle)?;
-    }
-    let with_qr = kind == SlateKind::Idle && !o.request_url.is_empty();
-    if with_qr {
-        std::fs::write(dir.join(QR_FILE), qr_png(&o.request_url)?)?;
-    }
     let args = build_clip_args(&ClipArgsOptions {
         inputs: vec![StreamInput {
-            url: slate_filter(font_name, with_qr, SLATE_SECONDS),
+            url: filter,
             headers: vec![],
         }],
         input_format: Some("lavfi".into()),
@@ -416,20 +476,20 @@ async fn generate_one(
             pix_fmt: "yuv420p".into(),
             fps: 30.0,
             has_audio: false,
-            duration_s: Some(f64::from(SLATE_SECONDS)),
+            duration_s: Some(f64::from(seconds)),
             portrait: false,
             keyframe_gap_s: Some(1.0),
             ..VideoInfo::default()
         },
         encoder: VideoEncoder::Libx264,
-        segment_seconds: o.segment_seconds,
+        segment_seconds,
         out_dir: dir.clone(),
         start_at_s: 0.0,
         readrate: None,
         overlay: None,
         duration_limit_s: None,
     });
-    let seg = ClipSegmenter::start(&o.ffmpeg_path, args, dir.clone(), Some(dir));
+    let seg = ClipSegmenter::start(ffmpeg_path, args, dir.clone(), Some(dir));
     // Dropped before the end (the generation aborted: a swap cancelled, the app quitting):
     // ffmpeg is stopped, not left making a set nobody waits for. A no-op once it ended.
     let _stop = StopOnDrop(&seg);
@@ -446,6 +506,92 @@ async fn generate_one(
     Ok(segments)
 }
 
+/// Empties (or makes) the folder `dir` and returns it absolute (ffmpeg runs in it).
+fn fresh_dir(dir: &Path) -> Result<PathBuf, SlateError> {
+    let dir = std::path::absolute(dir)?;
+    match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Length of a slate over the owner's video: the video rounded up to whole segments (a loop
+/// without a jump when the video is whole segments long).
+fn motion_seconds(video_s: u32, segment_seconds: u32) -> u32 {
+    let seg = segment_seconds.max(1);
+    video_s.max(1).div_ceil(seg) * seg
+}
+
+/// `lang`: the language the texts are written in (English when Japanese has no font);
+/// `font_name`: the placed font as the slate folder sees it (`None`: no font, no text);
+/// `background`: the owner's background placed in the set's folder, behind this slate.
+async fn generate_one(
+    kind: SlateKind,
+    o: &SlateOptions,
+    lang: Lang,
+    font_name: Option<&str>,
+    background: Option<&Background>,
+) -> Result<Vec<SegmentInfo>, SlateError> {
+    // ffmpeg runs with cwd = the slate dir, so the dir handed to it must not be relative.
+    let dir = fresh_dir(&o.dir.join(kind.as_str()))?;
+    if font_name.is_some() {
+        let (title, subtitle) = texts(lang, kind, &o.request_url, o.connecting);
+        std::fs::write(dir.join("title.txt"), title)?;
+        std::fs::write(dir.join("subtitle.txt"), subtitle)?;
+    }
+    let with_qr = kind == SlateKind::Idle && !o.request_url.is_empty();
+    if with_qr {
+        std::fs::write(dir.join(QR_FILE), qr_png(&o.request_url)?)?;
+    }
+    let (backdrop, seconds) = match background {
+        None => (Backdrop::Plain, SLATE_SECONDS),
+        Some(bg) if bg.motion => (
+            Backdrop::Motion { name: "../bg.mp4" },
+            motion_seconds(bg.seconds, o.segment_seconds),
+        ),
+        Some(_) => (
+            Backdrop::Picture {
+                name: "../bg.png",
+                tone: Tone::Custom,
+            },
+            SLATE_SECONDS,
+        ),
+    };
+    let filter = slate_filter_on(backdrop, font_name, with_qr, seconds);
+    let made = cut_slate(
+        &o.ffmpeg_path,
+        o.segment_seconds,
+        filter,
+        seconds,
+        dir.clone(),
+        kind,
+    )
+    .await;
+    match made {
+        // A background ffmpeg cannot draw never costs the channel its slates: plain ones.
+        Err(_) if !backdrop.is_plain() => {
+            for entry in std::fs::read_dir(&dir)?.flatten() {
+                if entry.path().extension().is_some_and(|e| e == "ts") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            let filter = slate_filter(font_name, with_qr, SLATE_SECONDS);
+            cut_slate(
+                &o.ffmpeg_path,
+                o.segment_seconds,
+                filter,
+                SLATE_SECONDS,
+                dir,
+                kind,
+            )
+            .await
+        }
+        made => made,
+    }
+}
+
 pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
     // Japanese without a Japanese font: English slates (the caller logs it).
     let japanese_font_missing = matches!(
@@ -457,22 +603,58 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
     } else {
         o.lang
     };
+    let root = std::path::absolute(&o.dir)?;
     // One font for the whole set, placed once in the set's folder.
     let font = font_for(lang, "", &o.font_file, &o.japanese_font_dir);
     let (font_name, font_missing) = if font.file().is_file() {
-        let root = std::path::absolute(&o.dir)?;
         (Some(place_font(font.file(), &root)?), None)
     } else {
         (None, Some(font.file().to_path_buf()))
     };
-    let font_name = font_name.as_deref();
+    // The owner's background, placed once too; one that cannot be placed is left out.
+    let background = o
+        .look
+        .background
+        .as_ref()
+        .filter(|bg| std::fs::create_dir_all(&root).is_ok() && bg.place(&root).is_ok());
+    let behind = |kind| background.and(o.look.background_for(kind));
+    let font_ref = font_name.as_deref();
     let (idle, buffering, pause, fallback, brb) = tokio::join!(
-        generate_one(SlateKind::Idle, o, lang, font_name),
-        generate_one(SlateKind::Buffering, o, lang, font_name),
-        generate_one(SlateKind::Pause, o, lang, font_name),
-        generate_one(SlateKind::Fallback, o, lang, font_name),
-        generate_one(SlateKind::Brb, o, lang, font_name)
+        generate_one(SlateKind::Idle, o, lang, font_ref, behind(SlateKind::Idle)),
+        generate_one(
+            SlateKind::Buffering,
+            o,
+            lang,
+            font_ref,
+            behind(SlateKind::Buffering)
+        ),
+        generate_one(
+            SlateKind::Pause,
+            o,
+            lang,
+            font_ref,
+            behind(SlateKind::Pause)
+        ),
+        generate_one(
+            SlateKind::Fallback,
+            o,
+            lang,
+            font_ref,
+            behind(SlateKind::Fallback)
+        ),
+        generate_one(SlateKind::Brb, o, lang, font_ref, behind(SlateKind::Brb))
     );
+    let backdrop = BackdropSpec {
+        ffmpeg_path: o.ffmpeg_path.clone(),
+        dir: root,
+        font_file_name: font_name.map(|n| n.trim_start_matches("../").to_string()),
+        lang,
+        segment_seconds: o.segment_seconds,
+        style: o.look.frame_style,
+        background: background.cloned(),
+    };
+    // The plain look of old needs nothing from the channel.
+    let backdrop = (backdrop.frames_on() || backdrop.background.is_some()).then_some(backdrop);
     Ok(Slates {
         idle: idle?,
         buffering: buffering?,
@@ -482,7 +664,124 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
         generation: o.generation,
         japanese_font_missing,
         font_missing,
+        backdrop,
     })
+}
+
+/// Seconds of a frame slate (two segments: made in well under a second).
+fn frame_slate_seconds(segment_seconds: u32) -> u32 {
+    2 * segment_seconds.max(1)
+}
+
+/// The waiting slate `kind` drawn over the last frame of `segment` (`duration_s` long), in its
+/// own folder `frames/<kind>-<n>` of the set. Errors leave the plain slate on air.
+pub async fn render_backdrop(
+    spec: &BackdropSpec,
+    kind: SlateKind,
+    segment: &Path,
+    duration_s: f64,
+    n: u64,
+) -> Result<Vec<SegmentInfo>, SlateError> {
+    let failed = |message: Msg| SlateError::Failed {
+        kind: kind.as_str(),
+        message,
+    };
+    let tone = Tone::of_frame(spec.style).ok_or_else(|| failed(Msg::text("off")))?;
+    let dir = fresh_dir(&spec.frame_slate_dir(kind, n))?;
+    extract_last_frame(
+        &spec.ffmpeg_path,
+        segment,
+        duration_s,
+        &dir.join("frame.png"),
+    )
+    .await
+    .map_err(failed)?;
+    let font = spec.font_file_name.as_ref().map(|f| format!("../../{f}"));
+    if font.is_some() {
+        let (title, subtitle) = texts(spec.lang, kind, "", false);
+        std::fs::write(dir.join("title.txt"), title)?;
+        std::fs::write(dir.join("subtitle.txt"), subtitle)?;
+    }
+    let seconds = frame_slate_seconds(spec.segment_seconds);
+    let backdrop = Backdrop::Picture {
+        name: "frame.png",
+        tone,
+    };
+    let filter = slate_filter_on(backdrop, font.as_deref(), false, seconds);
+    cut_slate(
+        &spec.ffmpeg_path,
+        spec.segment_seconds,
+        filter,
+        seconds,
+        dir,
+        kind,
+    )
+    .await
+}
+
+/// A PNG (960×540) of the idle slate over the owner's background, in `lang`: the preview of
+/// Settings. Made in `work` (emptied first).
+pub async fn render_preview(
+    ffmpeg_path: &Path,
+    font_file: &Path,
+    lang: Lang,
+    background: &Background,
+    work: &Path,
+) -> Result<Vec<u8>, Msg> {
+    let dir = fresh_dir(work).map_err(|e| e.message())?;
+    background.place(&dir).map_err(Msg::text)?;
+    let font = font_for(lang, "", font_file, &system_fonts_dir());
+    let lang = if matches!(font, FontChoice::JapaneseMissing(_)) {
+        Lang::En
+    } else {
+        lang
+    };
+    let font_name = if font.file().is_file() {
+        let name = place_font(font.file(), &dir.join("x")).map_err(Msg::text)?;
+        let (title, subtitle) = texts(lang, SlateKind::Idle, "", false);
+        std::fs::write(dir.join("x").join("title.txt"), title).map_err(Msg::text)?;
+        std::fs::write(dir.join("x").join("subtitle.txt"), subtitle).map_err(Msg::text)?;
+        // The font sits in `x`, ffmpeg runs in the folder above.
+        Some(name.replace("../", "x/"))
+    } else {
+        None
+    };
+    let backdrop = if background.motion {
+        Backdrop::Motion { name: "bg.mp4" }
+    } else {
+        Backdrop::Picture {
+            name: "bg.png",
+            tone: Tone::Custom,
+        }
+    };
+    let mut filter = slate_filter_on(backdrop, font_name.as_deref(), false, 1);
+    filter = filter.replace("textfile=", "textfile=x/");
+    let args: Vec<std::ffi::OsString> = [
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        &filter,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=960:540",
+        "-f",
+        "image2",
+        "-c:v",
+        "png",
+        "preview.png",
+    ]
+    .iter()
+    .map(std::ffi::OsString::from)
+    .collect();
+    crate::pipeline::slate_look::run_tool(ffmpeg_path, args, Some(&dir), Duration::from_secs(30))
+        .await?;
+    let png = std::fs::read(dir.join("preview.png")).map_err(Msg::text)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(png)
 }
 
 /// Where the set on air lives: the three kind folders of the start-up set sit directly in the
@@ -500,9 +799,13 @@ impl SetDir {
                 for kind in SlateKind::ALL {
                     let _ = std::fs::remove_dir_all(root.join(kind.as_str()));
                 }
-                for font in FONT_FILES {
-                    let _ = std::fs::remove_file(root.join(font));
+                for file in FONT_FILES
+                    .into_iter()
+                    .chain(["bg.png", "bg.mp4", FRAME_LINK])
+                {
+                    let _ = std::fs::remove_file(root.join(file));
                 }
+                let _ = std::fs::remove_dir_all(root.join(FRAMES_DIR));
             }
             SetDir::Own(dir) => {
                 let _ = std::fs::remove_dir_all(dir);
@@ -589,6 +892,7 @@ impl SlateSwapper {
         initial.connecting &= initial.public_url.is_empty();
         // The options say what the start-up set was made in.
         initial.lang = options.lang;
+        initial.look = options.look.clone();
         Self {
             ffmpeg_path: options.ffmpeg_path.clone(),
             font_file: options.font_file.clone(),
@@ -610,7 +914,7 @@ impl SlateSwapper {
     /// The swapper for a channel started with `config` (start-up set: generation 0 in
     /// `<data>/slates`, made for `config.public_url`, `connecting` and the channel's slate
     /// language `lang`, see [`SlateOptions`]).
-    pub fn for_config(config: &AppConfig, connecting: bool, lang: Lang) -> Self {
+    pub fn for_config(config: &AppConfig, connecting: bool, lang: Lang, look: SlateLook) -> Self {
         let root = config.data_dir.join("slates");
         // The old set stays until its segments left the playlist (`window_size` segments) and the
         // broadcaster's retention (`RETAIN_S`), plus a margin.
@@ -626,11 +930,13 @@ impl SlateSwapper {
             generation: 0,
             lang,
             japanese_font_dir: system_fonts_dir(),
+            look: look.clone(),
         };
         let initial = SlateAddress {
             public_url: config.public_url.clone(),
             connecting,
             lang,
+            look,
         };
         Self::new(&options, root, initial, hold)
     }
@@ -639,8 +945,11 @@ impl SlateSwapper {
     /// to the loop behind `commands`. Calls are serialized; one for what is on air does nothing.
     pub async fn swap(&self, public_url: &str, commands: &mpsc::Sender<Command>) -> SwapOutcome {
         let lang = self.lang;
+        // The look stays the one on air.
+        let look = self.state.lock().await.address.look.clone();
         let address = || SlateAddress {
             lang,
+            look,
             ..SlateAddress::from(public_url)
         };
         self.swap_to(address, commands).await
@@ -683,6 +992,7 @@ impl SlateSwapper {
             generation,
             lang: address.lang,
             japanese_font_dir: self.japanese_font_dir.clone(),
+            look: address.look.clone(),
         })
         .await;
         let slates = match made {
@@ -758,6 +1068,7 @@ mod tests {
             generation,
             lang: Lang::Pl,
             japanese_font_dir: system_fonts_dir(),
+            look: SlateLook::default(),
         }
     }
 
@@ -991,6 +1302,7 @@ mod tests {
                 public_url: "https://a.example.com".into(),
                 connecting: false,
                 lang: Lang::En,
+                look: SlateLook::default(),
             }
         );
         assert_eq!(SlateAddress::default(), SlateAddress::from(String::new()));
@@ -1499,6 +1811,7 @@ mod tests {
             public_url: String::new(),
             connecting: true,
             lang: Lang::Pl,
+            look: SlateLook::default(),
         };
         assert_eq!(
             swapper.swap_to(connecting, &tx).await,
@@ -1533,7 +1846,7 @@ mod tests {
                 Path::new("H"),
             )
         };
-        let swapper = SlateSwapper::for_config(&config, true, Lang::Fr);
+        let swapper = SlateSwapper::for_config(&config, true, Lang::Fr, SlateLook::default());
         let state = swapper.state.try_lock().unwrap();
         assert_eq!(
             state.address,
@@ -1541,6 +1854,7 @@ mod tests {
                 public_url: String::new(),
                 connecting: true,
                 lang: Lang::Fr,
+                look: SlateLook::default(),
             }
         );
     }
@@ -1800,5 +2114,227 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+    /// The pixel at `(x, y)` of the frame `at_s` seconds into a segment.
+    fn pixel(ffmpeg: &Path, segment: &Path, at_s: f64, x: u32, y: u32) -> [u8; 3] {
+        let frame = segment.with_extension(format!("{at_s}.px.png"));
+        let out = std::process::Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(segment)
+            .args(["-ss", &at_s.to_string(), "-frames:v", "1"])
+            .arg(&frame)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        image::open(&frame).unwrap().to_rgb8().get_pixel(x, y).0
+    }
+
+    /// Whether the first video frame of `segment` is a keyframe.
+    fn starts_with_keyframe(ffprobe: &Path, segment: &Path) -> bool {
+        let out = std::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v",
+                "-read_intervals",
+                "%+#1",
+            ])
+            .args(["-show_entries", "frame=key_frame", "-of", "csv=p=0"])
+            .arg(segment)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().starts_with('1')
+    }
+
+    #[tokio::test]
+    async fn the_owner_background_is_drawn_behind_the_idle_slate_with_a_keyframe_per_segment() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        let tools = crate::pipeline::slate_look::Tools {
+            ffmpeg: ffmpeg.clone(),
+            ffprobe: ffprobe.clone(),
+        };
+        let data = tempfile::tempdir().unwrap();
+        let red = data.path().join("red.png");
+        let made = std::process::Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=640x480",
+            ])
+            .args(["-frames:v", "1"])
+            .arg(&red)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let bg = crate::pipeline::slate_look::store_background(
+            &tools,
+            data.path(),
+            &std::fs::read(&red).unwrap(),
+        )
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slates = generate_slates(&SlateOptions {
+            segment_seconds: 1,
+            look: SlateLook {
+                background: Some(bg),
+                ..SlateLook::default()
+            },
+            ..options(ffmpeg.clone(), dir.path(), "https://tv.example.com/", 0)
+        })
+        .await
+        .unwrap();
+        // Idle: red (a little darker) in a corner, the code still readable; every 1 s segment
+        // starts on a keyframe.
+        assert_eq!(slates.idle.len(), 8);
+        for seg in &slates.idle {
+            assert!(
+                starts_with_keyframe(&ffprobe, &seg.path),
+                "{}",
+                seg.path.display()
+            );
+        }
+        let p = pixel(&ffmpeg, &slates.idle[3].path, 0.5, 40, 40);
+        assert!(p[0] > 150 && p[1] < 60 && p[2] < 60, "{p:?}");
+        assert_eq!(
+            qr_in_segment(&ffmpeg, &slates.idle[0].path, 0.0),
+            vec!["https://tv.example.com/".to_string()]
+        );
+        // The pause slate keeps the plain background (not asked for all slates).
+        let p = pixel(&ffmpeg, &slates.pause[0].path, 0.5, 40, 40);
+        assert!(p[0] < 40, "{p:?}");
+        let spec = slates
+            .backdrop
+            .as_ref()
+            .expect("the countdown needs the background");
+        assert!(!spec.frames_on());
+
+        // A GIF of 2 s behind every slate: the idle loop is 2 segments long.
+        let gif = data.path().join("a.gif");
+        let made = std::process::Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=320x240:r=10:d=2",
+            ])
+            .arg(&gif)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let moving = crate::pipeline::slate_look::store_background(
+            &tools,
+            data.path(),
+            &std::fs::read(&gif).unwrap(),
+        )
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let slates = generate_slates(&SlateOptions {
+            segment_seconds: 1,
+            look: SlateLook {
+                background: Some(moving),
+                background_all: true,
+                frame_style: FrameStyle::Dim,
+            },
+            ..options(ffmpeg.clone(), dir.path(), "", 0)
+        })
+        .await
+        .unwrap();
+        assert_eq!(slates.idle.len(), 2);
+        assert!(
+            slates
+                .idle
+                .iter()
+                .all(|s| starts_with_keyframe(&ffprobe, &s.path))
+        );
+        let p = pixel(&ffmpeg, &slates.pause[0].path, 0.5, 40, 40);
+        assert!(p[2] > 150 && p[0] < 60, "{p:?}");
+        assert!(
+            slates
+                .backdrop
+                .as_ref()
+                .is_some_and(BackdropSpec::frames_on)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waiting_slate_is_drawn_over_the_last_frame() {
+        let Some(ffmpeg) = ffmpeg_bin() else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let slates = generate_slates(&SlateOptions {
+            segment_seconds: 1,
+            look: SlateLook {
+                frame_style: FrameStyle::Dim,
+                ..SlateLook::default()
+            },
+            ..options(ffmpeg.clone(), dir.path(), "", 0)
+        })
+        .await
+        .unwrap();
+        let spec = slates.backdrop.clone().unwrap();
+        let film = dir.path().join("film.ts");
+        let made = std::process::Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=lime:s=1280x720:r=30:d=1",
+            ])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mpegts"])
+            .arg(&film)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let started = std::time::Instant::now();
+        let segments = render_backdrop(&spec, SlateKind::Pause, &film, 1.0, 1)
+            .await
+            .unwrap();
+        eprintln!("frame slate made in {:?}", started.elapsed());
+        assert_eq!(segments.len(), 2);
+        assert!(
+            segments[0]
+                .path
+                .starts_with(spec.frame_slate_dir(SlateKind::Pause, 1))
+        );
+        let p = pixel(&ffmpeg, &segments[1].path, 0.5, 40, 40);
+        // Lime, dimmed: green clearly above the plain slate's grey.
+        assert!(p[1] > 100 && p[0] < 80, "{p:?}");
+        if default_font().exists() {
+            assert!(title_pixels(&ffmpeg, &segments[0].path, 0.5) > 500);
+        }
+        // A broken segment: an error (the plain slate stays on air).
+        std::fs::write(&film, [0x47u8; 188]).unwrap();
+        assert!(
+            render_backdrop(&spec, SlateKind::Pause, &film, 1.0, 2)
+                .await
+                .is_err()
+        );
     }
 }

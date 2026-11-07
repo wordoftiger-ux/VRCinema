@@ -297,6 +297,9 @@ impl AppCore {
             lang: self
                 .live()
                 .map_or_else(Default::default, |l| l.state.slate_language()),
+            look: self
+                .live()
+                .map_or_else(Default::default, |l| l.state.slate_look()),
         }
     }
 }
