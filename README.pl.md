@@ -341,7 +341,7 @@ Wersja Node.js zostaje w repozytorium do czasu przełączenia.
 cd engine
 cargo build --release     # wymaga Rusta; wynik: engine\target\release\vrcinema.exe
 cd ..
-engine\target\release\vrcinema.exe setup   # pobiera ffmpeg/ffprobe/yt-dlp, tworzy .env
+engine\target\release\vrcinema.exe setup   # pobiera ffmpeg/ffprobe/yt-dlp/Deno (sprawdza sumy kontrolne), tworzy .env
 engine\target\release\vrcinema.exe         # uruchamia kanał (z katalogu projektu)
 ```
 

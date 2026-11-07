@@ -315,7 +315,7 @@ The Node.js version stays in this repository until the switch-over is done.
 cd engine
 cargo build --release     # needs Rust; result: engine\target\release\vrcinema.exe
 cd ..
-engine\target\release\vrcinema.exe setup   # downloads ffmpeg/ffprobe/yt-dlp, creates .env
+engine\target\release\vrcinema.exe setup   # downloads ffmpeg/ffprobe/yt-dlp/Deno (checksums verified), creates .env
 engine\target\release\vrcinema.exe         # starts the channel (run it from the project folder)
 ```
 
