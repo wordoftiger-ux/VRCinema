@@ -144,9 +144,13 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// Failed attempts (PIN or code) one address may make per [`IP_WINDOW`].
 pub const IP_FAILURES: u32 = 10;
+/// Attempts of any outcome one address may make per [`IP_WINDOW`].
+pub const IP_ATTEMPTS: u32 = 30;
 pub const IP_WINDOW: Duration = Duration::from_secs(15 * 60);
-/// Wrong PINs in a row that lock a nick.
+/// Wrong PINs that lock a nick.
 pub const NICK_FAILURES: u32 = 5;
+/// Argon2 runs (PIN checks and new PINs) at the same time; more wait their turn.
+pub const ARGON2_PARALLEL: usize = 2;
 const FIRST_LOCK_MS: u64 = 15 * 60 * 1000;
 const MAX_LOCK_MS: u64 = 24 * 60 * 60 * 1000;
 /// PINs one address may set per hour.
@@ -155,10 +159,23 @@ const PRUNE_AT: usize = 10_000;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct NickLock {
+    /// Wrong PINs since the last lock, attempts in progress included.
     failures: u32,
     lockouts: u32,
     locked_until: u64,
     last_failure: u64,
+}
+
+/// After this long an attempt that was never settled counts as wrong.
+const UNSETTLED_MS: u64 = 60 * 1000;
+
+/// Locks the nick: 15 minutes, doubled with each further lock, at most a day.
+fn lock_nick(lock: &mut NickLock, now: u64) {
+    lock.failures = 0;
+    lock.lockouts = lock.lockouts.saturating_add(1);
+    let shift = (lock.lockouts - 1).min(16);
+    let ms = FIRST_LOCK_MS.saturating_mul(1 << shift).min(MAX_LOCK_MS);
+    lock.locked_until = now.saturating_add(ms);
 }
 
 pub type SharedClock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -168,12 +185,27 @@ fn boxed(clock: &SharedClock) -> Clock {
     Box::new(move || c())
 }
 
-/// Limits guessing, in memory. Per address: [`IP_FAILURES`] failures per window. Per nick
-/// (skeleton, whether or not it exists, so the lock tells nothing): [`NICK_FAILURES`] wrong
-/// PINs in a row lock it for 15 minutes, doubling with each further lock up to 24 hours.
-/// Recovery codes count against the address only.
+/// An attempt [`PinGuard::begin`] let through and counted as a failure in advance; settle it
+/// with [`PinGuard::fail`] or [`PinGuard::succeed`] (which gives the failure back).
+#[derive(Debug)]
+pub struct Attempt {
+    ip: String,
+    skel: Option<String>,
+    at: u64,
+}
+
+/// Limits guessing, in memory. Per address: [`IP_FAILURES`] failures and [`IP_ATTEMPTS`]
+/// attempts of any outcome per window. Per nick (skeleton, whether or not it exists, so the
+/// lock tells nothing): [`NICK_FAILURES`] wrong PINs lock it for 15 minutes, doubling with each
+/// further lock up to 24 hours. Recovery codes count against the address only.
+///
+/// An attempt is counted as a failure when it starts and given back when it succeeds, so
+/// attempts running at the same time (the Argon2 check runs without this guard's lock) cannot
+/// pass the limits together.
 pub struct PinGuard {
-    ip_failures: RateLimiter,
+    /// Failure times per address, attempts in progress included.
+    ip_failures: HashMap<String, Vec<u64>>,
+    ip_attempts: RateLimiter,
     protects: RateLimiter,
     nicks: HashMap<String, NickLock>,
     clock: SharedClock,
@@ -182,7 +214,8 @@ pub struct PinGuard {
 impl PinGuard {
     pub fn new(clock: SharedClock) -> Self {
         Self {
-            ip_failures: RateLimiter::new(IP_FAILURES, IP_WINDOW, boxed(&clock)),
+            ip_failures: HashMap::new(),
+            ip_attempts: RateLimiter::new(IP_ATTEMPTS, IP_WINDOW, boxed(&clock)),
             protects: RateLimiter::new(PROTECTS_PER_HOUR, Duration::from_secs(3600), boxed(&clock)),
             nicks: HashMap::new(),
             clock,
@@ -190,48 +223,82 @@ impl PinGuard {
     }
 
     pub fn system() -> Self {
-        let clock = crate::rules::system_clock();
-        Self::new(Arc::new(move || clock()))
+        Self::new(Arc::from(crate::rules::system_clock()))
     }
 
-    /// Whether an attempt may be made now: the address has failures left and (for a PIN) the
-    /// nick is not locked.
-    pub fn may_try(&self, ip: &str, skel: Option<&str>) -> bool {
-        if self.ip_failures.peek(ip) >= IP_FAILURES as usize {
-            return false;
-        }
+    /// Starts an attempt (`skel`: a PIN for that nick; `None`: a recovery code): `None` when
+    /// the address is over its limits or the nick is locked (or has its failures in progress).
+    pub fn begin(&mut self, ip: &str, skel: Option<&str>) -> Option<Attempt> {
         let now = (self.clock)();
-        skel.and_then(|s| self.nicks.get(s))
-            .is_none_or(|l| now >= l.locked_until)
+        let window = IP_WINDOW.as_millis() as u64;
+        if self.ip_failures.len() > PRUNE_AT {
+            self.ip_failures
+                .retain(|_, times| times.iter().any(|&t| now.saturating_sub(t) < window));
+        }
+        if self.nicks.len() > PRUNE_AT {
+            self.nicks.retain(|_, l| {
+                now < l.locked_until
+                    || l.failures > 0
+                    || now.saturating_sub(l.last_failure) < MAX_LOCK_MS
+            });
+        }
+        let failures = self.ip_failures.entry(ip.to_string()).or_default();
+        failures.retain(|&t| now.saturating_sub(t) < window);
+        if failures.len() >= IP_FAILURES as usize {
+            return None;
+        }
+        if let Some(lock) = skel.and_then(|s| self.nicks.get_mut(s)) {
+            // Attempts never settled (a dropped connection) count as wrong once they are old.
+            if lock.failures >= NICK_FAILURES
+                && now.saturating_sub(lock.last_failure) >= UNSETTLED_MS
+            {
+                lock_nick(lock, now);
+            }
+            if now < lock.locked_until || lock.failures >= NICK_FAILURES {
+                return None;
+            }
+        }
+        if !self.ip_attempts.hit(ip) {
+            return None;
+        }
+        self.ip_failures
+            .entry(ip.to_string())
+            .or_default()
+            .push(now);
+        if let Some(s) = skel {
+            let lock = self.nicks.entry(s.to_string()).or_default();
+            lock.failures += 1;
+            lock.last_failure = now;
+        }
+        Some(Attempt {
+            ip: ip.to_string(),
+            skel: skel.map(str::to_string),
+            at: now,
+        })
     }
 
-    /// Registers a failed attempt (`skel`: a PIN for that nick; `None`: a recovery code).
-    pub fn fail(&mut self, ip: &str, skel: Option<&str>) {
-        self.ip_failures.hit(ip);
-        let Some(skel) = skel else {
+    /// A wrong PIN or code: the failure counted at the start stays; the nick may lock.
+    pub fn fail(&mut self, attempt: Attempt) {
+        let Some(skel) = attempt.skel else {
             return;
         };
         let now = (self.clock)();
-        if self.nicks.len() > PRUNE_AT {
-            self.nicks.retain(|_, l| {
-                now < l.locked_until || now.saturating_sub(l.last_failure) < MAX_LOCK_MS
-            });
-        }
-        let lock = self.nicks.entry(skel.to_string()).or_default();
-        lock.failures += 1;
-        lock.last_failure = now;
+        let lock = self.nicks.entry(skel).or_default();
         if lock.failures >= NICK_FAILURES {
-            lock.failures = 0;
-            lock.lockouts = lock.lockouts.saturating_add(1);
-            let shift = (lock.lockouts - 1).min(16);
-            let ms = FIRST_LOCK_MS.saturating_mul(1 << shift).min(MAX_LOCK_MS);
-            lock.locked_until = now.saturating_add(ms);
+            lock_nick(lock, now);
         }
     }
 
-    /// A correct PIN or code: the nick's count starts again.
-    pub fn succeed(&mut self, skel: &str) {
-        self.nicks.remove(skel);
+    /// A correct PIN or code: its failure is given back (it still counts as an attempt).
+    pub fn succeed(&mut self, attempt: Attempt) {
+        if let Some(times) = self.ip_failures.get_mut(&attempt.ip)
+            && let Some(at) = times.iter().rposition(|&t| t == attempt.at)
+        {
+            times.remove(at);
+        }
+        if let Some(lock) = attempt.skel.and_then(|s| self.nicks.get_mut(&s)) {
+            lock.failures = lock.failures.saturating_sub(1);
+        }
     }
 
     /// Registers setting a PIN from the address; false over [`PROTECTS_PER_HOUR`].
@@ -314,46 +381,89 @@ mod tests {
         )
     }
 
+    /// Whether an attempt may start now (settled as a success, which gives its failure back).
+    fn can(g: &mut PinGuard, ip: &str, skel: Option<&str>) -> bool {
+        g.begin(ip, skel).map(|a| g.succeed(a)).is_some()
+    }
+
+    fn wrong(g: &mut PinGuard, ip: &str, skel: Option<&str>) {
+        let a = g.begin(ip, skel).expect("attempt allowed");
+        g.fail(a);
+    }
+
     #[test]
     fn five_wrong_pins_lock_the_nick_with_a_growing_lock() {
         let (t, mut g) = guard();
         for i in 0..NICK_FAILURES {
-            assert!(g.may_try(&format!("ip{i}"), Some("kasia")));
-            g.fail(&format!("ip{i}"), Some("kasia"));
+            wrong(&mut g, &format!("ip{i}"), Some("kasia"));
         }
         // Locked for every address, other nicks are not.
-        assert!(!g.may_try("fresh", Some("kasia")));
-        assert!(g.may_try("fresh", Some("basia")));
+        assert!(!can(&mut g, "fresh", Some("kasia")));
+        assert!(can(&mut g, "fresh", Some("basia")));
         // A recovery code is not stopped by the nick's lock.
-        assert!(g.may_try("fresh", None));
+        assert!(can(&mut g, "fresh", None));
         t.fetch_add(FIRST_LOCK_MS, Ordering::SeqCst);
-        assert!(g.may_try("fresh", Some("kasia")));
-        for _ in 0..NICK_FAILURES {
-            g.fail("other", Some("kasia"));
+        assert!(can(&mut g, "fresh", Some("kasia")));
+        for i in 0..NICK_FAILURES {
+            wrong(&mut g, &format!("other{i}"), Some("kasia"));
         }
         t.fetch_add(FIRST_LOCK_MS, Ordering::SeqCst);
         assert!(
-            !g.may_try("fresh", Some("kasia")),
+            !can(&mut g, "fresh", Some("kasia")),
             "the second lock is longer"
         );
         t.fetch_add(FIRST_LOCK_MS, Ordering::SeqCst);
-        assert!(g.may_try("fresh", Some("kasia")));
-        g.succeed("kasia");
-        assert!(g.may_try("fresh", Some("kasia")));
+        assert!(can(&mut g, "fresh", Some("kasia")));
     }
 
     #[test]
-    fn an_address_has_ten_failures_per_window_and_five_pins_per_hour() {
+    fn attempts_in_progress_count_until_they_succeed() {
+        let (t, mut g) = guard();
+        // Attempts never settled (dropped connections) lock the nick once they are old.
+        let lost: Vec<Attempt> = (0..NICK_FAILURES)
+            .map(|i| g.begin(&format!("x{i}"), Some("basia")).unwrap())
+            .collect();
+        drop(lost);
+        t.fetch_add(UNSETTLED_MS, Ordering::SeqCst);
+        assert!(!can(&mut g, "late", Some("basia")));
+        t.fetch_add(FIRST_LOCK_MS, Ordering::SeqCst);
+        assert!(can(&mut g, "late", Some("basia")));
+        // Five attempts at once on one nick: a sixth cannot start, even from another address.
+        let running: Vec<Attempt> = (0..NICK_FAILURES)
+            .map(|i| g.begin(&format!("ip{i}"), Some("kasia")).unwrap())
+            .collect();
+        assert!(g.begin("late", Some("kasia")).is_none());
+        // Successes give their failures back.
+        for a in running {
+            g.succeed(a);
+        }
+        assert!(can(&mut g, "late", Some("kasia")));
+        // The same for an address: ten attempts in progress, then none.
+        let running: Vec<Attempt> = (0..IP_FAILURES)
+            .map(|i| g.begin("1.1.1.1", Some(&format!("n{i}"))).unwrap())
+            .collect();
+        assert!(g.begin("1.1.1.1", None).is_none());
+        for a in running {
+            g.succeed(a);
+        }
+        assert!(can(&mut g, "1.1.1.1", None));
+    }
+
+    #[test]
+    fn an_address_has_ten_failures_thirty_attempts_and_five_pins() {
         let (t, mut g) = guard();
         for i in 0..IP_FAILURES {
-            assert!(g.may_try("1.1.1.1", None));
-            g.fail("1.1.1.1", Some(&format!("nick{i}")));
+            wrong(&mut g, "1.1.1.1", Some(&format!("nick{i}")));
         }
-        assert!(!g.may_try("1.1.1.1", None));
-        assert!(!g.may_try("1.1.1.1", Some("free")));
-        assert!(g.may_try("2.2.2.2", Some("free")));
+        assert!(!can(&mut g, "1.1.1.1", None));
+        assert!(!can(&mut g, "1.1.1.1", Some("free")));
+        assert!(can(&mut g, "2.2.2.2", Some("free")));
         t.fetch_add(IP_WINDOW.as_millis() as u64, Ordering::SeqCst);
-        assert!(g.may_try("1.1.1.1", None));
+        // Correct attempts are capped too.
+        for _ in 0..IP_ATTEMPTS {
+            assert!(can(&mut g, "1.1.1.1", None));
+        }
+        assert!(!can(&mut g, "1.1.1.1", None));
         for _ in 0..PROTECTS_PER_HOUR {
             assert!(g.may_protect("1.1.1.1"));
         }
@@ -366,10 +476,10 @@ mod tests {
         let (t, mut g) = guard();
         for _ in 0..20 {
             for _ in 0..NICK_FAILURES {
-                g.fail("x", Some("kasia"));
+                wrong(&mut g, "x", Some("kasia"));
             }
             t.fetch_add(MAX_LOCK_MS, Ordering::SeqCst);
-            assert!(g.may_try("y", Some("kasia")));
+            assert!(can(&mut g, "y", Some("kasia")));
         }
     }
 }

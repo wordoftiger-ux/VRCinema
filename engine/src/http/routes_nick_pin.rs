@@ -3,6 +3,12 @@
 //! the code. The PIN and the code are never logged nor returned (except the new code, once).
 //! Any mismatch on adopting is the same answer after the same Argon2 work, so the route tells
 //! nothing about a nick beyond what a request already does (taken or free).
+//!
+//! The guessing guard is locked only to start and to settle an attempt (the attempt counts as
+//! a failure from its start); Argon2 runs without it, at most [`crate::nick_pin::ARGON2_PARALLEL`] at a time.
+//! The store writes only while the secret checked here is still the stored one.
+
+use std::sync::PoisonError;
 
 use axum::Router;
 use axum::extract::State;
@@ -13,10 +19,12 @@ use serde_json::{Value, json};
 use super::routes_public::{clean_name, nick_error};
 use super::{ApiError, ApiResult, AppState, Ctx, JsonBody, json_ok};
 use crate::nick_pin::{
-    constant_time_eq, dummy_phc, hash_pin, hash_recovery_code, new_recovery_code,
+    Attempt, constant_time_eq, dummy_phc, hash_pin, hash_recovery_code, new_recovery_code,
     normalize_recovery_code, validate_pin, verify_pin,
 };
-use crate::nicks::{NICK_MAX_CHARS, NickError, NickStore, badge, hash_device_key, skeleton};
+use crate::nicks::{
+    NICK_MAX_CHARS, NickError, NickStore, Verified, badge, hash_device_key, skeleton,
+};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -59,17 +67,48 @@ fn badge_json(key_hash: &str) -> Value {
     json!({ "hue": b.hue, "shape": b.shape })
 }
 
-/// Argon2 off the async workers.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> ApiResult<T> {
+/// Argon2 off the async workers, at most [`crate::nick_pin::ARGON2_PARALLEL`] at a time.
+async fn argon2<T: Send + 'static>(
+    state: &AppState,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> ApiResult<T> {
+    let _permit = state
+        .pin_work
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
+/// Starts an attempt in the guard (a brief lock); `nick_pin_locked` when it may not start.
+fn begin(state: &AppState, ip: &str, skel: Option<&str>) -> Result<Attempt, ApiError> {
+    state
+        .pin_guard
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .begin(ip, skel)
+        .ok_or_else(locked)
+}
+
+/// Settles an attempt: a success gives its counted failure back, a miss keeps it.
+fn settle(state: &AppState, attempt: Attempt, ok: bool) {
+    let mut guard = state
+        .pin_guard
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if ok {
+        guard.succeed(attempt);
+    } else {
+        guard.fail(attempt);
+    }
+}
+
 /// A new PIN and recovery code: (PHC, code hash, code shown once).
-async fn new_secret(pin: &str) -> ApiResult<(String, String, String)> {
+async fn new_secret(state: &AppState, pin: &str) -> ApiResult<(String, String, String)> {
     let pin = pin.to_string();
-    let phc = blocking(move || hash_pin(&pin)).await?;
+    let phc = argon2(state, move || hash_pin(&pin)).await?;
     let code = new_recovery_code();
     let normalized = normalize_recovery_code(&code).unwrap_or_default();
     Ok((phc, hash_recovery_code(&normalized), code))
@@ -90,32 +129,43 @@ async fn protect(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBo
         .with_db(|c| NickStore::new(c).held(&skel))?
         .filter(|h| !h.expired(now))
         .and_then(|h| h.pin_hash);
-    {
-        let mut guard = state.pin_guard.lock().await;
-        if let Some(phc) = current_phc {
-            let Some(current) = text(&body, "currentPin").map(str::to_string) else {
-                return Err(ApiError::coded(
-                    StatusCode::CONFLICT,
-                    "nick_pin_required",
-                    &[],
-                ));
-            };
-            if !guard.may_try(&ctx.ip, Some(&skel)) {
-                return Err(locked());
-            }
-            if !blocking(move || verify_pin(&current, &phc)).await? {
-                guard.fail(&ctx.ip, Some(&skel));
-                return Err(wrong());
-            }
-            guard.succeed(&skel);
-        }
-        if !guard.may_protect(&ctx.ip) {
-            return Err(locked());
+    if let Some(phc) = &current_phc {
+        let Some(current) = text(&body, "currentPin").map(str::to_string) else {
+            return Err(ApiError::coded(
+                StatusCode::CONFLICT,
+                "nick_pin_required",
+                &[],
+            ));
+        };
+        let attempt = begin(&state, &ctx.ip, Some(&skel))?;
+        let phc = phc.clone();
+        let ok = argon2(&state, move || verify_pin(&current, &phc)).await;
+        let ok = ok.unwrap_or(false);
+        settle(&state, attempt, ok);
+        if !ok {
+            return Err(wrong());
         }
     }
-    let (phc, recovery_hash, code) = new_secret(pin).await?;
+    let may_protect = state
+        .pin_guard
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .may_protect(&ctx.ip);
+    if !may_protect {
+        return Err(locked());
+    }
+    let (phc, recovery_hash, code) = new_secret(&state, pin).await?;
     state
-        .with_db(|c| Ok(NickStore::new(c).protect(&nick, &key_hash, &phc, &recovery_hash, now)))?
+        .with_db(|c| {
+            Ok(NickStore::new(c).protect(
+                &nick,
+                &key_hash,
+                &phc,
+                &recovery_hash,
+                current_phc.as_deref(),
+                now,
+            ))
+        })?
         .map_err(nick_error)?;
     Ok(json_ok(&json!({
         "nick": nick,
@@ -126,7 +176,7 @@ async fn protect(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBo
 
 /// `{deviceKey, name, pin, signOutOthers?}` or `{deviceKey, name, recoveryCode, newPin}`:
 /// binds this device to the protected nick. The recovery code signs every other device out
-/// and gives a new code.
+/// and gives a new code; it works once, also against concurrent requests.
 async fn adopt(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody) -> ApiResult {
     let (key_hash, nick) = device_and_nick(&body)?;
     let skel = skeleton(&nick);
@@ -149,45 +199,48 @@ async fn adopt(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
         return Err(nick_error(NickError::Blocked));
     }
     let now = crate::db::now_ms();
-    {
-        let mut guard = state.pin_guard.lock().await;
-        // A PIN counts against the nick too; a recovery code (80 bits) only against the
-        // address, so a stranger locking the nick does not lock its owner out.
-        let per_nick = pin.is_some().then_some(skel.as_str());
-        if !guard.may_try(&ctx.ip, per_nick) {
-            return Err(locked());
+    // A PIN counts against the nick too; a recovery code (80 bits) only against the address,
+    // so a stranger locking the nick does not lock its owner out.
+    let attempt = begin(&state, &ctx.ip, pin.is_some().then_some(skel.as_str()))?;
+    let held = match state.with_db(|c| NickStore::new(c).held(&skel)) {
+        Ok(held) => held.filter(|h| h.protected() && !h.expired(now)),
+        Err(e) => {
+            settle(&state, attempt, false);
+            return Err(e);
         }
-        let held = state
-            .with_db(|c| NickStore::new(c).held(&skel))?
-            .filter(|h| h.protected() && !h.expired(now));
-        let ok = match (&pin, code) {
-            (Some(pin), _) => {
-                let phc = held
-                    .as_ref()
-                    .and_then(|h| h.pin_hash.clone())
-                    .unwrap_or_else(|| dummy_phc().to_string());
-                let pin = pin.clone();
-                let matches = blocking(move || verify_pin(&pin, &phc)).await?;
-                matches && held.is_some()
-            }
-            (None, Some(code)) => {
-                let presented = normalize_recovery_code(code).map(|n| hash_recovery_code(&n));
-                let expected = held.as_ref().and_then(|h| h.recovery_hash.as_deref());
-                match (presented, expected) {
-                    (Some(p), Some(e)) => constant_time_eq(&p, e),
-                    _ => false,
-                }
-            }
-            (None, None) => false,
-        };
-        if !ok {
-            guard.fail(&ctx.ip, per_nick);
-            return Err(wrong());
+    };
+    // The stored secret the input matched, if it did.
+    let matched: Option<String> = match (&pin, code) {
+        (Some(pin), _) => {
+            let stored = held.as_ref().and_then(|h| h.pin_hash.clone());
+            let phc = stored.clone().unwrap_or_else(|| dummy_phc().to_string());
+            let pin = pin.clone();
+            let ok = argon2(&state, move || verify_pin(&pin, &phc))
+                .await
+                .unwrap_or(false);
+            stored.filter(|_| ok)
         }
-        guard.succeed(&skel);
-    }
+        (None, Some(code)) => {
+            let presented = normalize_recovery_code(code).map(|n| hash_recovery_code(&n));
+            let stored = held.as_ref().and_then(|h| h.recovery_hash.clone());
+            match (presented, stored) {
+                (Some(p), Some(s)) if constant_time_eq(&p, &s) => Some(s),
+                _ => None,
+            }
+        }
+        (None, None) => None,
+    };
+    settle(&state, attempt, matched.is_some());
+    let Some(matched) = matched else {
+        return Err(wrong());
+    };
+    let verified = if pin.is_some() {
+        Verified::Pin(&matched)
+    } else {
+        Verified::RecoveryCode(&matched)
+    };
     let fresh = match &replacement {
-        Some(pin) => Some(new_secret(pin).await?),
+        Some(pin) => Some(new_secret(&state, pin).await?),
         None => None,
     };
     let sign_out_others =
@@ -197,6 +250,7 @@ async fn adopt(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody
             Ok(NickStore::new(c).adopt(
                 &skel,
                 &key_hash,
+                verified,
                 sign_out_others,
                 fresh.as_ref().map(|(p, r, _)| (p.as_str(), r.as_str())),
                 now,

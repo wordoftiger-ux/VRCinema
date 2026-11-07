@@ -267,3 +267,76 @@ async fn the_owner_resets_a_pin_and_blocks_every_device() {
     let fresh = adopt_pin(&h, "4.4.4.5", KEY_C, "Kasia", "2580").await;
     assert_eq!(fresh.json()["code"], "device_blocked");
 }
+
+/// Security review: a recovery code works once even when two requests bring it at the same
+/// time (each verifies it before either writes; the write is conditional on the stored code).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_code_works_once_under_concurrent_requests() {
+    let h = Harness::new();
+    let code = protect(&h, KEY_A, "2580").await.json()["recoveryCode"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let send = |ip: &'static str, key: &'static str, pin: &'static str| {
+        post(
+            &h,
+            ADOPT,
+            ip,
+            json!({"deviceKey": key, "name": "Kasia", "recoveryCode": code, "newPin": pin}),
+        )
+    };
+    let (b, c) = tokio::join!(
+        send("2.2.2.2", KEY_B, "13579"),
+        send("3.3.3.3", KEY_C, "97531")
+    );
+    let mut statuses = [b.status, c.status];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::FORBIDDEN],
+        "{} / {}",
+        b.text(),
+        c.text()
+    );
+    let loser = if b.status == StatusCode::OK { &c } else { &b };
+    assert_eq!(loser.json()["code"], "nick_pin_wrong");
+    // Only the winner's new PIN works.
+    let (won_pin, lost_pin) = if b.status == StatusCode::OK {
+        ("13579", "97531")
+    } else {
+        ("97531", "13579")
+    };
+    assert_eq!(
+        adopt_pin(&h, "4.4.4.4", KEY_A, "Kasia", lost_pin)
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        adopt_pin(&h, "4.4.4.5", KEY_A, "Kasia", won_pin)
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+/// Security review: correct PINs are not free either — an address has a cap on attempts of
+/// any outcome.
+#[tokio::test]
+async fn correct_pins_are_capped_per_address_too() {
+    let h = Harness::new();
+    protect(&h, KEY_A, "2580").await;
+    let mut last = StatusCode::OK;
+    for _ in 0..=crate::nick_pin::IP_ATTEMPTS {
+        last = adopt_pin(&h, "9.9.9.9", KEY_B, "Kasia", "2580")
+            .await
+            .status;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        adopt_pin(&h, "9.9.9.8", KEY_B, "Kasia", "2580")
+            .await
+            .status,
+        StatusCode::OK
+    );
+}

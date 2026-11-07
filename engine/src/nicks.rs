@@ -39,6 +39,15 @@ pub fn hold_ms(protected: bool) -> i64 {
     }
 }
 
+/// The stored secret the caller verified a viewer's input against: the PIN's PHC or the
+/// recovery code's hash. The store writes only while it is still the stored one, so a code is
+/// used once even by concurrent requests.
+#[derive(Debug, Clone, Copy)]
+pub enum Verified<'a> {
+    Pin(&'a str),
+    RecoveryCode(&'a str),
+}
+
 /// The stored row of a nick, as the holder checks need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldNick {
@@ -74,6 +83,9 @@ pub enum NickError {
     Taken,
     Reserved,
     Blocked,
+    /// The PIN or recovery code the caller verified is no longer the stored one (changed or
+    /// used by a concurrent request).
+    Changed,
     /// The database failed; the request must not pass or be told the nick is taken.
     Db(String),
 }
@@ -399,18 +411,29 @@ impl<'a> NickStore<'a> {
     }
 
     /// Sets the PIN (and the recovery code) of `nick` for the device, claiming the nick first
-    /// like a request does (a free one becomes the device's). The caller has checked the
-    /// current PIN of a nick that already has one.
+    /// like a request does (a free one becomes the device's). `verified_pin` is the PHC the
+    /// caller checked the current PIN against (`None`: the nick had no PIN); a nick whose PIN
+    /// is no longer that one is [`NickError::Changed`].
     pub fn protect(
         &self,
         nick: &str,
         key_hash: &str,
         pin_hash: &str,
         recovery_hash: &str,
+        verified_pin: Option<&str>,
         now: i64,
     ) -> Result<(), NickError> {
-        self.claim(nick, key_hash, now)?;
+        // The comparison, the claim and the update run under the one database connection the
+        // caller holds (see the module notes): no other request comes in between.
         let skel = skeleton(nick);
+        let current = self
+            .held(&skel)?
+            .filter(|h| !h.expired(now))
+            .and_then(|h| h.pin_hash);
+        if current.as_deref() != verified_pin {
+            return Err(NickError::Changed);
+        }
+        self.claim(nick, key_hash, now)?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE viewer_nicks SET pin_hash = ?2, recovery_hash = ?3 WHERE skeleton = ?1",
@@ -422,33 +445,54 @@ impl<'a> NickStore<'a> {
     }
 
     /// Binds the device to the protected nick after the caller verified its PIN or recovery
-    /// code; `sign_out_others` drops every other device, `new_pin` (PHC, code hash) replaces the
-    /// PIN and the code. Returns the nick as it is written. A blocked device — this one or one
+    /// code (`verified`: the stored secret it compared against, still required to be the
+    /// stored one here, in the same transaction as the writes); `sign_out_others` drops every
+    /// other device, `new_pin` (PHC, code hash) replaces the PIN and the code — so a recovery
+    /// code works once. Returns the nick as it is written. A blocked device — this one or one
     /// of the nick — is refused.
     pub fn adopt(
         &self,
         skel: &str,
         key_hash: &str,
+        verified: Verified<'_>,
         sign_out_others: bool,
         new_pin: Option<(&str, &str)>,
         now: i64,
     ) -> Result<String, NickError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let held = self
+            .held(skel)?
+            .filter(|h| h.protected() && !h.expired(now))
+            .ok_or(NickError::Taken)?;
+        let still = match verified {
+            Verified::Pin(phc) => held.pin_hash.as_deref() == Some(phc),
+            Verified::RecoveryCode(hash) => held.recovery_hash.as_deref() == Some(hash),
+        };
+        if !still {
+            return Err(NickError::Changed);
+        }
         if self.is_blocked(key_hash)? || self.nick_blocked(skel)? {
             return Err(NickError::Blocked);
         }
-        let held = self
-            .held(skel)?
-            .filter(|h| h.protected())
-            .ok_or(NickError::Taken)?;
-        let tx = self.conn.unchecked_transaction()?;
         if sign_out_others {
             tx.execute("DELETE FROM nick_keys WHERE skeleton = ?", [skel])?;
         }
         if let Some((pin_hash, recovery_hash)) = new_pin {
-            tx.execute(
-                "UPDATE viewer_nicks SET pin_hash = ?2, recovery_hash = ?3 WHERE skeleton = ?1",
-                params![skel, pin_hash, recovery_hash],
+            // Conditional on the secret just compared: nothing else may have replaced it.
+            let (column, old) = match verified {
+                Verified::Pin(phc) => ("pin_hash", phc),
+                Verified::RecoveryCode(hash) => ("recovery_hash", hash),
+            };
+            let changed = tx.execute(
+                &format!(
+                    "UPDATE viewer_nicks SET pin_hash = ?2, recovery_hash = ?3
+                     WHERE skeleton = ?1 AND {column} = ?4"
+                ),
+                params![skel, pin_hash, recovery_hash, old],
             )?;
+            if changed != 1 {
+                return Err(NickError::Changed);
+            }
         }
         // Like a claim: the device's other nick without a PIN is freed.
         tx.execute(
@@ -918,12 +962,12 @@ mod pin_tests {
     fn a_protected_nick_is_held_by_its_bound_devices_only() {
         let conn = mem();
         let s = NickStore::new(&conn);
-        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
         assert!(s.is_bound(&sk(), &h(K1)).unwrap());
         assert_eq!(s.claim("Kasia", &h(K2), T + 1), Err(NickError::Taken));
         // Adopted by a second device, keeping the first.
         assert_eq!(
-            s.adopt(&sk(), &h(K2), false, None, T + 2),
+            s.adopt(&sk(), &h(K2), Verified::Pin("phc"), false, None, T + 2),
             Ok("Kasia".into())
         );
         assert_eq!(s.claim("kasia", &h(K1), T + 3), Ok(()));
@@ -932,7 +976,8 @@ mod pin_tests {
         assert!(e.protected);
         assert_eq!(e.devices, 2);
         // Signing the others out leaves only the adopting device.
-        s.adopt(&sk(), &h(K3), true, None, T + 6).unwrap();
+        s.adopt(&sk(), &h(K3), Verified::Pin("phc"), true, None, T + 6)
+            .unwrap();
         assert_eq!(s.claim("Kasia", &h(K1), T + 7), Err(NickError::Taken));
         assert_eq!(s.claim("Kasia", &h(K3), T + 7), Ok(()));
     }
@@ -941,7 +986,7 @@ mod pin_tests {
     fn a_protected_nick_survives_a_change_of_nick_and_holds_for_180_days() {
         let conn = mem();
         let s = NickStore::new(&conn);
-        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
         s.claim("Inna", &h(K1), T + 1).unwrap();
         assert_eq!(s.claim("Kasia", &h(K2), T + 2), Err(NickError::Taken));
         assert_eq!(s.claim("Kasia", &h(K1), T + 3), Ok(()));
@@ -961,15 +1006,23 @@ mod pin_tests {
     fn a_device_is_bound_to_one_protected_nick_and_at_most_eight_devices_stay() {
         let conn = mem();
         let s = NickStore::new(&conn);
-        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
-        s.protect("Basia", &h(K1), "phc", "rec", T + 1).unwrap();
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
+        s.protect("Basia", &h(K1), "phc", "rec", None, T + 1)
+            .unwrap();
         assert!(!s.is_bound(&sk(), &h(K1)).unwrap());
         let basia = skeleton("Basia");
         assert!(s.is_bound(&basia, &h(K1)).unwrap());
         for i in 0..10u32 {
             let key = format!("{i:032x}");
-            s.adopt(&basia, &h(&key), false, None, T + 10 + i64::from(i))
-                .unwrap();
+            s.adopt(
+                &basia,
+                &h(&key),
+                Verified::Pin("phc"),
+                false,
+                None,
+                T + 10 + i64::from(i),
+            )
+            .unwrap();
         }
         let devices: i64 = conn
             .query_row(
@@ -986,23 +1039,26 @@ mod pin_tests {
     fn reset_release_and_block_cover_every_device() {
         let conn = mem();
         let s = NickStore::new(&conn);
-        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
-        s.adopt(&sk(), &h(K2), false, None, T + 1).unwrap();
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
+        s.adopt(&sk(), &h(K2), Verified::Pin("phc"), false, None, T + 1)
+            .unwrap();
         // Reset: no PIN, no bindings, the last device keeps the nick.
         assert!(s.reset_pin(&sk()).unwrap());
         assert!(!s.reset_pin(&sk()).unwrap());
         assert_eq!(s.claim("Kasia", &h(K1), T + 2), Err(NickError::Taken));
         assert_eq!(s.claim("Kasia", &h(K2), T + 2), Ok(()));
         // Block: every bound device, and adopting is refused.
-        s.protect("Kasia", &h(K2), "phc", "rec", T + 3).unwrap();
-        s.adopt(&sk(), &h(K1), false, None, T + 4).unwrap();
+        s.protect("Kasia", &h(K2), "phc", "rec", None, T + 3)
+            .unwrap();
+        s.adopt(&sk(), &h(K1), Verified::Pin("phc"), false, None, T + 4)
+            .unwrap();
         assert!(s.block_nick(&sk()).unwrap());
         assert!(s.is_blocked(&h(K1)).unwrap() && s.is_blocked(&h(K2)).unwrap());
         let blocked = s.blocked().unwrap();
         assert_eq!(blocked.len(), 2);
         assert!(blocked.iter().all(|b| b.nick.as_deref() == Some("Kasia")));
         assert_eq!(
-            s.adopt(&sk(), &h(K3), false, None, T + 5),
+            s.adopt(&sk(), &h(K3), Verified::Pin("phc"), false, None, T + 5),
             Err(NickError::Blocked)
         );
         // Release removes the bindings too.
@@ -1014,8 +1070,9 @@ mod pin_tests {
     fn a_protected_nick_with_a_blocked_device_is_blocked_on_the_others() {
         let conn = mem();
         let s = NickStore::new(&conn);
-        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
-        s.adopt(&sk(), &h(K2), false, None, T + 1).unwrap();
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
+        s.adopt(&sk(), &h(K2), Verified::Pin("phc"), false, None, T + 1)
+            .unwrap();
         s.block_device(&h(K1)).unwrap();
         assert_eq!(
             s.check("Kasia", Some(&h(K2)), T + 2),
@@ -1028,20 +1085,64 @@ mod pin_tests {
         let conn = mem();
         let s = NickStore::new(&conn);
         assert_eq!(
-            s.adopt(&sk(), &h(K1), false, None, T),
+            s.adopt(&sk(), &h(K1), Verified::Pin("phc"), false, None, T),
             Err(NickError::Taken)
         );
         s.claim("Kasia", &h(K1), T).unwrap();
         assert_eq!(
-            s.adopt(&sk(), &h(K2), false, None, T),
+            s.adopt(&sk(), &h(K2), Verified::Pin("phc"), false, None, T),
             Err(NickError::Taken)
         );
-        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
-        s.adopt(&sk(), &h(K2), true, Some(("phc2", "rec2")), T + 1)
-            .unwrap();
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
+        s.adopt(
+            &sk(),
+            &h(K2),
+            Verified::Pin("phc"),
+            true,
+            Some(("phc2", "rec2")),
+            T + 1,
+        )
+        .unwrap();
         let held = s.held(&sk()).unwrap().unwrap();
         assert_eq!(held.pin_hash.as_deref(), Some("phc2"));
         assert_eq!(held.recovery_hash.as_deref(), Some("rec2"));
         assert_eq!(held.key_hash, h(K2));
+    }
+
+    #[test]
+    fn a_stale_secret_writes_nothing_so_a_recovery_code_works_once() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        s.protect("Kasia", &h(K1), "phc", "rec", None, T).unwrap();
+        let code = Verified::RecoveryCode("rec");
+        assert_eq!(
+            s.adopt(&sk(), &h(K2), code, true, Some(("phc2", "rec2")), T + 1),
+            Ok("Kasia".into())
+        );
+        // A second request that verified the same code before the first one wrote.
+        assert_eq!(
+            s.adopt(&sk(), &h(K3), code, true, Some(("phc3", "rec3")), T + 2),
+            Err(NickError::Changed)
+        );
+        assert_eq!(
+            s.adopt(&sk(), &h(K3), Verified::Pin("phc"), false, None, T + 2),
+            Err(NickError::Changed)
+        );
+        assert!(!s.is_bound(&sk(), &h(K3)).unwrap());
+        let held = s.held(&sk()).unwrap().unwrap();
+        assert_eq!(held.recovery_hash.as_deref(), Some("rec2"));
+        // Changing the PIN needs the PIN that is stored now.
+        assert_eq!(
+            s.protect("Kasia", &h(K2), "phc4", "rec4", Some("phc"), T + 3),
+            Err(NickError::Changed)
+        );
+        assert_eq!(
+            s.protect("Kasia", &h(K2), "phc4", "rec4", None, T + 3),
+            Err(NickError::Changed)
+        );
+        assert_eq!(
+            s.protect("Kasia", &h(K2), "phc4", "rec4", Some("phc2"), T + 3),
+            Ok(())
+        );
     }
 }

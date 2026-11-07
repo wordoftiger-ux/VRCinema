@@ -134,6 +134,8 @@ pub(super) fn nick_error(e: NickError) -> ApiError {
         NickError::Taken => ApiError::coded(StatusCode::CONFLICT, "nick_taken", &[]),
         NickError::Reserved => ApiError::coded(StatusCode::CONFLICT, "nick_reserved", &[]),
         NickError::Blocked => ApiError::coded(StatusCode::FORBIDDEN, "device_blocked", &[]),
+        // The PIN or code checked a moment ago is not the stored one any more.
+        NickError::Changed => ApiError::coded(StatusCode::FORBIDDEN, "nick_pin_wrong", &[]),
         NickError::Db(e) => ApiError::Internal(e),
     }
 }
