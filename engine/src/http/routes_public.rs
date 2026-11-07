@@ -105,7 +105,7 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
 
 /// Control and invisible format characters removed, trimmed, at most 32 UTF-16 units; empty
 /// means no name.
-fn clean_name(raw: Option<&Value>) -> Option<String> {
+pub(super) fn clean_name(raw: Option<&Value>) -> Option<String> {
     let raw = raw?.as_str()?;
     let stripped: String = raw
         .chars()
@@ -129,7 +129,7 @@ pub(super) struct Viewer {
     pub(super) key_hash: Option<String>,
 }
 
-fn nick_error(e: NickError) -> ApiError {
+pub(super) fn nick_error(e: NickError) -> ApiError {
     match e {
         NickError::Taken => ApiError::coded(StatusCode::CONFLICT, "nick_taken", &[]),
         NickError::Reserved => ApiError::coded(StatusCode::CONFLICT, "nick_reserved", &[]),

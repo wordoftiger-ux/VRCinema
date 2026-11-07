@@ -5,6 +5,7 @@ pub mod client_ip;
 mod routes_admin;
 mod routes_desktop;
 mod routes_monitor;
+mod routes_nick_pin;
 mod routes_public;
 mod routes_queue;
 mod routes_stream;
@@ -82,6 +83,8 @@ pub struct AppState {
     pub library: Option<Arc<MediaLibrary>>,
     pub request_limiter: Arc<Mutex<RateLimiter>>,
     pub login_limiter: Arc<tokio::sync::Mutex<RateLimiter>>,
+    /// Guessing limits of nick PINs and recovery codes (per address and per nick).
+    pub(crate) pin_guard: Arc<tokio::sync::Mutex<crate::nick_pin::PinGuard>>,
     pub log: LogFn,
     /// Changes at runtime (settings of the desktop app), hence behind a lock.
     admin_auth: Arc<RwLock<AdminAuth>>,
@@ -184,6 +187,7 @@ impl AppState {
             alarms: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
+            pin_guard: Arc::new(tokio::sync::Mutex::new(crate::nick_pin::PinGuard::system())),
             log: Arc::new(|_| {}),
         })
     }
@@ -1183,6 +1187,7 @@ pub fn build_router(state: AppState) -> Router {
     };
     Router::new()
         .merge(routes_public::router())
+        .merge(routes_nick_pin::router())
         .merge(routes_stream::router())
         .merge(admin)
         .merge(desktop)

@@ -40,6 +40,10 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/library", get(library))
         .route("/api/admin/nicks", get(list_nicks))
         .route("/api/admin/nicks/{skeleton}/release", post(release_nick))
+        .route(
+            "/api/admin/nicks/{skeleton}/reset-pin",
+            post(reset_nick_pin),
+        )
         .route("/api/admin/devices/block", post(block_device))
         .route("/api/admin/devices/unblock", post(unblock_device))
         .route("/api/admin/channels/main/local", post(add_local))
@@ -387,6 +391,8 @@ async fn list_nicks(State(state): State<AppState>) -> ApiResult {
                 "lastUsedAt": e.last_used_at,
                 "blocked": e.blocked,
                 "blockId": e.block_id,
+                "protected": e.protected,
+                "devices": e.devices,
             })
         })
         .collect();
@@ -412,21 +418,28 @@ async fn release_nick(State(state): State<AppState>, Path(skeleton): Path<String
     }
 }
 
-/// Blocks the device that holds the nick: its requests are refused from now on.
+/// The nick loses its PIN, recovery code and other devices; the device that used it last keeps
+/// it as a nick without a PIN.
+async fn reset_nick_pin(State(state): State<AppState>, Path(skeleton): Path<String>) -> ApiResult {
+    if state.with_db(|c| NickStore::new(c).reset_pin(&skeleton))? {
+        Ok(ok())
+    } else {
+        Err(ApiError::coded(StatusCode::NOT_FOUND, "nick_no_pin", &[]))
+    }
+}
+
+/// Blocks the device that holds the nick (every device of a protected nick): its requests are
+/// refused from now on.
 async fn block_device(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
     let skeleton = body
         .get("skeleton")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("bad_request"))?;
-    state.with_db(|c| {
-        let store = NickStore::new(c);
-        let Some(key_hash) = store.key_hash_of(skeleton)? else {
-            return Ok(Err(no_such_nick()));
-        };
-        store.block_device(&key_hash)?;
-        Ok(Ok(()))
-    })??;
-    Ok(ok())
+    if state.with_db(|c| NickStore::new(c).block_nick(skeleton))? {
+        Ok(ok())
+    } else {
+        Err(no_such_nick())
+    }
 }
 
 /// Lifts a block by its id (from the list of blocked devices).
