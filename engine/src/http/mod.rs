@@ -400,8 +400,9 @@ impl AppState {
         }
     }
 
-    /// How many times a new public address restarted the film for the ticker's code.
-    #[cfg(test)]
+    /// How many times a new public address restarted the film for the ticker's code (the
+    /// tunnel tests, which run on Windows only).
+    #[cfg(all(test, windows))]
     pub(crate) fn ticker_redraws(&self) -> usize {
         self.ticker_redraws
             .load(std::sync::atomic::Ordering::SeqCst)
