@@ -34,7 +34,7 @@ function Numbers({ settings, say, name, fields, okText, disabled = false }) {
     saveChannelWith(say, patch, okText);
   };
   return html`
-    <form class="limits" data-form=${name} onSubmit=${submit}>
+    <form class="limits" data-form=${name} novalidate onSubmit=${submit}>
       ${fields.map(
         (f, i) => html`<label class="limit"><span>${f.label}</span>
           <input type="number" class="num" name=${f.key} min=${f.min} max=${f.max} step=${f.step} value=${values[i]}

@@ -63,7 +63,7 @@
 // type through the panel routes applies the change and then drops the connection, as the real
 // tunnel would), `channelDown` (channelRunning false with an error).
 // Settings view: GET /api/admin/environment ({window, encoder, tickerSlow, language,
-// sessionViaTunnel, publicUrl, tunnelEnabled, tunnel, channelRunning, channelError}; scenario `headless`: no window — the window routes answer 403 like for a remote session, window false; `tickerSlow`, `encoder`), GET/PUT /api/desktop/config (validated like the engine; a new port or lanAccess answers restarted: true), tools (GET /api/desktop/tools, POST install|update|repair then GET progress; scenario `toolsMissing`), POST encoder/detect, pick-cookies (scenario `pickCookies`), GET log, GET update (scenario `updateOffer` {version, notes}, `toolsFail`, `infoFail`: the info route answers 500), POST update/apply, POST restart; GET/PUT /api/admin/channels/main/settings (validated like the engine: ticker messages <= 10 x <= 200 chars, intervals 60/120/300/600), GET /api/admin/nicks and POST nicks/{skeleton}/release, devices/block, devices/unblock.
+// sessionViaTunnel, publicUrl, tunnelEnabled, tunnel, channelRunning, channelError}; scenario `headless`: no window — the window routes answer 403 like for a remote session, window false; `tickerSlow`, `encoder`), GET/PUT /api/desktop/config (validated like the engine; a new port or lanAccess answers restarted: true), tools (GET /api/desktop/tools, POST install|update|repair then GET progress; scenario `toolsMissing`), POST encoder/detect, pick-cookies (scenario `pickCookies`), GET log, GET update (scenario `updateOffer` {version, notes}, `toolsFail`, `infoFail`: the info route answers 500), POST update/apply, POST restart; GET/PUT /api/admin/channels/main/settings (validated like the engine: ticker messages <= 10 x <= 200 chars, intervals 60/120/300/600; the Advanced keys too), GET/DELETE /api/admin/channels/main/journal and GET …/journal/export (scenario `journal`), `alarms` {black, silence} in the info and the environment, GET /api/admin/nicks and POST nicks/{skeleton}/release, devices/block, devices/unblock.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -173,6 +173,18 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     viewerLists: false,
     viewerListMax: 10,
     uploadMbps: 0,
+    transitionsEnabled: false,
+    transitionS: 1,
+    peakMbps: 0,
+    peakBufferS: 2,
+    subtitlesEnabled: false,
+    subtitlesLanguage: 'en',
+    loudnessEnabled: false,
+    loudnessTarget: -16,
+    alarmsEnabled: false,
+    alarmBlackS: 10,
+    alarmSilenceS: 15,
+    alarmSilenceDb: -50,
   });
   const POPULAR = ['youtube.com', 'youtu.be', 'twitch.tv', 'kick.com', 'vimeo.com', 'pixeldrain.com', 'cda.pl'];
   const initialNicks = () => [
@@ -227,6 +239,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       infoFail: false,
       toolsFail: false,
       tickerSlow: false,
+      alarms: { black: false, silence: false },
+      journal: [],
       encoder: 'h264_nvenc',
       toolsMissing: [],
       updateOffer: null,
@@ -729,6 +743,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       encoder: s.encoder,
       update: s.updateOffer,
       tickerSlow: s.tickerSlow,
+      alarms: s.alarms,
     };
   }
 
@@ -1018,6 +1033,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
         window: app,
         encoder: s.encoder,
         tickerSlow: s.tickerSlow,
+        alarms: s.alarms,
         language: s.language,
         sessionViaTunnel: app && s.sessionViaTunnel && s.tunnel !== 'off',
         publicUrl: '',
@@ -1090,6 +1106,23 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       return json(res, 200, answer);
     }
     if (path === `${base}/stats` && req.method === 'GET') return json(res, 200, statsAnswer());
+    // The broadcast journal (Settings → Advanced): scenario `journal` (rows, newest first).
+    if (path === `${base}/journal` && req.method === 'GET') {
+      return json(res, 200, { entries: s.journal.slice(0, Number(url.searchParams.get('limit') ?? 20)) });
+    }
+    if (path === `${base}/journal` && req.method === 'DELETE') {
+      const removed = s.journal.length;
+      s.journal = [];
+      return json(res, 200, { ok: true, removed });
+    }
+    if (path === `${base}/journal/export` && req.method === 'GET') {
+      const csv = url.searchParams.get('format') !== 'json';
+      res.writeHead(200, {
+        'Content-Type': csv ? 'text/csv; charset=utf-8' : 'application/json',
+        'Content-Disposition': `attachment; filename="vrcinema-journal-20261106.${csv ? 'csv' : 'json'}"`,
+      });
+      return res.end(csv ? 'started,ended,duration_s,title\r\n' : JSON.stringify(s.journal));
+    }
     const itemRoute = path.match(/^\/api\/admin\/items\/(\d+)$/);
     if (itemRoute) {
       const id = Number(itemRoute[1]);
