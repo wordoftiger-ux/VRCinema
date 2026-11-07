@@ -23,6 +23,7 @@ import {
   abilities,
   controlAt,
   netStatus,
+  obsState,
   queue,
   restart,
   seekBy,
@@ -166,11 +167,31 @@ const PAUSE_REASON_KEYS = {
   manual: 'player.paused_manual',
   tunnel: 'player.paused_tunnel',
   no_viewers: 'player.paused_no_viewers',
+  obs: 'player.paused_obs',
 };
 
 // ---------- Parts ----------
 
+/** The OBS stream's title and line under it (null: not on air, nothing to say). */
+function obsLines(state, current) {
+  if (state === 'live') return { title: t('player.obs_live'), sub: t('player.obs_live_hint') };
+  if (state === 'brb') return { title: t('player.obs_brb'), sub: t('player.obs_brb_hint') };
+  if (state === 'waiting' && current) return { title: null, sub: t('player.obs_waiting') };
+  return null;
+}
+
 function NowPlaying({ current, c }) {
+  const obs = obsLines(obsState.value, current);
+  if (obs?.title) {
+    return html`
+      <div class="nowp nowp-obs" data-obs=${obsState.value}>
+        <span class="thumb" aria-hidden="true"></span>
+        <div class="nowp-text">
+          <b class="nowp-title" title=${obs.title}><span class="live-tag">OBS</span> ${obs.title}</b>
+          <small class="nowp-sub" title=${obs.sub}>${obs.sub}</small>
+        </div>
+      </div>`;
+  }
   let sub = '';
   // Paused with no film on air (it ended before the pause point): the pause still shows.
   if (c?.pausePending && current) sub = t('player.pause_pending');
@@ -181,6 +202,7 @@ function NowPlaying({ current, c }) {
   // The stream counts down to a video's start time.
   const countdown = current ? null : countdownText(queue.value);
   if (countdown && !c?.paused) sub = countdown.text;
+  if (obs) sub = obs.sub;
   const title = current
     ? videoTitle(current.title)
     : countdown
@@ -369,13 +391,13 @@ export function PlayerBar({ onShortcuts }) {
   const pos = previewPos ?? shownPosition(c, controlAt.value, status);
   const dur = c?.durationS ?? current?.durationS ?? null;
   const live = Boolean(c?.isLive ?? current?.isLive);
-  const { canSeek, manual, canToggle } = abilities.value;
+  const { canSeek, manual, canToggle, canSkip } = abilities.value;
   const net = netStatus.value;
   const videoLink = ch?.playing?.[0]?.sourceUrl ?? null;
 
   const menuItems = () => [
     { key: 'player.restart', icon: 'prev', disabled: !canSeek, action: restart },
-    { key: 'player.next', icon: 'next', disabled: !current, action: skip },
+    { key: 'player.next', icon: 'next', disabled: !canSkip, action: skip },
     {
       key: 'player.copy_video_link',
       icon: 'copy',
@@ -402,7 +424,7 @@ export function PlayerBar({ onShortcuts }) {
             title=${manual ? t('player.resume') : t('player.pause')} onClick=${togglePause}>
             <${Icon} name=${manual ? 'play' : 'pause'} size=${20} />
           </button>
-          ${ctl('next', 'player.next', skip, Boolean(current))}
+          ${ctl('next', 'player.next', skip, canSkip)}
           <button type="button" class="sm" disabled=${!canSeek} aria-label=${t('player.forward_10_label')}
             title=${t('player.forward_10_label')} onClick=${() => seekBy(10)}>${t('player.forward_10')}</button>
         </div>

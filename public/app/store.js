@@ -529,15 +529,22 @@ export async function signOut() {
 
 // ---------- Derived values ----------
 
+/** The OBS stream: `off`, `waiting` (connected, after the video on air), `live` or `brb`. */
+export const obsState = computed(() => channel.value?.obs?.state ?? 'off');
+
 /** What the owner's controls may do now (the keys and the buttons follow the same rules). */
 export const abilities = computed(() => {
   const c = control.value;
   const current = Boolean(channel.value?.current);
+  // The OBS stream on air is ended in OBS: no skip here (it cannot be paused or sought either).
+  const obs = obsState.value === 'live';
   // A pause waiting for the Preview's position is the owner's pause too (the button resumes).
   const manual = Boolean(c?.pauseReasons?.includes('manual') || c?.pausePending);
   return {
     current,
     manual,
+    obs,
+    canSkip: current && !obs,
     canSeek: Boolean(current && c?.canSeek),
     // The owner's pause can always be resumed, also with no film left on air (the film ended
     // before the pause point, or was skipped while paused: the next one waits for the resume).

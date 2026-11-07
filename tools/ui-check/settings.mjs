@@ -106,7 +106,7 @@ const seg = (label, value) => `[role=radiogroup][aria-label="${label}"] button[d
 const putSettings = (a) => a.filter((r) => r.method === 'PUT' && r.path === '/api/admin/channels/main/settings');
 const putConfigs = (a) => a.filter((r) => r.method === 'PUT' && r.path === '/api/desktop/config');
 
-const SECTIONS = ['general', 'internet', 'channel', 'tools', 'remote', 'advanced', 'log', 'about'];
+const SECTIONS = ['general', 'internet', 'channel', 'obs', 'tools', 'remote', 'advanced', 'log', 'about'];
 
 try {
   await reset();
@@ -115,8 +115,8 @@ try {
 
   // ---------- Navigation ----------
   const links = await page.$$eval('.snav a', (as) => as.map((a) => [a.dataset.section, a.textContent.trim()]));
-  check(JSON.stringify(links.map((l) => l[0])) === JSON.stringify(SECTIONS), 'the list has the eight sections of the spec', links);
-  check(links.map((l) => l[1]).join('|') === 'General|Internet|Channel|Tools|Remote panel|Advanced|Log|About', 'their names', links);
+  check(JSON.stringify(links.map((l) => l[0])) === JSON.stringify(SECTIONS), 'the list has the nine sections (OBS since 2026-11-06)', links);
+  check(links.map((l) => l[1]).join('|') === 'General|Internet|Channel|OBS|Tools|Remote panel|Advanced|Log|About', 'their names', links);
   check((await text(page, '.sform h1')) === 'General', 'the heading names the section');
 
   // ---------- General ----------

@@ -148,6 +148,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     skippedUpdateVersion: null,
     pauseOnTunnelLoss: true,
     pauseWhenNoViewers: false,
+    obsLan: false,
+    obsPriority: true,
   });
   const initialSettings = () => ({
     linkMode: 'all',
@@ -381,6 +383,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       // Broadcast: how ready the next video is, and the viewers' need against the upload.
       next: s.next ?? null,
       link: s.link ?? null,
+      // Scenario `obs`: the OBS stream's state (off, waiting, live, brb).
+      obs: { state: s.obs ?? 'off' },
       playing: current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : [],
       queue: s.queue,
       pending: s.pendingItems,
@@ -1038,6 +1042,23 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (monitorSeg && req.method === 'GET') return monitorSegment(res, monitorSeg[1], monitorSeg[2]);
       if (await desktopRoute(res, req, route, payload)) return undefined;
       if (route === '/api/desktop/tunnel/qr') return sendQr(res);
+      // OBS (window only): scenario `obsKey`, `obsStatus` (listening, streaming, failed).
+      if (route === '/api/desktop/obs' || route === '/api/desktop/obs/key') {
+        if (mirror && s.remote) return coded(res, 403, 'window_only', 'Window only');
+        if (route.endsWith('/key') && req.method === 'POST') s.obsKey = `nowyklucz${Date.now() % 100000}`;
+        const lanServers = s.config.obsLan ? ['rtmp://192.168.1.20:1935/live'] : [];
+        return json(res, 200, {
+          server: 'rtmp://127.0.0.1:1935/live',
+          lanServers,
+          key: s.obsKey ?? 'abcdefghijklmnopqrstuvwx',
+          port: 1935,
+          lan: s.config.obsLan,
+          priority: s.config.obsPriority,
+          status: s.obsStatus ?? 'listening',
+          error: s.obsStatus === 'failed' ? 'address in use' : null,
+          onAir: s.obs ?? 'off',
+        });
+      }
       if (route === '/api/desktop/tunnel' && req.method === 'GET') return json(res, 200, tunnelView());
       if (route === '/api/desktop/wizard/complete' && req.method === 'POST') {
         s.firstRun = false;

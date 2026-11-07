@@ -32,7 +32,7 @@ import Hls from '/static/vendor/hls.mjs';
 import { html } from '../html.js';
 import { lang, t } from '../i18n.js';
 import { Icon } from '../icons.js';
-import { access, attachPreview, control, showToast } from '../store.js';
+import { access, attachPreview, control, obsState, showToast } from '../store.js';
 import { airBehindS, sourcePlayer, sourceReason, sourceState } from './sourceplayer.js';
 import { monitorMuted, monitorVolume, nudgeMonitorVolume } from './volume.js';
 import { Meter, setListening } from './meters.js';
@@ -643,6 +643,9 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
         <video ref=${hlsVideo} class=${`pv-hls${mode === 'fallback' ? '' : ' is-hidden'}`} muted playsinline></video>
         <${Overlay} inWindow=${inWindow} known=${known} supported=${supported} state=${state} mode=${mode} />
         ${fallbackNote ? html`<div class="monitor-fallback" role="note" title=${t('preview.fallback_hint')}>${t('preview.fallback')}</div>` : null}
+        ${inWindow && obsState.value === 'live'
+          ? html`<div class="monitor-fallback monitor-obs" role="note" data-obs-note>${t('monitor.obs_live')}</div>`
+          : null}
         ${tools}
       </div>
       ${pip
