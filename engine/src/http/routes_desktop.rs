@@ -27,7 +27,14 @@ use crate::tools::Tool;
 use crate::tunnel::TunnelState;
 use crate::tunnel::named::{ADD_DOMAIN_HELP, ErrorCode, NamedError, Phase};
 
-const ENCODERS: [&str; 5] = ["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf"];
+const ENCODERS: [&str; 6] = [
+    "auto",
+    "libx264",
+    "h264_nvenc",
+    "h264_qsv",
+    "h264_amf",
+    "h264_vaapi",
+];
 const MIN_PASSWORD_CHARS: usize = 8;
 
 /// The settings a remote session may change (spec section 2). An allowlist: anything else —
@@ -35,11 +42,12 @@ const MIN_PASSWORD_CHARS: usize = 8;
 /// Cloudflare's headers (they decide who can reach the panel at all and who a request comes
 /// from), read-only and unknown fields, and any field added later — stays with the window
 /// until it is added here.
-const REMOTE_SETTINGS: [&str; 11] = [
+const REMOTE_SETTINGS: [&str; 12] = [
     "language",
     "autostart",
     "publicUrl",
     "videoEncoder",
+    "vaapiDevice",
     "ytdlpCookies",
     "pixeldrainApiKey",
     "skippedUpdateVersion",
@@ -129,6 +137,7 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
         "hasPassword": s.admin_password_hash.is_some(),
         "videoEncoder": s.video_encoder,
         "detectedEncoder": s.detected_encoder,
+        "vaapiDevice": s.vaapi_device,
         "ytdlpCookies": s.ytdlp_cookies.as_ref().map(|p| p.to_string_lossy().into_owned()),
         // Write-only: a new key or `null` (clear) can be sent, the key itself never comes back.
         "hasPixeldrainKey": s.pixeldrain_api_key.is_some(),
@@ -325,6 +334,22 @@ fn optional_text(map: &Map<String, Value>, key: &str) -> Result<Option<Option<St
     }
 }
 
+/// `vaapiDevice`: empty (the default render node) or an absolute device path.
+fn vaapi_device(map: &Map<String, Value>) -> Result<Option<String>, ApiError> {
+    match map.get("vaapiDevice") {
+        None => Ok(None),
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() || (s.starts_with('/') && s.len() <= 200 && !s.contains('\0')) {
+                Ok(Some(s.to_string()))
+            } else {
+                Err(ApiError::bad_request("invalid_vaapi_device"))
+            }
+        }
+        Some(_) => Err(type_error("vaapiDevice")),
+    }
+}
+
 /// The accepted subset of the settings; read-only and unknown fields are ignored (among them
 /// `namedTunnelHostname`: the permanent-link wizard sets it together with the tunnel's id).
 fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
@@ -409,6 +434,7 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         remote_admin: flag(map, "remoteAdmin")?,
         password,
         video_encoder,
+        vaapi_device: vaapi_device(map)?,
         ytdlp_cookies,
         pixeldrain_api_key: optional_text(map, "pixeldrainApiKey")?,
         autostart: flag(map, "autostart")?,

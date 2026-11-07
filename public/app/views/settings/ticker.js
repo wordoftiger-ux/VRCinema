@@ -120,6 +120,7 @@ const ENCODER_KEYS = {
   h264_nvenc: 'settings.ticker.encoder_nvidia',
   h264_qsv: 'settings.ticker.encoder_intel',
   h264_amf: 'settings.ticker.encoder_amd',
+  h264_vaapi: 'settings.ticker.encoder_vaapi',
 };
 
 /** Which converter the channel uses now and what that means for the ticker. */

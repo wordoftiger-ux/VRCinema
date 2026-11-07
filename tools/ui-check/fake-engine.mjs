@@ -187,6 +187,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     alarmBlackS: 10,
     alarmSilenceS: 15,
     alarmSilenceDb: -50,
+    maxHeight: 0,
   });
   const POPULAR = ['youtube.com', 'youtu.be', 'twitch.tv', 'kick.com', 'vimeo.com', 'pixeldrain.com', 'cda.pl'];
   const initialNicks = () => [

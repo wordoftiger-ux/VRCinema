@@ -16,8 +16,8 @@ use crate::live::LiveValue;
 use crate::pipeline::advanced::AdvancedSettings;
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{
-    ClipArgsOptions, ClipExtras, MAX_HEIGHT, RateLimit, ReadRate, build_clip_args,
-    build_clip_args_ext, clip_fades,
+    ClipArgsOptions, ClipExtras, MAX_HEIGHT, RateLimit, ReadRate, build_clip_args_ext, clip_fades,
+    height_caps, light_profile,
 };
 use crate::pipeline::probe::{ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
@@ -113,6 +113,15 @@ pub fn clip_video_mode(info: &VideoInfo, settings: &ChannelSettings) -> VideoMod
     decide_video_mode(info, settings.force_transcode || settings.ticker.enabled)
 }
 
+/// A film taller than the maximum output resolution is converted even when it could be copied.
+pub fn capped_mode(mode: VideoMode, info: &VideoInfo, copy_cap: u32) -> VideoMode {
+    if mode == VideoMode::Copy && info.height > copy_cap {
+        VideoMode::Transcode
+    } else {
+        mode
+    }
+}
+
 /// How fast the source is read: a live stream as it comes, any clip without the ticker at
 /// [`READRATE`]; a clip with the ticker at real time ([`TICKER_READRATE`]), catching up at
 /// [`READRATE`] after a stall (ffmpeg's own catch-up, 1.05×, would take minutes to win back
@@ -173,6 +182,7 @@ pub fn clip_extras(
         rate: (rate != RateLimit::default()).then_some(rate),
         loudness_target: adv.loudness_enabled.then_some(adv.loudness_target),
         subtitles: subtitles.map(|file| (file, start_at_s)),
+        ..ClipExtras::default()
     }
 }
 
@@ -851,12 +861,12 @@ fn place_ticker_font(font: &Path, clips_dir: &Path) -> std::io::Result<String> {
     Ok(format!("../{FONTS_DIR}/{name}"))
 }
 
-/// Height of the converted picture (see `build_clip_args`: never above 1080).
-fn output_height(info: &VideoInfo) -> u32 {
+/// Height of the converted picture (see `build_clip_args`: never above `cap`, at most 1080).
+fn output_height(info: &VideoInfo, cap: u32) -> u32 {
     if info.height == 0 {
-        MAX_HEIGHT
+        cap
     } else {
-        info.height.min(MAX_HEIGHT)
+        info.height.min(cap)
     }
 }
 
@@ -867,6 +877,8 @@ struct TickerStart<'a> {
     duration_s: Option<f64>,
     start_at_s: f64,
     out_dir: &'a Path,
+    /// The height cap of the converted picture (the ticker is sized to it).
+    max_height: u32,
 }
 
 /// Writes the ticker's files into the clip folder and builds its filters; `None` (logged): the
@@ -946,7 +958,7 @@ fn prepare_ticker(
         },
         ..content
     };
-    let height = output_height(s.info);
+    let height = output_height(s.info, s.max_height);
     let k = f64::from(height) / f64::from(MAX_HEIGHT);
     let qr_size = if ticker.qr != TickerQr::Off && !content.address.is_empty() {
         let written = qr_image(&content.address, (QR_PX * k).round() as u32)
@@ -1116,6 +1128,11 @@ async fn start_clip(
     let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
     let start_at_s = if live { 0.0 } else { start_at_s };
     let duration_s = info.duration_s.or(stream.duration_s);
+    let encoder = d.encoder.get();
+    let light = light_profile(encoder);
+    // Settings → Advanced, maximum output resolution (automatic: 1080; 720 for a converted
+    // picture in the light profile).
+    let (convert_cap, copy_cap) = height_caps(settings.advanced.max_height, light);
     let ticker = if settings.ticker.enabled {
         prepare_ticker(
             &d,
@@ -1128,6 +1145,7 @@ async fn start_clip(
                 duration_s: progress_duration(live, item.end_s(duration_s.or(item.duration_s))),
                 start_at_s,
                 out_dir: &out_dir,
+                max_height: convert_cap,
             },
         )
     } else {
@@ -1144,9 +1162,17 @@ async fn start_clip(
         .end_s(duration_s.or(item.duration_s))
         .filter(|_| !live)
         .map(|end| end - start_at_s);
-    let extras = clip_extras(adv, clip_len_s, subs.clone(), start_at_s);
+    let extras = ClipExtras {
+        max_height: Some(convert_cap),
+        light,
+        ..clip_extras(adv, clip_len_s, subs.clone(), start_at_s)
+    };
     // Fades are drawn on a converted picture, so they force the conversion like the ticker.
-    let plain_mode = decide_video_mode(&info, settings.force_transcode || adv.transitions_enabled);
+    let plain_mode = capped_mode(
+        decide_video_mode(&info, settings.force_transcode || adv.transitions_enabled),
+        &info,
+        copy_cap,
+    );
     let mode = if ticker.is_some() {
         clip_video_mode(&info, &settings)
     } else if subs.is_some() {
@@ -1154,6 +1180,7 @@ async fn start_clip(
     } else {
         plain_mode
     };
+    let mode = capped_mode(mode, &info, copy_cap);
     // Without the ticker and the subtitles (the fallback when ffmpeg cannot draw them).
     let plain_extras = ClipExtras {
         subtitles: None,
@@ -1162,7 +1189,6 @@ async fn start_clip(
     if let Some(log) = &d.log {
         log(clip_start_line(&item, mode, &info, start_at_s));
     }
-    let encoder = d.encoder.get();
     let options = ClipArgsOptions {
         inputs: stream.inputs,
         input_format: None,
@@ -1317,13 +1343,16 @@ async fn start_countdown(
     total_s: f64,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
     let d = factory.deps;
-    let lang = {
+    let settings = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)
             .get(d.channel_id)
             .map_err(Msg::text)?
-            .slate_language
     };
+    let lang = settings.slate_language;
+    // Drawn on the processor: the light profile on a low-power computer.
+    let light = light_profile(VideoEncoder::Libx264);
+    let (convert_cap, _) = height_caps(settings.advanced.max_height, light);
     let n = factory.counter.fetch_add(1, Ordering::SeqCst) + 1;
     let out_dir = d.clips_dir.join(format!("countdown-{}-{n}", item.id));
     let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
@@ -1349,30 +1378,38 @@ async fn start_countdown(
     } else {
         None
     };
-    let args = build_clip_args(&ClipArgsOptions {
-        inputs: vec![StreamInput {
-            url: countdown_graph(font_name.as_deref(), total_s),
-            headers: Vec::new(),
-        }],
-        input_format: Some("lavfi".into()),
-        mode: VideoMode::Transcode,
-        info: VideoInfo {
-            codec: "rawvideo".into(),
-            height: 1080,
-            pix_fmt: "yuv420p".into(),
-            fps: 30.0,
-            has_audio: true,
-            duration_s: Some(total_s),
-            ..VideoInfo::default()
+    let extras = ClipExtras {
+        max_height: Some(convert_cap),
+        light,
+        ..ClipExtras::default()
+    };
+    let args = build_clip_args_ext(
+        &ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: countdown_graph(font_name.as_deref(), total_s),
+                headers: Vec::new(),
+            }],
+            input_format: Some("lavfi".into()),
+            mode: VideoMode::Transcode,
+            info: VideoInfo {
+                codec: "rawvideo".into(),
+                height: 1080,
+                pix_fmt: "yuv420p".into(),
+                fps: 30.0,
+                has_audio: true,
+                duration_s: Some(total_s),
+                ..VideoInfo::default()
+            },
+            encoder: VideoEncoder::Libx264,
+            segment_seconds: d.segment_seconds,
+            out_dir: out_dir.clone(),
+            start_at_s: 0.0,
+            readrate: Some(ReadRate::new(TICKER_READRATE)),
+            overlay: None,
+            duration_limit_s: None,
         },
-        encoder: VideoEncoder::Libx264,
-        segment_seconds: d.segment_seconds,
-        out_dir: out_dir.clone(),
-        start_at_s: 0.0,
-        readrate: Some(ReadRate::new(TICKER_READRATE)),
-        overlay: None,
-        duration_limit_s: None,
-    });
+        &extras,
+    );
     let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), Some(out_dir.clone()));
     Ok(Box::new(RealClipHandle {
         seg: Arc::new(seg),
@@ -1448,6 +1485,9 @@ async fn start_obs(
         duration_s: None,
         ..VideoInfo::default()
     };
+    let encoder = d.encoder.get();
+    let light = light_profile(encoder);
+    let (convert_cap, _) = height_caps(settings.advanced.max_height, light);
     let ticker = if settings.ticker.enabled {
         prepare_ticker(
             &d,
@@ -1459,31 +1499,39 @@ async fn start_obs(
                 duration_s: None,
                 start_at_s: 0.0,
                 out_dir: &out_dir,
+                max_height: convert_cap,
             },
         )
     } else {
         None
     };
-    let encoder = d.encoder.get();
     if let Some(log) = &d.log {
         log(clip_start_line(&item, VideoMode::Transcode, &info, 0.0));
     }
-    let args = build_clip_args(&ClipArgsOptions {
-        inputs: vec![StreamInput {
-            url: "pipe:0".into(),
-            headers: Vec::new(),
-        }],
-        input_format: Some("flv".into()),
-        mode: VideoMode::Transcode,
-        info: info.clone(),
-        encoder,
-        segment_seconds: d.segment_seconds,
-        out_dir: out_dir.clone(),
-        start_at_s: 0.0,
-        readrate: None,
-        overlay: ticker.as_ref().map(|t| t.overlay.clone()),
-        duration_limit_s: None,
-    });
+    let extras = ClipExtras {
+        max_height: Some(convert_cap),
+        light,
+        ..ClipExtras::default()
+    };
+    let args = build_clip_args_ext(
+        &ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: "pipe:0".into(),
+                headers: Vec::new(),
+            }],
+            input_format: Some("flv".into()),
+            mode: VideoMode::Transcode,
+            info: info.clone(),
+            encoder,
+            segment_seconds: d.segment_seconds,
+            out_dir: out_dir.clone(),
+            start_at_s: 0.0,
+            readrate: None,
+            overlay: ticker.as_ref().map(|t| t.overlay.clone()),
+            duration_limit_s: None,
+        },
+        &extras,
+    );
     std::fs::create_dir_all(&out_dir).map_err(Msg::text)?;
     let seg = Arc::new(ClipSegmenter::start_fed(
         &d.ffmpeg_path,
@@ -1579,6 +1627,7 @@ impl ClipFactory for RealClipFactory {
 mod tests {
     use super::*;
     use crate::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+    use crate::pipeline::ffmpeg_args::build_clip_args;
     use crate::pipeline::segmenter::SegmenterState;
     use crate::resolver::{MediaMeta, ResolveError, ResolvedStream, StreamInput};
     use async_trait::async_trait;

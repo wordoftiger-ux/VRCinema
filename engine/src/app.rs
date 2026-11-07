@@ -183,6 +183,8 @@ pub(crate) struct ConfigPatch {
     /// A new password for the remote panel (stored as an Argon2id hash).
     pub password: Option<String>,
     pub video_encoder: Option<String>,
+    /// The VA-API render node (empty: the default one).
+    pub vaapi_device: Option<String>,
     pub ytdlp_cookies: Option<Option<PathBuf>>,
     pub pixeldrain_api_key: Option<Option<String>>,
     pub autostart: Option<bool>,
@@ -216,6 +218,9 @@ impl ConfigPatch {
         }
         if let Some(v) = self.video_encoder {
             s.video_encoder = v;
+        }
+        if let Some(v) = self.vaapi_device {
+            s.vaapi_device = v;
         }
         if let Some(v) = self.ytdlp_cookies {
             s.ytdlp_cookies = v;
@@ -892,12 +897,15 @@ impl AppCore {
     /// Tests the hardware encoders with the installed ffmpeg and saves the result; the next
     /// clip uses it (no restart).
     pub(crate) async fn detect_encoder(self: &Arc<Self>) -> Result<VideoEncoder, OpError> {
-        let ffmpeg = app_config(&self.settings(), &self.home).ffmpeg_path;
-        if !ffmpeg.is_file() {
+        let config = app_config(&self.settings(), &self.home);
+        if !config.ffmpeg_path.is_file() {
             return Err(OpError::Conflict(Msg::error("ffmpeg_missing")));
         }
-        let found = crate::tools::detect_encoder(&ffmpeg).await;
+        let found = crate::tools::detect_encoder(&config.ffmpeg_path, &config.vaapi_device).await;
         self.log(Msg::new("log.encoder_test").arg("encoder", found.as_str()));
+        if crate::pipeline::ffmpeg_args::light_profile(found) {
+            self.log(Msg::new("log.light_profile"));
+        }
         let _guard = self.settings_change.lock().await;
         self.update_settings(|s| s.detected_encoder = Some(found.as_str().to_string()))
             .map_err(|e| OpError::Failed(self.save_failed(&e)))?;

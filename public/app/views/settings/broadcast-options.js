@@ -13,6 +13,8 @@ import { Block, Note, Row, Segmented, Switch, channelSettings, loadChannelSettin
 const JOURNAL = '/api/admin/channels/main/journal';
 const FADES = [0.5, 1, 1.5, 2, 3];
 const TARGETS = [-23, -18, -16, -14];
+/** Settings → Advanced, maximum output resolution (0: automatic). */
+const HEIGHTS = [0, 1080, 720, 480];
 
 const num = (v) => Number(String(v).replace(',', '.'));
 
@@ -154,8 +156,14 @@ function Journal() {
 export function BroadcastOptions() {
   const settings = channelSettings.value;
   const [note, say] = useNote();
+  const [lightProfile, setLightProfile] = useState(false);
   useEffect(() => {
     loadChannelSettings();
+    // A low-power computer converting on its processor (Raspberry Pi 5) gets a note.
+    api('GET', '/api/admin/environment').then(
+      (env) => setLightProfile(Boolean(env?.lightProfile)),
+      () => {},
+    );
   }, []);
   if (!settings) return html`<p class="set-sub">${t('settings.loading')}</p>`;
   const toggle = (key, label, hint) => html`
@@ -188,6 +196,13 @@ export function BroadcastOptions() {
           options=${TARGETS.map((v) => ({ value: v, label: t('settings.advanced.lufs', { n: v.toLocaleString(lang.value) }) }))}
           onChange=${(v) => saveChannelWith(say, { loudnessTarget: v }, t('settings.advanced.saved'))} />
       <//>
+      <${Row} title=${t('settings.advanced.max_height')} hint=${t('settings.advanced.max_height_hint')}>
+        <select class="sel" aria-label=${t('settings.advanced.max_height')} name="maxHeight" value=${String(settings.maxHeight ?? 0)}
+          onChange=${(e) => saveChannelWith(say, { maxHeight: Number(e.target.value) }, t('settings.advanced.saved'))}>
+          ${HEIGHTS.map((h) => html`<option value=${String(h)}>${h ? t('settings.advanced.max_height_value', { n: h }) : t('settings.advanced.max_height_auto')}</option>`)}
+        </select>
+      <//>
+      ${lightProfile ? html`<p class="set-note" data-light-profile>${t('settings.advanced.light_profile_note')}</p>` : null}
     <//>
     <${Block} title=${t('settings.advanced.alarms_block')}>
       ${toggle('alarmsEnabled', t('settings.advanced.alarms'), t('settings.advanced.alarms_hint'))}

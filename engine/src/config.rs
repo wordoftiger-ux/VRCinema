@@ -10,19 +10,25 @@ pub enum VideoEncoder {
     H264Nvenc,
     H264Qsv,
     H264Amf,
+    /// VA-API (Linux: Intel, AMD and others through Mesa / the Intel media driver).
+    H264Vaapi,
 }
 
+/// The VA-API render node used when neither `VAAPI_DEVICE` nor the app setting names one.
+pub const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+
 impl VideoEncoder {
-    /// A graphics card encoder (NVIDIA, Intel, AMD): converting costs the computer little.
+    /// A graphics card encoder (NVIDIA, Intel, AMD, VA-API): converting costs the computer little.
     pub fn is_gpu(self) -> bool {
         !matches!(self, Self::Libx264)
     }
 
-    pub const ALL: [VideoEncoder; 4] = [
+    pub const ALL: [VideoEncoder; 5] = [
         VideoEncoder::Libx264,
         VideoEncoder::H264Nvenc,
         VideoEncoder::H264Qsv,
         VideoEncoder::H264Amf,
+        VideoEncoder::H264Vaapi,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -31,6 +37,7 @@ impl VideoEncoder {
             VideoEncoder::H264Nvenc => "h264_nvenc",
             VideoEncoder::H264Qsv => "h264_qsv",
             VideoEncoder::H264Amf => "h264_amf",
+            VideoEncoder::H264Vaapi => "h264_vaapi",
         }
     }
 
@@ -52,6 +59,8 @@ pub struct AppConfig {
     pub ytdlp_path: PathBuf,
     pub ytdlp_js_runtime: Option<String>,
     pub video_encoder: VideoEncoder,
+    /// The VA-API render node (`VAAPI_DEVICE`, default [`DEFAULT_VAAPI_DEVICE`]).
+    pub vaapi_device: String,
     pub trust_cloudflare: bool,
     pub trust_proxy: bool,
     pub ytdlp_cookies: Option<PathBuf>,
@@ -213,6 +222,9 @@ pub fn load_config(
         ytdlp_path: tool_path("YTDLP_PATH", "yt-dlp"),
         ytdlp_js_runtime: trimmed(env, "YTDLP_JS_RUNTIME").map(str::to_string),
         video_encoder,
+        vaapi_device: trimmed(env, "VAAPI_DEVICE")
+            .unwrap_or(DEFAULT_VAAPI_DEVICE)
+            .to_string(),
         trust_cloudflare: flag(env, "TRUST_CLOUDFLARE"),
         trust_proxy: flag(env, "TRUST_PROXY"),
         ytdlp_cookies: trimmed(env, "YTDLP_COOKIES").map(PathBuf::from),
@@ -648,6 +660,7 @@ mod tests {
             ("h264_nvenc", VideoEncoder::H264Nvenc),
             ("h264_qsv", VideoEncoder::H264Qsv),
             ("h264_amf", VideoEncoder::H264Amf),
+            ("h264_vaapi", VideoEncoder::H264Vaapi),
         ] {
             let c = load_config(
                 &env(&[("ADMIN_PASSWORD", "haslo123"), ("VIDEO_ENCODER", name)]),
@@ -658,6 +671,22 @@ mod tests {
             assert_eq!(c.video_encoder, enc);
             assert_eq!(enc.as_str(), name);
         }
+    }
+
+    #[test]
+    fn the_vaapi_device_defaults_to_the_first_render_node() {
+        let c = load_config(&env(&[("ADMIN_PASSWORD", "haslo123")]), &root(), false).unwrap();
+        assert_eq!(c.vaapi_device, "/dev/dri/renderD128");
+        let c = load_config(
+            &env(&[
+                ("ADMIN_PASSWORD", "haslo123"),
+                ("VAAPI_DEVICE", " /dev/dri/renderD129 "),
+            ]),
+            &root(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.vaapi_device, "/dev/dri/renderD129");
     }
 
     #[test]
@@ -689,7 +718,8 @@ mod tests {
         assert!(e.contains("VIDEO_ENCODER"));
         assert_eq!(
             e,
-            "Unknown VIDEO_ENCODER \"foo\". Allowed: libx264, h264_nvenc, h264_qsv, h264_amf"
+            "Unknown VIDEO_ENCODER \"foo\". Allowed: libx264, h264_nvenc, h264_qsv, h264_amf, \
+             h264_vaapi"
         );
     }
 

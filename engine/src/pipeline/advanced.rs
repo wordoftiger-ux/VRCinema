@@ -7,6 +7,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::i18n::Msg;
+use crate::pipeline::ffmpeg_args::MAX_HEIGHT_CHOICES;
 
 /// The loudness targets the owner can choose (LUFS).
 pub const LOUDNESS_TARGETS: [i32; 4] = [-23, -18, -16, -14];
@@ -39,6 +40,9 @@ pub struct AdvancedSettings {
     pub alarm_silence_s: u32,
     /// Below this level (dBFS) the sound counts as silence.
     pub alarm_silence_db: i32,
+    /// The highest output height (one of [`MAX_HEIGHT_CHOICES`]); 0: automatic (see
+    /// [`crate::pipeline::ffmpeg_args::height_caps`]).
+    pub max_height: u32,
 }
 
 fn number<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
@@ -64,6 +68,7 @@ impl Default for AdvancedSettings {
             alarm_black_s: 10,
             alarm_silence_s: 15,
             alarm_silence_db: -50,
+            max_height: 0,
         }
     }
 }
@@ -83,6 +88,7 @@ pub struct AdvancedPatch {
     pub alarm_black_s: Option<u32>,
     pub alarm_silence_s: Option<u32>,
     pub alarm_silence_db: Option<i32>,
+    pub max_height: Option<u32>,
 }
 
 fn bool_of(key: &str, value: &Value) -> Result<bool, Msg> {
@@ -109,6 +115,20 @@ fn ranged(key: &str, value: &Value, min: f64, max: f64, step: f64) -> Result<f64
         return Err(out_of_range());
     }
     Ok(n)
+}
+
+/// The output height cap: one of [`MAX_HEIGHT_CHOICES`].
+fn max_height(key: &str, value: &Value) -> Result<u32, Msg> {
+    value
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| MAX_HEIGHT_CHOICES.contains(v))
+        .ok_or_else(|| {
+            let all: Vec<String> = MAX_HEIGHT_CHOICES.iter().map(u32::to_string).collect();
+            Msg::error("setting_not_one_of")
+                .arg("key", key)
+                .arg("values", all.join(", "))
+        })
 }
 
 /// The peak limit: 0 (automatic) or 1–12 Mbit/s, to a tenth.
@@ -174,6 +194,7 @@ pub fn sanitize_key(key: &str, value: &Value, out: &mut AdvancedPatch) -> Option
             "alarmSilenceDb" => {
                 out.alarm_silence_db = Some(ranged(key, value, -80.0, -20.0, 1.0)? as i32);
             }
+            "maxHeight" => out.max_height = Some(max_height(key, value)?),
             _ => return Ok(false),
         }
         Ok(true)
@@ -220,7 +241,8 @@ impl AdvancedSettings {
             alarms_enabled,
             alarm_black_s,
             alarm_silence_s,
-            alarm_silence_db
+            alarm_silence_db,
+            max_height
         );
     }
 }
@@ -244,6 +266,7 @@ impl AdvancedPatch {
             ("alarmBlackS", self.alarm_black_s.is_some()),
             ("alarmSilenceS", self.alarm_silence_s.is_some()),
             ("alarmSilenceDb", self.alarm_silence_db.is_some()),
+            ("maxHeight", self.max_height.is_some()),
         ];
         present
             .into_iter()
@@ -278,7 +301,7 @@ mod tests {
                 "transitionsEnabled": false, "transitionS": 1, "peakMbps": 0, "peakBufferS": 2,
                 "subtitlesEnabled": false, "subtitlesLanguage": "en", "loudnessEnabled": false,
                 "loudnessTarget": -16, "alarmsEnabled": false, "alarmBlackS": 10,
-                "alarmSilenceS": 15, "alarmSilenceDb": -50
+                "alarmSilenceS": 15, "alarmSilenceDb": -50, "maxHeight": 0
             })
         );
     }
@@ -295,6 +318,10 @@ mod tests {
         assert_eq!(p.alarm_silence_db, Some(-60));
         assert_eq!(p.subtitles_language.as_deref(), Some("pt-BR"));
         assert_eq!(patch(json!({"peakMbps": 0})).unwrap().peak_mbps, Some(0.0));
+        assert_eq!(
+            patch(json!({"maxHeight": 720})).unwrap().max_height,
+            Some(720)
+        );
         for bad in [
             json!({"transitionS": 9}),
             json!({"peakMbps": 0.5}),
@@ -302,6 +329,8 @@ mod tests {
             json!({"loudnessTarget": -20}),
             json!({"subtitlesLanguage": "polski!"}),
             json!({"alarmsEnabled": "yes"}),
+            json!({"maxHeight": 576}),
+            json!({"maxHeight": "720"}),
         ] {
             assert!(patch(bad.clone()).is_err(), "{bad}");
         }

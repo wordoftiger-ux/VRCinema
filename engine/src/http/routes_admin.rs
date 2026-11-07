@@ -775,6 +775,8 @@ async fn environment(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): Req
     Ok(json_ok(&json!({
         "window": core.is_some(),
         "encoder": state.live.encoder.get().as_str(),
+        // A low-power computer converting on its processor (Raspberry Pi 5): the light profile.
+        "lightProfile": crate::pipeline::ffmpeg_args::light_profile(state.live.encoder.get()),
         "tickerSlow": state.snapshot().stats.ticker_slow,
         "alarms": state.alarms.get(),
         "language": state.language().as_str(),

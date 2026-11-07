@@ -63,6 +63,7 @@ pub struct LiveSettings {
 
 impl LiveSettings {
     pub fn from_config(config: &AppConfig) -> Self {
+        crate::pipeline::ffmpeg_args::set_vaapi_device(&config.vaapi_device);
         Self {
             trust_cloudflare: LiveValue::new(config.trust_cloudflare),
             cloudflare_from_loopback_only: LiveValue::new(false),
@@ -82,6 +83,7 @@ impl LiveSettings {
         self.trust_cloudflare.set(config.trust_cloudflare);
         self.public_url.set(config.public_url.clone());
         self.encoder.set(config.video_encoder);
+        crate::pipeline::ffmpeg_args::set_vaapi_device(&config.vaapi_device);
         self.ytdlp_cookies.set(config.ytdlp_cookies.clone());
         self.pixeldrain_api_key
             .set(config.pixeldrain_api_key.clone());

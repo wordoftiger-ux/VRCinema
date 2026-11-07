@@ -1215,7 +1215,8 @@ async fn a_gpu_encoder_cuts_the_converted_film_into_four_second_segments() {
         eprintln!("skipped: no bin/ffmpeg");
         return;
     }
-    let encoder = vrcinema::tools::encoder::detect_encoder(&cfg.ffmpeg_path).await;
+    let encoder =
+        vrcinema::tools::encoder::detect_encoder(&cfg.ffmpeg_path, &cfg.vaapi_device).await;
     if encoder == VideoEncoder::Libx264 {
         eprintln!("skipped: no graphics card encoder on this computer");
         return;

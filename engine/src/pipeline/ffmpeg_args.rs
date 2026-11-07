@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::{PoisonError, RwLock};
 
 use crate::config::VideoEncoder;
 use crate::pipeline::probe::{VideoInfo, VideoMode};
@@ -10,6 +11,56 @@ use crate::resolver::types::StreamInput;
 pub const VIDEO_BITRATE: &str = "6M";
 pub const MAX_HEIGHT: u32 = 1080;
 pub const MAX_FPS: u32 = 30;
+/// The automatic height cap of a converted picture in the light profile ([`light_profile`]).
+pub const LIGHT_MAX_HEIGHT: u32 = 720;
+/// The heights the owner can cap the output at (Settings → Advanced); 0 is automatic.
+pub const MAX_HEIGHT_CHOICES: [u32; 4] = [0, 1080, 720, 480];
+
+/// A computer without any hardware H.264 encoder by design (aarch64 Linux, e.g. a Raspberry Pi
+/// 5): converting on its processor needs the light profile.
+pub const LOW_POWER_PLATFORM: bool = cfg!(all(target_os = "linux", target_arch = "aarch64"));
+
+/// The light profile: a low-power platform converting on its processor (libx264). Converted
+/// pictures get the `superfast` preset, 3 Mbit/s by default and at most 720 lines by default.
+pub fn light_profile(encoder: VideoEncoder) -> bool {
+    LOW_POWER_PLATFORM && encoder == VideoEncoder::Libx264
+}
+
+/// The height caps `(converted, copied)` of the `maxHeight` setting: automatic (0) is 1080 for
+/// both, except a converted picture in the light profile (720; a film that can be copied still
+/// is, copying costs nothing); a chosen height caps every film (a taller one is converted).
+pub fn height_caps(setting: u32, light: bool) -> (u32, u32) {
+    match setting {
+        0 if light => (LIGHT_MAX_HEIGHT, MAX_HEIGHT),
+        0 => (MAX_HEIGHT, MAX_HEIGHT),
+        h => (h.min(MAX_HEIGHT), h.min(MAX_HEIGHT)),
+    }
+}
+
+/// The VA-API render node every converting ffmpeg uses (empty: the default one); set wherever
+/// the live configuration is applied (`LiveSettings`).
+static VAAPI_DEVICE: RwLock<String> = RwLock::new(String::new());
+
+pub fn set_vaapi_device(device: &str) {
+    *VAAPI_DEVICE.write().unwrap_or_else(PoisonError::into_inner) = device.trim().to_string();
+}
+
+/// The VA-API render node (`VAAPI_DEVICE`, the app setting, else `/dev/dri/renderD128`).
+pub fn vaapi_device() -> String {
+    let device = VAAPI_DEVICE
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    if device.is_empty() {
+        crate::config::DEFAULT_VAAPI_DEVICE.to_string()
+    } else {
+        device
+    }
+}
+
+/// The software picture handed to the VA-API encoder: NV12 uploaded to the GPU. Always the last
+/// filters, after every software filter (scale, letterbox, subtitles, ticker, fades).
+pub const VAAPI_UPLOAD: &str = "format=nv12,hwupload";
 
 /// A portrait picture (already scaled to its output height) centred in a 16:9 frame of the same
 /// height, black bars left and right (an even width; ffmpeg aligns `x` to the chroma grid).
@@ -172,6 +223,12 @@ impl Default for RateLimit {
 }
 
 impl RateLimit {
+    /// The automatic bitrate of the light profile: 3M / 3M / 6M.
+    pub const LIGHT: Self = Self {
+        peak_kbps: 3000,
+        buffer_kbits: 6000,
+    };
+
     /// From Settings → Advanced: `peak_mbps` 0 is automatic (6), the buffer is seconds of the peak.
     pub fn from_settings(peak_mbps: f64, buffer_s: f64) -> Self {
         let peak = if peak_mbps > 0.0 { peak_mbps } else { 6.0 };
@@ -198,6 +255,11 @@ impl RateLimit {
 
 /// [`encoder_args`] with the bitrate of `rate`.
 pub fn encoder_args_with(encoder: VideoEncoder, rate: &RateLimit) -> Vec<OsString> {
+    encoder_args_ext(encoder, rate, false)
+}
+
+/// [`encoder_args_with`]; `light`: libx264 with the `superfast` preset (the light profile).
+pub fn encoder_args_ext(encoder: VideoEncoder, rate: &RateLimit, light: bool) -> Vec<OsString> {
     let mut args = Vec::new();
     match encoder {
         VideoEncoder::H264Nvenc => push_all(
@@ -247,13 +309,27 @@ pub fn encoder_args_with(encoder: VideoEncoder, rate: &RateLimit) -> Vec<OsStrin
                 "1",
             ],
         ),
+        // h264_vaapi makes a forced key frame an IDR frame by itself.
+        VideoEncoder::H264Vaapi => push_all(
+            &mut args,
+            &[
+                "-c:v",
+                "h264_vaapi",
+                "-profile:v",
+                "high",
+                "-level",
+                H264_LEVEL,
+                "-rc_mode",
+                "CBR",
+            ],
+        ),
         VideoEncoder::Libx264 => push_all(
             &mut args,
             &[
                 "-c:v",
                 "libx264",
                 "-preset",
-                "veryfast",
+                if light { "superfast" } else { "veryfast" },
                 "-profile:v",
                 "high",
                 "-level:v",
@@ -286,6 +362,11 @@ pub struct ClipExtras {
     /// Burn in this subtitle file (a name in ffmpeg's working folder, the clip folder); the
     /// second value is the film second the clip starts at (the subtitles' clock is shifted).
     pub subtitles: Option<(String, f64)>,
+    /// The highest height of a converted picture (`None`: [`MAX_HEIGHT`]).
+    pub max_height: Option<u32>,
+    /// The light profile ([`light_profile`]): libx264 `superfast` and, without a peak limit of
+    /// the owner, [`RateLimit::LIGHT`].
+    pub light: bool,
 }
 
 /// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
@@ -374,6 +455,11 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
             "-nostats",
         ],
     );
+    let vaapi = o.mode == VideoMode::Transcode && o.encoder == VideoEncoder::H264Vaapi;
+    if vaapi {
+        // Also the device `hwupload` uploads to.
+        push_all(&mut args, &["-vaapi_device", &vaapi_device()]);
+    }
     for input in &o.inputs {
         args.extend(input_options(input));
         if o.start_at_s > 0.0 {
@@ -432,8 +518,9 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
             if o.info.hdr {
                 filters.push(TONEMAP.to_string());
             }
+            let max_height = x.max_height.unwrap_or(MAX_HEIGHT);
             filters.push(format!(
-                "scale=-2:'min({MAX_HEIGHT},ih)':out_color_matrix=bt709:out_range=tv"
+                "scale=-2:'min({max_height},ih)':out_color_matrix=bt709:out_range=tv"
             ));
             // A constant frame rate: a variable one is made constant, a faster one capped.
             if o.info.vfr || o.info.fps > f64::from(MAX_FPS) + 0.5 {
@@ -456,8 +543,17 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
             if let Some((st, d)) = x.fade_out {
                 filters.push(format!("fade=t=out:st={st:.3}:d={d}"));
             }
+            if vaapi {
+                filters.push(VAAPI_UPLOAD.to_string());
+            }
             push_all(&mut args, &["-vf", &filters.join(",")]);
-            args.extend(encoder_args_with(o.encoder, &x.rate.unwrap_or_default()));
+            let light = x.light && o.encoder == VideoEncoder::Libx264;
+            let rate = x.rate.unwrap_or(if light {
+                RateLimit::LIGHT
+            } else {
+                RateLimit::default()
+            });
+            args.extend(encoder_args_ext(o.encoder, &rate, light));
             push_all(&mut args, &BT709_TAGS);
             push_all(
                 &mut args,
@@ -988,6 +1084,7 @@ mod tests {
             rate: Some(RateLimit::from_settings(4.5, 1.5)),
             loudness_target: Some(-16),
             subtitles: Some(("subs.vtt".into(), 30.0)),
+            ..ClipExtras::default()
         };
         let args = strs(&build_clip_args_ext(&o, &x));
         let vf = value_after(&args, "-vf", 0).unwrap();
@@ -1011,6 +1108,122 @@ mod tests {
         // A higher peak keeps the usual target.
         let r = RateLimit::from_settings(10.0, 2.0);
         assert_eq!(r.values(), ["6000k", "10000k", "20000k"]);
+    }
+
+    /// VA-API: the device before the inputs, every software filter (ticker, subtitles, fades)
+    /// before the upload to the GPU, a forced key frame every segment (no GPU needed).
+    #[test]
+    fn vaapi_uploads_after_every_software_filter() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.encoder = VideoEncoder::H264Vaapi;
+        o.segment_seconds = 1;
+        o.overlay = Some("drawbox=x=0".into());
+        let x = ClipExtras {
+            fade_in_s: Some(1.0),
+            fade_out: Some((59.0, 1.0)),
+            subtitles: Some(("subs.srt".into(), 0.0)),
+            ..ClipExtras::default()
+        };
+        let args = strs(&build_clip_args_ext(&o, &x));
+        assert_eq!(
+            value_after(&args, "-vaapi_device", 0).as_deref(),
+            Some("/dev/dri/renderD128")
+        );
+        assert!(pos(&args, "-vaapi_device") < pos(&args, "-i"));
+        assert_eq!(
+            value_after(&args, "-vf", 0).as_deref(),
+            Some(
+                "scale=-2:'min(1080,ih)':out_color_matrix=bt709:out_range=tv,format=yuv420p,\
+                 subtitles=subs.srt,drawbox=x=0,format=yuv420p,fade=t=in:st=0:d=1,\
+                 fade=t=out:st=59.000:d=1,format=nv12,hwupload"
+            )
+        );
+        assert_eq!(value_after(&args, "-c:v", 0).as_deref(), Some("h264_vaapi"));
+        assert_eq!(value_after(&args, "-rc_mode", 0).as_deref(), Some("CBR"));
+        assert_eq!(value_after(&args, "-level", 0).as_deref(), Some("4.1"));
+        assert_eq!(value_after(&args, "-b:v", 0).as_deref(), Some("6M"));
+        assert_eq!(
+            value_after(&args, "-force_key_frames", 0).as_deref(),
+            Some("expr:gte(t,n_forced*1)")
+        );
+        // A copied picture needs no device; other encoders get no upload.
+        o.mode = VideoMode::Copy;
+        assert!(!build(&o).contains(&"-vaapi_device".to_string()));
+        o.mode = VideoMode::Transcode;
+        o.encoder = VideoEncoder::H264Nvenc;
+        let args = build(&o);
+        assert!(!args.contains(&"-vaapi_device".to_string()));
+        assert!(!value_after(&args, "-vf", 0).unwrap().contains("hwupload"));
+    }
+
+    #[test]
+    fn vaapi_with_a_live_input_deinterlaced_and_letterboxed() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.encoder = VideoEncoder::H264Vaapi;
+        o.info.interlaced = true;
+        o.info.portrait = true;
+        o.info.vfr = true;
+        let vf = value_after(&build(&o), "-vf", 0).unwrap();
+        assert!(vf.starts_with(DEINTERLACE), "{vf}");
+        assert!(vf.ends_with(&format!("{LETTERBOX},{VAAPI_UPLOAD}")), "{vf}");
+        assert!(vf.contains(",fps=30,"), "{vf}");
+    }
+
+    #[test]
+    fn the_light_profile_is_faster_smaller_and_lower_by_default() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        let x = ClipExtras {
+            max_height: Some(720),
+            light: true,
+            ..ClipExtras::default()
+        };
+        let args = strs(&build_clip_args_ext(&o, &x));
+        assert_eq!(
+            value_after(&args, "-preset", 0).as_deref(),
+            Some("superfast")
+        );
+        assert_eq!(value_after(&args, "-b:v", 0).as_deref(), Some("3000k"));
+        assert_eq!(value_after(&args, "-maxrate", 0).as_deref(), Some("3000k"));
+        assert_eq!(value_after(&args, "-bufsize", 0).as_deref(), Some("6000k"));
+        assert!(
+            value_after(&args, "-vf", 0)
+                .unwrap()
+                .starts_with("scale=-2:'min(720,ih)'")
+        );
+        // The owner's peak limit wins over the light default.
+        let x = ClipExtras {
+            rate: Some(RateLimit::from_settings(4.0, 2.0)),
+            ..x
+        };
+        let args = strs(&build_clip_args_ext(&o, &x));
+        assert_eq!(value_after(&args, "-maxrate", 0).as_deref(), Some("4000k"));
+        // A GPU encoder is never "light".
+        o.encoder = VideoEncoder::H264Vaapi;
+        let args = strs(&build_clip_args_ext(
+            &o,
+            &ClipExtras {
+                light: true,
+                ..ClipExtras::default()
+            },
+        ));
+        assert_eq!(value_after(&args, "-b:v", 0).as_deref(), Some("6M"));
+    }
+
+    #[test]
+    fn height_caps_keep_todays_default_and_cap_a_chosen_height() {
+        assert_eq!(height_caps(0, false), (1080, 1080));
+        assert_eq!(height_caps(0, true), (720, 1080));
+        assert_eq!(height_caps(720, false), (720, 720));
+        assert_eq!(height_caps(480, true), (480, 480));
+        assert_eq!(height_caps(4000, false), (1080, 1080));
+        // Windows and x86 are never the low-power platform.
+        assert!(!light_profile(VideoEncoder::H264Vaapi));
+        if !cfg!(target_arch = "aarch64") {
+            assert!(!light_profile(VideoEncoder::Libx264));
+        }
     }
 
     #[test]

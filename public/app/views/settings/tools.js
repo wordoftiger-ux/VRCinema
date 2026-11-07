@@ -2,7 +2,7 @@
 // the state of the channel (missing tools, a failed start, restart) and the graphics card.
 
 import { signal } from '/static/vendor/signals.mjs';
-import { useEffect } from '/static/vendor/hooks.mjs';
+import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
 import { api, errorText } from '../../api.js';
@@ -31,14 +31,37 @@ const ENCODER_OPTIONS = [
   { value: 'h264_nvenc', key: 'settings.tools.enc_nvidia' },
   { value: 'h264_qsv', key: 'settings.tools.enc_intel' },
   { value: 'h264_amf', key: 'settings.tools.enc_amd' },
+  { value: 'h264_vaapi', key: 'settings.tools.enc_vaapi' },
   { value: 'libx264', key: 'settings.tools.enc_cpu' },
 ];
 export const ENCODER_RESULT_KEYS = {
   h264_nvenc: 'settings.tools.result_nvidia',
   h264_qsv: 'settings.tools.result_intel',
   h264_amf: 'settings.tools.result_amd',
+  h264_vaapi: 'settings.tools.result_vaapi',
   libx264: 'settings.tools.result_cpu',
 };
+const DEFAULT_VAAPI_DEVICE = '/dev/dri/renderD128';
+
+/** The VA-API render node (Linux), shown while VA-API is chosen or was found; empty: the default one. */
+function VaapiDevice({ cfg, say }) {
+  const [value, setValue] = useState(cfg.vaapiDevice ?? '');
+  useEffect(() => setValue(cfg.vaapiDevice ?? ''), [cfg.vaapiDevice]);
+  const submit = (e) => {
+    e.preventDefault();
+    const v = value.trim();
+    if (v && !v.startsWith('/')) return say('err', t('settings.tools.vaapi_device_invalid'));
+    saveWith(say, { vaapiDevice: v }, t('settings.tools.vaapi_device_saved'));
+  };
+  return html`
+    <${Row} title=${t('settings.tools.vaapi_device')} hint=${t('settings.tools.vaapi_device_hint')} block>
+      <form class="inline wide" data-form="vaapiDevice" onSubmit=${submit}>
+        <input type="text" class="txt" name="vaapiDevice" maxlength="200" aria-label=${t('settings.tools.vaapi_device')}
+          placeholder=${DEFAULT_VAAPI_DEVICE} value=${value} onInput=${(e) => setValue(e.target.value)} />
+        <button type="submit" class="btn pri">${t('settings.save')}</button>
+      </form>
+    <//>`;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const megabytes = (bytes) => `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
@@ -228,6 +251,9 @@ export function Tools() {
             : t('settings.tools.no_test')}</span>
           <button type="button" class="btn" disabled=${!cfg} onClick=${detect}>${t('settings.tools.test')}</button>
         </div>
+        ${cfg && (cfg.videoEncoder === 'h264_vaapi' || (cfg.videoEncoder === 'auto' && cfg.detectedEncoder === 'h264_vaapi'))
+          ? html`<${VaapiDevice} cfg=${cfg} say=${say} />`
+          : null}
       <//>
       <${Note} note=${note} />
     </div>`;

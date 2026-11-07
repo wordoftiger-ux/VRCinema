@@ -141,12 +141,17 @@ async fn main() -> ExitCode {
         }
     };
     if encoder_auto(&env) {
-        // NVENC, QSV, AMF in turn (one second of test picture each), else libx264.
-        config.video_encoder = vrcinema::tools::detect_encoder(&config.ffmpeg_path).await;
+        // NVENC, QSV, AMF, VA-API (Linux) in turn (one second of test picture each), else
+        // libx264.
+        config.video_encoder =
+            vrcinema::tools::detect_encoder(&config.ffmpeg_path, &config.vaapi_device).await;
         log(
             config.language,
             &Msg::new("log.encoder_test").arg("encoder", config.video_encoder.as_str()),
         );
+    }
+    if vrcinema::pipeline::ffmpeg_args::light_profile(config.video_encoder) {
+        log(config.language, &Msg::new("log.light_profile"));
     }
     // Every process started from here on (ffmpeg, yt-dlp and whatever they start) is born
     // inside the job object and dies with this program (Windows; a no-op elsewhere).

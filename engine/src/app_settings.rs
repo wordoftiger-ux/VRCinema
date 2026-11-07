@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AppConfig, VideoEncoder};
+use crate::config::{AppConfig, DEFAULT_VAAPI_DEVICE, VideoEncoder};
 use crate::i18n::{Lang, Msg};
 
 pub const CONFIG_FILE: &str = "config.json";
@@ -19,9 +19,12 @@ pub struct AppSettings {
     pub remote_admin: bool,
     pub admin_password_hash: Option<String>,
     pub session_secret: String,
-    /// `auto`, `libx264`, `h264_nvenc`, `h264_qsv` or `h264_amf`.
+    /// `auto`, `libx264`, `h264_nvenc`, `h264_qsv`, `h264_amf` or `h264_vaapi`.
     pub video_encoder: String,
     pub detected_encoder: Option<String>,
+    /// The VA-API render node; empty: `VAAPI_DEVICE` of the environment, else
+    /// [`DEFAULT_VAAPI_DEVICE`].
+    pub vaapi_device: String,
     pub ytdlp_cookies: Option<PathBuf>,
     pub pixeldrain_api_key: Option<String>,
     pub autostart: bool,
@@ -123,6 +126,7 @@ impl Default for AppSettings {
             session_secret: String::new(),
             video_encoder: "auto".into(),
             detected_encoder: None,
+            vaapi_device: String::new(),
             ytdlp_cookies: None,
             pixeldrain_api_key: None,
             autostart: false,
@@ -284,6 +288,22 @@ impl AppSettings {
         }
         .unwrap_or(VideoEncoder::Libx264)
     }
+
+    /// The VA-API render node: the setting, else `VAAPI_DEVICE`, else the default one.
+    pub fn effective_vaapi_device(&self) -> String {
+        vaapi_device_of(&self.vaapi_device, std::env::var("VAAPI_DEVICE").ok())
+    }
+}
+
+fn vaapi_device_of(setting: &str, env: Option<String>) -> String {
+    [
+        Some(setting.trim().to_string()),
+        env.map(|e| e.trim().to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|d| !d.is_empty())
+    .unwrap_or_else(|| DEFAULT_VAAPI_DEVICE.to_string())
 }
 
 /// The engine configuration for the desktop app: tools in `<home>/tools`, data in
@@ -311,6 +331,7 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         ytdlp_path: tools.join(format!("yt-dlp{exe}")),
         ytdlp_js_runtime: deno.is_file().then(|| format!("deno:{}", deno.display())),
         video_encoder,
+        vaapi_device: settings.effective_vaapi_device(),
         trust_cloudflare: settings.trust_cloudflare,
         trust_proxy: false,
         ytdlp_cookies: settings.ytdlp_cookies.clone(),
@@ -582,5 +603,20 @@ mod tests {
         assert_eq!(app_config(&s, home).video_encoder, VideoEncoder::H264Amf);
         s.video_encoder = "bzdura".into();
         assert_eq!(app_config(&s, home).video_encoder, VideoEncoder::Libx264);
+        s.video_encoder = "h264_vaapi".into();
+        assert_eq!(app_config(&s, home).video_encoder, VideoEncoder::H264Vaapi);
+    }
+
+    #[test]
+    fn the_vaapi_device_setting_wins_over_the_environment() {
+        assert_eq!(vaapi_device_of("", None), "/dev/dri/renderD128");
+        assert_eq!(
+            vaapi_device_of(" ", Some("/dev/dri/renderD129".into())),
+            "/dev/dri/renderD129"
+        );
+        assert_eq!(
+            vaapi_device_of("/dev/dri/renderD130", Some("/dev/dri/renderD129".into())),
+            "/dev/dri/renderD130"
+        );
     }
 }
