@@ -294,24 +294,30 @@ pub fn free_space(dir: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-/// Free bytes on the disk holding `dir`, from `df -Pk` (POSIX output: the fourth field of the
-/// second line, in KiB).
-#[cfg(not(windows))]
+/// Free bytes on the disk holding `dir` for an unprivileged user (`statvfs`: available
+/// blocks times the fragment size); `None` when it cannot be read.
+#[cfg(unix)]
 pub fn free_space(dir: &Path) -> Option<u64> {
-    let out = std::process::Command::new("df")
-        .arg("-Pk")
-        .arg(dir)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let kib: u64 = text
-        .lines()
-        .nth(1)?
-        .split_whitespace()
-        .nth(3)?
-        .parse()
-        .ok()?;
-    Some(kib * 1024)
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: a NUL-terminated path and a pointer to space for one `statvfs`, filled on success.
+    let stats = unsafe {
+        if libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stats.assume_init()
+    };
+    #[allow(clippy::useless_conversion)] // the field types differ between systems
+    let (blocks, size) = (u64::from(stats.f_bavail), u64::from(stats.f_frsize));
+    blocks.checked_mul(size)
+}
+
+/// Elsewhere (neither Windows nor unix) the free space is not known: previews then wait for
+/// a disk they can measure (fail closed).
+#[cfg(not(any(windows, unix)))]
+pub fn free_space(_dir: &Path) -> Option<u64> {
+    None
 }
 
 /// Drops the least recently asked films beyond `max` (never one being downloaded).
