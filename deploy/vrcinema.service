@@ -31,7 +31,7 @@ KillSignal=SIGTERM
 TimeoutStopSec=20
 Restart=on-failure
 RestartSec=5
-# Intel Quick Sync (h264_qsv) needs /dev/dri: uncomment on a machine with Intel graphics
+# Intel Quick Sync (h264_qsv) and VA-API (h264_vaapi) need /dev/dri: uncomment on a machine with Intel or AMD graphics
 # (both groups must exist, see `getent group video render`). NVIDIA works through its driver.
 #SupplementaryGroups=video render
 # Hardening: the server writes only to its own folder.

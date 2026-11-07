@@ -394,14 +394,30 @@ journalctl -u vrcinema -f             # dziennik (baner pokazuje linki do panelu
 
 ### Karta graficzna
 
-`VIDEO_ENCODER=auto` sprawdza przy starcie enkodery sprzętowe (NVIDIA NVENC ze sterownikiem NVIDIA; Intel Quick Sync z `intel-media-va-driver` i dostępem do `/dev/dri`, zobacz zakomentowaną linię `SupplementaryGroups=` w pliku usługi; AMD AMF), a gdy żaden nie działa, używa `libx264` (procesor). VA-API nie jest jeszcze obsługiwane. Filmy, których nie trzeba konwertować, i tak prawie nie obciążają procesora.
+`VIDEO_ENCODER=auto` sprawdza przy starcie enkodery sprzętowe w tej kolejności: NVIDIA NVENC (sterownik NVIDIA), Intel Quick Sync, AMD AMF, a potem **VA-API** (`h264_vaapi`: grafika Intel i AMD przez `intel-media-va-driver` albo `mesa-va-drivers`). Wygrywa pierwszy, który zakoduje sekundowy obraz testowy; gdy żaden, używa `libx264` (procesor). Filmy, których nie trzeba konwertować, i tak prawie nie obciążają procesora.
+
+- VA-API potrzebuje dostępu do `/dev/dri`: odkomentuj `SupplementaryGroups=video render` w pliku usługi (albo dodaj swojego użytkownika do grupy `render`). `vainfo` (pakiet `vainfo`) pokazuje, czy sterownik działa.
+- Urządzenie to `/dev/dri/renderD128`; przy kilku kartach graficznych ustaw inne przez `VAAPI_DEVICE=/dev/dri/renderD129` w `.env` (aplikacja z oknem: Ustawienia → Narzędzia, „Urządzenie VA-API”).
+- `VIDEO_ENCODER=h264_vaapi` wymusza VA-API. Wszystkie kroki programowe (pasek informacyjny, napisy, przejścia, odliczanie, OBS) zostają bez zmian; obraz trafia na kartę graficzną dopiero do kodowania, z klatką kluczową w każdym segmencie.
 
 ### Raspberry Pi 5
 
+Pi 5 **nie ma sprzętowego enkodera H.264** (umie dekodować, nie kodować), więc konwertuje na procesorze. VRCinema to rozpoznaje (64-bitowy Linux na ARM z `libx264`) i włącza **lekki profil**: preset `superfast`, domyślnie 3 Mbit/s zamiast 6 i konwertowany obraz najwyżej **720p30**. Filmy, które da się skopiować bez zmian (H.264 do 1080p30), nadal są kopiowane, co prawie nic nie kosztuje. Dziennik mówi o tym przy starcie, a Ustawienia → Zaawansowane pokazują uwagę przy **Maksymalnej rozdzielczości wyjścia** (automatycznie, 1080p, 720p, 480p). Zostaw automatycznie albo 720p; konwersja 1080p na Pi 5 nie nadąża.
+
+**Osobna karta SD.** Jeśli na Pi działa inny system (np. Batocera), zostaw tę kartę bez zmian i zainstaluj Raspberry Pi OS na drugiej karcie (albo dysku USB/NVMe), a potem po prostu zamieniaj karty:
+
+1. Na PC zainstaluj [Raspberry Pi Imager](https://www.raspberrypi.com/software/) i wybierz *Raspberry Pi 5* → **Raspberry Pi OS Lite (64-bit)** (albo wersję z pulpitem) → nową kartę. W ustawieniach (zębatka) ustaw nazwę hosta, użytkownika, hasło i Wi-Fi oraz włącz SSH.
+2. Włóż kartę do Pi, uruchom go, odczekaj minutę i połącz się: `ssh <użytkownik>@<nazwa-hosta>.local`.
+3. `sudo apt update && sudo apt full-upgrade -y`, potem kroki z [Instalacji](#instalacja) i [Uruchamiania jako usługa](#uruchamianie-jako-usługa-systemd) wyżej (kompilacja trwa ok. 30 minut na Pi 5). `VIDEO_ENCODER=auto` nie znajdzie enkodera sprzętowego i lekki profil włączy się sam.
+4. Żeby wrócić do drugiego systemu, wyłącz Pi (`sudo poweroff`) i zamień kartę.
+
+**Czego się spodziewać.**
+
+- Filmy kopiowane: kilka procent procesora. Konwersja 720p30: mniej więcej 2–3 z 4 rdzeni; pasek informacyjny, przejścia albo napisy dokładają swoje. Dwie konwersje naraz (następny film przygotowuje się, gdy leci bieżący) mogą chwilowo zająć wszystkie cztery.
+- Użyj oficjalnego **Active Coolera** (albo obudowy z wentylatorem) i oficjalnego zasilacza 27 W: bez chłodzenia Pi 5 zwalnia przy długiej konwersji i obraz się tnie. `vcgencmd measure_temp` pokazuje temperaturę (trzymaj poniżej ok. 80 °C), a `vcgencmd get_throttled` musi zwracać `throttled=0x0`.
 - Używaj **64-bitowego** Raspberry Pi OS. Na 32-bitowym nie ma gotowego ffmpeg (`setup` się zatrzyma; użyj ffmpeg z systemu, jak wyżej).
-- Pi 5 **nie ma sprzętowego enkodera H.264**: konwersja idzie na procesorze (`libx264`). Konwersja 1080p na żywo jest na granicy jego możliwości, więc wyłącz pasek informacyjny i wybieraj źródła, których nie trzeba konwertować; użyj wentylatora albo aktywnego chłodzenia.
 - Trzymaj `DATA_DIR` na dysku SSD/USB zamiast na karcie SD: segmenty są zapisywane bez przerwy.
-- Każdy widz pobiera ok. 6 Mbit/s, więc o liczbie widzów decyduje Twoje łącze w górę.
+- Każdy widz pobiera ok. 3 Mbit/s konwertowanego filmu (więcej przy kopiowanym), więc o liczbie widzów decyduje Twoje łącze w górę.
 
 ### Aplikacja z oknem na Linuksie
 

@@ -368,14 +368,30 @@ journalctl -u vrcinema -f             # the log (the banner shows the panel and 
 
 ### Graphics card
 
-`VIDEO_ENCODER=auto` tests the hardware encoders at start (NVIDIA NVENC with the NVIDIA driver; Intel Quick Sync with `intel-media-va-driver` and access to `/dev/dri`, see the commented `SupplementaryGroups=` line in the unit; AMD AMF) and falls back to `libx264` (the processor). VA-API is not supported yet. Films that need no conversion cost almost no processor time either way.
+`VIDEO_ENCODER=auto` tests the hardware encoders at start, in this order: NVIDIA NVENC (NVIDIA driver), Intel Quick Sync, AMD AMF, then **VA-API** (`h264_vaapi`: Intel and AMD graphics through `intel-media-va-driver` or `mesa-va-drivers`). The first that encodes a one-second test picture wins; if none does, it falls back to `libx264` (the processor). Films that need no conversion cost almost no processor time either way.
+
+- VA-API needs access to `/dev/dri`: uncomment `SupplementaryGroups=video render` in the unit (or add your user to the `render` group). `vainfo` (package `vainfo`) shows whether the driver works.
+- The device is `/dev/dri/renderD128`; with several graphics cards set another one with `VAAPI_DEVICE=/dev/dri/renderD129` in `.env` (the desktop app: Settings → Tools, "VA-API device").
+- `VIDEO_ENCODER=h264_vaapi` forces it. Every software step (ticker, subtitles, fades, countdown, OBS) stays as it is; the picture is uploaded to the graphics card only for encoding, with a key frame every segment.
 
 ### Raspberry Pi 5
 
+The Pi 5 has **no hardware H.264 encoder** (it can decode, not encode), so it converts on its processor. VRCinema notices this (64-bit ARM Linux with `libx264`) and switches to a **light profile**: the `superfast` preset, 3 Mbit/s instead of 6 by default, and converted pictures at most **720p30**. Films that can be copied as they are (H.264 up to 1080p30) are still copied, which costs almost nothing. The log says so at start, and Settings → Advanced shows a note next to **Maximum output resolution** (automatic, 1080p, 720p, 480p). Leave it at automatic or 720p; 1080p conversion on a Pi 5 falls behind.
+
+**A separate SD card.** If your Pi runs another system (for example Batocera), keep that card as it is and put Raspberry Pi OS on a second card (or a USB/NVMe drive), then just swap cards:
+
+1. On a PC, install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and choose *Raspberry Pi 5* → **Raspberry Pi OS Lite (64-bit)** (or the desktop edition) → the new card. In the settings (gear) set a host name, user, password and Wi-Fi, and enable SSH.
+2. Put the card in the Pi, start it, wait a minute, then `ssh <user>@<hostname>.local`.
+3. `sudo apt update && sudo apt full-upgrade -y`, then follow [Install](#install) and [Run it as a service](#run-it-as-a-service-systemd) above (building takes about 30 minutes on a Pi 5). `VIDEO_ENCODER=auto` finds no hardware encoder and the light profile turns on by itself.
+4. To go back to the other system, shut down (`sudo poweroff`) and swap the card.
+
+**What to expect.**
+
+- Films that are copied: a few percent of the processor. A 720p30 conversion: roughly 2–3 of the 4 cores; the info ticker, fades or subtitles add to it. Two conversions at once (the next film is prepared while one airs) can briefly use all four.
+- Use the official **Active Cooler** (or a case with a fan) and the official 27 W power supply: without cooling the Pi 5 throttles under a long conversion and the stream stutters. `vcgencmd measure_temp` shows the temperature (keep it below about 80 °C) and `vcgencmd get_throttled` must say `throttled=0x0`.
 - Use the **64-bit** Raspberry Pi OS. The 32-bit system has no ready-made ffmpeg (`setup` stops; use the system's ffmpeg as described above).
-- The Pi 5 has **no hardware H.264 encoder**: converting runs on the processor (`libx264`). Real-time 1080p conversion is at its limit, so keep the info ticker off and prefer sources that need no conversion; use a fan or active cooler.
 - Put `DATA_DIR` on an SSD or USB drive rather than the SD card: segments are written all the time.
-- Every viewer pulls about 6 Mbit/s, so your upload decides how many people can watch.
+- Every viewer pulls about 3 Mbit/s of a converted film (more for a copied one), so your upload decides how many people can watch.
 
 ### The window app on Linux
 
