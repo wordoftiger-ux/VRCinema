@@ -2866,4 +2866,87 @@ mod tests {
             _download: None,
         })
     }
+
+    /// The OBS stream: FLV on stdin becomes 4 s segments (converted), and the clip ends when the
+    /// stream does.
+    #[tokio::test]
+    async fn an_obs_stream_from_stdin_is_cut_into_segments_and_ends_with_its_input() {
+        let tool = |name: &str| {
+            std::env::var_os("VRCINEMA_BIN_DIR")
+                .map(PathBuf::from)
+                .map(|d| d.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+                .filter(|p| p.is_file())
+                .or_else(|| bin(name))
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (tool("ffmpeg"), tool("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg or bin/ffprobe missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let flv = dir.path().join("obs.flv");
+        let made = crate::process::run_process(
+            &ffmpeg,
+            &[
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=60:duration=9",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=9",
+                "-c:v",
+                "libx264",
+                "-g",
+                "120",
+                "-c:a",
+                "aac",
+                "-f",
+                "flv",
+            ]
+            .iter()
+            .map(OsString::from)
+            .chain([flv.clone().into_os_string()])
+            .collect::<Vec<_>>(),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(made.code, Some(0), "{}", made.stderr);
+        let f = fixture(None, dir, ffmpeg, ffprobe);
+        let bytes = std::fs::read(&flv).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4096);
+        tokio::spawn(async move {
+            for piece in bytes.chunks(32 * 1024) {
+                tx.send(piece.to_vec()).await.unwrap();
+            }
+            // The publisher stays a moment, then leaves.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+        });
+        let mut obs_item = f.item.clone();
+        obs_item.id = 0;
+        obs_item.is_live = true;
+        let mut handle = f.factory.create_obs(obs_item, rx).await.unwrap();
+        let mut segments = Vec::new();
+        let finished = wait_until(
+            || {
+                segments.extend(handle.poll());
+                handle.state() != SegmenterState::Running
+            },
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(finished);
+        segments.extend(handle.poll());
+        assert_eq!(handle.state(), SegmenterState::Done, "{:?}", handle.error());
+        assert!(segments.len() >= 2, "{segments:?}");
+        let total: f64 = segments.iter().map(|s| s.duration).sum();
+        assert!((8.0..10.5).contains(&total), "{total}");
+        assert!(!handle.copies_video(), "always converted");
+        handle.dispose();
+    }
 }
