@@ -42,14 +42,25 @@ fn check_tools(config: &AppConfig) -> Result<(), Msg> {
     }
 }
 
-/// The configuration and the merged variables (environment + `.env`).
+/// `VIDEO_ENCODER=auto`: the encoder is tested at start (see [`vrcinema::tools::detect_encoder`]).
+fn encoder_auto(env: &HashMap<String, String>) -> bool {
+    env.get("VIDEO_ENCODER")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("auto"))
+}
+
+/// The configuration and the merged variables (environment + `.env`). With
+/// `VIDEO_ENCODER=auto` the configuration says libx264 until the start-up test.
 fn prepare_server(root: &std::path::Path) -> Result<(AppConfig, HashMap<String, String>), String> {
     let env = load_env(root).map_err(|m| {
         Msg::new("log.headless_config_error")
             .arg_msg("error", m)
             .render(Lang::En)
     })?;
-    let config = load_config(&env, root, cfg!(windows)).map_err(|e| {
+    let mut config_env = env.clone();
+    if encoder_auto(&env) {
+        config_env.insert("VIDEO_ENCODER".into(), "libx264".into());
+    }
+    let config = load_config(&config_env, root, cfg!(windows)).map_err(|e| {
         Msg::new("log.headless_config_error")
             .arg("error", e.message().render(env_language(&env)))
             .render(env_language(&env))
@@ -122,13 +133,21 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let (config, env) = match prepare_server(&root) {
+    let (mut config, env) = match prepare_server(&root) {
         Ok(c) => c,
         Err(msg) => {
             eprintln!("{msg}");
             return ExitCode::FAILURE;
         }
     };
+    if encoder_auto(&env) {
+        // NVENC, QSV, AMF in turn (one second of test picture each), else libx264.
+        config.video_encoder = vrcinema::tools::detect_encoder(&config.ffmpeg_path).await;
+        log(
+            config.language,
+            &Msg::new("log.encoder_test").arg("encoder", config.video_encoder.as_str()),
+        );
+    }
     // Every process started from here on (ffmpeg, yt-dlp and whatever they start) is born
     // inside the job object and dies with this program (Windows; a no-op elsewhere).
     if let Err(e) = contain_this_process() {

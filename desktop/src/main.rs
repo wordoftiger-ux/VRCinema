@@ -200,10 +200,18 @@ fn spawn_outside_job(mut cmd: std::process::Command) {
     let _ = cmd.spawn();
 }
 
-/// Opens an http(s) address in the user's default browser.
+/// Opens an http(s) address in the user's default browser (Linux: `xdg-open`).
 pub fn open_in_browser(url: &str) {
-    let mut cmd = std::process::Command::new("rundll32");
-    cmd.args(["url.dll,FileProtocolHandler", url]);
+    let mut cmd = if cfg!(windows) {
+        let mut cmd = std::process::Command::new("rundll32");
+        cmd.arg("url.dll,FileProtocolHandler");
+        cmd
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    cmd.arg(url);
     spawn_outside_job(cmd);
 }
 
@@ -287,6 +295,8 @@ fn finish_update(exe: &Path) {
 fn engine_options() -> AppOptions {
     let mut options = AppOptions {
         version: Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version::new(0, 0, 0)),
+        // Releases carry only the Windows program.
+        self_update: cfg!(windows),
         ..AppOptions::default()
     };
     if let Some(url) = std::env::var_os(UPDATE_API_ENV).and_then(|v| v.into_string().ok())
@@ -354,13 +364,15 @@ fn start(
 
 fn main() {
     let args = Args::parse(std::env::args().skip(1));
-    let exe = std::env::current_exe().ok();
+    // The program file an update replaces: Windows only (releases carry only `VRCinema.exe`).
+    let exe = std::env::current_exe().ok().filter(|_| cfg!(windows));
     // Also on a normal start: a previous cleanup may have failed (the old program was still
     // running then). Never delays the start.
     if let Some(exe) = &exe {
         spawn_update_cleanup(exe.clone());
     }
-    if tauri::webview_version().is_err() {
+    // WebView2 is a separate install only on Windows (Linux: WebKitGTK comes with the package).
+    if cfg!(windows) && tauri::webview_version().is_err() {
         webview2_missing(system_lang());
         std::process::exit(1);
     }

@@ -515,9 +515,13 @@ pub fn system_lang_from(source: impl FnOnce() -> Option<u16>) -> Lang {
     }
 }
 
-/// The language of the Windows interface of the current user (`GetUserDefaultUILanguage`).
+/// The language of the user's interface: Windows `GetUserDefaultUILanguage`; elsewhere the
+/// POSIX locale (`LC_ALL`, then `LC_MESSAGES`, then `LANG`).
 pub fn system_lang() -> Lang {
-    system_lang_from(user_ui_language)
+    #[cfg(windows)]
+    return system_lang_from(user_ui_language);
+    #[cfg(not(windows))]
+    lang_from_locale(|name| std::env::var(name).ok())
 }
 
 #[cfg(windows)]
@@ -526,9 +530,31 @@ fn user_ui_language() -> Option<u16> {
     Some(unsafe { windows_sys::Win32::Globalization::GetUserDefaultUILanguage() })
 }
 
-#[cfg(not(windows))]
-fn user_ui_language() -> Option<u16> {
-    None
+/// The supported language of the POSIX locale read through `var` (`pl_PL.UTF-8` is Polish;
+/// the first non-empty of `LC_ALL`, `LC_MESSAGES`, `LANG` decides, like `setlocale`);
+/// `C`, `POSIX`, anything unsupported or nothing set is English.
+pub fn lang_from_locale(var: impl Fn(&str) -> Option<String>) -> Lang {
+    let Some(locale) = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .filter_map(&var)
+        .find(|v| !v.trim().is_empty())
+    else {
+        return Lang::En;
+    };
+    let language = locale
+        .trim()
+        .split(['_', '.', '@', '-'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match language.as_str() {
+        "pl" => Lang::Pl,
+        "es" => Lang::Es,
+        "de" => Lang::De,
+        "fr" => Lang::Fr,
+        "ja" => Lang::Ja,
+        _ => Lang::En,
+    }
 }
 
 #[cfg(test)]

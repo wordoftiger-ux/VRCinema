@@ -1,0 +1,46 @@
+# systemd unit of the headless VRCinema server (Linux, no window).
+#
+# Layout (see README, "Linux (server without window)"):
+#   /opt/vrcinema/vrcinema      the program
+#   /opt/vrcinema/.env         settings (ADMIN_PASSWORD, SESSION_SECRET, PUBLIC_URL, ...)
+#   /opt/vrcinema/bin/         yt-dlp, ffmpeg, ffprobe, deno (from `vrcinema setup`)
+#   /opt/vrcinema/data/        database, segments, logs (DATA_DIR)
+#
+# Install:
+#   sudo cp deploy/vrcinema.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vrcinema
+#   journalctl -u vrcinema -f        # the server's log
+[Unit]
+Description=VRCinema channel server (VRChat HLS)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=vrcinema
+Group=vrcinema
+# The folder with .env, bin/ and data/ (the server looks for them in its working folder).
+WorkingDirectory=/opt/vrcinema
+ExecStart=/opt/vrcinema/vrcinema
+# SIGTERM stops the channel cleanly (ffmpeg and yt-dlp end with it). Whatever is left after
+# the timeout - also after a crash - is killed with the whole control group, which on Linux
+# does what the Windows job object does.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+# Intel Quick Sync (h264_qsv) needs /dev/dri: uncomment on a machine with Intel graphics
+# (both groups must exist, see `getent group video render`). NVIDIA works through its driver.
+#SupplementaryGroups=video render
+# Hardening: the server writes only to its own folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/vrcinema
+# MEDIA_DIRS outside /opt/vrcinema are read-only anyway; nothing more to add for them.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,88 @@
+name: linux
+
+# The headless Rust server (engine/) on real Linux machines: x86_64 and aarch64
+# (the arm runner is the same CPU family as a Raspberry Pi 5).
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  server:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      # The slates' font.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+        working-directory: .
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --release
+      # The real downloader on Linux: yt-dlp, the static ffmpeg and Deno, checksums verified.
+      - name: vrcinema setup
+        working-directory: .
+        run: |
+          engine/target/release/vrcinema setup --no-env --cloudflared
+          ls -l bin
+          test -x bin/ffmpeg && test -x bin/ffprobe && test -x bin/yt-dlp && test -x bin/deno && test -x bin/cloudflared
+          bin/ffmpeg -hide_banner -version | head -n 1
+      # Start, answer, stop on SIGTERM (as systemd does).
+      - name: Start and stop the server
+        working-directory: .
+        env:
+          ADMIN_PASSWORD: ci-password-123
+          PORT: "8090"
+          VIDEO_ENCODER: auto
+        run: |
+          engine/target/release/vrcinema > server.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8090/; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:8090/
+          curl -fsS http://127.0.0.1:8090/live/main.m3u8 || true
+          kill -TERM "$pid"
+          for i in $(seq 1 20); do
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then echo "still running after SIGTERM"; cat server.log; exit 1; fi
+          wait "$pid" || { echo "exit code $?"; cat server.log; exit 1; }
+          if pgrep -x ffmpeg; then echo "ffmpeg left behind"; exit 1; fi
+          cat server.log
+      # The tests that do not depend on Windows.
+      - name: Platform-neutral unit tests
+        run: cargo test --lib -- tools:: setup:: config:: home:: i18n:: process:: preview_source:: library:: db::
+      # Everything else: many tests are still shaped for Windows (tool names, the tunnel
+      # fakes); this run shows what is left to port and does not fail the job.
+      - name: Full test suite (informational)
+        continue-on-error: true
+        run: cargo test
+      - name: Package
+        working-directory: .
+        run: |
+          mkdir -p dist/vrcinema
+          cp engine/target/release/vrcinema .env.example deploy/vrcinema.service dist/vrcinema/
+          tar -C dist -czf vrcinema-linux-${{ matrix.arch }}.tar.gz vrcinema
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrcinema-linux-${{ matrix.arch }}
+          path: vrcinema-linux-${{ matrix.arch }}.tar.gz

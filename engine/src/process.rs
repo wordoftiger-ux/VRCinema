@@ -54,8 +54,9 @@ impl ProcessError {
 /// itself into the job at startup, see [`contain_this_process`]; then children inherit it.)
 ///
 /// On Linux there is deliberately no parent-death signal (`PR_SET_PDEATHSIG` is tied to the
-/// spawning thread, and tokio blocking threads come and go); we rely on `kill_on_drop` and the
-/// container lifecycle there.
+/// spawning thread, and tokio blocking threads come and go); we rely on `kill_on_drop`, and for
+/// an abrupt death on the service manager: the systemd unit (`deploy/vrcinema.service`) uses
+/// `KillMode=control-group`, Docker ends the container's processes.
 pub fn command(cmd: &Path) -> Command {
     let mut command = Command::new(cmd);
     command.kill_on_drop(true);
@@ -481,23 +482,34 @@ pub async fn run_process_stoppable(
 async fn kill_tree(child: &mut Child) {
     if let Some(pid) = child.id() {
         #[cfg(windows)]
-        let mut killer = {
-            let mut c = command(Path::new("taskkill"));
-            c.args(["/T", "/F", "/PID", &pid.to_string()]);
-            c
-        };
-        #[cfg(not(windows))]
-        let mut killer = {
-            let mut c = command(Path::new("kill"));
-            c.args(["-KILL", "--", &format!("-{pid}")]);
-            c
-        };
-        killer.stdout(Stdio::null()).stderr(Stdio::null());
-        if let Ok(mut k) = spawn(&mut killer) {
-            let _ = tokio::time::timeout(Duration::from_secs(10), k.wait()).await;
+        {
+            let mut killer = command(Path::new("taskkill"));
+            killer.args(["/T", "/F", "/PID", &pid.to_string()]);
+            killer.stdout(Stdio::null()).stderr(Stdio::null());
+            if let Ok(mut k) = spawn(&mut killer) {
+                let _ = tokio::time::timeout(Duration::from_secs(10), k.wait()).await;
+            }
         }
+        #[cfg(unix)]
+        kill_group(pid);
     }
     let _ = child.kill().await;
+}
+
+/// Kills the process group `pgid` (a child started with `process_group(0)` leads a group
+/// with its own pid) with SIGKILL; no `kill` program is needed (slim images have none).
+#[cfg(unix)]
+fn kill_group(pgid: u32) {
+    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+        return;
+    };
+    if pgid <= 1 {
+        return; // never "every process" or init
+    }
+    // SAFETY: a plain system call with integer arguments; a group that is gone gives ESRCH.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
 }
 
 #[cfg(test)]

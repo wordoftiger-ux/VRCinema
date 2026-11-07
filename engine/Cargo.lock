@@ -1179,6 +1179,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "image",
+ "libc",
  "local-ip-address",
  "qrcode",
  "reqwest",

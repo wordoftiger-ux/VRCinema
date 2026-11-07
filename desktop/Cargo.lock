@@ -2723,6 +2723,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "image",
+ "libc",
  "local-ip-address",
  "qrcode",
  "reqwest",

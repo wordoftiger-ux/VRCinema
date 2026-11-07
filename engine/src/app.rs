@@ -105,6 +105,9 @@ pub struct AppOptions {
     pub update_api_url: String,
     /// Check for a new version at start and every 24 h.
     pub check_updates: bool,
+    /// The program can replace itself with a release (releases carry only the Windows
+    /// `VRCinema.exe`; elsewhere no update is ever offered).
+    pub self_update: bool,
     pub tool_sources: ToolSources,
     /// Tests: a `FakeResolver` file instead of the real resolvers.
     pub fake_resolver: Option<PathBuf>,
@@ -127,6 +130,7 @@ impl Default for AppOptions {
             version: Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version::new(0, 0, 0)),
             update_api_url: DEFAULT_API_URL.to_string(),
             check_updates: true,
+            self_update: true,
             tool_sources: ToolSources::default(),
             fake_resolver: None,
             tunnel_timings: TunnelTimings::default(),
@@ -1012,6 +1016,13 @@ impl AppCore {
     /// Asks GitHub for a newer program. Problems (no network, private repository) are only
     /// logged; the answer then offers nothing.
     pub(crate) async fn check_update(&self) -> UpdateInfo {
+        if !self.options.self_update {
+            return UpdateInfo {
+                current: self.options.version.clone(),
+                available: None,
+                error: None,
+            };
+        }
         let skipped = self.settings().skipped_update_version;
         let mut info = self_update::check_latest(
             &self.api_http,
