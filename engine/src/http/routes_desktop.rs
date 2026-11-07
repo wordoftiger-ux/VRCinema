@@ -200,6 +200,7 @@ async fn info(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -
         "pauseReasons": reasons,
         "language": s.language.as_str(),
         "tickerSlow": core.ticker_slow(),
+        "alarms": state.alarms.get(),
         "sessionViaTunnel": ctx.via_tunnel,
     })))
 }

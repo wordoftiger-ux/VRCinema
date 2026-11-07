@@ -110,6 +110,8 @@ pub struct AppState {
     pub(crate) preview: Option<crate::preview_source::PreviewSources>,
     /// Each viewer's latency, from its segment requests (the air clock).
     pub(crate) air_viewers: Arc<crate::pipeline::air::AirViewers>,
+    /// The black picture / silence alarms (Settings → Advanced), set by the air observer.
+    pub(crate) alarms: Arc<crate::pipeline::air_watch::AlarmBoard>,
 }
 
 impl AppState {
@@ -173,6 +175,7 @@ impl AppState {
             queue_undo: Arc::default(),
             preview: None,
             air_viewers: Arc::default(),
+            alarms: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             log: Arc::new(|_| {}),
@@ -200,6 +203,12 @@ impl AppState {
     /// Shares the record of segment fetches with the app's automatic pause.
     pub fn with_viewers(mut self, viewers: Arc<ViewerActivity>) -> Self {
         self.viewers = viewers;
+        self
+    }
+
+    /// Shares the alarms of the air observer.
+    pub fn with_alarms(mut self, alarms: Arc<crate::pipeline::air_watch::AlarmBoard>) -> Self {
+        self.alarms = alarms;
         self
     }
 

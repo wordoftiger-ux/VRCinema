@@ -4,6 +4,7 @@
 //! TypeScript version (`src/db/database.ts`), so a database file created by
 //! either implementation can be opened by the other.
 
+pub mod journal;
 pub mod lists;
 pub mod queue;
 pub mod settings;
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS blocked_devices (
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(MIGRATIONS)?;
     conn.execute_batch(lists::SCHEMA)?;
+    conn.execute_batch(journal::SCHEMA)?;
     add_column_if_missing(conn, "queue_items", "requester_key_hash", "TEXT")?;
     // In and out points (film seconds) and the start time (Unix ms) of an item.
     add_column_if_missing(conn, "queue_items", "in_s", "REAL")?;

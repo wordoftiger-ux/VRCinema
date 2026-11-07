@@ -513,6 +513,21 @@ pub async fn run(
         (idle_engine_handle(), LoopGuard::new(None, None))
     };
 
+    // The broadcast journal and the alarms (Settings → Advanced) follow the engine's snapshots.
+    let alarms = Arc::new(crate::pipeline::air_watch::AlarmBoard::default());
+    let air_watch = engine_task.has_loop().then(|| {
+        crate::pipeline::air_watch::spawn_air_watch(
+            handle.snapshot.clone(),
+            crate::pipeline::air_watch::AirWatchOptions {
+                db: Arc::clone(&db),
+                channel_id: MAIN_CHANNEL_ID,
+                ffmpeg_path: config.ffmpeg_path.clone(),
+                log: Some(Arc::clone(&shared_log)),
+                board: Arc::clone(&alarms),
+            },
+        )
+    });
+
     let served = async {
         // The listener only opens once the channel has published its first real playlist.
         tokio::pin!(shutdown);
@@ -540,6 +555,7 @@ pub async fn run(
         .with_live(live.clone())
         .with_slates(slates)
         .with_monitor_watch(monitor_watch)
+        .with_alarms(Arc::clone(&alarms))
         .with_preview(preview);
         if let Some(configure) = configure_state {
             state = configure(state);
@@ -590,6 +606,10 @@ pub async fn run(
 
     // Also when serving never started: the loop must not outlive this call.
     engine_task.shutdown().await;
+    // The observer closes the journal's open row once the snapshots end.
+    if let Some(watch) = air_watch {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), watch).await;
+    }
     served
 }
 

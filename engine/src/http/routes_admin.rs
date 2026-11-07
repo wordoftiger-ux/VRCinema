@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -15,6 +15,7 @@ use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, ReqLang, admin_item, control_json, json_ok,
     json_response, state_map,
 };
+use crate::db::journal::{JournalRepo, KEEP_ROWS, journal_csv, journal_json};
 use crate::db::{
     AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo, SettingsRepo, sanitize_settings_patch,
 };
@@ -55,6 +56,68 @@ pub(super) fn router() -> Router<AppState> {
             "/api/admin/channels/main/settings",
             get(get_settings).put(put_settings),
         )
+        .route(
+            "/api/admin/channels/main/journal",
+            get(journal).delete(clear_journal),
+        )
+        .route(
+            "/api/admin/channels/main/journal/export",
+            get(journal_export),
+        )
+}
+
+/// Rows of the broadcast journal shown in Settings → Advanced at most.
+const JOURNAL_PAGE_MAX: usize = 500;
+
+/// The newest rows of the broadcast journal (`?limit=`, default 20).
+async fn journal(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let limit = query
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, JOURNAL_PAGE_MAX);
+    let entries = state.with_db(|c| JournalRepo::new(c).list(state.channel_id, limit))?;
+    Ok(json_ok(&json!({ "entries": entries })))
+}
+
+async fn clear_journal(State(state): State<AppState>) -> ApiResult {
+    let removed = state.with_db(|c| JournalRepo::new(c).clear(state.channel_id))?;
+    Ok(json_ok(&json!({ "ok": true, "removed": removed })))
+}
+
+/// The whole journal as a file: `?format=csv` (default) or `json`.
+async fn journal_export(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let entries =
+        state.with_db(|c| JournalRepo::new(c).list(state.channel_id, KEEP_ROWS as usize))?;
+    let day = chrono::Local::now().format("%Y%m%d");
+    let (body, mime, ext) = match query.get("format").map(String::as_str) {
+        Some("json") => (
+            serde_json::to_string_pretty(&journal_json(&entries)).unwrap_or_default(),
+            "application/json; charset=utf-8",
+            "json",
+        ),
+        // A byte order mark: spreadsheets then read the titles as UTF-8.
+        _ => (
+            format!("\u{feff}{}", journal_csv(&entries)),
+            "text/csv; charset=utf-8",
+            "csv",
+        ),
+    };
+    let disposition = format!("attachment; filename=\"vrcinema-journal-{day}.{ext}\"");
+    Ok(axum::response::IntoResponse::into_response((
+        [
+            (axum::http::header::CONTENT_TYPE, mime.to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        body,
+    )))
 }
 
 /// Runs before body parsing, like Fastify's `onRequest` hook.
@@ -708,6 +771,7 @@ async fn environment(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): Req
         "window": core.is_some(),
         "encoder": state.live.encoder.get().as_str(),
         "tickerSlow": state.snapshot().stats.ticker_slow,
+        "alarms": state.alarms.get(),
         "language": state.language().as_str(),
         "sessionViaTunnel": ctx.via_tunnel,
         "publicUrl": settings

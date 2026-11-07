@@ -2,6 +2,7 @@
 
 pub mod advanced;
 pub mod air;
+pub mod air_watch;
 pub mod broadcaster;
 pub mod channel;
 pub mod clip_factory;
