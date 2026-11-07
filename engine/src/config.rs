@@ -62,6 +62,8 @@ pub struct AppConfig {
     pub window_size: usize,
     /// The app's language (`LANGUAGE` of the headless server, default English).
     pub language: Lang,
+    /// The OBS input (headless: on only with `OBS_STREAM_KEY`).
+    pub obs: crate::obs::ObsConfig,
 }
 
 /// The `LANGUAGE` of the environment, English when it is missing or unknown (for messages
@@ -209,7 +211,28 @@ pub fn load_config(
         segment_seconds: 4,
         window_size: 10,
         language,
+        obs: obs_from_env(env),
     })
+}
+
+/// `OBS_STREAM_KEY` (at least 16 characters) switches the OBS input on; `OBS_PORT` (default
+/// 1935), `OBS_LAN` (listen on every address), `OBS_PRIORITY` (default on).
+fn obs_from_env(env: &HashMap<String, String>) -> crate::obs::ObsConfig {
+    let key = trimmed(env, "OBS_STREAM_KEY")
+        .unwrap_or_default()
+        .to_string();
+    crate::obs::ObsConfig {
+        enabled: key.chars().count() >= 16,
+        port: trimmed(env, "OBS_PORT")
+            .and_then(|p| p.parse().ok())
+            .filter(|p| *p > 0)
+            .unwrap_or(crate::obs::DEFAULT_PORT),
+        key,
+        lan: flag(env, "OBS_LAN"),
+        priority: env
+            .get("OBS_PRIORITY")
+            .is_none_or(|_| flag(env, "OBS_PRIORITY")),
+    }
 }
 
 /// Czyta plik .env, także zapisany przez Notatnik lub PowerShell ze znacznikiem BOM.

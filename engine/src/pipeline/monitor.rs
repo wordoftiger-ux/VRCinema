@@ -945,6 +945,7 @@ mod tests {
             pause: vec![slate("pause.ts")],
             generation: 0,
             fallback: Vec::new(),
+            brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         };

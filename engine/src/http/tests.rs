@@ -111,6 +111,7 @@ fn idle_state() -> ChannelState {
         paused: false,
         pause_reasons: Vec::new(),
         control: Default::default(),
+        obs: Default::default(),
     }
 }
 
@@ -978,6 +979,7 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
             paused: false,
             pause_reasons: Vec::new(),
             control: Default::default(),
+            obs: Default::default(),
         },
     ));
     let body = h.send(get("/api/channels/main/state")).await.json();
@@ -1016,6 +1018,7 @@ async fn a_paused_channel_reports_status_paused_reasons_and_the_paused_film() {
             paused: true,
             pause_reasons: vec![PauseReason::Tunnel, PauseReason::NoViewers],
             control: Default::default(),
+            obs: Default::default(),
         },
     ));
     let body = h.send(get("/api/channels/main/state")).await.json();

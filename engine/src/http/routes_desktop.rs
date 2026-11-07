@@ -75,6 +75,8 @@ pub(super) fn router(state: AppState) -> Router<AppState> {
         .route("/api/desktop/tunnel/named/create", post(named_create))
         .route("/api/desktop/tunnel/named/quick", post(named_quick))
         .route("/api/desktop/tunnel/named/delete", post(named_delete))
+        .route("/api/desktop/obs", get(obs_view))
+        .route("/api/desktop/obs/key", post(obs_new_key))
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             super::require_window,
@@ -141,6 +143,8 @@ fn config_view(core: &AppCore) -> Map<String, Value> {
         "pauseOnTunnelLoss": s.pause_on_tunnel_loss,
         "pauseWhenNoViewers": s.pause_when_no_viewers,
         "language": s.language.as_str(),
+        "obsLan": s.obs_lan,
+        "obsPriority": s.obs_priority,
     });
     match view {
         Value::Object(map) => map,
@@ -202,6 +206,58 @@ async fn info(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -
         "tickerSlow": core.ticker_slow(),
         "sessionViaTunnel": ctx.via_tunnel,
     })))
+}
+
+/// The OBS input for the window (window only: the key never reaches a remote panel): the
+/// addresses for OBS's "Server" field, the stream key, the two switches and the listener's
+/// state (`off`, `listening`, `failed` with why, `streaming`).
+async fn obs_view(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
+    let core = state.desktop()?;
+    let s = core.settings();
+    let (status, error) = match state
+        .obs
+        .as_ref()
+        .map(|hub| (hub.listening(), hub.connected()))
+    {
+        None => ("off", None),
+        Some((_, true)) => ("streaming", None),
+        Some((crate::obs::Listening::On(_), false)) => ("listening", None),
+        Some((crate::obs::Listening::Failed { error, .. }, false)) => {
+            ("failed", Some(error.render(lang)))
+        }
+        Some((crate::obs::Listening::Off, false)) => ("off", None),
+    };
+    let lan: Vec<String> = if s.obs_lan {
+        crate::server::lan_addresses()
+            .iter()
+            .map(|ip| crate::obs::server_url(&ip.to_string(), s.obs_port))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let on_air = state.engine.snapshot.borrow().state.obs;
+    Ok(json_ok(&json!({
+        "server": crate::obs::server_url("127.0.0.1", s.obs_port),
+        "lanServers": lan,
+        "key": s.obs_key,
+        "port": s.obs_port,
+        "lan": s.obs_lan,
+        "priority": s.obs_priority,
+        "status": status,
+        "error": error,
+        "onAir": on_air.as_str(),
+    })))
+}
+
+/// A new stream key (the old one stops working at once; a stream already on keeps going).
+async fn obs_new_key(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult {
+    let core = state.desktop()?;
+    core.apply_config(ConfigPatch {
+        obs_new_key: true,
+        ..ConfigPatch::default()
+    })
+    .await?;
+    obs_view(State(state), ReqLang(lang)).await
 }
 
 async fn get_config(State(state): State<AppState>) -> ApiResult {
@@ -362,6 +418,9 @@ fn parse_patch(body: &Value) -> Result<ConfigPatch, ApiError> {
         pause_on_tunnel_loss: flag(map, "pauseOnTunnelLoss")?,
         pause_when_no_viewers: flag(map, "pauseWhenNoViewers")?,
         language,
+        obs_lan: flag(map, "obsLan")?,
+        obs_priority: flag(map, "obsPriority")?,
+        obs_new_key: false,
     })
 }
 

@@ -118,6 +118,11 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     body.insert("settings".into(), json!(settings));
     body.insert("control".into(), control_json(&snapshot.state));
     body.insert("air".into(), super::air_json(&state, &snapshot));
+    // The OBS stream: `off`, `waiting`, `live` or `brb` (never its key or address).
+    body.insert(
+        "obs".into(),
+        json!({ "state": snapshot.state.obs.as_str() }),
+    );
     body.insert(
         "link".into(),
         super::link_json(&state, &snapshot, settings.upload_mbps),

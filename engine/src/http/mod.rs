@@ -110,6 +110,8 @@ pub struct AppState {
     pub(crate) preview: Option<crate::preview_source::PreviewSources>,
     /// Each viewer's latency, from its segment requests (the air clock).
     pub(crate) air_viewers: Arc<crate::pipeline::air::AirViewers>,
+    /// The OBS input's hub (its listener's state for the window); `None` without one.
+    pub(crate) obs: Option<crate::obs::ObsHub>,
 }
 
 impl AppState {
@@ -157,7 +159,11 @@ impl AppState {
                 ytdlp_cookies: LiveValue::new(None),
                 pixeldrain_api_key: LiveValue::new(None),
                 language: LiveValue::new(config.language),
+                obs_key: LiveValue::new(String::new()),
+                obs_lan: LiveValue::new(false),
+                obs_priority: LiveValue::new(true),
             },
+            obs: None,
             config: Arc::new(config),
             channel_id,
             db,
@@ -209,6 +215,12 @@ impl AppState {
         watch: Arc<crate::pipeline::monitor::MonitorWatch>,
     ) -> Self {
         self.monitor_watch = watch;
+        self
+    }
+
+    /// The OBS input (the window shows its listener's state).
+    pub fn with_obs(mut self, hub: Option<crate::obs::ObsHub>) -> Self {
+        self.obs = hub;
         self
     }
 

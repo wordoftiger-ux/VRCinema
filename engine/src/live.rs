@@ -53,6 +53,12 @@ pub struct LiveSettings {
     pub pixeldrain_api_key: LiveValue<Option<String>>,
     /// The app's language (answers to requests that name none they can read).
     pub language: LiveValue<Lang>,
+    /// The OBS stream key (the listener compares every `publish` with the current one).
+    pub obs_key: LiveValue<String>,
+    /// The OBS listener takes connections from the home network (it moves over at once).
+    pub obs_lan: LiveValue<bool>,
+    /// The OBS stream takes the air at once (read by the channel).
+    pub obs_priority: LiveValue<bool>,
 }
 
 impl LiveSettings {
@@ -65,6 +71,9 @@ impl LiveSettings {
             ytdlp_cookies: LiveValue::new(config.ytdlp_cookies.clone()),
             pixeldrain_api_key: LiveValue::new(config.pixeldrain_api_key.clone()),
             language: LiveValue::new(config.language),
+            obs_key: LiveValue::new(config.obs.key.clone()),
+            obs_lan: LiveValue::new(config.obs.lan),
+            obs_priority: LiveValue::new(config.obs.priority),
         }
     }
 
@@ -77,6 +86,9 @@ impl LiveSettings {
         self.pixeldrain_api_key
             .set(config.pixeldrain_api_key.clone());
         self.language.set(config.language);
+        self.obs_key.set(config.obs.key.clone());
+        self.obs_lan.set(config.obs.lan);
+        self.obs_priority.set(config.obs.priority);
     }
 }
 
