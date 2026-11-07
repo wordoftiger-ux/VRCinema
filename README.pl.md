@@ -141,6 +141,16 @@ Widzowie nie tracą kawałka filmu, gdy zerwie się połączenie:
 - **Nikt nie ogląda** (domyślnie wyłączona): po 30 sekundach bez widzów film się zatrzymuje i wznawia, gdy tylko ktoś zacznie oglądać (podgląd w oknie liczy się jako widz, gdy okno jest widoczne; zminimalizowane okno albo schowane do zasobnika zatrzymuje podgląd).
 - Transmisje na żywo nigdy nie są wstrzymywane. Obie opcje są w **Ustawieniach** → **Internet** → „Wstrzymywanie kanału”. Wznowiony film rusza po kilku sekundach planszy buforowania; tak ma być.
 
+### Nadawanie z OBS
+
+OBS Studio może nadawać prosto do kanału (RTMP). W aplikacji otwórz **Ustawienia** → **OBS** i skopiuj dwie wartości do OBS → Settings → Stream: Service „Custom…”, **Server** `rtmp://127.0.0.1:1935/live` i pokazany tam **klucz strumienia** (zachowaj go dla siebie; „Nowy klucz” od razu go wymienia).
+
+- **OBS ma priorytet nad kolejką** (domyślnie włączone): gdy OBS zacznie nadawać, film na antenie zatrzymuje się dokładnie w miejscu, a OBS wchodzi na antenę w ciągu kilku sekund; gdy zakończysz transmisję, film rusza od tego samego miejsca. Wyłączone: OBS czeka na koniec filmu na antenie.
+- Krótkie zerwanie pokazuje „Zaraz wracamy” przez maksymalnie 10 sekund; jeśli OBS wróci w tym czasie, nadaje dalej, w przeciwnym razie wraca kolejka.
+- Obraz z OBS zawsze przechodzi przez konwersję kanału (klatka kluczowa w każdym fragmencie, dźwięk 48 kHz stereo, najwyżej 1080p30), więc OBS może wysyłać cokolwiek. Pasek informacyjny i kod QR są rysowane jak na każdej transmisji na żywo. Podgląd pokazuje OBS na żywo; przewijanie i pauza są wyłączone, dopóki OBS jest na antenie (zatrzymaj transmisję w OBS, aby wrócić do kolejki).
+- **Zezwól na OBS z innych urządzeń w sieci** (domyślnie wyłączone): połączyć może się tylko OBS na tym komputerze. Po włączeniu OBS na innym komputerze w sieci domowej użyje adresu z „Serwer dla innych urządzeń”. Windows zapyta wtedy raz, czy VRCinema może przyjmować połączenia przez zaporę: zezwól tylko dla **sieci prywatnych**. Port OBS (1935) to osobny port, którego tunel nigdy nie przekazuje, więc z internetu przez publiczny link kanału nie da się do niego dostać. Pięć złych kluczy z jednego adresu w ciągu minuty blokuje ten adres na minutę.
+- Serwer bez okna (`.env`) przyjmuje OBS tylko z `OBS_STREAM_KEY` (co najmniej 16 znaków); `OBS_PORT`, `OBS_LAN=1` i `OBS_PRIORITY=0` zmieniają resztę.
+
 ### Lista testów ręcznych dla właściciela
 
 Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:

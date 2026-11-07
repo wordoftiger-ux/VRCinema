@@ -335,6 +335,7 @@ impl Snapshot {
                 paused: false,
                 pause_reasons: Vec::new(),
                 control: Default::default(),
+                obs: Default::default(),
             },
             prefetched_item_id: None,
             stats: ChannelStats::default(),
@@ -877,6 +878,7 @@ mod tests {
                 paused: false,
                 pause_reasons: Vec::new(),
                 control: Default::default(),
+                obs: Default::default(),
             }
         }
         fn prefetched_item_id(&self) -> Option<i64> {
@@ -1423,6 +1425,7 @@ mod tests {
             pause: slate_in(dir, "pause.ts"),
             generation: 0,
             fallback: Vec::new(),
+            brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         }
@@ -1565,6 +1568,7 @@ mod tests {
                 pause: slate_in(&slates_dir, "pause.ts"),
                 generation: 0,
                 fallback: Vec::new(),
+                brb: Vec::new(),
                 japanese_font_missing: false,
                 font_missing: None,
             };
@@ -1716,6 +1720,7 @@ mod tests {
             pause: two("pause"),
             generation,
             fallback: Vec::new(),
+            brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         }

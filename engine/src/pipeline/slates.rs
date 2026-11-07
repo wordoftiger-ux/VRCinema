@@ -117,14 +117,17 @@ pub enum SlateKind {
     Pause,
     /// Shown while a film that failed on air is being started again ("Technical problem").
     Fallback,
+    /// Shown for a short while after the OBS stream dropped ("Be right back").
+    Brb,
 }
 
 impl SlateKind {
-    pub const ALL: [SlateKind; 4] = [
+    pub const ALL: [SlateKind; 5] = [
         SlateKind::Idle,
         SlateKind::Buffering,
         SlateKind::Pause,
         SlateKind::Fallback,
+        SlateKind::Brb,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -133,6 +136,7 @@ impl SlateKind {
             SlateKind::Buffering => "buffering",
             SlateKind::Pause => "pause",
             SlateKind::Fallback => "fallback",
+            SlateKind::Brb => "brb",
         }
     }
 }
@@ -145,6 +149,8 @@ pub struct Slates {
     /// Empty (a set made by an older test or a failed generation of this kind): the buffering
     /// slate is shown instead.
     pub fallback: Vec<SegmentInfo>,
+    /// "Be right back" (OBS); empty: the pause slate is shown instead.
+    pub brb: Vec<SegmentInfo>,
     /// Which set this is: 0 for the one made at start-up, then 1, 2, ... for every live
     /// replacement. It is part of the source keys, so the broadcaster sees a new set as a
     /// different source (a discontinuity) even when the same kind of slate airs on.
@@ -289,6 +295,10 @@ fn texts(lang: Lang, kind: SlateKind, request_url: &str, connecting: bool) -> (S
         SlateKind::Fallback => (
             i18n::t(lang, "slates.fallback_title", &[]),
             i18n::t(lang, "slates.fallback_subtitle", &[]),
+        ),
+        SlateKind::Brb => (
+            i18n::t(lang, "slates.brb_title", &[]),
+            i18n::t(lang, "slates.brb_subtitle", &[]),
         ),
     }
 }
@@ -455,17 +465,19 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
         (None, Some(font.file().to_path_buf()))
     };
     let font_name = font_name.as_deref();
-    let (idle, buffering, pause, fallback) = tokio::join!(
+    let (idle, buffering, pause, fallback, brb) = tokio::join!(
         generate_one(SlateKind::Idle, o, lang, font_name),
         generate_one(SlateKind::Buffering, o, lang, font_name),
         generate_one(SlateKind::Pause, o, lang, font_name),
-        generate_one(SlateKind::Fallback, o, lang, font_name)
+        generate_one(SlateKind::Fallback, o, lang, font_name),
+        generate_one(SlateKind::Brb, o, lang, font_name)
     );
     Ok(Slates {
         idle: idle?,
         buffering: buffering?,
         pause: pause?,
         fallback: fallback?,
+        brb: brb?,
         generation: o.generation,
         japanese_font_missing,
         font_missing,

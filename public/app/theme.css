@@ -1718,6 +1718,35 @@ kbd {
   flex: none;
 }
 
+.q-obs {
+  margin: 8px 14px;
+  color: var(--text-mute);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.monitor-obs {
+  left: 10px;
+  right: auto;
+  color: var(--text);
+}
+
+.obs-copy {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.obs-copy code {
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  background: var(--bg-input, rgba(255, 255, 255, 0.06));
+  font-size: 12.5px;
+  user-select: all;
+  word-break: break-all;
+}
+
 .q-empty {
   margin: 8px 14px;
   color: var(--text-faint);

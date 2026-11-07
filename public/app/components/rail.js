@@ -12,6 +12,7 @@ export const SETTINGS_SECTIONS = [
   'general',
   'internet',
   'channel',
+  'obs',
   'tools',
   'remote',
   'advanced',

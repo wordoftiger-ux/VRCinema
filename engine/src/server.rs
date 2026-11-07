@@ -176,7 +176,7 @@ fn banner(config: &AppConfig, port: u16, builtin_tunnel: bool) -> Vec<Msg> {
     lines
 }
 
-fn lan_addresses() -> Vec<Ipv4Addr> {
+pub(crate) fn lan_addresses() -> Vec<Ipv4Addr> {
     local_ip_address::list_afinet_netifas()
         .unwrap_or_default()
         .into_iter()
@@ -323,6 +323,7 @@ async fn start_channel_loop(
     fake_resolver: bool,
     monitor: Option<Arc<MonitorWatch>>,
     downloads: &TempDownloads,
+    obs: Option<crate::obs::ObsHub>,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -358,6 +359,7 @@ async fn start_channel_loop(
         let encoder = live.encoder.clone();
         let public_url = live.public_url.clone();
         let downloads = downloads.clone();
+        let obs_priority = live.obs_priority.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -394,6 +396,12 @@ async fn start_channel_loop(
                 watch: Arc::clone(watch),
                 first_seq: None,
             });
+            options.obs = obs
+                .as_ref()
+                .map(|hub| crate::pipeline::channel::ObsOptions {
+                    hub: hub.clone(),
+                    priority: obs_priority.clone(),
+                });
             let tags_db = Arc::clone(&db);
             let broadcaster = Broadcaster::new(
                 BroadcasterOptions {
@@ -492,6 +500,19 @@ pub async fn run(
         Some(Arc::clone(&shared_log)),
     );
     let mut slates = None;
+    // The OBS input: its own port (never the HTTP one, so never behind the tunnel).
+    let obs_hub = (start_channel && config.obs.enabled).then(crate::obs::ObsHub::default);
+    let _obs_task = obs_hub.as_ref().map(|hub| {
+        AbortOnDrop(tokio::spawn(crate::obs::ingest::run(
+            crate::obs::ingest::IngestOptions {
+                hub: hub.clone(),
+                port: config.obs.port,
+                key: live.obs_key.clone(),
+                lan: live.obs_lan.clone(),
+                log: Some(Arc::clone(&shared_log)),
+            },
+        )))
+    });
     let (handle, engine_task) = if start_channel {
         let (handle, task, swapper) = start_channel_loop(
             &config,
@@ -504,6 +525,7 @@ pub async fn run(
             fake_resolver.is_some(),
             monitor.then(|| Arc::clone(&monitor_watch)),
             &downloads,
+            obs_hub.clone(),
         )
         .await?;
         slates = Some(swapper);
@@ -556,7 +578,8 @@ pub async fn run(
         .with_slates(slates)
         .with_monitor_watch(monitor_watch)
         .with_alarms(Arc::clone(&alarms))
-        .with_preview(preview);
+        .with_preview(preview)
+        .with_obs(obs_hub.clone());
         if let Some(configure) = configure_state {
             state = configure(state);
         }
@@ -611,6 +634,16 @@ pub async fn run(
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), watch).await;
     }
     served
+}
+
+/// A task stopped when this is dropped (the OBS listener ends with its server, also on an
+/// early error).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// The channel loop of one [`run`] call, counted in `channel_loops` while it runs. Stopped by

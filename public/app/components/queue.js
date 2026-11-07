@@ -35,6 +35,7 @@ import {
   requesterPreview,
   showToast,
   undoRemoval,
+  obsState,
 } from '../store.js';
 import { errorText } from '../api.js';
 
@@ -360,6 +361,9 @@ export function QueuePanel() {
           </div>`
         : null}
       <div class="qscroll">
+        ${obsState.value === 'live' || obsState.value === 'brb'
+          ? html`<p class="q-obs" role="status" data-obs=${obsState.value}><span class="live-tag">OBS</span> ${t('queue.obs_waits')}</p>`
+          : null}
         <${Library} />
         ${pending.length ? html`<${Approvals} items=${pending} />` : null}
         ${pending.length ? html`<h3 class="sec">${t('queue.section_queued')}</h3>` : null}

@@ -13,6 +13,7 @@ pub mod live;
 pub mod local_files;
 pub mod logging;
 pub mod nicks;
+pub mod obs;
 pub mod pipeline;
 pub mod preview_source;
 pub mod process;

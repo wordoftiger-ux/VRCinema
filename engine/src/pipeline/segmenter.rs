@@ -69,6 +69,9 @@ pub fn parse_segment_csv(text: &str) -> Vec<(String, f64)> {
     out
 }
 
+/// What an ffmpeg reading `pipe:0` gets: the first pieces, then the rest as it comes.
+type Feed = (Vec<Vec<u8>>, tokio::sync::mpsc::Receiver<Vec<u8>>);
+
 #[derive(Debug, Clone)]
 struct Snapshot {
     state: SegmenterState,
@@ -130,6 +133,30 @@ impl ClipSegmenter {
         out_dir: PathBuf,
         cwd: Option<PathBuf>,
     ) -> Self {
+        Self::spawn(ffmpeg, args, out_dir, cwd, None)
+    }
+
+    /// Like [`Self::start`] for an ffmpeg reading `pipe:0`: `head`, then everything `input`
+    /// brings, is written to its stdin; stdin closes (ffmpeg finishes) when `input` ends. A
+    /// process that is gone drops `input` (its sender sees the channel closed).
+    pub fn start_fed(
+        ffmpeg: &Path,
+        args: Vec<OsString>,
+        out_dir: PathBuf,
+        cwd: Option<PathBuf>,
+        head: Vec<Vec<u8>>,
+        input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Self {
+        Self::spawn(ffmpeg, args, out_dir, cwd, Some((head, input)))
+    }
+
+    fn spawn(
+        ffmpeg: &Path,
+        args: Vec<OsString>,
+        out_dir: PathBuf,
+        cwd: Option<PathBuf>,
+        feed: Option<Feed>,
+    ) -> Self {
         let (status, _) = watch::channel(Snapshot {
             state: SegmenterState::Running,
             error: None,
@@ -152,7 +179,11 @@ impl ClipSegmenter {
         let mut command = process::command(ffmpeg);
         command
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(if feed.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             // `-progress pipe:1` (see `build_clip_args`) reports on stdout, so stderr stays
             // errors only; ffmpegs without the option write nothing here.
             .stdout(Stdio::piped())
@@ -169,6 +200,22 @@ impl ClipSegmenter {
         };
 
         segmenter.pid = child.id();
+        if let (Some(mut stdin), Some((head, mut input))) = (child.stdin.take(), feed) {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                for piece in head {
+                    if stdin.write_all(&piece).await.is_err() {
+                        return;
+                    }
+                }
+                while let Some(piece) = input.recv().await {
+                    if stdin.write_all(&piece).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = stdin.shutdown().await;
+            });
+        }
         let stderr = child.stderr.take();
         if let Some(progress) = child.stdout.take() {
             tokio::spawn(read_progress(progress, segmenter.progress.clone()));

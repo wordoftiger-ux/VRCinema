@@ -242,6 +242,8 @@ impl AutoPause {
                     .arg("seconds", self.timings.no_viewers.as_secs()),
                 // Never wanted by the automatic pause (it is the owner's own reason).
                 PauseReason::Manual => Msg::new("log.pause_manual"),
+                // The channel's own reason, never wanted here either.
+                PauseReason::Obs => continue,
             };
             (self.log)(message);
         }
@@ -250,6 +252,7 @@ impl AutoPause {
                 PauseReason::Tunnel => Msg::new("log.auto_pause_tunnel_end"),
                 PauseReason::NoViewers => Msg::new("log.auto_pause_no_viewers_end"),
                 PauseReason::Manual => Msg::new("log.pause_manual_end"),
+                PauseReason::Obs => continue,
             });
         }
     }

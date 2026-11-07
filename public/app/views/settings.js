@@ -7,6 +7,7 @@ import { route } from '../components/rail.js';
 import { General } from './settings/general.js';
 import { Internet } from './settings/internet.js';
 import { ChannelSettings } from './settings/channel.js';
+import { Obs } from './settings/obs.js';
 import { Tools } from './settings/tools.js';
 import { Remote } from './settings/remote.js';
 import { Advanced } from './settings/advanced.js';
@@ -17,6 +18,7 @@ const SECTIONS = {
   general: { key: 'settings.nav.general', Section: General },
   internet: { key: 'settings.nav.internet', Section: Internet },
   channel: { key: 'settings.nav.channel', Section: ChannelSettings },
+  obs: { key: 'settings.nav.obs', Section: Obs },
   tools: { key: 'settings.nav.tools', Section: Tools },
   remote: { key: 'settings.nav.remote', Section: Remote },
   advanced: { key: 'settings.nav.advanced', Section: Advanced },

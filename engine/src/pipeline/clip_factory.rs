@@ -1394,7 +1394,157 @@ async fn start_countdown(
     }))
 }
 
+/// How long an OBS stream's start waits for its metadata (its height and frame rate).
+const OBS_META_WAIT: Duration = Duration::from_secs(3);
+
+/// The OBS stream: its first FLV tags are read until the metadata (and the first video tag),
+/// then ffmpeg converts the whole stream from stdin like a live stream (always converted: a
+/// key frame every segment, constant frame rate, AAC 48 kHz stereo; the info ticker as for a
+/// live stream).
+async fn start_obs(
+    factory: RealClipFactory,
+    item: QueueItem,
+    mut input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<Box<dyn ClipHandle>, Msg> {
+    let d = factory.deps;
+    let mut head = Vec::new();
+    let mut meta = None;
+    let deadline = tokio::time::Instant::now() + OBS_META_WAIT;
+    while head.len() < 64 {
+        match tokio::time::timeout_at(deadline, input.recv()).await {
+            Ok(Some(piece)) => {
+                let video = piece.first() == Some(&9);
+                meta = meta.or_else(|| crate::obs::stream_meta(&piece));
+                head.push(piece);
+                if video {
+                    break;
+                }
+            }
+            Ok(None) => return Err(Msg::new("log.obs_ended_early")),
+            Err(_) => break,
+        }
+    }
+    let meta = meta.unwrap_or(crate::obs::StreamMeta {
+        has_audio: true,
+        ..Default::default()
+    });
+    let settings = {
+        let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+        SettingsRepo::new(&conn)
+            .get(d.channel_id)
+            .map_err(Msg::text)?
+    };
+    let n = factory.counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let out_dir = d.clips_dir.join(format!("obs-{n}"));
+    let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
+    let info = VideoInfo {
+        codec: "flv".into(),
+        height: meta.height.unwrap_or(0),
+        pix_fmt: "yuv420p".into(),
+        fps: meta.fps.unwrap_or(0.0),
+        // A live input's timestamps jitter: always made constant.
+        vfr: true,
+        has_audio: meta.has_audio,
+        duration_s: None,
+        ..VideoInfo::default()
+    };
+    let ticker = if settings.ticker.enabled {
+        prepare_ticker(
+            &d,
+            &factory.rotation,
+            &TickerStart {
+                item: &item,
+                settings: &settings,
+                info: &info,
+                duration_s: None,
+                start_at_s: 0.0,
+                out_dir: &out_dir,
+            },
+        )
+    } else {
+        None
+    };
+    let encoder = d.encoder.get();
+    if let Some(log) = &d.log {
+        log(clip_start_line(&item, VideoMode::Transcode, &info, 0.0));
+    }
+    let args = build_clip_args(&ClipArgsOptions {
+        inputs: vec![StreamInput {
+            url: "pipe:0".into(),
+            headers: Vec::new(),
+        }],
+        input_format: Some("flv".into()),
+        mode: VideoMode::Transcode,
+        info: info.clone(),
+        encoder,
+        segment_seconds: d.segment_seconds,
+        out_dir: out_dir.clone(),
+        start_at_s: 0.0,
+        readrate: None,
+        overlay: ticker.as_ref().map(|t| t.overlay.clone()),
+        duration_limit_s: None,
+    });
+    std::fs::create_dir_all(&out_dir).map_err(Msg::text)?;
+    let seg = Arc::new(ClipSegmenter::start_fed(
+        &d.ffmpeg_path,
+        args,
+        out_dir.clone(),
+        Some(out_dir.clone()),
+        head,
+        input,
+    ));
+    let ticker = ticker.map(|prepared| {
+        let slow = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(run_ticker(
+            prepared.writer,
+            prepared.source,
+            Arc::clone(&seg),
+            Arc::clone(&slow),
+            false,
+            d.log.clone(),
+        ));
+        TickerRun {
+            task: task.abort_handle(),
+            slow,
+            code: prepared.code,
+        }
+    });
+    Ok(Box::new(RealClipHandle {
+        seg,
+        out_dir,
+        ffmpeg_path: d.ffmpeg_path.clone(),
+        duration_s: None,
+        copies_video: false,
+        probe: ProbeSummary {
+            codec: info.codec.clone(),
+            height: info.height,
+            fps: info.fps,
+            pix_fmt: info.pix_fmt.clone(),
+            has_audio: info.has_audio,
+            duration_s: None,
+        },
+        mode: StreamMode::Transcode,
+        encoder: Some(encoder),
+        ticker,
+        fallback: None,
+        produced: false,
+        item_id: item.id,
+        title: item.title.clone(),
+        log: d.log.clone(),
+        disposed: false,
+        _download: None,
+    }))
+}
+
 impl ClipFactory for RealClipFactory {
+    fn create_obs(
+        &self,
+        item: QueueItem,
+        input: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        Box::pin(start_obs(self.clone(), item, input))
+    }
+
     fn prepare(&self, item: QueueItem) -> BoxFuture<'static, Result<(), Msg>> {
         Box::pin(prepare_film(self.clone(), item))
     }
@@ -2879,5 +3029,88 @@ mod tests {
             disposed: false,
             _download: None,
         })
+    }
+
+    /// The OBS stream: FLV on stdin becomes 4 s segments (converted), and the clip ends when the
+    /// stream does.
+    #[tokio::test]
+    async fn an_obs_stream_from_stdin_is_cut_into_segments_and_ends_with_its_input() {
+        let tool = |name: &str| {
+            std::env::var_os("VRCINEMA_BIN_DIR")
+                .map(PathBuf::from)
+                .map(|d| d.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+                .filter(|p| p.is_file())
+                .or_else(|| bin(name))
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (tool("ffmpeg"), tool("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg or bin/ffprobe missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let flv = dir.path().join("obs.flv");
+        let made = crate::process::run_process(
+            &ffmpeg,
+            &[
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=60:duration=9",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=44100:duration=9",
+                "-c:v",
+                "libx264",
+                "-g",
+                "120",
+                "-c:a",
+                "aac",
+                "-f",
+                "flv",
+            ]
+            .iter()
+            .map(OsString::from)
+            .chain([flv.clone().into_os_string()])
+            .collect::<Vec<_>>(),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(made.code, Some(0), "{}", made.stderr);
+        let f = fixture(None, dir, ffmpeg, ffprobe);
+        let bytes = std::fs::read(&flv).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4096);
+        tokio::spawn(async move {
+            for piece in bytes.chunks(32 * 1024) {
+                tx.send(piece.to_vec()).await.unwrap();
+            }
+            // The publisher stays a moment, then leaves.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+        });
+        let mut obs_item = f.item.clone();
+        obs_item.id = 0;
+        obs_item.is_live = true;
+        let mut handle = f.factory.create_obs(obs_item, rx).await.unwrap();
+        let mut segments = Vec::new();
+        let finished = wait_until(
+            || {
+                segments.extend(handle.poll());
+                handle.state() != SegmenterState::Running
+            },
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(finished);
+        segments.extend(handle.poll());
+        assert_eq!(handle.state(), SegmenterState::Done, "{:?}", handle.error());
+        assert!(segments.len() >= 2, "{segments:?}");
+        let total: f64 = segments.iter().map(|s| s.duration).sum();
+        assert!((8.0..10.5).contains(&total), "{total}");
+        assert!(!handle.copies_video(), "always converted");
+        handle.dispose();
     }
 }

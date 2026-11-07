@@ -96,6 +96,60 @@ pub trait ClipFactory: Send + Sync {
         let _ = (item, seconds);
         Box::pin(async { Err(Msg::new(COUNTDOWN_UNAVAILABLE)) })
     }
+
+    /// The OBS stream (`input`: FLV bytes) converted into segments like a live stream; `item`
+    /// stands for it on air. `Err`: no OBS input here.
+    fn create_obs(
+        &self,
+        item: QueueItem,
+        input: mpsc::Receiver<Vec<u8>>,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        let _ = (item, input);
+        Box::pin(async { Err(Msg::new(OBS_UNAVAILABLE)) })
+    }
+}
+
+/// The queue item id of the OBS stream on air (database ids start at 1).
+pub const OBS_ITEM_ID: i64 = 0;
+/// Segments an OBS stream gathers before it takes the air (a cushion against the real-time
+/// pace of its segments).
+const OBS_CUSHION: usize = 2;
+/// After the OBS stream left the air, "Be right back" airs this long before the queue goes on.
+const OBS_GRACE_MS: u64 = 10_000;
+const OBS_UNAVAILABLE: &str = "log.obs_unavailable";
+
+/// The OBS input ([`crate::obs`]): where publishers' streams arrive, and whether one takes the
+/// air at once (the film on air pauses) or after the film on air.
+pub struct ObsOptions {
+    pub hub: crate::obs::ObsHub,
+    pub priority: crate::live::LiveValue<bool>,
+}
+
+/// The OBS stream as the window shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObsAirState {
+    #[default]
+    Off,
+    /// Connected, not on air yet (starting, or waiting for the film on air to end).
+    Waiting,
+    Live,
+    /// The connection dropped: "Be right back" until it comes back or the grace ends.
+    Brb,
+}
+
+impl ObsAirState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Waiting => "waiting",
+            Self::Live => "live",
+            Self::Brb => "brb",
+        }
+    }
+}
+
+fn is_obs(c: &ActiveClip) -> bool {
+    c.item.id == OBS_ITEM_ID
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +186,8 @@ pub enum PauseReason {
     NoViewers,
     /// The owner paused the channel.
     Manual,
+    /// The OBS stream is on air (or about to come back).
+    Obs,
 }
 
 impl PauseReason {
@@ -141,6 +197,7 @@ impl PauseReason {
             Self::Tunnel => "log.pause_reason_tunnel",
             Self::NoViewers => "log.pause_reason_no_viewers",
             Self::Manual => "log.pause_reason_manual",
+            Self::Obs => "log.pause_reason_obs",
         })
     }
 
@@ -149,6 +206,7 @@ impl PauseReason {
             Self::Tunnel => "tunnel",
             Self::NoViewers => "no_viewers",
             Self::Manual => "manual",
+            Self::Obs => "obs",
         }
     }
 }
@@ -180,6 +238,8 @@ pub struct ChannelState {
     pub pause_reasons: Vec<PauseReason>,
     /// What the owner's controls act on right now.
     pub control: ControlState,
+    /// The OBS stream (server side, not lagged).
+    pub obs: ObsAirState,
 }
 
 /// The film the owner's controls act on: the one being aired (or started) or paused right
@@ -227,6 +287,8 @@ pub struct ChannelOptions {
     pub monitor: Option<MonitorOptions>,
     /// Wall clock in Unix milliseconds (start times of films); default: the system clock.
     pub wall_now: Option<ClockFn>,
+    /// The OBS input; `None`: none.
+    pub obs: Option<ObsOptions>,
 }
 
 impl ChannelOptions {
@@ -251,6 +313,7 @@ impl ChannelOptions {
             viewer_lag_segments: None,
             monitor: None,
             wall_now: None,
+            obs: None,
         }
     }
 }
@@ -535,6 +598,7 @@ fn slate_slot(kind: SlateKind) -> usize {
         SlateKind::Buffering => 1,
         SlateKind::Pause => 2,
         SlateKind::Fallback => 3,
+        SlateKind::Brb => 4,
     }
 }
 
@@ -560,7 +624,7 @@ pub struct Channel {
     pending_seek: Option<PendingSeek>,
     /// The owner's pause at a position not aired yet; the film airs up to it first.
     armed_pause: Option<ArmedPause>,
-    slate_index: [usize; 4],
+    slate_index: [usize; 5],
     last_slate_kind: Option<SlateKind>,
     previous_clip_segment: Option<PathBuf>,
     pending_meta: HashMap<PathBuf, SegmentMeta>,
@@ -587,6 +651,12 @@ pub struct Channel {
     prepare_rx: mpsc::UnboundedReceiver<(i64, Result<(), Msg>)>,
     /// The film whose prepared clip failed and was started once more.
     prefetch_retried: Option<i64>,
+    /// An OBS stream not on air yet (starting, gathering its cushion, or waiting behind a film).
+    obs_pending: Option<ActiveClip>,
+    /// When the OBS stream left the air ("Be right back" until [`OBS_GRACE_MS`] later).
+    obs_lost_at: Option<u64>,
+    /// OBS streams started so far (their source keys differ).
+    obs_sessions: u32,
 }
 
 /// The film resolved ahead of its turn, and how far it got.
@@ -640,7 +710,7 @@ impl Channel {
             pause_reasons: BTreeSet::new(),
             pending_seek: None,
             armed_pause: None,
-            slate_index: [0; 4],
+            slate_index: [0; 5],
             last_slate_kind: None,
             previous_clip_segment: None,
             pending_meta: HashMap::new(),
@@ -656,6 +726,9 @@ impl Channel {
             prepare_tx,
             prepare_rx,
             prefetch_retried: None,
+            obs_pending: None,
+            obs_lost_at: None,
+            obs_sessions: 0,
         }
     }
 
@@ -670,15 +743,24 @@ impl Channel {
         self.pending_seek = None;
         self.armed_pause = None;
         self.drop_countdown();
-        for mut clip in [self.current.take(), self.prefetched.take()]
-            .into_iter()
-            .flatten()
+        for mut clip in [
+            self.current.take(),
+            self.prefetched.take(),
+            self.obs_pending.take(),
+        ]
+        .into_iter()
+        .flatten()
         {
             clip.dispose();
         }
     }
 
     pub fn skip(&mut self) -> anyhow::Result<()> {
+        if self.obs_on_air() {
+            // The OBS stream ends in OBS (Stop streaming), not here.
+            self.log(Msg::new("log.obs_skip_ignored"));
+            return Ok(());
+        }
         // A pause waiting for this film's position goes with it.
         self.armed_pause = None;
         let skipped = Msg::new(SKIPPED);
@@ -695,13 +777,18 @@ impl Channel {
     /// next slate segment comes from the new set, from its first segment, under a new source key.
     pub fn replace_slates(&mut self, slates: Slates) {
         self.o.slates = slates;
-        self.slate_index = [0; 4];
+        self.slate_index = [0; 5];
         self.last_slate_kind = None;
     }
 
     /// Called after queue changes (removal, reorder, approval).
     pub fn on_queue_changed(&mut self) -> anyhow::Result<()> {
-        if let Some(id) = self.current.as_ref().map(|c| c.item.id) {
+        if let Some(id) = self
+            .current
+            .as_ref()
+            .filter(|c| !is_obs(c))
+            .map(|c| c.item.id)
+        {
             match self
                 .queue(|q| q.get(id))?
                 .filter(|f| f.status == ItemStatus::Playing)
@@ -797,9 +884,12 @@ impl Channel {
                     }
                     (_, None) => (ChannelStatus::Buffering, None),
                     (MetaKind::Clip, current) => (ChannelStatus::Playing, current),
-                    (MetaKind::Slate(SlateKind::Buffering | SlateKind::Fallback), current) => {
-                        (ChannelStatus::Buffering, current)
-                    }
+                    (
+                        MetaKind::Slate(
+                            SlateKind::Buffering | SlateKind::Fallback | SlateKind::Brb,
+                        ),
+                        current,
+                    ) => (ChannelStatus::Buffering, current),
                 }
             }
         };
@@ -809,11 +899,201 @@ impl Channel {
             paused: self.is_holding_back(),
             pause_reasons: self.pause_reasons.iter().copied().collect(),
             control: self.control_state(),
+            obs: self.obs_state(),
+        }
+    }
+
+    /// The OBS stream right now (not lagged).
+    pub fn obs_state(&self) -> ObsAirState {
+        if self.obs_on_air() {
+            ObsAirState::Live
+        } else if self.obs_lost_at.is_some() {
+            ObsAirState::Brb
+        } else if self.obs_pending.is_some() {
+            ObsAirState::Waiting
+        } else {
+            ObsAirState::Off
+        }
+    }
+
+    /// The OBS stream is the clip on air.
+    fn obs_on_air(&self) -> bool {
+        self.current.as_ref().is_some_and(is_obs)
+    }
+
+    /// The stand-in queue item of the OBS stream: a live item titled "Live" in the slate
+    /// language.
+    fn obs_item(&self) -> QueueItem {
+        let lang = self.settings_lang().unwrap_or_default();
+        QueueItem {
+            id: OBS_ITEM_ID,
+            channel_id: self.o.channel_id,
+            position: 0,
+            source_url: "obs".into(),
+            title: crate::i18n::t(lang, "slates.obs_title", &[]),
+            duration_s: None,
+            is_live: true,
+            status: ItemStatus::Playing,
+            added_by: crate::db::AddedBy::Admin,
+            requester_name: None,
+            requester_ip: None,
+            requester_key_hash: None,
+            error: None,
+            created_at: 0,
+            started_at: None,
+            finished_at: None,
+            in_s: None,
+            out_s: None,
+            start_at: None,
+        }
+    }
+
+    fn settings_lang(&self) -> Option<crate::i18n::Lang> {
+        let conn = self.o.db.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::db::SettingsRepo::new(&conn)
+            .get(self.o.channel_id)
+            .ok()
+            .map(|s| s.slate_language)
+    }
+
+    /// Called every tick: a publisher that started streaming gets its conversion started; a
+    /// stream that cannot take the air yet keeps only its newest segments.
+    fn obs_tick(&mut self) {
+        let session = self.o.obs.as_ref().and_then(|o| o.hub.take_session());
+        if let Some(session) = session {
+            if let Some(mut old) = self.obs_pending.take() {
+                old.dispose();
+            }
+            self.obs_sessions += 1;
+            let item = self.obs_item();
+            self.log(Msg::new("log.obs_starting"));
+            let start = self.o.factory.create_obs(item.clone(), session.input);
+            let clip = self.launch_with(item, 0.0, self.obs_sessions, start);
+            self.obs_pending = Some(clip);
+        }
+        let Some(p) = self.obs_pending.as_mut() else {
+            return;
+        };
+        if let Some(handle) = p.handle.as_mut() {
+            let fresh = handle.poll();
+            p.ready.extend(fresh);
+        }
+        let mut stale = Vec::new();
+        while p.ready.len() > OBS_CUSHION {
+            if let Some(seg) = p.ready.pop_front() {
+                stale.push(seg.path);
+            }
+        }
+        for path in stale {
+            self.remove_segment(&path);
+        }
+    }
+
+    /// The OBS stream may take the air now: with priority at once, otherwise once no film airs.
+    fn obs_may_air(&self) -> bool {
+        let priority = self.o.obs.as_ref().is_none_or(|o| o.priority.get());
+        priority || self.current.as_ref().is_none_or(is_obs)
+    }
+
+    /// Runs the OBS stream's turns at the start of every `next()` step: a stream that gathered
+    /// its cushion takes the air, one that failed before goes, and after a drop "Be right
+    /// back" airs (returned) until the grace ends, when the paused film goes on.
+    fn obs_step(&mut self) -> Option<SlateKind> {
+        if let Some(p) = self.obs_pending.as_mut() {
+            if let Some(handle) = p.handle.as_mut() {
+                let fresh = handle.poll();
+                p.ready.extend(fresh);
+            }
+            let done = p
+                .handle
+                .as_ref()
+                .is_some_and(|h| h.state() == SegmenterState::Done);
+            let ready = p.ready.len() >= OBS_CUSHION || (done && !p.ready.is_empty());
+            let empty = p.ready.is_empty();
+            let failure = p.failure().filter(|_| empty);
+            if let Some(error) = failure {
+                if let Some(mut p) = self.obs_pending.take() {
+                    p.dispose();
+                }
+                self.log(Msg::new("log.obs_failed").arg_msg("error", error));
+            } else if ready && self.obs_may_air() {
+                self.obs_take_air();
+            } else if done
+                && empty
+                && let Some(mut p) = self.obs_pending.take()
+            {
+                p.dispose();
+            }
+        }
+        if self.current.is_none()
+            && let Some(lost) = self.obs_lost_at
+        {
+            if (self.now)().saturating_sub(lost) < OBS_GRACE_MS {
+                return Some(SlateKind::Brb);
+            }
+            self.obs_lost_at = None;
+            self.log(Msg::new("log.obs_back_to_queue"));
+        }
+        // The stream is gone for good (or never made it on air): the queue goes on.
+        if self.pause_reasons.contains(&PauseReason::Obs)
+            && !self.obs_on_air()
+            && self.obs_lost_at.is_none()
+        {
+            self.resume(PauseReason::Obs);
+        }
+        None
+    }
+
+    /// The OBS stream takes the air: the film on air is paused exactly where it is (reason
+    /// `obs`), a live stream on air goes back to the front of the queue, a countdown stops.
+    fn obs_take_air(&mut self) {
+        let Some(clip) = self.obs_pending.take() else {
+            return;
+        };
+        let channel_id = self.o.channel_id;
+        match self.current.take() {
+            Some(mut old) if is_obs(&old) => old.dispose(),
+            Some(mut live) if live.item.is_live => {
+                live.dispose();
+                if let Err(e) = self.queue(|q| q.reset_playing(channel_id)) {
+                    self.log_error("log.channel_error", &e);
+                }
+            }
+            other => self.current = other,
+        }
+        self.drop_countdown();
+        self.pause(PauseReason::Obs);
+        if let Some(mut left) = self.current.take() {
+            // Not parked (cannot happen: a film is parked by the pause above); back in line.
+            left.dispose();
+            let _ = self.queue(|q| q.reset_playing(channel_id));
+        }
+        self.obs_lost_at = None;
+        self.log(Msg::new("log.obs_on_air"));
+        self.current = Some(clip);
+    }
+
+    /// The OBS stream on air ended (its connection closed, or ffmpeg failed).
+    fn obs_lost(&mut self, error: Option<Msg>) {
+        self.obs_lost_at = Some((self.now)());
+        self.log(match error {
+            Some(error) => Msg::new("log.obs_failed").arg_msg("error", error),
+            None => Msg::new("log.obs_lost").arg("seconds", OBS_GRACE_MS / 1000),
+        });
+    }
+
+    fn remove_segment(&self, path: &Path) {
+        match &self.o.remove_file {
+            Some(remove) => remove(path),
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
     fn control_state(&self) -> ControlState {
-        if let Some(p) = &self.parked {
+        // While the OBS stream airs, the controls show it (a live stream), not the paused film.
+        if let Some(p) = self.parked.as_ref().filter(|_| !self.obs_on_air()) {
             return ControlState {
                 item_id: Some(p.item.id),
                 is_live: false,
@@ -987,6 +1267,7 @@ impl Channel {
     /// Called by the engine loop every tick: runs a seek whose quiet has passed and warns
     /// when the film on air cannot keep up with its ticker.
     pub fn on_tick(&mut self) {
+        self.obs_tick();
         if let Err(e) = self.run_due_seek() {
             self.log_error("log.channel_error_seek", &e);
         }
@@ -1565,6 +1846,7 @@ impl Channel {
                 self.current.as_mut(),
                 self.prefetched.as_mut(),
                 self.countdown.as_mut().map(|c| &mut c.clip),
+                self.obs_pending.as_mut(),
             ]
             .into_iter()
             .flatten()
@@ -1615,6 +1897,9 @@ impl Channel {
             .saturating_mul(1000);
         for _ in 0..NEXT_GUARD {
             self.fire_armed_pause();
+            if let Some(kind) = self.obs_step() {
+                return self.slate(kind);
+            }
             if self.current.is_none() {
                 if !self.pause_reasons.is_empty() {
                     // A countdown made before the pause would be out of date after it.
@@ -1709,7 +1994,9 @@ impl Channel {
     /// failed on air is started again, otherwise "Loading".
     fn waiting_slate(&mut self) -> anyhow::Result<SourceSegment> {
         let recovering = self.current.as_ref().is_some_and(|c| c.recovering);
-        self.slate(if recovering {
+        self.slate(if self.obs_on_air() {
+            SlateKind::Brb
+        } else if recovering {
             SlateKind::Fallback
         } else {
             SlateKind::Buffering
@@ -1717,17 +2004,19 @@ impl Channel {
     }
 
     fn slate(&mut self, kind: SlateKind) -> anyhow::Result<SourceSegment> {
-        // A set without the fallback slate shows the buffering one.
-        let kind = if kind == SlateKind::Fallback && self.o.slates.fallback.is_empty() {
-            SlateKind::Buffering
-        } else {
-            kind
+        // A set without the fallback slate shows the buffering one; without "Be right back"
+        // the pause slate.
+        let kind = match kind {
+            SlateKind::Fallback if self.o.slates.fallback.is_empty() => SlateKind::Buffering,
+            SlateKind::Brb if self.o.slates.brb.is_empty() => SlateKind::Pause,
+            kind => kind,
         };
         let list = match kind {
             SlateKind::Idle => &self.o.slates.idle,
             SlateKind::Buffering => &self.o.slates.buffering,
             SlateKind::Pause => &self.o.slates.pause,
             SlateKind::Fallback => &self.o.slates.fallback,
+            SlateKind::Brb => &self.o.slates.brb,
         };
         if list.is_empty() {
             return Err(msg_error(
@@ -1748,6 +2037,7 @@ impl Channel {
             }
             SlateKind::Pause => self.parked.as_ref().map(|p| p.item.clone()),
             SlateKind::Idle => None,
+            SlateKind::Brb => Some(self.obs_item()),
         };
         let position_s = match (&self.current, &self.parked) {
             (Some(c), _) => c.position_s(),
@@ -2151,6 +2441,11 @@ impl Channel {
         let Some(mut c) = self.current.take() else {
             return Ok(());
         };
+        if is_obs(&c) {
+            c.dispose();
+            self.obs_lost(Some(error));
+            return Ok(());
+        }
         self.log(
             Msg::new("log.clip_failed")
                 .arg("id", c.item.id)
@@ -2192,6 +2487,12 @@ impl Channel {
         status: ItemStatus,
         error: Option<&Msg>,
     ) -> anyhow::Result<()> {
+        if is_obs(&c) {
+            // The stream ended (its connection closed): "Be right back" for a while.
+            c.dispose();
+            self.obs_lost(error.filter(|_| status == ItemStatus::Failed).cloned());
+            return Ok(());
+        }
         // Conditional: an owner's removal (status `removed`) is never overwritten.
         let stored = error.map(Msg::to_stored);
         let result = self.queue(|q| q.finish(c.item.id, status, stored.as_deref()));
@@ -2324,6 +2625,7 @@ mod tests {
             pause: vec![info("/slates/pause/0.ts", 0), info("/slates/pause/1.ts", 1)],
             generation: 0,
             fallback: vec![info("/slates/fallback/0.ts", 0)],
+            brb: vec![info("/slates/brb/0.ts", 0)],
             japanese_font_missing: false,
             font_missing: None,
         }
@@ -2494,6 +2796,15 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn create_obs(
+            &self,
+            item: QueueItem,
+            input: mpsc::Receiver<Vec<u8>>,
+        ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+            drop(input);
+            self.create(item, 0.0, 0)
+        }
+
         /// A fake clip at "position -1" (its segment paths differ from the film's).
         fn create_countdown(
             &self,
@@ -2579,6 +2890,17 @@ mod tests {
         removed: &Arc<Mutex<Vec<PathBuf>>>,
         logs: &Arc<Mutex<Vec<String>>>,
     ) -> Channel {
+        channel_with_obs(db, factory, now, removed, logs, None)
+    }
+
+    fn channel_with_obs(
+        db: &Arc<Mutex<Connection>>,
+        factory: &FakeFactory,
+        now: &Arc<AtomicU64>,
+        removed: &Arc<Mutex<Vec<PathBuf>>>,
+        logs: &Arc<Mutex<Vec<String>>>,
+        obs: Option<ObsOptions>,
+    ) -> Channel {
         let mut o = ChannelOptions::new(
             MAIN_CHANNEL_ID,
             Arc::clone(db),
@@ -2597,6 +2919,7 @@ mod tests {
         o.log = Some(Box::new(move |m: Msg| {
             logs.lock().unwrap().push(m.to_string())
         }));
+        o.obs = obs;
         Channel::new(o)
     }
 
@@ -3308,6 +3631,7 @@ mod tests {
             ],
             generation,
             fallback: Vec::new(),
+            brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
         }
@@ -5460,5 +5784,160 @@ mod tests {
         assert_eq!(e.get(b.id).start_at, None, "now wins over the start time");
         e.next();
         assert_eq!(e.get(b.id).status, ItemStatus::Playing);
+    }
+
+    // ---------- OBS ----------
+
+    fn setup_obs(priority: bool) -> (Env, crate::obs::ObsHub) {
+        let db = Arc::new(Mutex::new(open_database(Path::new(":memory:")).unwrap()));
+        let factory = FakeFactory::default();
+        let now = Arc::new(AtomicU64::new(0));
+        let removed = Arc::new(Mutex::new(Vec::new()));
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let hub = crate::obs::ObsHub::default();
+        let obs = ObsOptions {
+            hub: hub.clone(),
+            priority: crate::live::LiveValue::new(priority),
+        };
+        let mut channel = channel_with_obs(&db, &factory, &now, &removed, &logs, Some(obs));
+        channel.start().unwrap();
+        let env = Env {
+            db,
+            factory,
+            now,
+            removed,
+            logs,
+            channel,
+        };
+        (env, hub)
+    }
+
+    /// OBS connects: the channel takes the stream and starts its (fake) conversion.
+    async fn obs_connects(e: &mut Env, hub: &crate::obs::ObsHub) -> (Fake, u64) {
+        let (id, _tx) = hub.open().unwrap();
+        e.tick();
+        e.flush().await;
+        let last = e.factory.lock().handles.len() - 1;
+        let h = e.factory.handle(last);
+        assert_eq!(h.item_id(), OBS_ITEM_ID);
+        (h, id)
+    }
+
+    #[tokio::test]
+    async fn obs_with_priority_pauses_the_film_where_it_is_and_it_resumes_after_the_grace() {
+        let (mut e, hub) = setup_obs(true);
+        let a = e.add_item("a");
+        let film = e.air(&a, 2).await; // 8 s aired
+        film.produce(3);
+        let (obs, id) = obs_connects(&mut e, &hub).await;
+        assert_eq!(e.channel.state().obs, ObsAirState::Waiting);
+        obs.produce(1);
+        // One segment is no cushion yet: the film goes on.
+        assert_eq!(e.key(), clip_key(&a, 0));
+        obs.produce(1);
+        assert_eq!(e.key(), "clip-0-1", "the stream takes the air");
+        assert!(film.disposed(), "the film is paused");
+        let state = e.channel.state();
+        assert_eq!(state.obs, ObsAirState::Live);
+        assert!(state.pause_reasons.contains(&PauseReason::Obs));
+        assert!(!state.paused, "a live stream airs through the pause");
+        assert!(state.control.is_live && !state.control.can_seek);
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        // Skip does nothing to the stream.
+        e.channel.skip().unwrap();
+        assert_eq!(e.key(), "clip-0-1");
+        // The connection ends: what is left airs, then "Be right back".
+        hub.close(id);
+        obs.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "brb");
+        assert_eq!(e.channel.state().obs, ObsAirState::Brb);
+        e.advance(9_000);
+        assert_eq!(e.key(), "brb", "the queue waits during the grace");
+        e.advance(2_000);
+        assert_eq!(e.key(), "buffering", "the film resumes after the grace");
+        e.flush().await;
+        assert_eq!(
+            e.factory.calls().last().unwrap(),
+            &Call {
+                item_id: a.id,
+                start_at_s: 12.0,
+                attempt: 0
+            },
+            "from exactly where it paused"
+        );
+        assert_eq!(e.channel.state().obs, ObsAirState::Off);
+        assert!(e.channel.state().pause_reasons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn obs_coming_back_within_the_grace_goes_on_air_without_the_queue() {
+        let (mut e, hub) = setup_obs(true);
+        let a = e.add_item("a");
+        e.add_item("b");
+        e.air(&a, 1).await;
+        let (obs, id) = obs_connects(&mut e, &hub).await;
+        obs.produce(2);
+        assert_eq!(e.key(), "clip-0-1");
+        hub.close(id);
+        obs.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "clip-0-1");
+        assert_eq!(e.key(), "brb");
+        e.advance(5_000);
+        let (again, _) = obs_connects(&mut e, &hub).await;
+        assert_eq!(e.key(), "brb", "gathering its cushion");
+        again.produce(2);
+        assert_eq!(e.key(), "clip-0-2");
+        assert_eq!(e.channel.state().obs, ObsAirState::Live);
+        e.advance(20_000);
+        assert_eq!(e.key(), "clip-0-2", "no film started meanwhile");
+        assert_eq!(
+            e.factory
+                .calls()
+                .iter()
+                .filter(|c| c.item_id != OBS_ITEM_ID)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn without_priority_the_stream_waits_for_the_film_with_only_its_newest_segments() {
+        let (mut e, hub) = setup_obs(false);
+        let a = e.add_item("a");
+        e.add_item("b");
+        let film = e.air(&a, 1).await;
+        film.produce(1);
+        let (obs, _) = obs_connects(&mut e, &hub).await;
+        obs.produce(5);
+        e.tick();
+        assert_eq!(
+            e.removed
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.starts_with("/clips/0"))
+                .count(),
+            3,
+            "the backlog is trimmed to the cushion"
+        );
+        assert_eq!(e.key(), clip_key(&a, 0), "the film plays on");
+        film.set_state(SegmenterState::Done);
+        assert_eq!(e.key(), "clip-0-1", "after the film, the stream");
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+        assert!(e.channel.state().pause_reasons.contains(&PauseReason::Obs));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_fails_before_going_on_air_leaves_the_film_alone() {
+        let (mut e, hub) = setup_obs(true);
+        let a = e.add_item("a");
+        let film = e.air(&a, 1).await;
+        film.produce(2);
+        let (obs, _) = obs_connects(&mut e, &hub).await;
+        obs.set_error("bad stream");
+        obs.set_state(SegmenterState::Failed);
+        assert_eq!(e.key(), clip_key(&a, 0));
+        assert_eq!(e.channel.state().obs, ObsAirState::Off);
+        assert!(!film.disposed());
     }
 }

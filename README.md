@@ -141,6 +141,16 @@ Viewers don't miss part of a film because the connection dropped:
 - **Nobody watching** (off by default): after 30 seconds without a viewer the film pauses; it resumes as soon as someone starts watching (the preview in the window counts as a viewer while the window is visible; a minimised window or one hidden in the tray stops the preview).
 - Live streams are never paused. Both options are in **Settings** → **Internet** → "Pausing the channel". A resumed film starts after a few seconds of the buffering screen; that is expected.
 
+### Streaming from OBS
+
+OBS Studio can stream straight into the channel (RTMP). In the app open **Settings** → **OBS** and copy the two values into OBS → Settings → Stream: Service "Custom…", **Server** `rtmp://127.0.0.1:1935/live` and the **Stream key** shown there (keep it secret; "New key" replaces it at once).
+
+- **OBS has priority over the queue** (on by default): when OBS starts streaming, the film on air pauses exactly where it is and OBS goes on air within a few seconds; when you stop streaming, the film continues from the same point. Off: OBS waits until the film on air ends.
+- A short drop shows "Be right back" for up to 10 seconds; if OBS reconnects in time, it simply goes on, otherwise the queue continues.
+- The stream is always converted by the channel (a key frame every segment, 48 kHz stereo sound, at most 1080p30), so it can be anything OBS sends. The info ticker and its QR code are drawn on it like on any live stream. The Preview shows it live; seeking and pause are off while OBS is on air (stop streaming in OBS to return to the queue).
+- **Allow OBS from other devices on the network** (off by default): only OBS on this computer can connect. Switched on, OBS on another computer of your home network can use the address shown under "Server for other devices". Windows then asks once whether VRCinema may accept connections through the firewall: allow it for **private networks** only. The OBS port (1935) is a separate port the tunnel never forwards, so it is never reachable from the internet through the channel's public link. Five wrong keys from one address within a minute lock that address out for a minute.
+- The server without a window (`.env`) takes OBS only with `OBS_STREAM_KEY` (at least 16 characters); `OBS_PORT`, `OBS_LAN=1` and `OBS_PRIORITY=0` change the rest.
+
 ### Owner's manual test checklist
 
 These need a person at the screen and are not covered by the automatic tests:

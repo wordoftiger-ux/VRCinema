@@ -189,6 +189,10 @@ pub(crate) struct ConfigPatch {
     pub pause_on_tunnel_loss: Option<bool>,
     pub pause_when_no_viewers: Option<bool>,
     pub language: Option<crate::i18n::Lang>,
+    pub obs_lan: Option<bool>,
+    pub obs_priority: Option<bool>,
+    /// A new OBS stream key.
+    pub obs_new_key: bool,
 }
 
 impl ConfigPatch {
@@ -238,6 +242,15 @@ impl ConfigPatch {
         }
         if let Some(v) = self.language {
             s.language = v;
+        }
+        if let Some(v) = self.obs_lan {
+            s.obs_lan = v;
+        }
+        if let Some(v) = self.obs_priority {
+            s.obs_priority = v;
+        }
+        if self.obs_new_key {
+            s.obs_key = crate::obs::new_key();
         }
         let new_password = password_hash.is_some();
         if let Some(hash) = password_hash {

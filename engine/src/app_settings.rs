@@ -51,6 +51,14 @@ pub struct AppSettings {
     /// size). A damaged entry reads as `None` (it never costs the other settings).
     #[serde(deserialize_with = "lenient_window")]
     pub window: Option<WindowState>,
+    /// The OBS stream key (made on the first start; "New key" replaces it).
+    pub obs_key: String,
+    /// OBS may connect from other devices of the home network (default: this computer only).
+    pub obs_lan: bool,
+    /// The OBS stream takes the air at once, pausing the film where it is.
+    pub obs_priority: bool,
+    /// The OBS (RTMP) port.
+    pub obs_port: u16,
 }
 
 fn lenient_window<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<WindowState>, D::Error> {
@@ -131,6 +139,10 @@ impl Default for AppSettings {
             pause_when_no_viewers: false,
             language: Lang::En,
             window: None,
+            obs_key: String::new(),
+            obs_lan: false,
+            obs_priority: true,
+            obs_port: crate::obs::DEFAULT_PORT,
         }
     }
 }
@@ -240,6 +252,12 @@ impl AppSettings {
         if settings.session_secret.is_empty() {
             settings.session_secret = random_secret();
         }
+        if settings.obs_key.is_empty() {
+            settings.obs_key = crate::obs::new_key();
+        }
+        if settings.obs_port == 0 {
+            settings.obs_port = crate::obs::DEFAULT_PORT;
+        }
         (settings, warning)
     }
 
@@ -309,6 +327,13 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         segment_seconds: 4,
         window_size: 10,
         language: settings.language,
+        obs: crate::obs::ObsConfig {
+            enabled: true,
+            port: settings.obs_port,
+            key: settings.obs_key.clone(),
+            lan: settings.obs_lan,
+            priority: settings.obs_priority,
+        },
     }
 }
 
