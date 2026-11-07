@@ -29,7 +29,7 @@ English version: [README.md](README.md).
 - **Aktualizacje**: program sprawdza, czy jest nowszy `VRCinema.exe`, przy starcie i co 24 godziny, i proponuje instalację (plik jest weryfikowany sumą SHA-256, a stary zostaje, dopóki nowy się nie uruchomi). Wymaga to publicznych wydań w repozytorium.
 - **Dane**: wszystko leży w `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Zmienna `VRCINEMA_HOME` wskazuje inny folder. Usunięcie folderu przywraca stan początkowy.
 - **Rozmiar i pamięć** (zmierzone, wersja release): `VRCinema.exe` ma 25 MB. Podczas filmu przy otwartym oknie sam zajmuje około 45 MB; procesy WebView2 rysujące okno zajmują około 600 MB, gdy gra podgląd na żywo; cloudflared zajmuje około 40 MB, a ffmpeg to osobny proces (około 30 MB przy kopiowaniu, około 300 MB przy konwersji na karcie graficznej).
-- **Bez okna** (serwer, Docker): zobacz [VPS (Linux, Docker)](#vps-linux-docker) i [Wersja w Rust](#wersja-w-rust-eksperymentalna) niżej; serwer `vrcinema` bez okna ma ten sam panel i tę samą stronę zgłoszeń.
+- **Bez okna** (serwer, Docker): zobacz [VPS (Linux, Docker)](#vps-linux-docker), [Wersja w Rust](#wersja-w-rust-eksperymentalna) i [Linux (serwer bez okna)](#linux-serwer-bez-okna) niżej; serwer `vrcinema` bez okna ma ten sam panel i tę samą stronę zgłoszeń.
 
 ### Odtwarzacz
 
@@ -347,6 +347,65 @@ engine\target\release\vrcinema.exe         # uruchamia kanał (z katalogu projek
 
 Na tym samym katalogu `data/` uruchamiaj naraz tylko jedną wersję. Żeby wrócić, zatrzymaj `vrcinema` i uruchom wersję Node.js (`npm start`); baza jest zgodna w obie strony, z ograniczeniami: wersja Node.js pomija nicki i tryby linków (oraz inne ustawienia z etapu 4) i pokazuje powody zapisane przez serwer Rust (dlaczego film się nie udał albo został pominięty) jako surowy zapisany tekst.
 Przełączaj w nowym oknie PowerShell: ustawienia nadpisane wcześniej przez `$env:PORT` czy `$env:DATA_DIR` zostają w starym oknie i wygrywają z `.env`. Wersja Rust blokuje katalog danych (`vrcinema.lock`), więc drugi serwer Rust na tym samym `data/` nie wystartuje.
+
+## Linux (serwer bez okna)
+
+Serwer `vrcinema` bez okna działa na Linuksie, na x86_64 i na 64-bitowym ARM (np. Raspberry Pi 5). Okna nie ma: kanałem steruje się z panelu WWW, który serwer udostępnia (`http://<serwer>:8080/admin`), z dowolnej przeglądarki, także z telefonu. Obsługa Linuksa jest nowa; zgłaszaj, co nie działa.
+
+### Instalacja
+
+Na Debianie, Ubuntu albo Raspberry Pi OS (64-bit):
+
+```bash
+# Kompilacja programu (potrzebny kompilator C dla SQLite i TLS; kilka minut, ok. 30 min na Pi 5)
+sudo apt install -y build-essential cmake pkg-config curl git fonts-dejavu-core
+curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && . "$HOME/.cargo/env"
+git clone https://github.com/wordoftiger-ux/vrcinema.git
+cd vrcinema/engine && cargo build --release
+
+# Osobny użytkownik i katalog
+sudo useradd --system --home-dir /opt/vrcinema --shell /usr/sbin/nologin vrcinema
+sudo install -d -o vrcinema -g vrcinema /opt/vrcinema
+sudo install -m 755 target/release/vrcinema /opt/vrcinema/
+sudo install -m 644 ../.env.example /opt/vrcinema/
+cd /opt/vrcinema
+sudo -u vrcinema ./vrcinema setup      # yt-dlp, ffmpeg, ffprobe, Deno do bin/; tworzy .env
+sudo -u vrcinema nano .env            # ADMIN_PASSWORD, SESSION_SECRET, PUBLIC_URL, ...
+```
+
+`setup` pobiera linuksowe wersje dla Twojego procesora (yt-dlp, statyczny ffmpeg od BtbN, Deno; `--cloudflared` dokłada cloudflared), sprawdza każdy plik z opublikowaną sumą SHA-256, wznawia przerwane pobieranie i nadaje programom prawo uruchamiania. `setup --force` pobiera je od nowa (aktualizacja). Na innych systemach (32-bitowy ARM, macOS) kończy się wskazówką: zainstaluj ffmpeg, ffprobe i yt-dlp menedżerem pakietów i ustaw `FFMPEG_PATH`, `FFPROBE_PATH` oraz `YTDLP_PATH` w `.env`.
+
+### Uruchamianie jako usługa (systemd)
+
+```bash
+sudo cp ~/vrcinema/deploy/vrcinema.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vrcinema
+journalctl -u vrcinema -f             # dziennik (baner pokazuje linki do panelu i kanału)
+```
+
+`systemctl stop` / `restart` wysyła SIGTERM: kanał zatrzymuje się porządnie razem ze swoim ffmpeg i yt-dlp. Usługa zabija całą swoją grupę procesów (control group), więc nic nie zostaje nawet po awarii. Działa jako użytkownik `vrcinema` i może zapisywać tylko w `/opt/vrcinema`; `DATA_DIR` albo `MEDIA_DIRS` gdzie indziej muszą być dla niego czytelne (a `DATA_DIR` dopisany do `ReadWritePaths=`).
+
+### Zapora i adres publiczny
+
+- **Panel i strumień**: TCP `PORT` (8080). Za reverse proxy (Caddy, nginx) otwórz tylko 80/443 (`sudo ufw allow 80,443/tcp`), ustaw `TRUST_PROXY=true`, a gdy proxy działa na tej samej maszynie, także `HOST=127.0.0.1`. Bez proxy: `sudo ufw allow 8080/tcp`.
+- **Szybki tunel Cloudflare**: `./vrcinema setup --cloudflared`, potem `bin/cloudflared tunnel --url http://localhost:8080`; ustaw `TRUST_CLOUDFLARE=true` i `PUBLIC_URL` (zobacz [Udostępnienie dla VRChat](#udostępnienie-dla-vrchat)). Żaden port nie musi być otwarty. Dla stałego adresu uruchom cloudflared jako osobną usługę (`cloudflared service install`).
+- **OBS** (`OBS_STREAM_KEY`): TCP 1935 (`OBS_PORT`). Nasłuchuje tylko na tej maszynie, chyba że `OBS_LAN=1`; wtedy wpuść tylko swój adres (`sudo ufw allow from 203.0.113.7 to any port 1935 proto tcp`). Nigdy nie idzie przez tunel.
+
+### Karta graficzna
+
+`VIDEO_ENCODER=auto` sprawdza przy starcie enkodery sprzętowe (NVIDIA NVENC ze sterownikiem NVIDIA; Intel Quick Sync z `intel-media-va-driver` i dostępem do `/dev/dri`, zobacz zakomentowaną linię `SupplementaryGroups=` w pliku usługi; AMD AMF), a gdy żaden nie działa, używa `libx264` (procesor). VA-API nie jest jeszcze obsługiwane. Filmy, których nie trzeba konwertować, i tak prawie nie obciążają procesora.
+
+### Raspberry Pi 5
+
+- Używaj **64-bitowego** Raspberry Pi OS. Na 32-bitowym nie ma gotowego ffmpeg (`setup` się zatrzyma; użyj ffmpeg z systemu, jak wyżej).
+- Pi 5 **nie ma sprzętowego enkodera H.264**: konwersja idzie na procesorze (`libx264`). Konwersja 1080p na żywo jest na granicy jego możliwości, więc wyłącz pasek informacyjny i wybieraj źródła, których nie trzeba konwertować; użyj wentylatora albo aktywnego chłodzenia.
+- Trzymaj `DATA_DIR` na dysku SSD/USB zamiast na karcie SD: segmenty są zapisywane bez przerwy.
+- Każdy widz pobiera ok. 6 Mbit/s, więc o liczbie widzów decyduje Twoje łącze w górę.
+
+### Aplikacja z oknem na Linuksie
+
+Aplikacja na pulpit (`VRCinema`) ma już linuksowe elementy (dane w `$XDG_DATA_HOME/vrcinema` albo `~/.local/share/vrcinema`, linki otwiera `xdg-open`, bez samoaktualizacji: wydania zawierają tylko `VRCinema.exe`), ale nie była jeszcze budowana ani testowana na Linuksie. Do kompilacji potrzebne są pakiety deweloperskie WebKitGTK (`libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`). Na razie używaj serwera bez okna opisanego wyżej.
 
 ## Dla programistów
 
