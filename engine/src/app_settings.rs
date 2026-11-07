@@ -322,7 +322,7 @@ pub fn app_config(settings: &AppSettings, home: &Path) -> AppConfig {
         font_file: PathBuf::from(if cfg!(windows) {
             "C:/Windows/Fonts/arial.ttf"
         } else {
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            crate::config::default_font(false)
         }),
         segment_seconds: 4,
         window_size: 10,

@@ -103,12 +103,31 @@ fn flag(env: &HashMap<String, String>, key: &str) -> bool {
     })
 }
 
-fn default_font(windows: bool) -> &'static str {
+/// Where DejaVu Sans lives on common Linux systems (Debian, Ubuntu and Raspberry Pi OS first:
+/// `fonts-dejavu-core`; then Fedora, Arch, openSUSE, Alpine and a manual install).
+const LINUX_FONTS: [&str; 6] = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/DejaVuSans.ttf",
+];
+
+/// The font of the slates when `FONT_FILE` is not set: Arial on Windows; elsewhere the first
+/// DejaVu Sans found (the Debian path when there is none, so the error names a known package).
+pub(crate) fn default_font(windows: bool) -> &'static str {
+    pick_font(windows, |p| Path::new(p).is_file())
+}
+
+fn pick_font(windows: bool, exists: impl Fn(&str) -> bool) -> &'static str {
     if windows {
-        "C:/Windows/Fonts/arial.ttf"
-    } else {
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        return "C:/Windows/Fonts/arial.ttf";
     }
+    LINUX_FONTS
+        .into_iter()
+        .find(|p| exists(p))
+        .unwrap_or(LINUX_FONTS[0])
 }
 
 fn random_secret() -> Result<String, ConfigError> {
@@ -375,6 +394,28 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).into(), (*v).into()))
             .collect()
+    }
+
+    #[test]
+    fn the_default_font_is_the_first_dejavu_found_on_linux() {
+        assert_eq!(pick_font(true, |_| false), "C:/Windows/Fonts/arial.ttf");
+        // Fedora's place.
+        assert_eq!(
+            pick_font(false, |p| p.contains("dejavu-sans-fonts")),
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"
+        );
+        // Arch's place.
+        assert_eq!(
+            pick_font(false, |p| p.contains("/TTF/")),
+            "/usr/share/fonts/TTF/DejaVuSans.ttf"
+        );
+        // Several: Debian's wins.
+        assert_eq!(pick_font(false, |_| true), LINUX_FONTS[0]);
+        // None installed: the Debian path, so the error names a known place.
+        assert_eq!(
+            pick_font(false, |_| false),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        );
     }
 
     #[test]

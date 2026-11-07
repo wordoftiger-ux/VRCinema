@@ -295,6 +295,36 @@ fn the_default_language_follows_the_windows_ui_language() {
     assert_eq!(system_lang_from(|| None), Lang::En);
 }
 
+#[test]
+fn the_default_language_on_linux_follows_the_posix_locale() {
+    let with = |pairs: &'static [(&'static str, &'static str)]| {
+        lang_from_locale(move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        })
+    };
+    assert_eq!(with(&[("LANG", "pl_PL.UTF-8")]), Lang::Pl);
+    assert_eq!(with(&[("LANG", "de_AT.utf8")]), Lang::De);
+    assert_eq!(with(&[("LANG", "ja_JP.UTF-8")]), Lang::Ja);
+    assert_eq!(with(&[("LANG", "fr")]), Lang::Fr);
+    assert_eq!(with(&[("LANG", "es_MX@euro")]), Lang::Es);
+    // LC_ALL wins over LC_MESSAGES, which wins over LANG; an empty one does not count.
+    assert_eq!(
+        with(&[("LC_ALL", "es_ES.UTF-8"), ("LANG", "pl_PL.UTF-8")]),
+        Lang::Es
+    );
+    assert_eq!(
+        with(&[("LC_ALL", ""), ("LC_MESSAGES", "fr_FR"), ("LANG", "pl_PL")]),
+        Lang::Fr
+    );
+    assert_eq!(with(&[("LANG", "C.UTF-8")]), Lang::En);
+    assert_eq!(with(&[("LANG", "POSIX")]), Lang::En);
+    assert_eq!(with(&[("LANG", "ko_KR.UTF-8")]), Lang::En);
+    assert_eq!(with(&[]), Lang::En);
+}
+
 #[cfg(windows)]
 #[test]
 fn the_real_windows_ui_language_is_a_supported_language_or_english() {
