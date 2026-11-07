@@ -78,6 +78,8 @@ Common to all languages:
 | Waiting for approval | Waiting for approval | Do zatwierdzenia | Pendiente de aprobación | Wartet auf Freigabe | En attente de validation | 承認待ち |
 | Allowed sites (allowlist) | allowed sites | dozwolone serwisy | sitios permitidos | erlaubte Websites | sites autorisés | 許可したサイト |
 | Blocked sites (blocklist) | blocked sites | zablokowane serwisy | sitios bloqueados | gesperrte Websites | sites bloqués | ブロックしたサイト |
+| Stream key — the secret OBS sends with its stream (Settings → OBS) | stream key | klucz strumienia | clave de transmisión | Streamschlüssel | clé de stream | ストリームキー |
+| OBS on air / Be right back (OBS stream states; OBS menu names stay in English) | OBS live / Be right back | OBS na żywo / Zaraz wracamy | OBS en vivo / Volvemos enseguida | OBS live / Gleich geht’s weiter | OBS en direct / On revient tout de suite | OBSライブ / まもなく再開します |
 | Site (a website a link comes from; not a page of the program) | site | serwis | sitio | Website | site | サイト |
 | Limits (for viewers) | limits | limity | límites | Limits | limites | 制限 |
 | Pause / resume | pause / resume | wstrzymaj / wznów | pausar / reanudar | pausieren / fortsetzen | mettre en pause / reprendre | 一時停止 / 再開 |
