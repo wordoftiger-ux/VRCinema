@@ -8,8 +8,14 @@
 //! - The badge (360 hues x 12 shapes = 4320 combinations) is a visual aid to tell viewers
 //!   apart, not proof of identity: two devices can collide.
 //! - The store runs on the engine's single database connection (behind its mutex), so a check
-//!   and the following claim are not interleaved with another request's; the upsert is still
-//!   written so it cannot take over a nick held by another device on its own.
+//!   and the following claim are not interleaved with another request's; the claim still
+//!   re-reads the holder inside its transaction, so it cannot take over a nick held by another
+//!   device on its own.
+//!
+//! A nick can be protected with a PIN (spec `2026-11-07-nick-pin-design.md`): its devices are
+//! then the keys bound in `nick_keys` (a device is bound to one protected nick at most), and
+//! another device adopts it with the PIN or the recovery code (`crate::nick_pin` and the
+//! routes check those; this store only records the result).
 
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -17,7 +23,45 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
 pub const NICK_MAX_CHARS: usize = 24;
-pub const NICK_HOLD_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+pub const NICK_HOLD_MS: i64 = 30 * DAY_MS;
+/// How long a protected nick is held after its last use.
+pub const NICK_PROTECTED_HOLD_MS: i64 = 180 * DAY_MS;
+/// Most devices bound to one protected nick; binding another drops the oldest.
+pub const NICK_MAX_DEVICES: i64 = 8;
+
+/// The hold time of a nick.
+pub fn hold_ms(protected: bool) -> i64 {
+    if protected {
+        NICK_PROTECTED_HOLD_MS
+    } else {
+        NICK_HOLD_MS
+    }
+}
+
+/// The stored row of a nick, as the holder checks need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldNick {
+    pub display: String,
+    /// The device that used the nick last.
+    pub key_hash: String,
+    pub last_used_at: i64,
+    /// Argon2 PHC of the PIN; `Some` for a protected nick.
+    pub pin_hash: Option<String>,
+    /// SHA-256 (hex) of the recovery code.
+    pub recovery_hash: Option<String>,
+}
+
+impl HeldNick {
+    pub fn protected(&self) -> bool {
+        self.pin_hash.is_some()
+    }
+
+    /// Whether the nick is free for anyone at `now` (unused for its hold time).
+    pub fn expired(&self, now: i64) -> bool {
+        now.saturating_sub(self.last_used_at) >= hold_ms(self.protected())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Badge {
@@ -49,6 +93,10 @@ pub struct NickEntry {
     pub blocked: bool,
     /// Id of the block when the device is blocked.
     pub block_id: Option<i64>,
+    /// Protected with a PIN.
+    pub protected: bool,
+    /// Devices bound to the nick (0 without a PIN).
+    pub devices: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,32 +240,109 @@ impl<'a> NickStore<'a> {
         Self { conn }
     }
 
+    /// The stored row of a nick (by skeleton), whether or not its hold time is over.
+    pub fn held(&self, skel: &str) -> rusqlite::Result<Option<HeldNick>> {
+        self.conn
+            .query_row(
+                "SELECT display, key_hash, last_used_at, pin_hash, recovery_hash
+                 FROM viewer_nicks WHERE skeleton = ?",
+                [skel],
+                |r| {
+                    Ok(HeldNick {
+                        display: r.get(0)?,
+                        key_hash: r.get(1)?,
+                        last_used_at: r.get(2)?,
+                        pin_hash: r.get(3)?,
+                        recovery_hash: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Whether the device holds the nick: the device that used it last for a nick without a
+    /// PIN, any bound device for a protected one.
+    fn holds(&self, skel: &str, held: &HeldNick, key_hash: &str) -> rusqlite::Result<bool> {
+        if held.protected() {
+            self.is_bound(skel, key_hash)
+        } else {
+            Ok(held.key_hash == key_hash)
+        }
+    }
+
+    /// Whether the device is bound to this protected nick.
+    pub fn is_bound(&self, skel: &str, key_hash: &str) -> rusqlite::Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM nick_keys WHERE key_hash = ? AND skeleton = ?",
+                [key_hash, skel],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Whether a device of the nick (the one that used it last or a bound one) is blocked.
+    pub fn nick_blocked(&self, skel: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM blocked_devices b WHERE b.key_hash IN (
+               SELECT key_hash FROM viewer_nicks WHERE skeleton = ?1
+               UNION SELECT key_hash FROM nick_keys WHERE skeleton = ?1))",
+            [skel],
+            |r| r.get(0),
+        )
+    }
+
     /// Reserves `nick` for the device (or renews its reservation) at `now` (Unix ms). A nick
-    /// held by another device that used it within 30 days is taken; a device changing its nick
-    /// frees the old one.
+    /// held by another device within its hold time is taken; a device changing its nick frees
+    /// the old one, unless that one is protected (it stays with its PIN).
     pub fn claim(&self, nick: &str, key_hash: &str, now: i64) -> Result<(), NickError> {
         self.check(nick, Some(key_hash), now)?;
         let skel = skeleton(nick);
         let tx = self.conn.unchecked_transaction()?;
+        // Read again inside the transaction: whatever happened between `check` and here, a
+        // nick another device holds is not taken over.
+        let held = self.held(&skel)?;
+        let holder = match &held {
+            Some(h) => self.holds(&skel, h, key_hash)?,
+            None => false,
+        };
+        if let Some(h) = &held
+            && !holder
+            && !h.expired(now)
+        {
+            return Err(NickError::Taken);
+        }
         tx.execute(
-            "DELETE FROM viewer_nicks WHERE key_hash = ? AND skeleton != ?",
+            "DELETE FROM viewer_nicks WHERE key_hash = ? AND skeleton != ? AND pin_hash IS NULL",
             params![key_hash, skel],
         )?;
-        // The WHERE keeps the upsert from taking over a nick another device used recently,
-        // whatever happened between `check` and here.
-        let changed = tx.execute(
-            "INSERT INTO viewer_nicks (skeleton, display, key_hash, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(skeleton) DO UPDATE SET display = excluded.display,
-               last_used_at = excluded.last_used_at,
-               created_at = CASE WHEN viewer_nicks.key_hash = excluded.key_hash
-                 THEN viewer_nicks.created_at ELSE excluded.created_at END,
-               key_hash = excluded.key_hash
-             WHERE viewer_nicks.key_hash = excluded.key_hash OR viewer_nicks.last_used_at <= ?5",
-            params![skel, nick, key_hash, now, now.saturating_sub(NICK_HOLD_MS)],
-        )?;
-        if changed == 0 {
-            return Err(NickError::Taken);
+        match &held {
+            None => {
+                tx.execute(
+                    "INSERT INTO viewer_nicks (skeleton, display, key_hash, created_at, last_used_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    params![skel, nick, key_hash, now],
+                )?;
+            }
+            Some(_) if holder => {
+                tx.execute(
+                    "UPDATE viewer_nicks SET display = ?2, key_hash = ?3, last_used_at = ?4
+                     WHERE skeleton = ?1",
+                    params![skel, nick, key_hash, now],
+                )?;
+            }
+            // Expired: a new holder, without the old PIN, code or devices.
+            Some(_) => {
+                tx.execute("DELETE FROM nick_keys WHERE skeleton = ?", [&skel])?;
+                tx.execute(
+                    "UPDATE viewer_nicks SET display = ?2, key_hash = ?3, created_at = ?4,
+                       last_used_at = ?4, pin_hash = NULL, recovery_hash = NULL
+                     WHERE skeleton = ?1",
+                    params![skel, nick, key_hash, now],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -235,21 +360,122 @@ impl<'a> NickStore<'a> {
         if is_reserved(&skel) {
             return Err(NickError::Reserved);
         }
-        let held: Option<(String, i64)> = self
-            .conn
-            .query_row(
-                "SELECT key_hash, last_used_at FROM viewer_nicks WHERE skeleton = ?",
-                [&skel],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((holder, last)) = &held
-            && Some(holder.as_str()) != key_hash
-            && now.saturating_sub(*last) < NICK_HOLD_MS
-        {
+        let Some(held) = self.held(&skel)? else {
+            return Ok(());
+        };
+        if held.expired(now) {
+            return Ok(());
+        }
+        let holder = match key_hash {
+            Some(key) => self.holds(&skel, &held, key)?,
+            None => false,
+        };
+        if !holder {
             return Err(NickError::Taken);
         }
+        // A protected nick whose device was blocked stays blocked on its other devices.
+        if held.protected() && self.nick_blocked(&skel)? {
+            return Err(NickError::Blocked);
+        }
         Ok(())
+    }
+
+    /// Binds the device to the protected nick (moving it from another one), keeping at most
+    /// [`NICK_MAX_DEVICES`] devices (the oldest binding goes).
+    fn bind(&self, skel: &str, key_hash: &str, now: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO nick_keys (key_hash, skeleton, added_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key_hash) DO UPDATE SET skeleton = excluded.skeleton,
+               added_at = excluded.added_at",
+            params![key_hash, skel, now],
+        )?;
+        self.conn.execute(
+            "DELETE FROM nick_keys WHERE skeleton = ?1 AND key_hash NOT IN (
+               SELECT key_hash FROM nick_keys WHERE skeleton = ?1
+               ORDER BY added_at DESC, rowid DESC LIMIT ?2)",
+            params![skel, NICK_MAX_DEVICES],
+        )?;
+        Ok(())
+    }
+
+    /// Sets the PIN (and the recovery code) of `nick` for the device, claiming the nick first
+    /// like a request does (a free one becomes the device's). The caller has checked the
+    /// current PIN of a nick that already has one.
+    pub fn protect(
+        &self,
+        nick: &str,
+        key_hash: &str,
+        pin_hash: &str,
+        recovery_hash: &str,
+        now: i64,
+    ) -> Result<(), NickError> {
+        self.claim(nick, key_hash, now)?;
+        let skel = skeleton(nick);
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE viewer_nicks SET pin_hash = ?2, recovery_hash = ?3 WHERE skeleton = ?1",
+            params![skel, pin_hash, recovery_hash],
+        )?;
+        self.bind(&skel, key_hash, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Binds the device to the protected nick after the caller verified its PIN or recovery
+    /// code; `sign_out_others` drops every other device, `new_pin` (PHC, code hash) replaces the
+    /// PIN and the code. Returns the nick as it is written. A blocked device — this one or one
+    /// of the nick — is refused.
+    pub fn adopt(
+        &self,
+        skel: &str,
+        key_hash: &str,
+        sign_out_others: bool,
+        new_pin: Option<(&str, &str)>,
+        now: i64,
+    ) -> Result<String, NickError> {
+        if self.is_blocked(key_hash)? || self.nick_blocked(skel)? {
+            return Err(NickError::Blocked);
+        }
+        let held = self
+            .held(skel)?
+            .filter(|h| h.protected())
+            .ok_or(NickError::Taken)?;
+        let tx = self.conn.unchecked_transaction()?;
+        if sign_out_others {
+            tx.execute("DELETE FROM nick_keys WHERE skeleton = ?", [skel])?;
+        }
+        if let Some((pin_hash, recovery_hash)) = new_pin {
+            tx.execute(
+                "UPDATE viewer_nicks SET pin_hash = ?2, recovery_hash = ?3 WHERE skeleton = ?1",
+                params![skel, pin_hash, recovery_hash],
+            )?;
+        }
+        // Like a claim: the device's other nick without a PIN is freed.
+        tx.execute(
+            "DELETE FROM viewer_nicks WHERE key_hash = ? AND skeleton != ? AND pin_hash IS NULL",
+            params![key_hash, skel],
+        )?;
+        self.bind(skel, key_hash, now)?;
+        tx.execute(
+            "UPDATE viewer_nicks SET key_hash = ?2, last_used_at = ?3 WHERE skeleton = ?1",
+            params![skel, key_hash, now],
+        )?;
+        tx.commit()?;
+        Ok(held.display)
+    }
+
+    /// The owner's reset: the nick loses its PIN, code and bound devices and stays with the
+    /// device that used it last, as a nick without a PIN. Returns whether it had a PIN.
+    pub fn reset_pin(&self, skel: &str) -> rusqlite::Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE viewer_nicks SET pin_hash = NULL, recovery_hash = NULL
+             WHERE skeleton = ? AND pin_hash IS NOT NULL",
+            [skel],
+        )?;
+        tx.execute("DELETE FROM nick_keys WHERE skeleton = ?", [skel])?;
+        tx.commit()?;
+        Ok(changed > 0)
     }
 
     pub fn is_blocked(&self, key_hash: &str) -> rusqlite::Result<bool> {
@@ -266,10 +492,29 @@ impl<'a> NickStore<'a> {
 
     /// Frees a nick; returns whether it was held.
     pub fn release(&self, skeleton: &str) -> rusqlite::Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM viewer_nicks WHERE skeleton = ?", [skeleton])?
-            > 0)
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM nick_keys WHERE skeleton = ?", [skeleton])?;
+        let held = tx.execute("DELETE FROM viewer_nicks WHERE skeleton = ?", [skeleton])? > 0;
+        tx.commit()?;
+        Ok(held)
+    }
+
+    /// Blocks every device of the nick: the one that used it last and, for a protected nick,
+    /// each bound one. Returns whether the nick is held.
+    pub fn block_nick(&self, skeleton: &str) -> rusqlite::Result<bool> {
+        let Some(held) = self.held(skeleton)? else {
+            return Ok(false);
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        self.block_device(&held.key_hash)?;
+        tx.execute(
+            "INSERT INTO blocked_devices (key_hash, blocked_at, nick)
+             SELECT key_hash, ?2, ?3 FROM nick_keys WHERE skeleton = ?1
+             ON CONFLICT(key_hash) DO NOTHING",
+            params![skeleton, crate::db::now_ms(), held.display],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Blocks the device, remembering the nick it used last (kept when the nick is released).
@@ -310,25 +555,36 @@ impl<'a> NickStore<'a> {
             .optional()
     }
 
-    /// Nicks used within the hold time, most recently used first (older ones are free anyway).
+    /// Nicks used within their hold time, most recently used first (older ones are free
+    /// anyway).
     pub fn list(&self, now: i64) -> rusqlite::Result<Vec<NickEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT n.skeleton, n.display, n.key_hash, n.last_used_at, b.rowid
+            "SELECT n.skeleton, n.display, n.key_hash, n.last_used_at, b.rowid,
+               n.pin_hash IS NOT NULL,
+               (SELECT COUNT(*) FROM nick_keys k WHERE k.skeleton = n.skeleton)
              FROM viewer_nicks n LEFT JOIN blocked_devices b ON b.key_hash = n.key_hash
-             WHERE n.last_used_at > ?
+             WHERE n.last_used_at > CASE WHEN n.pin_hash IS NULL THEN ?1 ELSE ?2 END
              ORDER BY n.last_used_at DESC, n.skeleton",
         )?;
-        stmt.query_map([now.saturating_sub(NICK_HOLD_MS)], |r| {
-            let block_id: Option<i64> = r.get(4)?;
-            Ok(NickEntry {
-                skeleton: r.get(0)?,
-                display: r.get(1)?,
-                key_hash: r.get(2)?,
-                last_used_at: r.get(3)?,
-                blocked: block_id.is_some(),
-                block_id,
-            })
-        })?
+        stmt.query_map(
+            [
+                now.saturating_sub(NICK_HOLD_MS),
+                now.saturating_sub(NICK_PROTECTED_HOLD_MS),
+            ],
+            |r| {
+                let block_id: Option<i64> = r.get(4)?;
+                Ok(NickEntry {
+                    skeleton: r.get(0)?,
+                    display: r.get(1)?,
+                    key_hash: r.get(2)?,
+                    last_used_at: r.get(3)?,
+                    blocked: block_id.is_some(),
+                    block_id,
+                    protected: r.get(5)?,
+                    devices: r.get(6)?,
+                })
+            },
+        )?
         .collect()
     }
 
@@ -633,5 +889,159 @@ mod block_tests {
             s.check("Kasia", None, 1000),
             Err(NickError::Db(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use crate::db::open_database;
+
+    const K1: &str = "1111111111111111111111111111111a";
+    const K2: &str = "2222222222222222222222222222222b";
+    const K3: &str = "3333333333333333333333333333333c";
+    const T: i64 = 1_000_000_000_000;
+
+    fn mem() -> Connection {
+        open_database(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    fn h(k: &str) -> String {
+        hash_device_key(k).unwrap()
+    }
+
+    fn sk() -> String {
+        skeleton("Kasia")
+    }
+
+    #[test]
+    fn a_protected_nick_is_held_by_its_bound_devices_only() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        assert!(s.is_bound(&sk(), &h(K1)).unwrap());
+        assert_eq!(s.claim("Kasia", &h(K2), T + 1), Err(NickError::Taken));
+        // Adopted by a second device, keeping the first.
+        assert_eq!(
+            s.adopt(&sk(), &h(K2), false, None, T + 2),
+            Ok("Kasia".into())
+        );
+        assert_eq!(s.claim("kasia", &h(K1), T + 3), Ok(()));
+        assert_eq!(s.claim("KASIA", &h(K2), T + 4), Ok(()));
+        let e = &s.list(T + 5).unwrap()[0];
+        assert!(e.protected);
+        assert_eq!(e.devices, 2);
+        // Signing the others out leaves only the adopting device.
+        s.adopt(&sk(), &h(K3), true, None, T + 6).unwrap();
+        assert_eq!(s.claim("Kasia", &h(K1), T + 7), Err(NickError::Taken));
+        assert_eq!(s.claim("Kasia", &h(K3), T + 7), Ok(()));
+    }
+
+    #[test]
+    fn a_protected_nick_survives_a_change_of_nick_and_holds_for_180_days() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.claim("Inna", &h(K1), T + 1).unwrap();
+        assert_eq!(s.claim("Kasia", &h(K2), T + 2), Err(NickError::Taken));
+        assert_eq!(s.claim("Kasia", &h(K1), T + 3), Ok(()));
+        // Not freed after 30 days...
+        let later = T + 3 + NICK_HOLD_MS;
+        assert_eq!(s.claim("Kasia", &h(K2), later), Err(NickError::Taken));
+        assert_eq!(s.list(later).unwrap().len(), 1, "only the protected nick");
+        // ...but after 180 days, and then without its PIN and devices.
+        let free = T + 3 + NICK_PROTECTED_HOLD_MS;
+        assert_eq!(s.claim("Kasia", &h(K2), free), Ok(()));
+        let held = s.held(&sk()).unwrap().unwrap();
+        assert!(held.pin_hash.is_none() && held.recovery_hash.is_none());
+        assert!(!s.is_bound(&sk(), &h(K1)).unwrap());
+    }
+
+    #[test]
+    fn a_device_is_bound_to_one_protected_nick_and_at_most_eight_devices_stay() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.protect("Basia", &h(K1), "phc", "rec", T + 1).unwrap();
+        assert!(!s.is_bound(&sk(), &h(K1)).unwrap());
+        let basia = skeleton("Basia");
+        assert!(s.is_bound(&basia, &h(K1)).unwrap());
+        for i in 0..10u32 {
+            let key = format!("{i:032x}");
+            s.adopt(&basia, &h(&key), false, None, T + 10 + i64::from(i))
+                .unwrap();
+        }
+        let devices: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nick_keys WHERE skeleton = ?",
+                [&basia],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(devices, NICK_MAX_DEVICES);
+        assert!(!s.is_bound(&basia, &h(K1)).unwrap(), "the oldest went");
+    }
+
+    #[test]
+    fn reset_release_and_block_cover_every_device() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.adopt(&sk(), &h(K2), false, None, T + 1).unwrap();
+        // Reset: no PIN, no bindings, the last device keeps the nick.
+        assert!(s.reset_pin(&sk()).unwrap());
+        assert!(!s.reset_pin(&sk()).unwrap());
+        assert_eq!(s.claim("Kasia", &h(K1), T + 2), Err(NickError::Taken));
+        assert_eq!(s.claim("Kasia", &h(K2), T + 2), Ok(()));
+        // Block: every bound device, and adopting is refused.
+        s.protect("Kasia", &h(K2), "phc", "rec", T + 3).unwrap();
+        s.adopt(&sk(), &h(K1), false, None, T + 4).unwrap();
+        assert!(s.block_nick(&sk()).unwrap());
+        assert!(s.is_blocked(&h(K1)).unwrap() && s.is_blocked(&h(K2)).unwrap());
+        let blocked = s.blocked().unwrap();
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked.iter().all(|b| b.nick.as_deref() == Some("Kasia")));
+        assert_eq!(
+            s.adopt(&sk(), &h(K3), false, None, T + 5),
+            Err(NickError::Blocked)
+        );
+        // Release removes the bindings too.
+        assert!(s.release(&sk()).unwrap());
+        assert!(!s.is_bound(&sk(), &h(K1)).unwrap());
+    }
+
+    #[test]
+    fn a_protected_nick_with_a_blocked_device_is_blocked_on_the_others() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.adopt(&sk(), &h(K2), false, None, T + 1).unwrap();
+        s.block_device(&h(K1)).unwrap();
+        assert_eq!(
+            s.check("Kasia", Some(&h(K2)), T + 2),
+            Err(NickError::Blocked)
+        );
+    }
+
+    #[test]
+    fn adopting_needs_a_protected_nick_and_may_replace_the_pin() {
+        let conn = mem();
+        let s = NickStore::new(&conn);
+        assert_eq!(
+            s.adopt(&sk(), &h(K1), false, None, T),
+            Err(NickError::Taken)
+        );
+        s.claim("Kasia", &h(K1), T).unwrap();
+        assert_eq!(
+            s.adopt(&sk(), &h(K2), false, None, T),
+            Err(NickError::Taken)
+        );
+        s.protect("Kasia", &h(K1), "phc", "rec", T).unwrap();
+        s.adopt(&sk(), &h(K2), true, Some(("phc2", "rec2")), T + 1)
+            .unwrap();
+        let held = s.held(&sk()).unwrap().unwrap();
+        assert_eq!(held.pin_hash.as_deref(), Some("phc2"));
+        assert_eq!(held.recovery_hash.as_deref(), Some("rec2"));
+        assert_eq!(held.key_hash, h(K2));
     }
 }

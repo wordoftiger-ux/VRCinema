@@ -70,6 +70,12 @@ CREATE TABLE IF NOT EXISTS blocked_devices (
   key_hash TEXT PRIMARY KEY,
   blocked_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nick_keys (
+  key_hash TEXT PRIMARY KEY,
+  skeleton TEXT NOT NULL,
+  added_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS nick_keys_skeleton ON nick_keys(skeleton);
 ";
 
 /// Brings an opened database up to the current schema: new tables and columns only, so no
@@ -84,7 +90,10 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "queue_items", "out_s", "REAL")?;
     add_column_if_missing(conn, "queue_items", "start_at", "INTEGER")?;
     // The nick a blocked device used last (the block outlives the nick).
-    add_column_if_missing(conn, "blocked_devices", "nick", "TEXT")
+    add_column_if_missing(conn, "blocked_devices", "nick", "TEXT")?;
+    // A protected nick: Argon2 PHC of its PIN and SHA-256 of its recovery code.
+    add_column_if_missing(conn, "viewer_nicks", "pin_hash", "TEXT")?;
+    add_column_if_missing(conn, "viewer_nicks", "recovery_hash", "TEXT")
 }
 
 fn has_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
