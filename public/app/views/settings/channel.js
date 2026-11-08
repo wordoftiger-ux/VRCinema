@@ -9,6 +9,7 @@ import { Block, LanguageOptions, Note, Row, Switch, channelSettings, loadChannel
 import { Ticker } from './ticker.js';
 import { Nicks } from './nicks.js';
 import { SlateLook } from './slates.js';
+import { AudioLook } from './audio.js';
 
 const MODES = [
   { value: 'all', label: 'settings.channel.mode_all', hint: 'settings.channel.mode_all_hint' },
@@ -221,6 +222,7 @@ export function ChannelSettings() {
         <${Upload} settings=${settings} say=${say} />
       <//>
       <${SlateLook} settings=${settings} say=${say} />
+      <${AudioLook} settings=${settings} say=${say} />
       <${Note} note=${note} />
       <${Ticker} />
       <${Nicks} />

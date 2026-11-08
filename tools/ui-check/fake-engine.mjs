@@ -166,6 +166,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     slateLanguage: 'en',
     slateFrameStyle: 'dim',
     slateBackgroundAll: false,
+    audioVisual: 'auto',
     tickerEnabled: true,
     tickerMode: 'interval',
     tickerIntervalS: 60,
