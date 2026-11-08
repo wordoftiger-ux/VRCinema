@@ -166,7 +166,7 @@ pub struct Slates {
     pub font_missing: Option<PathBuf>,
     /// How the channel draws the waiting slates over the last frame (and the countdown over
     /// the owner's background); `None`: plain slates only (sets made by tests).
-    pub backdrop: Option<BackdropSpec>,
+    pub backdrop: Option<std::sync::Arc<BackdropSpec>>,
 }
 
 /// What the channel needs to draw a waiting slate over the last frame of the film (see
@@ -654,7 +654,8 @@ pub async fn generate_slates(o: &SlateOptions) -> Result<Slates, SlateError> {
         background: background.cloned(),
     };
     // The plain look of old needs nothing from the channel.
-    let backdrop = (backdrop.frames_on() || backdrop.background.is_some()).then_some(backdrop);
+    let backdrop = (backdrop.frames_on() || backdrop.background.is_some())
+        .then(|| std::sync::Arc::new(backdrop));
     Ok(Slates {
         idle: idle?,
         buffering: buffering?,
@@ -2270,12 +2271,7 @@ mod tests {
         );
         let p = pixel(&ffmpeg, &slates.pause[0].path, 0.5, 40, 40);
         assert!(p[2] > 150 && p[0] < 60, "{p:?}");
-        assert!(
-            slates
-                .backdrop
-                .as_ref()
-                .is_some_and(BackdropSpec::frames_on)
-        );
+        assert!(slates.backdrop.as_ref().is_some_and(|b| b.frames_on()));
     }
 
     #[tokio::test]

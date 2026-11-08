@@ -7,6 +7,7 @@ mod routes_desktop;
 mod routes_monitor;
 mod routes_public;
 mod routes_queue;
+mod routes_slates;
 mod routes_stream;
 mod viewer_lists;
 
@@ -1200,6 +1201,7 @@ pub fn build_router(state: AppState) -> Router {
         routes_admin::router()
     }
     .merge(routes_queue::router())
+    .merge(routes_slates::router())
     .merge(viewer_lists::admin_router())
     .route_layer(middleware::from_fn_with_state(
         state.clone(),

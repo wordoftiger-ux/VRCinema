@@ -4622,3 +4622,124 @@ async fn trim_and_schedule_set_in_out_points_and_a_start_time() {
     let r = post("trim", json!({"itemId": film.id, "inS": 1})).await;
     assert_eq!(r.json()["code"], "trim_not_allowed");
 }
+
+// ---------- the owner's slate background (spec 2026-11-07) ----------
+
+const SLATE_BG_ROUTE: &str = "/api/admin/channels/main/slate-background";
+
+#[tokio::test]
+async fn the_slate_background_is_uploaded_only_from_home_checked_and_removed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("bin");
+    let exe = |name: &str| {
+        root.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        })
+    };
+    let data = tempfile::tempdir().unwrap();
+    let media = crate::pipeline::slate_look::SlateMedia {
+        data_dir: data.path().to_path_buf(),
+        ffmpeg: exe("ffmpeg"),
+        ffprobe: exe("ffprobe"),
+        font_file: "C:/Windows/Fonts/arial.ttf".into(),
+    };
+    let settings = crate::app_settings::AppSettings {
+        trust_cloudflare: true,
+        ..crate::app_settings::AppSettings::default()
+    };
+    let live = crate::live::LiveSettings::from_config(&crate::app_settings::app_config(
+        &settings,
+        Path::new("H"),
+    ));
+    live.cloudflare_from_loopback_only.set(true);
+    let h = Harness::with_state(config(), move |s| s.with_live(live).with_slate_media(media));
+    let cookie = h.login().await;
+
+    let res = h.send(get(SLATE_BG_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.json()["background"], Value::Null);
+    assert_eq!(res.json()["maxSeconds"], 30);
+
+    // Through the tunnel: refused, whatever the file.
+    let res = h
+        .send(
+            call("PUT", SLATE_BG_ROUTE)
+                .cookie(&cookie)
+                .ip("127.0.0.1")
+                .header("cf-connecting-ip", "1.2.3.4")
+                .raw("image/png", b"\x89PNG\r\n\x1a\n"),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.json()["code"], "slate_background_remote");
+    // Not a picture (a playlist could make ffmpeg open other things): refused before ffprobe.
+    let res = h
+        .send(
+            call("PUT", SLATE_BG_ROUTE)
+                .cookie(&cookie)
+                .raw("text/plain", b"#EXTM3U\nhttp://192.168.1.1/a.ts"),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(res.json()["code"], "slate_background_unknown");
+    // Far over the limit: the body is not even read.
+    let huge = vec![0u8; crate::pipeline::slate_look::MAX_UPLOAD_BYTES + 128 * 1024];
+    let res = h
+        .send(
+            call("PUT", SLATE_BG_ROUTE)
+                .cookie(&cookie)
+                .raw("video/mp4", &huge),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    if !exe("ffmpeg").exists() {
+        eprintln!("skip: bin/ffmpeg missing");
+        return;
+    }
+    let png = data.path().join("x.png");
+    assert!(
+        std::process::Command::new(exe("ffmpeg"))
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=640x360"
+            ])
+            .args(["-frames:v", "1"])
+            .arg(&png)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let res = h
+        .send(
+            call("PUT", SLATE_BG_ROUTE)
+                .cookie(&cookie)
+                .ip("192.168.1.20")
+                .raw("image/png", &std::fs::read(&png).unwrap()),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+    assert_eq!(res.json()["background"]["source"], "image");
+    let res = h
+        .send(get(&format!("{SLATE_BG_ROUTE}/preview")).cookie(&cookie))
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+    let preview = image::load_from_memory(&res.body).unwrap();
+    assert_eq!((preview.width(), preview.height()), (960, 540));
+    let res = h.send(call("DELETE", SLATE_BG_ROUTE).cookie(&cookie)).await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.json()["background"], Value::Null);
+    let res = h
+        .send(get(&format!("{SLATE_BG_ROUTE}/preview")).cookie(&cookie))
+        .await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+}

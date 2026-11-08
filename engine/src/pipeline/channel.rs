@@ -6244,6 +6244,13 @@ mod tests {
         e.channel.replace_slates(slates);
         let a = e.add_item("a");
         e.next();
+        // The start runs on another worker: wait for it (the suite may be busy).
+        for _ in 0..400 {
+            if !e.factory.lock().handles.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
         e.flush().await;
         e.factory.handle(0).lock().pending.push(SegmentInfo {
             path: film.clone(),

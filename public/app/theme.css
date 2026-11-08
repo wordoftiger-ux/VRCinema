@@ -3163,3 +3163,49 @@ kbd {
 .dialog-field .txt {
   max-width: 140px;
 }
+
+/* Settings → Channel → Slates: the owner's background (spec 2026-11-07). */
+.slate-bg {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--line-control);
+  border-radius: 10px;
+}
+.slate-bg.over {
+  border-color: var(--line-focus);
+  background: rgba(255, 255, 255, 0.03);
+}
+.slate-bg-preview,
+.slate-bg-empty {
+  width: 100%;
+  max-width: 480px;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  border: 1px solid var(--line-card);
+}
+.slate-bg-preview {
+  object-fit: cover;
+  display: block;
+}
+.slate-bg-empty {
+  display: grid;
+  place-items: center;
+  background: #14161c;
+  color: #b8bcc8;
+  font-size: 13px;
+}
+.slate-bg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.slate-bg-actions label.btn.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.slate-bg-drop {
+  font-size: 12px;
+  opacity: 0.7;
+}

@@ -8,6 +8,7 @@ import { t } from '../../i18n.js';
 import { Block, LanguageOptions, Note, Row, Switch, channelSettings, loadChannelSettings, saveChannelWith, useNote } from './common.js';
 import { Ticker } from './ticker.js';
 import { Nicks } from './nicks.js';
+import { SlateLook } from './slates.js';
 
 const MODES = [
   { value: 'all', label: 'settings.channel.mode_all', hint: 'settings.channel.mode_all_hint' },
@@ -219,6 +220,7 @@ export function ChannelSettings() {
         ${toggle('discontinuityTags', t('settings.channel.discontinuity'), t('settings.channel.discontinuity_hint'), t('settings.channel.discontinuity_on'), t('settings.channel.discontinuity_off'))}
         <${Upload} settings=${settings} say=${say} />
       <//>
+      <${SlateLook} settings=${settings} say=${say} />
       <${Note} note=${note} />
       <${Ticker} />
       <${Nicks} />
