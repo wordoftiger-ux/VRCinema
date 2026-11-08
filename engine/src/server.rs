@@ -556,6 +556,17 @@ pub async fn run(
             },
         )
     });
+    // The film on air in the owner's VRChat chatbox (Settings → Channel → VRChat).
+    let _osc_watch = engine_task.has_loop().then(|| {
+        AbortOnDrop(crate::osc::spawn_osc_watch(
+            handle.snapshot.clone(),
+            crate::osc::OscWatchOptions {
+                db: Arc::clone(&db),
+                channel_id: MAIN_CHANNEL_ID,
+                log: Some(Arc::clone(&shared_log)),
+            },
+        ))
+    });
 
     let served = async {
         // The listener only opens once the channel has published its first real playlist.

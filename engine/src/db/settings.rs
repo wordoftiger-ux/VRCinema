@@ -70,6 +70,9 @@ pub struct ChannelSettings {
     /// The slates' last frame and the owner's background (`slateFrameStyle`, ...).
     #[serde(flatten)]
     pub slate_look: SlateLookSettings,
+    /// Settings → Channel → VRChat: the film on air in the owner's chatbox (`oscEnabled`, ...).
+    #[serde(flatten)]
+    pub osc: crate::osc::OscSettings,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -98,6 +101,7 @@ impl Default for ChannelSettings {
             ticker: TickerSettings::default(),
             advanced: AdvancedSettings::default(),
             slate_look: SlateLookSettings::default(),
+            osc: crate::osc::OscSettings::default(),
         }
     }
 }
@@ -143,6 +147,7 @@ pub struct SettingsPatch {
     pub ticker_messages: Option<Vec<String>>,
     pub advanced: AdvancedPatch,
     pub slate_look: SlateLookPatch,
+    pub osc: crate::osc::OscPatch,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -315,6 +320,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             "tickerMessages" => out.ticker_messages = Some(expect_messages(key, value)?),
             _ => match crate::pipeline::slate_look::sanitize_key(key, value, &mut out.slate_look)
                 .or_else(|| crate::pipeline::advanced::sanitize_key(key, value, &mut out.advanced))
+                .or_else(|| crate::osc::sanitize_key(key, value, &mut out.osc))
             {
                 Some(result) => result?,
                 None => return Err(Msg::error("unknown_setting").arg("key", key)),
@@ -440,7 +446,7 @@ impl<'a> SettingsRepo<'a> {
                     }
                 }
                 _ => {
-                    if !s.slate_look.read_stored(&key, &value) {
+                    if !s.slate_look.read_stored(&key, &value) && !s.osc.read_stored(&key, &value) {
                         s.advanced.read_stored(&key, &value);
                     }
                 }
@@ -541,6 +547,9 @@ impl<'a> SettingsRepo<'a> {
                 stmt.execute(params![channel_id, key, value])?;
             }
             for (key, value) in patch.slate_look.entries() {
+                stmt.execute(params![channel_id, key, value])?;
+            }
+            for (key, value) in patch.osc.entries() {
                 stmt.execute(params![channel_id, key, value])?;
             }
         }

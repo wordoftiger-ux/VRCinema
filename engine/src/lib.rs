@@ -15,6 +15,7 @@ pub mod logging;
 pub mod nick_pin;
 pub mod nicks;
 pub mod obs;
+pub mod osc;
 pub mod pipeline;
 pub mod preview_source;
 pub mod process;

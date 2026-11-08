@@ -443,6 +443,11 @@ fn settings_serialize_with_camel_case_keys() {
             "maxHeight": 0,
             "slateFrameStyle": "dim",
             "slateBackgroundAll": false,
+            "oscEnabled": false,
+            "oscHost": "127.0.0.1",
+            "oscPort": 9000,
+            "oscTemplate": "▶ {title} — {added}",
+            "oscRepeatS": 0,
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -487,7 +492,12 @@ fn settings_serialize_with_camel_case_keys() {
             "alarmSilenceDb",
             "maxHeight",
             "slateFrameStyle",
-            "slateBackgroundAll"
+            "slateBackgroundAll",
+            "oscEnabled",
+            "oscHost",
+            "oscPort",
+            "oscTemplate",
+            "oscRepeatS"
         ]
     );
 }
