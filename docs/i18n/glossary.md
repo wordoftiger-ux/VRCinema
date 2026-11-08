@@ -127,6 +127,7 @@ Common to all languages:
 | Sign in / sign out | sign in / sign out | zaloguj / wyloguj | iniciar sesión / cerrar sesión | anmelden / abmelden | se connecter / se déconnecter | ログイン / ログアウト |
 | Video | video | film | video | Video | vidéo | 動画 |
 | Link | link | link | enlace | Link | lien | リンク |
+| Chatbox — VRChat's text bubble above the avatar (Settings → Channel → VRChat chatbox; sent over OSC, which stays untranslated) | chatbox | chatbox | chatbox | Chatbox | chatbox | チャットボックス |
 | Playlist — a site's list of videos (YouTube, pixeldrain) | playlist | playlista | lista de reproducción | Playlist | playlist | 再生リスト |
 | List — several links a viewer sends at once (one per line, or a playlist), approved as one group | list | lista | lista | Liste | liste | リスト |
 | QR code | QR code | kod QR | código QR | QR-Code | code QR | QRコード |

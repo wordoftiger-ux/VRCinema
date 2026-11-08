@@ -1,6 +1,6 @@
 // Settings → Channel: the links viewers may send, the limits, moderation, viewer lists, video files from
-// viewers, the language of the
-// slates, conversion, the info ticker and the viewers' nicks. These are the channel's own
+// viewers, the language of the slates, conversion, the VRChat chatbox, the info ticker and the viewers'
+// nicks. These are the channel's own
 // settings: they work in a remote session too.
 
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
@@ -10,6 +10,7 @@ import { Block, LanguageOptions, Note, Row, Switch, channelSettings, loadChannel
 import { Ticker } from './ticker.js';
 import { Nicks } from './nicks.js';
 import { SlateLook } from './slates.js';
+import { Osc } from './osc.js';
 
 const MODES = [
   { value: 'all', label: 'settings.channel.mode_all', hint: 'settings.channel.mode_all_hint' },
@@ -265,6 +266,7 @@ export function ChannelSettings() {
       <//>
       <${SlateLook} settings=${settings} say=${say} />
       <${Note} note=${note} />
+      <${Osc} settings=${settings} />
       <${Ticker} />
       <${Nicks} />
     </div>`;

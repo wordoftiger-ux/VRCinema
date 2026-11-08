@@ -98,6 +98,13 @@ An optional band burned into the picture of the stream, so everyone in VRChat se
 - **When changes show up**: the text (your messages, "next", the address, the language of the slates, queue changes) changes on the stream within about **20–60 seconds** (the film is prepared ahead of time; about 20 s for the film on air, up to about a minute for a film that was prepared in advance). Switching the ticker on or off, the mode, interval, speed, QR code or progress line restarts the film on air from where it is (a few seconds of the buffering screen); so does a new public address while the QR code is shown.
 - The text is white with a shadow on a dark band; the progress line is amber. Live streams have no progress line.
 
+### VRChat chatbox (OSC)
+
+The program can show the video on air in **your own VRChat chatbox** (the bubble above your avatar), for example "▶ Never Gonna Give You Up — added by Kasia".
+
+- **Settings** → **Channel** → **VRChat chatbox**: on/off (off by default), the address and port (default `127.0.0.1` and `9000`, VRChat's OSC input), the text with the fields `{title}`, `{nick}` (the viewer's nick, empty for your own videos) and `{added}` ("added by …" in the language of the slates; default `▶ {title} — {added}`), and **Send again** (only when the video changes, or every 10 s to 5 min, because VRChat hides the chatbox after a while).
+- **It reaches VRChat only when the program runs on the same PC as VRChat**, or when the address is set to the PC that runs VRChat (its home network address) and that PC accepts UDP on the port. OSC must be switched on in VRChat: **Action Menu** → **Options** → **OSC** → **Enabled**. On a VPS or a Raspberry Pi the default address reaches nothing.
+- What is sent: one OSC message `/chatbox/input` with the text, "send now" (so VRChat's keyboard does not open) and "no notification sound"; when the video changes and on the repeat, never more often than once every 1.5 s (VRChat's limit). Titles and nicks come from viewers: line breaks and control characters are removed and the text is cut to 144 characters (VRChat's limit).
 ### Viewer nicks
 
 - Viewers can type a nick (up to 24 characters) on the request page. The first request with a nick creates a random device key in that browser; the server keeps only its SHA-256 hash. The nick then belongs to that device for 30 days after its last use: the same nick from another browser or device is refused ("This nick is already taken by someone else"). Look-alike nicks count as the same nick: capitals, accents, spaces, dots, dashes, invisible characters and Cyrillic or Greek look-alikes are ignored (Kasia, KASIA, kásia, K a s i a, Ka5ia are one nick). "Host" and its translations are reserved.
@@ -330,6 +337,31 @@ engine\target\release\vrcinema.exe         # starts the channel (run it from the
 Run only one version at a time on the same `data/` folder. To go back, stop `vrcinema` and start the Node.js version (`npm start`); the database is compatible both ways, with limits: the Node.js version ignores nicks and the link modes (and the other stage 4 settings), and shows the reasons the Rust server saved (why a video failed or was skipped) as the raw stored text.
 Switch over from a fresh PowerShell window: overrides set earlier with `$env:PORT` or `$env:DATA_DIR` linger in the old window and win over `.env`. The Rust version locks the data folder (`vrcinema.lock`), so a second Rust server on the same `data/` folder refuses to start.
 
+## Command line (`vrcinema ctl`)
+
+`vrcinema ctl` steers the program that is running on this computer: the server without a window or the desktop app (the `vrcinema` program from `engine/` or the Linux download; the desktop app's own `VRCinema.exe` has no console).
+
+```
+vrcinema ctl status                     # what is on air, the pause, the queue
+vrcinema ctl queue list                 # the video on air and the queue (#numbers)
+vrcinema ctl queue add https://youtu.be/dQw4w9WgXcQ
+vrcinema ctl queue remove 12            # a number from queue list
+vrcinema ctl queue clear                # the video on air keeps playing
+vrcinema ctl skip
+vrcinema ctl pause | resume
+vrcinema ctl seek 1:30                  # from the start; seek +10 / seek -10 from here
+vrcinema ctl play-now 12
+vrcinema ctl settings get               # the settings ctl may change (list below)
+vrcinema ctl settings set oscEnabled true
+vrcinema ctl --json status              # the program's answer as JSON (errors too: {"ok": false, "error", "code", "exitCode"})
+```
+
+- **How it signs in.** Each time the program starts it writes `ctl.json` to its data folder (`data/` next to `.env`, or `%LOCALAPPDATA%\VRCinema\data` / `~/.local/share/vrcinema/data` for the desktop app) with its local address and a new random token; the file is removed when the program stops. `ctl` finds it by itself (`--data-dir <folder>` for another folder). The token is accepted only from this computer (`127.0.0.1`/`::1`) and never through the tunnel or a reverse proxy; it cannot open the window's own settings. Keep the data folder private (on Linux the file is readable by its owner only).
+- **Without the file** (an older server, or one bound to a single network address) `ctl` signs in with the admin password: `ADMIN_PASSWORD` from the environment or `.env`, or `--password-stdin` (for example `cat secret.txt | vrcinema ctl --password-stdin status`). The password is never accepted as an argument, because other users of the computer can see command lines.
+- `--url http://127.0.0.1:8080` picks the address; an address on another computer needs `--allow-remote` and the password (the token never leaves the computer).
+- **Exit codes**: `0` done, `1` the program refused (the reason is printed, e.g. "Nothing is playing right now."), `2` wrong usage, `3` no running program found or it cannot be reached, `4` not authorized (token or password refused). Messages follow `LANGUAGE` of the environment or `.env`.
+- **Settings ctl may change**: `moderation`, `viewerLists`, `viewerListMax`, `maxDurationS`, `maxActivePerRequester`, `requestLimitCount`, `requestLimitWindowS`, `slateLanguage`, `tickerEnabled`, `oscEnabled`, `oscTemplate`, `oscRepeatS` (a value is read as JSON when it is one: `true`, `30`; otherwise as text). The program checks the values as in the panel.
+- There is no volume command: the volume is the host's own player in VRChat.
 ## Linux (server without window)
 
 The headless `vrcinema` server runs on Linux, on x86_64 and on 64-bit ARM (for example a Raspberry Pi 5). There is no window: you run the channel from the web panel the server serves (`http://<server>:8080/admin`), from any browser, also a phone. Linux support is new; please report what does not work.

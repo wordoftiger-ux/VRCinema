@@ -74,6 +74,9 @@ pub struct ChannelSettings {
     /// Video files from viewers (`viewerUploads`, ...).
     #[serde(flatten)]
     pub uploads: UploadSettings,
+    /// Settings → Channel → VRChat: the film on air in the owner's chatbox (`oscEnabled`, ...).
+    #[serde(flatten)]
+    pub osc: crate::osc::OscSettings,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -103,6 +106,7 @@ impl Default for ChannelSettings {
             advanced: AdvancedSettings::default(),
             slate_look: SlateLookSettings::default(),
             uploads: UploadSettings::default(),
+            osc: crate::osc::OscSettings::default(),
         }
     }
 }
@@ -149,6 +153,7 @@ pub struct SettingsPatch {
     pub advanced: AdvancedPatch,
     pub slate_look: SlateLookPatch,
     pub uploads: UploadPatch,
+    pub osc: crate::osc::OscPatch,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -322,6 +327,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             _ => match crate::pipeline::slate_look::sanitize_key(key, value, &mut out.slate_look)
                 .or_else(|| crate::pipeline::advanced::sanitize_key(key, value, &mut out.advanced))
                 .or_else(|| crate::uploads::sanitize_key(key, value, &mut out.uploads))
+                .or_else(|| crate::osc::sanitize_key(key, value, &mut out.osc))
             {
                 Some(result) => result?,
                 None => return Err(Msg::error("unknown_setting").arg("key", key)),
@@ -449,6 +455,7 @@ impl<'a> SettingsRepo<'a> {
                 _ => {
                     if !s.slate_look.read_stored(&key, &value)
                         && !s.uploads.read_stored(&key, &value)
+                        && !s.osc.read_stored(&key, &value)
                     {
                         s.advanced.read_stored(&key, &value);
                     }
@@ -553,6 +560,9 @@ impl<'a> SettingsRepo<'a> {
                 stmt.execute(params![channel_id, key, value])?;
             }
             for (key, value) in patch.uploads.entries() {
+                stmt.execute(params![channel_id, key, value])?;
+            }
+            for (key, value) in patch.osc.entries() {
                 stmt.execute(params![channel_id, key, value])?;
             }
         }

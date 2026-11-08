@@ -123,6 +123,38 @@ async fn main() -> ExitCode {
             }
         };
     }
+    if args.first().is_some_and(|a| a == "ctl") {
+        // The environment and `.env` (a broken `.env` still leaves the environment).
+        let vars = load_env(&root).unwrap_or_else(|_| {
+            std::env::vars_os()
+                .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+                .collect()
+        });
+        let app_home = vrcinema::home::resolve_home(
+            std::env::var_os("VRCINEMA_HOME"),
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("XDG_DATA_HOME"),
+            std::env::var_os("HOME"),
+        )
+        .ok();
+        let env = vrcinema::ctl::CtlEnv {
+            root,
+            vars,
+            app_home,
+            read_stdin: Box::new(|| {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok().map(|_| line)
+            }),
+        };
+        let code = vrcinema::ctl::run(
+            &args[1..],
+            &env,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        )
+        .await;
+        return ExitCode::from(code);
+    }
     if let Some(other) = args.first() {
         eprintln!(
             "{}",

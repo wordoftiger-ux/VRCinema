@@ -579,6 +579,17 @@ pub async fn run(
             },
         )
     });
+    // The film on air in the owner's VRChat chatbox (Settings → Channel → VRChat).
+    let _osc_watch = engine_task.has_loop().then(|| {
+        AbortOnDrop(crate::osc::spawn_osc_watch(
+            handle.snapshot.clone(),
+            crate::osc::OscWatchOptions {
+                db: Arc::clone(&db),
+                channel_id: MAIN_CHANNEL_ID,
+                log: Some(Arc::clone(&shared_log)),
+            },
+        ))
+    });
 
     let served = async {
         // The listener only opens once the channel has published its first real playlist.
@@ -595,6 +606,8 @@ pub async fn run(
             }
         }
 
+        // `vrcinema ctl`: a new token per run, in `<data>/ctl.json` while the server runs.
+        let ctl_token = crate::ctl::new_token();
         let mut state = AppState::new(
             HttpConfig::from(&config),
             MAIN_CHANNEL_ID,
@@ -616,7 +629,8 @@ pub async fn run(
         .with_monitor_watch(monitor_watch)
         .with_alarms(Arc::clone(&alarms))
         .with_preview(preview)
-        .with_obs(obs_hub.clone());
+        .with_obs(obs_hub.clone())
+        .with_ctl_token(&ctl_token);
         if let Some(configure) = configure_state {
             state = configure(state);
         }
@@ -643,6 +657,24 @@ pub async fn run(
         if let Some(ready) = ready {
             let _ = ready.send(addr);
         }
+        let _ctl_file = match crate::ctl::ControlFile::write(
+            &config.data_dir,
+            &crate::ctl::local_url(addr),
+            &ctl_token,
+        ) {
+            Ok(file) => Some(file),
+            Err(e) => {
+                shared_log(
+                    Msg::new("log.ctl_file_failed")
+                        .arg(
+                            "path",
+                            config.data_dir.join(crate::ctl::CONTROL_FILE).display(),
+                        )
+                        .arg("error", e),
+                );
+                None
+            }
+        };
 
         let updater =
             update_ytdlp.then(|| spawn_updater(config.ytdlp_path.clone(), Arc::clone(&shared_log)));

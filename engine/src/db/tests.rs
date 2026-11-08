@@ -402,7 +402,7 @@ fn slate_language_is_validated_stored_and_read_back() {
 #[test]
 fn settings_serialize_with_camel_case_keys() {
     let v = serde_json::to_value(ChannelSettings::default()).unwrap();
-    // The upload keys on their own (one object literal is too long for the json! macro).
+    // The upload and VRChat keys apart (one `json!` of every key is too long and too deep for the macro).
     let mut rest = v.clone();
     let uploads: Vec<serde_json::Value> = [
         "viewerUploads",
@@ -414,6 +414,16 @@ fn settings_serialize_with_camel_case_keys() {
     .map(|k| rest.as_object_mut().unwrap().remove(*k).unwrap())
     .collect();
     assert_eq!(uploads, [json!(false), json!(50), json!(600), json!(2048)]);
+    for (key, expected) in [
+        ("oscEnabled", json!(false)),
+        ("oscHost", json!("127.0.0.1")),
+        ("oscPort", json!(9000)),
+        ("oscTemplate", json!("▶ {title} — {added}")),
+        ("oscRepeatS", json!(0)),
+    ] {
+        let got = rest.as_object_mut().unwrap().remove(key);
+        assert_eq!(got, Some(expected), "{key}");
+    }
     assert_eq!(
         rest,
         json!({
@@ -503,7 +513,12 @@ fn settings_serialize_with_camel_case_keys() {
             "viewerUploads",
             "viewerUploadMaxMb",
             "viewerUploadMaxS",
-            "viewerUploadQuotaMb"
+            "viewerUploadQuotaMb",
+            "oscEnabled",
+            "oscHost",
+            "oscPort",
+            "oscTemplate",
+            "oscRepeatS"
         ]
     );
 }
