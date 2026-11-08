@@ -123,6 +123,8 @@ pub struct AppState {
     pub(crate) alarms: Arc<crate::pipeline::air_watch::AlarmBoard>,
     /// The OBS input's hub (its listener's state for the window); `None` without one.
     pub(crate) obs: Option<crate::obs::ObsHub>,
+    /// The token of `vrcinema ctl` for this run (see [`crate::ctl`]); `None`: no `ctl`.
+    ctl_token: Option<Arc<str>>,
 }
 
 impl AppState {
@@ -176,6 +178,7 @@ impl AppState {
                 obs_priority: LiveValue::new(true),
             },
             obs: None,
+            ctl_token: None,
             config: Arc::new(config),
             channel_id,
             db,
@@ -314,6 +317,43 @@ impl AppState {
                 }
             }
         });
+    }
+
+    /// Accepts `Authorization: Bearer <token>` on the admin routes from this computer (the
+    /// token of `<data>/ctl.json`, see [`crate::ctl`]).
+    pub fn with_ctl_token(mut self, token: &str) -> Self {
+        self.ctl_token = Some(Arc::from(token));
+        self
+    }
+
+    /// The request carries this run's `ctl` token and comes from this computer directly: a
+    /// loopback peer and none of the headers a tunnel or a proxy adds (cloudflared and a reverse
+    /// proxy are loopback peers too). Never a window session.
+    pub(crate) fn ctl_authorized(&self, req: &Request) -> bool {
+        let Some(expected) = self.ctl_token.as_deref() else {
+            return false;
+        };
+        let headers = req.headers();
+        let Some(presented) = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+        else {
+            return false;
+        };
+        let local = req
+            .extensions()
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .is_some_and(|c| c.0.ip().to_canonical().is_loopback());
+        let forwarded = [
+            "cf-connecting-ip",
+            "x-forwarded-for",
+            "forwarded",
+            "x-real-ip",
+        ]
+        .iter()
+        .any(|h| headers.contains_key(*h));
+        local && !forwarded && auth::safe_equal(presented.trim(), expected)
     }
 
     pub fn with_log(mut self, log: LogFn) -> Self {

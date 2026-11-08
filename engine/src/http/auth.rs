@@ -26,7 +26,7 @@ fn sign(payload: &str, secret: &str) -> String {
 
 /// Equality that does not leak the position of the first difference: both sides are hashed to
 /// 32 bytes first, then compared without early exit.
-fn safe_equal(a: &str, b: &str) -> bool {
+pub(crate) fn safe_equal(a: &str, b: &str) -> bool {
     let ha = Sha256::digest(a.as_bytes());
     let hb = Sha256::digest(b.as_bytes());
     ha.iter()

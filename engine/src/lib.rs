@@ -3,6 +3,7 @@ pub mod app_settings;
 pub mod assets;
 pub mod auto_pause;
 pub mod config;
+pub mod ctl;
 pub mod db;
 pub mod engine;
 pub mod home;

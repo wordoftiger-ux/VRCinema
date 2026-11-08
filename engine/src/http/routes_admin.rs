@@ -130,7 +130,7 @@ pub(super) async fn require_admin(
     req: Request,
     next: Next,
 ) -> Response {
-    if !state.is_admin(req.headers()) {
+    if !state.is_admin(req.headers()) && !state.ctl_authorized(&req) {
         return axum::response::IntoResponse::into_response(ApiError::coded(
             StatusCode::UNAUTHORIZED,
             "login_required",
