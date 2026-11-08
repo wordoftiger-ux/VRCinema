@@ -469,6 +469,25 @@ impl<'a> QueueRepo<'a> {
             .query_row(&sql, params_from_iter(args), |r| r.get(0))
     }
 
+    /// Every item (any channel) that plays a viewer's received file (`upload:` source): its
+    /// source, status and when it finished. A status this program does not know counts as
+    /// waiting (its file is kept).
+    pub fn upload_rows(&self) -> rusqlite::Result<Vec<crate::uploads::UploadRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_url, status, finished_at FROM queue_items
+             WHERE substr(source_url, 1, 7) = 'upload:'",
+        )?;
+        stmt.query_map([], |r| {
+            let status: String = r.get(1)?;
+            Ok((
+                r.get(0)?,
+                ItemStatus::parse(&status).unwrap_or(ItemStatus::Queued),
+                r.get(2)?,
+            ))
+        })?
+        .collect()
+    }
+
     /// Finished (played + failed) items, newest first.
     pub fn history(&self, channel_id: i64, limit: u32) -> rusqlite::Result<Vec<QueueItem>> {
         let sql = format!(

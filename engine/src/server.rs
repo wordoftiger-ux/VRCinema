@@ -239,6 +239,10 @@ fn build_resolver(
     });
     Ok(Arc::new(
         CompositeResolver::new(Box::new(pixeldrain), Box::new(ytdlp), local)
+            .with_upload(Box::new(crate::uploads::UploadResolver::new(
+                config.data_dir.join(crate::uploads::UPLOADS_DIR),
+                file_probe(ffprobe.clone()),
+            )))
             .with_file(Box::new(FileResolver::new(file_probe(ffprobe)))),
     ))
 }
@@ -498,6 +502,25 @@ pub async fn run(
     // Films downloaded by yt-dlp for clips of an earlier run (TikTok).
     let _ = reset_dir(&config.data_dir.join(TEMP_DIR));
 
+    // Files viewers send (Settings → Channel): part files of an earlier run go now, the rest
+    // once no item needs them.
+    let uploads = match crate::uploads::UploadStore::new(
+        &config.data_dir.join(crate::uploads::UPLOADS_DIR),
+        config.ffprobe_path.clone(),
+    ) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(e) => {
+            shared_log(Msg::new("log.uploads_unavailable").arg("error", e));
+            None
+        }
+    };
+    let _uploads_task = uploads.as_ref().map(|store| {
+        AbortOnDrop(tokio::spawn(crate::uploads::run_sweeper(
+            Arc::clone(store),
+            Arc::clone(&db),
+        )))
+    });
+
     let monitor_watch = Arc::new(MonitorWatch::default());
     // Films yt-dlp downloads, shared by the air's clips and the window's Preview.
     let downloads = TempDownloads::new(config.data_dir.join(TEMP_DIR));
@@ -589,6 +612,7 @@ pub async fn run(
             ffprobe: config.ffprobe_path.clone(),
             font_file: config.font_file.clone(),
         })
+        .with_uploads(uploads)
         .with_monitor_watch(monitor_watch)
         .with_alarms(Arc::clone(&alarms))
         .with_preview(preview)

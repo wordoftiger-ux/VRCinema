@@ -402,8 +402,20 @@ fn slate_language_is_validated_stored_and_read_back() {
 #[test]
 fn settings_serialize_with_camel_case_keys() {
     let v = serde_json::to_value(ChannelSettings::default()).unwrap();
+    // The upload keys on their own (one object literal is too long for the json! macro).
+    let mut rest = v.clone();
+    let uploads: Vec<serde_json::Value> = [
+        "viewerUploads",
+        "viewerUploadMaxMb",
+        "viewerUploadMaxS",
+        "viewerUploadQuotaMb",
+    ]
+    .iter()
+    .map(|k| rest.as_object_mut().unwrap().remove(*k).unwrap())
+    .collect();
+    assert_eq!(uploads, [json!(false), json!(50), json!(600), json!(2048)]);
     assert_eq!(
-        v,
+        rest,
         json!({
             "linkMode": "all",
             "allowedDomains": ["youtube.com", "youtu.be", "pixeldrain.com", "cda.pl"],
@@ -487,7 +499,11 @@ fn settings_serialize_with_camel_case_keys() {
             "alarmSilenceDb",
             "maxHeight",
             "slateFrameStyle",
-            "slateBackgroundAll"
+            "slateBackgroundAll",
+            "viewerUploads",
+            "viewerUploadMaxMb",
+            "viewerUploadMaxS",
+            "viewerUploadQuotaMb"
         ]
     );
 }

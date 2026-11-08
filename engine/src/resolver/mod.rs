@@ -125,6 +125,8 @@ pub struct CompositeResolver {
     pub local: Option<Box<dyn MediaResolver>>,
     /// Files given by absolute path (`file:`), created only by the desktop window.
     pub file: Option<Box<dyn MediaResolver>>,
+    /// Files viewers sent (`upload:`), see [`crate::uploads`].
+    pub upload: Option<Box<dyn MediaResolver>>,
 }
 
 impl CompositeResolver {
@@ -138,6 +140,7 @@ impl CompositeResolver {
             ytdlp,
             local,
             file: None,
+            upload: None,
         }
     }
 
@@ -146,7 +149,18 @@ impl CompositeResolver {
         self
     }
 
+    pub fn with_upload(mut self, upload: Box<dyn MediaResolver>) -> Self {
+        self.upload = Some(upload);
+        self
+    }
+
     fn pick(&self, url: &str) -> Result<&dyn MediaResolver, ResolveError> {
+        if crate::uploads::is_upload_source(url) {
+            return self
+                .upload
+                .as_deref()
+                .ok_or_else(|| ResolveError::coded("upload_gone"));
+        }
         if url.starts_with("local:") {
             return match &self.local {
                 Some(local) => Ok(local.as_ref()),

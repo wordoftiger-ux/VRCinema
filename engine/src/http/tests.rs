@@ -39,6 +39,7 @@ use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, Res
 
 mod lists;
 mod nick_pin;
+mod uploads;
 
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;
 

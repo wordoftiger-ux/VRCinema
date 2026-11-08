@@ -10,6 +10,7 @@ mod routes_public;
 mod routes_queue;
 mod routes_slates;
 mod routes_stream;
+mod routes_uploads;
 mod viewer_lists;
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
@@ -101,6 +102,8 @@ pub struct AppState {
     /// Where the owner's slate background lives and the tools that make it (None: no
     /// background can be set, e.g. in tests).
     pub(crate) slate_media: Option<Arc<crate::pipeline::slate_look::SlateMedia>>,
+    /// The folder of the files viewers send (`None`: uploads cannot work, e.g. in tests).
+    pub(crate) uploads: Option<Arc<crate::uploads::UploadStore>>,
     /// Read per request (`trust_cloudflare`, `public_url`): HttpConfig keeps the start values.
     live: LiveSettings,
     /// Segment fetches (viewers), for the automatic pause of the app.
@@ -163,6 +166,7 @@ impl AppState {
             desktop: None,
             slates: None,
             slate_media: None,
+            uploads: None,
             live: LiveSettings {
                 trust_cloudflare: LiveValue::new(config.trust_cloudflare),
                 cloudflare_from_loopback_only: LiveValue::new(false),
@@ -265,6 +269,12 @@ impl AppState {
     /// The data folder and tools of the owner's slate background.
     pub fn with_slate_media(mut self, media: crate::pipeline::slate_look::SlateMedia) -> Self {
         self.slate_media = Some(Arc::new(media));
+        self
+    }
+
+    /// The folder of the files viewers send.
+    pub fn with_uploads(mut self, uploads: Option<Arc<crate::uploads::UploadStore>>) -> Self {
+        self.uploads = uploads;
         self
     }
 
@@ -1224,6 +1234,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .merge(routes_public::router())
         .merge(routes_nick_pin::router())
+        .merge(routes_uploads::router())
         .merge(routes_stream::router())
         .merge(admin)
         .merge(desktop)

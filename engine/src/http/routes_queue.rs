@@ -210,6 +210,19 @@ fn find_item(state: &AppState, id: i64) -> ApiResult<QueueItem> {
         .ok_or_else(no_such_item)
 }
 
+/// A viewer's file whose item finished may be deleted already: it cannot play again.
+pub(super) fn refuse_gone_upload(state: &AppState, item: &QueueItem) -> ApiResult<()> {
+    let gone = crate::uploads::is_upload_source(&item.source_url)
+        && state
+            .uploads
+            .as_ref()
+            .is_none_or(|u| u.file_of(&item.source_url).is_none());
+    if gone {
+        return Err(ApiError::coded(StatusCode::CONFLICT, "upload_gone", &[]));
+    }
+    Ok(())
+}
+
 /// What a bulk removal takes: the waiting items (queued and waiting for approval), and the
 /// one on air only when the owner ticked it.
 fn statuses(include_playing: bool) -> Vec<ItemStatus> {
@@ -345,6 +358,7 @@ async fn undo(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiRes
 /// video that plays next.
 async fn play_next(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
     let item = find_item(&state, item_id(&body)?)?;
+    refuse_gone_upload(&state, &item)?;
     let next = state.with_db(|c| {
         let q = QueueRepo::new(c);
         match item.status {

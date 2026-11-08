@@ -542,7 +542,11 @@ impl RealClipFactory {
 /// The link of `item` as the programs may see it: a viewer's link is looked up again first
 /// (its name may have started to point into the owner's network since the request).
 async fn checked_source(d: &ClipFactoryDeps, item: &QueueItem) -> Result<(String, bool), Msg> {
-    let viewer = item.added_by == AddedBy::Public && d.check_viewer_media;
+    // A file a viewer sent has no address to look up: it was checked when it arrived and its
+    // resolver only opens files of the uploads folder.
+    let viewer = item.added_by == AddedBy::Public
+        && d.check_viewer_media
+        && !crate::uploads::is_upload_source(&item.source_url);
     let source = if viewer {
         check_media_url(&item.source_url, d.host_resolver.as_ref())
             .await

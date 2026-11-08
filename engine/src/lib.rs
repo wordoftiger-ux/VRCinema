@@ -28,3 +28,4 @@ pub mod stats;
 pub mod tools;
 pub mod tunnel;
 pub mod updater;
+pub mod uploads;

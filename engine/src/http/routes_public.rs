@@ -98,6 +98,13 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
             "moderation": settings.moderation,
             "viewerLists": settings.viewer_lists,
             "viewerListMax": settings.viewer_list_max,
+            // Whether viewers may send a file, and its limits (`null`: they may not).
+            "uploads": (settings.uploads.viewer_uploads && state.uploads.is_some()).then(|| json!({
+                "maxMb": settings.uploads.viewer_upload_max_mb.clamp(1, crate::uploads::HARD_MAX_MB),
+                "maxDurationS": num_json(
+                    settings.max_duration_s.min(f64::from(settings.uploads.viewer_upload_max_s)),
+                ),
+            })),
         }),
     );
     Ok(json_ok(&Value::Object(body)))

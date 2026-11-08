@@ -13,7 +13,7 @@ Two audiences, two registers: the **owner's program** (window, remote panel, tra
 every key outside `viewer.*`) addresses the owner **formally**; the **request page** (`viewer.*`
 keys, and the errors only that page shows: `errors.nick_reserved`, `errors.nick_taken`,
 `errors.too_many_active`, `errors.too_many_requests`, `errors.viewer_lists_off`, `errors.list_full`,
-`errors.duplicate_link`, `errors.nick_pin_*`) addresses players **informally**. Errors
+`errors.duplicate_link`, `errors.nick_pin_*`, `errors.uploads_off`, `errors.upload_*` except `errors.upload_gone`) addresses players **informally**. Errors
 the panel shows too stay formal.
 
 | | Address: program / request page | Register and form | Typography |
@@ -104,6 +104,7 @@ Common to all languages:
 | Alarm — black picture or silence on air for the set time | alarm / black picture / silence | alarm / czarny obraz / cisza | alarma / imagen negra / silencio | Alarm / schwarzes Bild / Stille | alarme / image noire / silence | アラーム / 黒画面 / 無音 |
 | Broadcast journal — record of what aired when (not the program's log) | broadcast journal | dziennik emisji | registro de emisión | Sendeprotokoll | registre de diffusion (never "journal": that is the log) | 放送記録 |
 | Upload — the owner's internet sending speed (Mbit/s) | upload | upload (Mb/s) | subida | Upload | envoi | アップロード速度 |
+| Video file (a viewer sends one from the request page; Settings → Channel "Video files from viewers") — never "upload" alone, which is the owner's sending speed | send a video file / sent file | wyślij plik wideo / wysłany plik | enviar un archivo de video / archivo enviado | Videodatei senden / gesendete Datei | envoyer un fichier vidéo / fichier envoyé | 動画ファイルを送信 / 送信されたファイル |
 | Undo (a removal, for a few seconds) | Undo | Cofnij | Deshacer | Rückgängig | Annuler | 元に戻す |
 | On air — also the caption of the right screen of the Channel view (the stream as the viewers get it) | on air / On air | na antenie / Na antenie | en emisión / En emisión | auf Sendung (laufendes Video) / Auf Sendung | à l’antenne / À l’antenne | 放送中 (what the channel broadcasts now) |
 | Live stream | live stream | transmisja na żywo | transmisión en vivo (tag: EN VIVO) | Livestream | direct (tag: EN DIRECT) | ライブ配信 (only a live source; tag: ライブ) |

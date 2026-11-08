@@ -129,8 +129,10 @@ impl PreviewSources {
             return known;
         }
         let viewer = item.added_by == AddedBy::Public;
-        if is_disk_source(&item.source_url) {
-            if viewer {
+        // A file a viewer sent lies in the uploads folder (checked when it arrived).
+        let upload = crate::uploads::is_upload_source(&item.source_url);
+        if upload || is_disk_source(&item.source_url) {
+            if viewer && !upload {
                 // Viewers cannot add disk files; one that says so is not believed.
                 return PreviewStatus::Unavailable { reason: "viewer" };
             }

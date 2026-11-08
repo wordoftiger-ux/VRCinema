@@ -747,6 +747,7 @@ async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
     ) {
         return Err(control_bad_request("not_playable_now"));
     }
+    super::routes_queue::refuse_gone_upload(&state, &item)?;
     apply_control(&state, Command::PlayNow { item_id: item.id }).await
 }
 
