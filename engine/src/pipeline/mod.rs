@@ -36,6 +36,7 @@ pub const WINDOW_SEGMENTS: usize = segments_for(WINDOW_S);
 pub mod advanced;
 pub mod air;
 pub mod air_watch;
+pub mod audio_visual;
 pub mod broadcaster;
 pub mod channel;
 pub mod clip_factory;

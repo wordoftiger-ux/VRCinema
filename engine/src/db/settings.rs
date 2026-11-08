@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::i18n::{Lang, Msg};
 use crate::pipeline::advanced::{AdvancedPatch, AdvancedSettings};
+use crate::pipeline::audio_visual::{AudioPatch, AudioSettings};
 use crate::pipeline::slate_look::{SlateLookPatch, SlateLookSettings};
 use crate::pipeline::ticker::{
     INTERVALS_S, MAX_MESSAGE_CHARS, MAX_MESSAGES, TickerMode, TickerQr, TickerSettings, TickerSpeed,
@@ -70,6 +71,9 @@ pub struct ChannelSettings {
     /// The slates' last frame and the owner's background (`slateFrameStyle`, ...).
     #[serde(flatten)]
     pub slate_look: SlateLookSettings,
+    /// The picture of audio-only sources (`audioVisual`).
+    #[serde(flatten)]
+    pub audio: AudioSettings,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -98,6 +102,7 @@ impl Default for ChannelSettings {
             ticker: TickerSettings::default(),
             advanced: AdvancedSettings::default(),
             slate_look: SlateLookSettings::default(),
+            audio: AudioSettings::default(),
         }
     }
 }
@@ -143,6 +148,7 @@ pub struct SettingsPatch {
     pub ticker_messages: Option<Vec<String>>,
     pub advanced: AdvancedPatch,
     pub slate_look: SlateLookPatch,
+    pub audio: AudioPatch,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -315,6 +321,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             "tickerMessages" => out.ticker_messages = Some(expect_messages(key, value)?),
             _ => match crate::pipeline::slate_look::sanitize_key(key, value, &mut out.slate_look)
                 .or_else(|| crate::pipeline::advanced::sanitize_key(key, value, &mut out.advanced))
+                .or_else(|| crate::pipeline::audio_visual::sanitize_key(key, value, &mut out.audio))
             {
                 Some(result) => result?,
                 None => return Err(Msg::error("unknown_setting").arg("key", key)),
@@ -440,7 +447,8 @@ impl<'a> SettingsRepo<'a> {
                     }
                 }
                 _ => {
-                    if !s.slate_look.read_stored(&key, &value) {
+                    if !s.slate_look.read_stored(&key, &value) && !s.audio.read_stored(&key, &value)
+                    {
                         s.advanced.read_stored(&key, &value);
                     }
                 }
@@ -541,6 +549,9 @@ impl<'a> SettingsRepo<'a> {
                 stmt.execute(params![channel_id, key, value])?;
             }
             for (key, value) in patch.slate_look.entries() {
+                stmt.execute(params![channel_id, key, value])?;
+            }
+            for (key, value) in patch.audio.entries() {
                 stmt.execute(params![channel_id, key, value])?;
             }
         }
