@@ -31,9 +31,14 @@ function Nick({ nick, run }) {
   return html`
     <li class="nick-row" data-skeleton=${nick.skeleton} data-blocked=${nick.blocked ? 'true' : 'false'}>
       <span class="nick-name"><${RequesterBadge} badge=${nick.badge} /><b>${nick.nick}</b>
-        ${nick.blocked ? html`<span class="stt s-failed">${t('settings.nicks.blocked_tag')}</span>` : null}</span>
+        ${nick.blocked ? html`<span class="stt s-failed">${t('settings.nicks.blocked_tag')}</span>` : null}
+        ${nick.protected ? html`<span class="stt nick-pin" data-pin>${tn('settings.nicks.pin_devices', nick.devices ?? 0)}</span>` : null}</span>
       <small class="nick-used">${t('settings.nicks.last_used', { when: finishedText(nick.lastUsedAt) })}</small>
       <span class="nick-actions">
+        ${nick.protected
+          ? html`<button type="button" class="btn" data-action="reset-pin" aria-label=${t('settings.nicks.reset_pin_label', { nick: nick.nick })}
+              onClick=${() => confirmResetPin(nick, run)}>${t('settings.nicks.reset_pin')}</button>`
+          : null}
         <button type="button" class="btn" data-action="release" aria-label=${t('settings.nicks.release_label', { nick: nick.nick })}
           onClick=${() => run(() => api('POST', `${NICKS}/${encodeURIComponent(nick.skeleton)}/release`), t('settings.nicks.released', { nick: nick.nick }))}>
           ${t('settings.nicks.release')}</button>
@@ -43,6 +48,19 @@ function Nick({ nick, run }) {
               onClick=${() => confirmBlock(nick, run)}>${t('settings.nicks.block')}</button>`}
       </span>
     </li>`;
+}
+
+/** Resetting removes the viewer's PIN and signs their other devices out: asked about first. */
+function confirmResetPin(nick, run) {
+  openDialog({
+    title: () => t('settings.nicks.reset_pin_title'),
+    body: () => html`<p class="dialog-intro">${t('settings.nicks.reset_pin_body', { nick: nick.nick })}</p>`,
+    buttons: [
+      { key: 'settings.nicks.reset_pin', primary: true,
+        action: () => run(() => api('POST', `${NICKS}/${encodeURIComponent(nick.skeleton)}/reset-pin`), t('settings.nicks.pin_reset_done', { nick: nick.nick })) },
+      { key: 'settings.cancel' },
+    ],
+  });
 }
 
 /** Blocking refuses every video from that device: it is asked about first. */

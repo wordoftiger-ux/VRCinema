@@ -15,6 +15,7 @@
 // name to its tree and a file name to its size in bytes; `libraryAddError`: the code POST …/local
 // answers with.
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
+// Nick PIN: POST /api/channels/main/nick/protect and …/nick/adopt (scenario viewerPins, viewerCodes), POST /api/admin/nicks/{skeleton}/reset-pin.
 // Viewer lists: POST /api/channels/main/request-list (settings viewerLists / viewerListMax, scenario listDelayMs), the panel's pendingLists and POST /api/admin/channels/main/lists/{id}.
 // GET /__test/stats: {maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight}; GET /__test/hang never answers.
 // The producer's monitor (window only, 403 for a remote session or without a window; requests
@@ -190,7 +191,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
   });
   const POPULAR = ['youtube.com', 'youtu.be', 'twitch.tv', 'kick.com', 'vimeo.com', 'pixeldrain.com', 'cda.pl'];
   const initialNicks = () => [
-    { skeleton: 'kasia', nick: 'Kasia', badge: { hue: 40, shape: 3 }, lastUsedAt: Date.now() - 60000, blocked: false, blockId: null },
+    { skeleton: 'kasia', nick: 'Kasia', badge: { hue: 40, shape: 3 }, lastUsedAt: Date.now() - 60000, blocked: false, blockId: null, protected: true, devices: 2 },
     { skeleton: 'a/b?c#d%e', nick: 'A/B?C#D%E', badge: { hue: 200, shape: 8 }, lastUsedAt: Date.now() - 7200000, blocked: false, blockId: null },
     { skeleton: 'troll', nick: 'Troll', badge: { hue: 10, shape: 5 }, lastUsedAt: Date.now() - 86400000, blocked: true, blockId: 1 },
   ];
@@ -218,6 +219,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       viewerError: null,
       viewerNickTaken: [],
       viewerKnown: [],
+      viewerPins: {},
+      viewerCodes: {},
       panelFail: false,
       panelDelayMs: 0,
       patchDelayMs: 0,
@@ -519,6 +522,46 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     if (pending) s.pendingItems.push({ ...item, status: 'pending_approval' });
     else s.queue.push(item);
     return json(res, 201, { status: pending ? 'pending_approval' : 'queued', item: publicItem(item) });
+  }
+
+  // Nick PIN (like the engine's routes, without hashing): `viewerPins` {nick: pin} and
+  // `viewerCodes` {nick: recovery code} of the scenario; a PIN or code makes the key known.
+  function viewerNickPin(res, kind, payload) {
+    const key = payload?.deviceKey;
+    const nick = String(payload?.name ?? '').trim();
+    const name = nick.toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(key ?? '')) return coded(res, 400, 'invalid_device_key', 'The device key must be 32 hexadecimal characters.');
+    if (!nick) return coded(res, 400, 'nick_pin_no_nick', 'Type your nick first.');
+    const badge = { hue: parseInt(key.slice(0, 3), 16) % 360, shape: parseInt(key[3], 16) % 12 };
+    const valid = (p) => typeof p === 'string' && (/^\d{4,8}$/.test(p) || (!/^\d+$/.test(p) && [...p].length >= 8));
+    const newCode = () => `CODE-${String(nextId++).padStart(4, '0')}-ABCD-EFGH`;
+    const known = () => { if (!s.viewerKnown.includes(key)) s.viewerKnown.push(key); };
+    if (kind === 'protect') {
+      if (!valid(payload.pin)) return coded(res, 400, 'nick_pin_invalid', 'Use 4–8 digits, or a passphrase of at least 8 characters.');
+      if (s.viewerNickTaken.includes(name) && !s.viewerKnown.includes(key)) return coded(res, 409, 'nick_taken', 'This nick is already taken by someone else. Pick another one.');
+      if (s.viewerPins[name] !== undefined) {
+        if (payload.currentPin === undefined) return coded(res, 409, 'nick_pin_required', 'This nick already has a PIN. Enter the current one to change it.');
+        if (payload.currentPin !== s.viewerPins[name]) return coded(res, 403, 'nick_pin_wrong', 'This nick and PIN (or recovery code) don’t match.');
+      }
+      s.viewerPins[name] = payload.pin;
+      s.viewerCodes[name] = newCode();
+      if (!s.viewerNickTaken.includes(name)) s.viewerNickTaken.push(name);
+      known();
+      return json(res, 200, { nick, recoveryCode: s.viewerCodes[name], requesterBadge: badge });
+    }
+    const wrong = () => coded(res, 403, 'nick_pin_wrong', 'This nick and PIN (or recovery code) don’t match.');
+    if (payload.recoveryCode !== undefined) {
+      if (!valid(payload.newPin)) return coded(res, 400, 'nick_pin_invalid', 'Use 4–8 digits, or a passphrase of at least 8 characters.');
+      if (!s.viewerCodes[name] || payload.recoveryCode.toUpperCase() !== s.viewerCodes[name]) return wrong();
+      s.viewerPins[name] = payload.newPin;
+      s.viewerCodes[name] = newCode();
+      s.viewerKnown = [key];
+      return json(res, 200, { nick: nick.charAt(0).toUpperCase() + nick.slice(1), recoveryCode: s.viewerCodes[name], requesterBadge: badge });
+    }
+    if (s.viewerPins[name] === undefined || payload.pin !== s.viewerPins[name]) return wrong();
+    if (payload.signOutOthers) s.viewerKnown = [];
+    known();
+    return json(res, 200, { nick: nick.charAt(0).toUpperCase() + nick.slice(1), requesterBadge: badge });
   }
 
   const statsAnswer = () => {
@@ -981,6 +1024,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     }
     if (path === '/api/channels/main/requests' && req.method === 'POST') return viewerRequest(res, req, payload);
     if (path === '/api/channels/main/request-list' && req.method === 'POST') return viewerList(res, req, payload);
+    if (path === '/api/channels/main/nick/protect' && req.method === 'POST') return viewerNickPin(res, 'protect', payload);
+    if (path === '/api/channels/main/nick/adopt' && req.method === 'POST') return viewerNickPin(res, 'adopt', payload);
     if (path === '/api/admin/login' && req.method === 'POST') {
       const pl = req.headers['x-vrcinema-lang'] === 'pl';
       if (s.remotePanelOff) return coded(res, 403, 'remote_panel_off', pl ? 'Panel zdalny jest wyłączony.' : 'The remote panel is switched off.');
@@ -1097,6 +1142,13 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       const skeleton = decodeURIComponent(nickRoute[1]);
       if (!s.nicks.some((n) => n.skeleton === skeleton)) return coded(res, 404, 'nick_not_found', 'No such nick.');
       s.nicks = s.nicks.filter((n) => n.skeleton !== skeleton);
+      return json(res, 200, { ok: true });
+    }
+    const resetPin = path.match(/^\/api\/admin\/nicks\/(.+)\/reset-pin$/);
+    if (resetPin && req.method === 'POST') {
+      const nick = s.nicks.find((n) => n.skeleton === decodeURIComponent(resetPin[1]));
+      if (!nick?.protected) return coded(res, 404, 'nick_no_pin', 'This nick has no PIN.');
+      Object.assign(nick, { protected: false, devices: 0 });
       return json(res, 200, { ok: true });
     }
     if (path === '/api/admin/devices/block' && req.method === 'POST') {

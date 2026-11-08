@@ -9,6 +9,7 @@ import { api, errorText } from '../api.js';
 import { RequesterBadge } from '../components/badge.js';
 import { deviceKey, existingDeviceKey, saveBadge, saveNick, savedBadge, savedNick } from './device.js';
 import { formatLimit } from './format.js';
+import { NickPin, openAdopt } from './nickpin.js';
 import { channel, refresh, showToast } from './store.js';
 
 const NICK_MAX = 24;
@@ -85,6 +86,18 @@ export function RequestForm() {
     setError(null);
     setSuggestion(null);
     nickField.current?.focus();
+  };
+
+  /** The nick this device holds after a PIN was set or used: kept with its icon. */
+  const holdNick = (name, b) => {
+    setNick(name);
+    saveNick(name);
+    setError(null);
+    setSuggestion(null);
+    if (b && typeof b === 'object') {
+      saveBadge(b);
+      setBadge(b);
+    }
   };
 
   const submit = async (e) => {
@@ -170,13 +183,16 @@ export function RequestForm() {
               <p>${requestErrorText(error)}</p>
               ${suggestion
                 ? html`<button type="button" class="btn" onClick=${takeSuggestion}>
-                    ${t('viewer.use_nick', { nick: suggestion })}</button>`
+                    ${t('viewer.use_nick', { nick: suggestion })}</button>
+                  <button type="button" class="btn" data-action="its-mine" onClick=${openAdopt}>
+                    ${t('viewer.pin_its_mine')}</button>`
                 : null}
             </div>`
           : null}
         <button type="submit" class="btn pri v-submit" disabled=${busy || !url.trim()}>
           ${busy ? (lists ? tn('viewer.checking_links', lines.length) : t('viewer.adding')) : t('viewer.add_button')}</button>
       </form>
+      <${NickPin} nick=${nick} onNick=${holdNick} />
       ${result ? html`<${ListResult} result=${result} />` : null}
       <${Rules} rules=${rules} />
     </section>`;

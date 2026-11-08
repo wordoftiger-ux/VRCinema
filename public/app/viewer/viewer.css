@@ -233,6 +233,102 @@ p.v-time {
   color: var(--text);
 }
 
+.v-error .btn + .btn {
+  margin-left: 8px;
+}
+
+/* ---------- Nick PIN ---------- */
+
+.v-pin {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-card);
+}
+
+.v-pin summary {
+  cursor: pointer;
+  min-height: 24px;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+.v-pin-intro {
+  margin: 8px 0 12px;
+  color: var(--text-mute);
+  font-size: 13.5px;
+}
+
+.v-pin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.v-pin-tabs .btn {
+  min-height: 40px;
+}
+
+.v-pin-tabs .btn[aria-pressed="true"] {
+  border-color: var(--amber);
+  color: var(--text-strong);
+}
+
+.v-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+}
+
+.v-linkbtn {
+  margin: 0 0 12px;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--amber);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.v-pin-code {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius);
+  background: var(--amber-bg);
+}
+
+.v-pin-code .txt {
+  width: 100%;
+  min-height: 44px;
+  font: 18px var(--mono);
+  letter-spacing: 0.08em;
+}
+
+.v-pin-code p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13.5px;
+}
+
+.v-pin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.v-pin-actions .btn {
+  min-height: 44px;
+}
+
 .v-rules {
   margin-top: 14px;
   padding-top: 12px;
