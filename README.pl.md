@@ -303,6 +303,14 @@ Znane ograniczenia (sprawdzany jest adres, nie to, co dzieje się po jego pobran
 
 Jeśli Twoja sieć jest ważniejsza niż wygoda, używaj trybu `allowlist` z serwisami, którym ufasz.
 
+### Pliki wideo od widzów
+
+Domyślnie wyłączone: **Ustawienia** → **Kanał** → **Pliki wideo od widzów** → **Pozwól widzom wysyłać małe pliki wideo**. Strona zgłoszeń dostaje wtedy pole na plik obok pola linku. Limity (w tym samym bloku): największy plik (50 MB, najwyżej 200 MB), najdłuższy film (10 min; obowiązuje też maksymalna długość kanału) i wszystkie pliki razem (2048 MB). Plik liczy się jak link: sprawdzanie nicku i urządzenia, zablokowane urządzenia, zgłoszenia na adres, filmy w kolejce na osobę i zatwierdzanie zgłoszeń działają tak samo, a kolejka pokazuje go z nickiem widza („wysłany plik”).
+
+- Rozmiar liczy się na bajtach, które naprawdę przychodzą (nie tylko z `Content-Length`); jedno wysyłanie na adres i trzy naraz; każdy kawałek musi przyjść w 30 s, cały plik w 20 min; na dysku zostają 2 GB wolnego miejsca.
+- Przechodzą tylko binarne kontenery wideo (MP4/MOV, WebM/MKV, AVI, FLV, MPEG-TS/PS, Ogg, WMV) rozpoznane po pierwszych bajtach, potem czytane przez ffprobe z wymuszonym formatem i tylko lokalnymi plikami. Playlisty, tekst, obrazy i pliki z samym dźwiękiem są odrzucane. Plik dostaje nazwę nadaną przez serwer (`DATA_DIR/uploads/<losowa>.<rozszerzenie>`); nazwa z przeglądarki służy tylko za tytuł.
+- Plik jest usuwany ok. 90 s po tym, jak film poleciał, się nie udał, został odrzucony albo usunięty (także przez **Wyczyść kolejkę** i **Usuń wszystko od tego widza**; ich **Cofnij** działa w tej minucie). Gdy suma jest pełna, najpierw idą pliki, których żaden film już nie potrzebuje, od najstarszych; jeśli to nie wystarczy, wysyłanie jest odrzucane. Wyłączenie przełącznika od razu odrzuca nowe pliki; te, które są już w kolejce, zostają i polecą.
+- Przez tunel Cloudflare jedno żądanie może mieć najwyżej 100 MB (limit Cloudflare), więc większe pliki tam nie przejdą; przy szybkim tunelu duże pliki mogą też iść wolno.
 Opcje `.env` są opisane w [.env.example](.env.example): język (`LANGUAGE`), enkoder karty graficznej (`VIDEO_ENCODER=h264_nvenc`), cookies dla YouTube (`YTDLP_COOKIES`), klucz API pixeldrain i ścieżki.
 
 ## Gdy coś nie działa
