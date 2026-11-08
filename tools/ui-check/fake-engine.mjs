@@ -166,6 +166,11 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     slateLanguage: 'en',
     slateFrameStyle: 'dim',
     slateBackgroundAll: false,
+    oscEnabled: false,
+    oscHost: '127.0.0.1',
+    oscPort: 9000,
+    oscTemplate: '▶ {title} — {added}',
+    oscRepeatS: 0,
     tickerEnabled: true,
     tickerMode: 'interval',
     tickerIntervalS: 60,
@@ -936,6 +941,12 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
         next[key] = list;
       } else if (key === 'tickerIntervalS') {
         if (!INTERVALS.includes(value)) return fail('setting_not_one_of', `${key}: expected one of: 60, 120, 300, 600`);
+        next[key] = value;
+      } else if (key === 'oscPort') {
+        if (!Number.isInteger(value) || value < 1 || value > 65535) return fail('setting_out_of_range', `${key}: expected a number from 1 to 65535`);
+        next[key] = value;
+      } else if (key === 'oscRepeatS') {
+        if (!Number.isInteger(value) || (value !== 0 && (value < 5 || value > 600))) return fail('osc_repeat_invalid', `${key}: expected 0 (off) or a number from 5 to 600`);
         next[key] = value;
       } else if (key === 'allowedDomains' || key === 'blockedDomains') {
         next[key] = value.map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]).filter(Boolean);
