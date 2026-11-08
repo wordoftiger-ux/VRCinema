@@ -1,11 +1,12 @@
 // "Add a video": the link, the nick (with this device's icon) and what the channel accepts.
 // With the owner's "lists" setting on, the link field takes several links (one per line) and
-// playlists; the answer lists what was added and why the rest was left out.
+// playlists; the answer lists what was added and why the rest was left out. With the owner's
+// "video files" setting on, a small video file can be sent instead of a link.
 
 import { useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
-import { sentenceGap, sentences, t, tn } from '../i18n.js';
-import { api, errorText } from '../api.js';
+import { lang, sentenceGap, sentences, t, tn } from '../i18n.js';
+import { ApiError, api, errorText } from '../api.js';
 import { RequesterBadge } from '../components/badge.js';
 import { deviceKey, existingDeviceKey, saveBadge, saveNick, savedBadge, savedNick } from './device.js';
 import { formatLimit } from './format.js';
@@ -13,6 +14,66 @@ import { NickPin, openAdopt } from './nickpin.js';
 import { channel, refresh, showToast } from './store.js';
 
 const NICK_MAX = 24;
+export const UPLOAD_ROUTE = '/api/channels/main/upload';
+const UPLOAD_ACCEPT = 'video/*,.mkv,.mov,.mp4,.webm,.avi,.flv,.ts,.mpg,.mpeg,.ogv,.wmv';
+
+/**
+ * Sends `file` as the raw body with the viewer's nick and key in headers; `onProgress` gets
+ * the share sent (0–1). Resolves to the JSON answer; errors as `ApiError` like `api`.
+ */
+export function sendFile(file, { name, deviceKey }, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', UPLOAD_ROUTE);
+    xhr.setRequestHeader('X-VRCinema-Lang', lang.value);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.setRequestHeader('X-Upload-Name', encodeURIComponent(file.name || ''));
+    if (name) xhr.setRequestHeader('X-Viewer-Name', encodeURIComponent(name));
+    if (deviceKey) xhr.setRequestHeader('X-Device-Key', encodeURIComponent(deviceKey));
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        data = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+      reject(new ApiError(data?.error || t('ui.error_status', { status: xhr.status }), { status: xhr.status, code: data?.code ?? null, data }));
+    };
+    xhr.onerror = () => reject(new ApiError(t('ui.no_answer'), { code: 'network' }));
+    xhr.ontimeout = xhr.onerror;
+    xhr.send(file);
+  });
+}
+
+/** The file box: a picker and a drop target, or the chosen file with a button to drop it. */
+function FileBox({ uploads, file, onFile, busy }) {
+  const [over, setOver] = useState(false);
+  const drop = (e) => {
+    e.preventDefault();
+    setOver(false);
+    if (!busy) onFile(e.dataTransfer?.files?.[0] ?? null);
+  };
+  const mb = (bytes) => (bytes / 1048576).toFixed(1);
+  return html`
+    <div class=${over ? 'v-file over' : 'v-file'} data-file=${file ? 'chosen' : 'none'}
+      onDragOver=${(e) => { e.preventDefault(); setOver(true); }} onDragLeave=${() => setOver(false)} onDrop=${drop}>
+      <span class="v-file-label">${t('viewer.upload_label')}</span>
+      ${file
+        ? html`<span class="v-file-chosen"><b title=${file.name}>${file.name}</b><small>${mb(file.size)} MB</small>
+            <button type="button" class="btn" data-action="file-remove" disabled=${busy}
+              aria-label=${t('viewer.upload_remove')} title=${t('viewer.upload_remove')} onClick=${() => onFile(null)}>×</button></span>`
+        : html`<span class="v-file-pick">
+            <label class=${busy ? 'btn disabled' : 'btn'}>${t('viewer.upload_pick')}
+              <input type="file" class="sr-only" name="file" accept=${UPLOAD_ACCEPT} disabled=${busy}
+                onChange=${(e) => { onFile(e.target.files?.[0] ?? null); e.target.value = ''; }} /></label>
+            <span>${t('viewer.upload_drop')}</span></span>`}
+      <small>${t('viewer.upload_limits', { mb: uploads.maxMb, limit: formatLimit(uploads.maxDurationS) })}</small>
+    </div>`;
+}
 
 /** The text of a failed request, in the page's language. */
 export function requestErrorText(e) {
@@ -75,10 +136,19 @@ export function RequestForm() {
   const [suggestion, setSuggestion] = useState(null);
   const [badge, setBadge] = useState(savedBadge());
   const [result, setResult] = useState(null);
+  const [file, setFile] = useState(null);
+  const [progress, setProgress] = useState(null);
   const nickField = useRef(null);
   const rules = channel.value?.rules;
   const lists = Boolean(rules?.viewerLists);
+  const uploads = rules?.uploads ?? null;
   const lines = lists ? linkLines(url) : [];
+  // A chosen file goes instead of the link (the box goes away when the owner turns it off).
+  const sendingFile = Boolean(uploads && file);
+  const chooseFile = (f) => {
+    setError(null);
+    setFile(f);
+  };
 
   /** Takes the suggested nick; the button goes away with the error, so the focus goes to the nick. */
   const takeSuggestion = () => {
@@ -103,7 +173,11 @@ export function RequestForm() {
   const submit = async (e) => {
     e.preventDefault();
     const name = nick.trim();
-    if (!url.trim() || busy) return;
+    if ((!url.trim() && !sendingFile) || busy) return;
+    if (sendingFile && file.size > uploads.maxMb * 1048576) {
+      setError(new ApiError(t('errors.upload_too_big', { max: uploads.maxMb }), { code: 'upload_too_big', data: { max: uploads.maxMb } }));
+      return;
+    }
     setBusy(true);
     setError(null);
     setSuggestion(null);
@@ -120,6 +194,16 @@ export function RequestForm() {
       }
     };
     try {
+      if (sendingFile) {
+        setProgress(0);
+        const r = await sendFile(file, { name, deviceKey: key }, setProgress);
+        const title = r.item?.title;
+        showToast(r.status === 'pending_approval' ? t('viewer.pending', { title }) : t('viewer.added', { title }));
+        setFile(null);
+        keepBadge(r.item?.requesterBadge);
+        refresh();
+        return;
+      }
       if (lists) {
         // Every link is read by the channel; a long list takes a while.
         const r = await api('POST', '/api/channels/main/request-list', body, { timeoutMs: 180000 });
@@ -143,7 +227,16 @@ export function RequestForm() {
       if (err.code === 'nick_taken') setSuggestion(alternative(name));
     } finally {
       setBusy(false);
+      setProgress(null);
     }
+  };
+  const busyText = () => {
+    if (sendingFile) {
+      return progress !== null && progress < 1
+        ? t('viewer.uploading', { percent: Math.floor(progress * 100) })
+        : t('viewer.upload_checking');
+    }
+    return lists ? tn('viewer.checking_links', lines.length) : t('viewer.adding');
   };
 
   return html`
@@ -161,11 +254,12 @@ export function RequestForm() {
             </label>`
           : html`<label class="v-field">
           <span>${t('viewer.link_label')}</span>
-          <input type="url" class="txt" name="url" required autocomplete="off" inputmode="url"
+          <input type="url" class="txt" name="url" required=${!sendingFile} autocomplete="off" inputmode="url"
             placeholder=${t('viewer.link_placeholder')} value=${url} readOnly=${busy}
             aria-describedby=${error ? 'v-error' : undefined} aria-invalid=${error ? 'true' : undefined}
             onInput=${(e) => setUrl(e.currentTarget.value)} />
         </label>`}
+        ${uploads ? html`<${FileBox} uploads=${uploads} file=${file} onFile=${chooseFile} busy=${busy} />` : null}
         <label class="v-field">
           <span>${t('viewer.nick_label')}</span>
           <span class="v-nick">
@@ -189,8 +283,8 @@ export function RequestForm() {
                 : null}
             </div>`
           : null}
-        <button type="submit" class="btn pri v-submit" disabled=${busy || !url.trim()}>
-          ${busy ? (lists ? tn('viewer.checking_links', lines.length) : t('viewer.adding')) : t('viewer.add_button')}</button>
+        <button type="submit" class="btn pri v-submit" disabled=${busy || (!url.trim() && !sendingFile)}>
+          ${busy ? busyText() : sendingFile ? t('viewer.upload_button') : t('viewer.add_button')}</button>
       </form>
       <${NickPin} nick=${nick} onNick=${holdNick} />
       ${result ? html`<${ListResult} result=${result} />` : null}

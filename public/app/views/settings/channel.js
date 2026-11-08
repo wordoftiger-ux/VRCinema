@@ -1,4 +1,5 @@
-// Settings → Channel: the links viewers may send, the limits, moderation, viewer lists, the language of the
+// Settings → Channel: the links viewers may send, the limits, moderation, viewer lists, video files from
+// viewers, the language of the
 // slates, conversion, the info ticker and the viewers' nicks. These are the channel's own
 // settings: they work in a remote session too.
 
@@ -168,6 +169,47 @@ function ViewerLists({ settings, say }) {
     <//>`;
 }
 
+/** Video files from viewers: the switch, the largest file, the longest video and all files together. */
+function ViewerUploads({ settings, say }) {
+  const fromSettings = () => ({
+    maxMb: String(settings.viewerUploadMaxMb ?? 50),
+    maxMin: String(Math.max(1, Math.round((settings.viewerUploadMaxS ?? 600) / 60))),
+    quotaMb: String(settings.viewerUploadQuotaMb ?? 2048),
+  });
+  const [form, setForm] = useState(fromSettings);
+  const key = JSON.stringify([settings.viewerUploadMaxMb, settings.viewerUploadMaxS, settings.viewerUploadQuotaMb]);
+  useEffect(() => setForm(fromSettings()), [key]);
+  const on = Boolean(settings.viewerUploads);
+  const submit = (e) => {
+    e.preventDefault();
+    const n = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, Number(v)]));
+    const whole = Object.values(n).every(Number.isInteger);
+    if (!whole || n.maxMb < 1 || n.maxMb > 200 || n.maxMin < 1 || n.maxMin > 120 || n.quotaMb < 100 || n.quotaMb > 100000) {
+      return say('err', t('settings.channel.uploads_invalid'));
+    }
+    saveChannelWith(say, { viewerUploadMaxMb: n.maxMb, viewerUploadMaxS: n.maxMin * 60, viewerUploadQuotaMb: n.quotaMb }, t('settings.channel.uploads_saved'));
+  };
+  const field = (name, label, min, max) => html`
+    <label class="limit"><span>${label}</span>
+      <input type="number" class="num" min=${min} max=${max} step="1" name=${name} value=${form[name]} disabled=${!on}
+        onInput=${(e) => setForm({ ...form, [name]: e.target.value })} /></label>`;
+  const label = t('settings.channel.uploads');
+  return html`
+    <${Block} title=${t('settings.channel.uploads_block')}>
+      <${Row} title=${label} hint=${t('settings.channel.uploads_hint')}>
+        <${Switch} label=${label} checked=${on}
+          onChange=${(v) => saveChannelWith(say, { viewerUploads: v }, t(v ? 'settings.channel.uploads_on' : 'settings.channel.uploads_off'))} />
+      <//>
+      <form class="limits" data-form="viewer-uploads" onSubmit=${submit}>
+        ${field('maxMb', t('settings.channel.uploads_max_mb'), 1, 200)}
+        ${field('maxMin', t('settings.channel.uploads_max_min'), 1, 120)}
+        ${field('quotaMb', t('settings.channel.uploads_quota'), 100, 100000)}
+        <button type="submit" class="btn pri" disabled=${!on}>${t('settings.save')}</button>
+      </form>
+      <p class="set-sub">${t('settings.channel.uploads_tunnel_hint')}</p>
+    <//>`;
+}
+
 /** The owner's upload speed (Mbit/s, 0: not given): the panel warns when viewers need about that. */
 function Upload({ settings, say }) {
   const current = String(settings.uploadMbps ?? 0);
@@ -209,6 +251,7 @@ export function ChannelSettings() {
         ${toggle('moderation', t('settings.channel.moderation'), t('settings.channel.moderation_hint'), t('settings.channel.moderation_on'), t('settings.channel.moderation_off'))}
       <//>
       <${ViewerLists} settings=${settings} say=${say} />
+      <${ViewerUploads} settings=${settings} say=${say} />
       <${Block} title=${t('settings.channel.stream')}>
         <${Row} title=${t('settings.channel.slate_language')} hint=${t('settings.channel.slate_language_hint')}>
           <select class="sel" aria-label=${t('settings.channel.slate_language')} value=${settings.slateLanguage}

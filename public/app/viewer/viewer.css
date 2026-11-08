@@ -191,6 +191,55 @@ p.v-time {
   margin-top: 4px;
 }
 
+/* A video file instead of a link (when the owner allows it): picker and drop target. */
+.v-file {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-card);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+}
+
+.v-file.over {
+  border-color: var(--amber);
+  background: var(--hover);
+}
+
+.v-file small {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.v-file-pick,
+.v-file-chosen {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.v-file-pick .btn,
+.v-file-chosen .btn {
+  min-height: 44px;
+}
+
+.v-file-pick label.btn.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.v-file-chosen b {
+  min-width: 0;
+  flex: 1 1 10em;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .v-nick {
   display: flex;
   align-items: center;

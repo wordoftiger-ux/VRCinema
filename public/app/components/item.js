@@ -7,6 +7,8 @@ import { RequesterBadge } from './badge.js';
 import { formatTime } from './playerbar.js';
 
 export const isLocal = (item) => String(item.sourceUrl ?? '').startsWith('local:');
+/** A video file a viewer sent from the request page. */
+export const isUpload = (item) => String(item.sourceUrl ?? '').startsWith('upload:');
 export const isWeb = (item) => /^https?:\/\//i.test(String(item.sourceUrl ?? ''));
 
 /** The picture of a video: the engine has none to give, so a coloured stand-in. */
@@ -23,6 +25,7 @@ export function lengthText(item) {
 export function itemDetails(item) {
   const parts = [lengthText(item)];
   if (isLocal(item)) parts.push(t('queue.from_disk'));
+  if (isUpload(item)) parts.push(t('queue.uploaded'));
   if (item.requesterName) parts.push(item.requesterName);
   else if (item.requesterBadge === 'host') {
     if (!isLocal(item)) parts.push(t('queue.by_host'));
