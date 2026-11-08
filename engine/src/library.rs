@@ -71,12 +71,18 @@ pub struct LibraryListing {
     pub entries: Vec<LibraryEntry>,
 }
 
+/// Audio-only files: they air with a picture made from their sound (pipeline::audio_visual).
+pub const AUDIO_EXTENSIONS: [&str; 9] = [
+    "mp3", "flac", "ogg", "oga", "opus", "m4a", "wav", "aac", "wma",
+];
+
+/// A file the channel plays: a video or an audio file (by its extension).
 pub fn is_video_file(name: &str) -> bool {
     // Like Node's `path.extname`: a leading dot alone does not start an extension.
     match name.rfind('.') {
         Some(i) if i > 0 => {
             let ext = name[i + 1..].to_lowercase();
-            VIDEO_EXTENSIONS.contains(&ext.as_str())
+            VIDEO_EXTENSIONS.contains(&ext.as_str()) || AUDIO_EXTENSIONS.contains(&ext.as_str())
         }
         _ => false,
     }
@@ -819,5 +825,10 @@ mod tests {
         assert!(!is_video_file("a.jpg"));
         assert!(!is_video_file("mp4"));
         assert!(!is_video_file(".mp4"));
+        // Audio files play with a picture.
+        for name in ["a.mp3", "b.FLAC", "c.ogg", "d.opus", "e.m4a", "f.wav"] {
+            assert!(is_video_file(name), "{name}");
+        }
+        assert!(!is_video_file("cover.jpg"));
     }
 }
