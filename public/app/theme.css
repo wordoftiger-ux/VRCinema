@@ -3215,3 +3215,90 @@ kbd {
   font-size: 12px;
   opacity: 0.7;
 }
+/* Live capture of this computer (spec 2026-11-08-capture-design). */
+.q-capture {
+  margin: 6px 14px 0;
+}
+.cap .dialog-fields {
+  margin-top: 4px;
+}
+.cap-source {
+  flex: 1;
+  min-width: 0;
+}
+.cap-pair {
+  align-items: flex-start;
+  gap: 12px;
+}
+.cap-pair .sel {
+  min-width: 120px;
+}
+.cap-region .num {
+  width: 84px;
+}
+.cap-title {
+  width: 100%;
+}
+.cap-empty {
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
+.cap-error {
+  color: var(--red-text);
+  font-size: 12.5px;
+}
+.cap-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 10px;
+}
+.cap-preview img {
+  display: block;
+  width: 240px;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: #000;
+}
+.cap-on {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 3px 2px 9px;
+  border-radius: 999px;
+  background: var(--red-bg);
+  color: var(--red-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.cap-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  animation: cap-blink 1.2s ease-in-out infinite;
+}
+@keyframes cap-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cap-dot {
+    animation: none;
+  }
+}
+.cap-stop {
+  border: 0;
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: var(--red);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.cap-stop:hover {
+  filter: brightness(1.1);
+}

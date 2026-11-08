@@ -2,7 +2,7 @@
 // (the panel every second, the program's info every 3 s) and the owner's controls.
 
 import { signal, computed, batch } from '/static/vendor/signals.mjs';
-import { api, errorText } from './api.js';
+import { api, apiBlob, errorText } from './api.js';
 import { chosenLang, lang, loadLang, rememberLang } from './i18n.js';
 
 const PANEL = '/api/admin/channels/main';
@@ -482,6 +482,44 @@ export async function addLink(url) {
     refreshPanel();
   }
 }
+
+// ---------- Live capture of this computer (the window only) ----------
+
+const CAPTURE = '/api/desktop/capture';
+
+/** What can be captured now: `{platform, desktop, region, screens, windows, cameras, audio, fast, notes}`. */
+export const captureSources = () => api('GET', `${CAPTURE}/sources`, undefined, { timeoutMs: 30000 });
+
+/** One frame of the capture `spec` (a JPEG `Blob`); throws `ApiError`. */
+export const capturePreview = (spec) => apiBlob(`${CAPTURE}/preview`, spec, { timeoutMs: 30000 });
+
+/** Adds the capture `spec` (with its `title`) to the queue: `{itemId, title}`; throws `ApiError`. */
+export async function addCapture(spec) {
+  try {
+    return await api('POST', CAPTURE, spec);
+  } finally {
+    refreshPanel();
+    refreshInfo();
+  }
+}
+
+/** Stop: every capture ends and the waiting ones leave the queue. Resolves to success (a failure is shown). */
+export async function stopCapture() {
+  try {
+    await api('POST', `${CAPTURE}/stop`);
+    if (info.value?.capture) info.value = { ...info.value, capture: { running: [], queued: 0 } };
+    return true;
+  } catch (e) {
+    showToast(errorText(e));
+    return false;
+  } finally {
+    refreshPanel();
+    refreshInfo();
+  }
+}
+
+/** A window, screen, camera or microphone of this computer is being captured now (window only). */
+export const capturing = computed(() => (info.value?.capture?.running?.length ?? 0) > 0);
 
 /**
  * Changes the program's language and switches the interface at once (a remote panel only when

@@ -17,6 +17,7 @@ import { sentences, t, tn, videoTitle } from '../i18n.js';
 import { ItemText, Thumb, isWeb } from './item.js';
 import { contextMenuHandlers, openMenu } from './menu.js';
 import { AddLink } from './addlink.js';
+import { CaptureButton } from './capture.js';
 import { Library } from './library.js';
 import { Approvals } from './approvals.js';
 import { RequesterBadge } from './badge.js';
@@ -354,6 +355,7 @@ export function QueuePanel() {
     <aside class="q" aria-labelledby="queue-title">
       <h2 class="q-head"><span id="queue-title">${t('queue.title')}</span><span class="q-count" title=${title}>${text}</span></h2>
       <${AddLink} />
+      ${access.value === 'window' ? html`<${CaptureButton} />` : null}
       ${undo
         ? html`<div class="q-undo" role="status">
             <span>${undo.text}</span>

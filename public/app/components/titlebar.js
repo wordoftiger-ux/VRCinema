@@ -9,6 +9,7 @@ import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { AppIcon, Icon } from '../icons.js';
 import { showToast } from '../store.js';
+import { CaptureIndicator } from './capture.js';
 
 /** The page runs in the program's window (Tauri), not in a browser. */
 export function inWindow() {
@@ -67,6 +68,7 @@ export function Titlebar() {
     <header class="titlebar" data-tauri-drag-region="deep">
       <${AppIcon} />
       <span class="tb-title">VRCinema</span>
+      <${CaptureIndicator} />
       <div class="wc">
         ${button('minimize', 'minimize', 'titlebar.minimize')}
         ${maximized
