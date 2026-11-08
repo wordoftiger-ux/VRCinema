@@ -98,6 +98,13 @@ Opcjonalny pas wypalany w obrazie strumienia, więc widzi go każdy w VRChat: �
 - **Kiedy widać zmiany**: tekst (Twoje wiadomości, „następnie”, adres, język plansz, zmiany kolejki) zmienia się na strumieniu w ciągu ok. **20–60 sekund** (film jest przygotowywany z wyprzedzeniem; ok. 20 s dla filmu na antenie, do ok. minuty dla filmu przygotowanego wcześniej). Włączenie albo wyłączenie paska, tryb, odstęp, prędkość, kod QR i pasek postępu uruchamiają film na antenie od nowa od bieżącego miejsca (kilka sekund planszy buforowania); tak samo nowy adres publiczny, gdy pokazywany jest kod QR.
 - Tekst jest biały z cieniem na ciemnym pasie; pasek postępu jest bursztynowy. Transmisje na żywo nie mają paska postępu.
 
+### Chatbox VRChat (OSC)
+
+Program może pokazywać film na antenie w **Twoim własnym chatboxie VRChat** (dymek nad awatarem), np. „▶ Never Gonna Give You Up — dodane przez Kasia”.
+
+- **Ustawienia** → **Kanał** → **Chatbox VRChat**: włącz/wyłącz (domyślnie wyłączone), adres i port (domyślnie `127.0.0.1` i `9000`, wejście OSC VRChat), tekst z polami `{title}`, `{nick}` (nick widza, pusty dla Twoich filmów) i `{added}` („dodane przez …” w języku plansz; domyślnie `▶ {title} — {added}`) oraz **Wysyłaj ponownie** (tylko przy zmianie filmu albo co 10 s – 5 min, bo VRChat po chwili chowa chatbox).
+- **Dociera do VRChat tylko wtedy, gdy program działa na tym samym komputerze co VRChat**, albo gdy adres wskazuje komputer z VRChat (jego adres w sieci domowej) i ten komputer przyjmuje UDP na tym porcie. OSC musi być włączone w VRChat: **Action Menu** → **Options** → **OSC** → **Enabled**. Na VPS-ie czy Raspberry Pi domyślny adres nigdzie nie trafia.
+- Co jest wysyłane: jedna wiadomość OSC `/chatbox/input` z tekstem, „wyślij od razu” (żeby nie otwierała się klawiatura VRChat) i „bez dźwięku powiadomienia”; przy zmianie filmu i przy powtórce, nigdy częściej niż raz na 1,5 s (limit VRChat). Tytuły i nicki pochodzą od widzów: znaki nowej linii i sterujące są usuwane, a tekst przycinany do 144 znaków (limit VRChat).
 ### Nicki widzów
 
 - Widzowie mogą wpisać nick (do 24 znaków) na stronie zgłoszeń. Pierwsze zgłoszenie z nickiem tworzy w tej przeglądarce losowy klucz urządzenia; serwer zapisuje tylko jego skrót SHA-256. Nick należy potem do tego urządzenia przez 30 dni od ostatniego użycia: ten sam nick z innej przeglądarki albo urządzenia jest odrzucany („Ten nick jest już zajęty przez kogoś innego”). Podobne nicki liczą się jako ten sam: wielkość liter, znaki diakrytyczne, spacje, kropki, myślniki, niewidoczne znaki i podobne litery cyrylicy albo greki są pomijane (Kasia, KASIA, kásia, K a s i a, Ka5ia to jeden nick). „Gospodarz”, „Host” i ich tłumaczenia są zastrzeżone.
@@ -348,6 +355,31 @@ engine\target\release\vrcinema.exe         # uruchamia kanał (z katalogu projek
 Na tym samym katalogu `data/` uruchamiaj naraz tylko jedną wersję. Żeby wrócić, zatrzymaj `vrcinema` i uruchom wersję Node.js (`npm start`); baza jest zgodna w obie strony, z ograniczeniami: wersja Node.js pomija nicki i tryby linków (oraz inne ustawienia z etapu 4) i pokazuje powody zapisane przez serwer Rust (dlaczego film się nie udał albo został pominięty) jako surowy zapisany tekst.
 Przełączaj w nowym oknie PowerShell: ustawienia nadpisane wcześniej przez `$env:PORT` czy `$env:DATA_DIR` zostają w starym oknie i wygrywają z `.env`. Wersja Rust blokuje katalog danych (`vrcinema.lock`), więc drugi serwer Rust na tym samym `data/` nie wystartuje.
 
+## Wiersz poleceń (`vrcinema ctl`)
+
+`vrcinema ctl` steruje programem działającym na tym komputerze: serwerem bez okna albo aplikacją na pulpit (program `vrcinema` z `engine/` lub z paczki dla Linuksa; `VRCinema.exe` aplikacji z oknem nie ma konsoli).
+
+```
+vrcinema ctl status                     # co jest na antenie, pauza, kolejka
+vrcinema ctl queue list                 # film na antenie i kolejka (#numery)
+vrcinema ctl queue add https://youtu.be/dQw4w9WgXcQ
+vrcinema ctl queue remove 12            # numer z queue list
+vrcinema ctl queue clear                # film na antenie gra dalej
+vrcinema ctl skip
+vrcinema ctl pause | resume
+vrcinema ctl seek 1:30                  # od początku; seek +10 / seek -10 od bieżącego miejsca
+vrcinema ctl play-now 12
+vrcinema ctl settings get               # ustawienia, które ctl może zmienić (lista niżej)
+vrcinema ctl settings set oscEnabled true
+vrcinema ctl --json status              # odpowiedź programu jako JSON (błędy też: {"ok": false, "error", "code", "exitCode"})
+```
+
+- **Jak się loguje.** Przy każdym starcie program zapisuje `ctl.json` w swoim folderze danych (`data/` obok `.env` albo `%LOCALAPPDATA%\VRCinema\data` / `~/.local/share/vrcinema/data` dla aplikacji z oknem) ze swoim lokalnym adresem i nowym losowym tokenem; plik znika, gdy program się zatrzymuje. `ctl` znajduje go sam (`--data-dir <folder>` dla innego folderu). Token działa tylko z tego komputera (`127.0.0.1`/`::1`) i nigdy przez tunel ani reverse proxy; nie otwiera ustawień dostępnych tylko w oknie. Folder danych trzymaj prywatnie (na Linuksie plik może czytać tylko właściciel).
+- **Bez pliku** (starszy serwer albo nasłuch tylko na jednym adresie sieciowym) `ctl` loguje się hasłem administratora: `ADMIN_PASSWORD` ze zmiennych środowiska albo `.env`, albo `--password-stdin` (np. `cat haslo.txt | vrcinema ctl --password-stdin status`). Hasło nigdy nie jest przyjmowane jako argument, bo wiersze poleceń widzą inni użytkownicy komputera.
+- `--url http://127.0.0.1:8080` wybiera adres; adres na innym komputerze wymaga `--allow-remote` i hasła (token nigdy nie opuszcza komputera).
+- **Ustawienia, które ctl może zmienić**: `moderation`, `viewerLists`, `viewerListMax`, `maxDurationS`, `maxActivePerRequester`, `requestLimitCount`, `requestLimitWindowS`, `slateLanguage`, `tickerEnabled`, `oscEnabled`, `oscTemplate`, `oscRepeatS` (wartość jest czytana jako JSON, gdy nim jest: `true`, `30`; inaczej jako tekst). Program sprawdza wartości tak jak w panelu.
+- **Kody wyjścia**: `0` gotowe, `1` program odmówił (powód jest wypisany, np. „Teraz nic nie leci.”), `2` złe użycie, `3` nie znaleziono działającego programu albo nie można się z nim połączyć, `4` brak uprawnień (token albo hasło odrzucone). Komunikaty są w języku `LANGUAGE` ze zmiennych środowiska albo `.env`.
+- Nie ma polecenia głośności: głośność to własny odtwarzacz gospodarza w VRChat.
 ## Linux (serwer bez okna)
 
 Serwer `vrcinema` bez okna działa na Linuksie, na x86_64 i na 64-bitowym ARM (np. Raspberry Pi 5). Okna nie ma: kanałem steruje się z panelu WWW, który serwer udostępnia (`http://<serwer>:8080/admin`), z dowolnej przeglądarki, także z telefonu. Obsługa Linuksa jest nowa; zgłaszaj, co nie działa.
