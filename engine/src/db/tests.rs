@@ -441,6 +441,8 @@ fn settings_serialize_with_camel_case_keys() {
             "alarmSilenceS": 15,
             "alarmSilenceDb": -50,
             "maxHeight": 0,
+            "slateFrameStyle": "dim",
+            "slateBackgroundAll": false,
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -483,7 +485,9 @@ fn settings_serialize_with_camel_case_keys() {
             "alarmBlackS",
             "alarmSilenceS",
             "alarmSilenceDb",
-            "maxHeight"
+            "maxHeight",
+            "slateFrameStyle",
+            "slateBackgroundAll"
         ]
     );
 }

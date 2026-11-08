@@ -53,6 +53,37 @@ export async function api(method, path, body, { timeoutMs = DEFAULT_TIMEOUT_MS }
 }
 
 /**
+ * Sends the file `blob` as the raw body of `method` `path`; resolves to the JSON answer. Errors
+ * as for `api` (a large file may take long: `timeoutMs`).
+ */
+export async function apiUpload(method, path, blob, { timeoutMs = 300000 } = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: { 'X-VRCinema-Lang': lang.value, 'Content-Type': blob.type || 'application/octet-stream' },
+      body: blob,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    throw new ApiError(t('ui.no_answer'), { code: 'network' });
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    const message = data?.error || t('ui.error_status', { status: res.status });
+    throw new ApiError(message, { status: res.status, code: data?.code ?? null, data });
+  }
+  return data;
+}
+
+/**
  * The text of an error for people, in the interface's language: the dictionary's
  * `errors.<code>` when it has the code and needs no field the answer did not bring, else the
  * engine's own message (it was asked in the same language).

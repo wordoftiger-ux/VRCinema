@@ -1432,6 +1432,7 @@ mod tests {
             brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
+            backdrop: None,
         }
     }
 
@@ -1575,6 +1576,7 @@ mod tests {
                 brb: Vec::new(),
                 japanese_font_missing: false,
                 font_missing: None,
+                backdrop: None,
             };
             let channel = Channel::new(ChannelOptions::new(
                 MAIN_CHANNEL_ID,
@@ -1727,6 +1729,7 @@ mod tests {
             brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
+            backdrop: None,
         }
     }
 

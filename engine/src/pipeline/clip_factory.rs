@@ -21,6 +21,7 @@ use crate::pipeline::ffmpeg_args::{
 };
 use crate::pipeline::probe::{ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
+use crate::pipeline::slate_look::{Backdrop, backdrop_source, text_shadow};
 use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
 use crate::pipeline::temp_downloads::{Lease, TempDownloads, is_tiktok};
 use crate::pipeline::ticker::{
@@ -1317,9 +1318,15 @@ pub fn countdown_timer_text(total_s: f64) -> String {
 /// film's title (read from files in ffmpeg's folder; the title without `%` expansion), and
 /// silence of the same length (one input, so the real-time pace holds for both).
 pub fn countdown_graph(font: Option<&str>, total_s: f64) -> String {
-    let mut chain = vec![format!("color=c=0x14161c:s=1920x1080:r=30:d={total_s:.3}")];
+    countdown_graph_on(Backdrop::Plain, font, total_s)
+}
+
+/// Like [`countdown_graph`], drawn on `backdrop` (the texts get a shadow over a picture).
+pub fn countdown_graph_on(backdrop: Backdrop<'_>, font: Option<&str>, total_s: f64) -> String {
+    let mut chain = vec![backdrop_source(backdrop, &format!("{total_s:.3}"))];
     if let Some(font) = font {
-        let common = format!("fontfile={font}:x=(w-text_w)/2");
+        let shadow = text_shadow(backdrop);
+        let common = format!("fontfile={font}{shadow}:x=(w-text_w)/2");
         chain.push(format!(
             "drawtext={common}:fontcolor=0xb8bcc8:textfile=title.txt:fontsize=64:y=(h/2)-260"
         ));
@@ -1341,6 +1348,7 @@ async fn start_countdown(
     factory: RealClipFactory,
     item: QueueItem,
     total_s: f64,
+    backdrop: crate::pipeline::slate_look::CountdownBackdrop,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
     let d = factory.deps;
     let settings = {
@@ -1357,6 +1365,8 @@ async fn start_countdown(
     let out_dir = d.clips_dir.join(format!("countdown-{}-{n}", item.id));
     let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
     std::fs::create_dir_all(&out_dir).map_err(Msg::text)?;
+    // The last frame of the film that just ended, the owner's background or the plain one.
+    let backdrop = backdrop.prepare(&d.ffmpeg_path, &out_dir).await;
     let title = crate::i18n::t(lang, "slates.countdown_title", &[]);
     let film = item.title.replace(['\r', '\n'], " ");
     let font = font_for(
@@ -1386,7 +1396,7 @@ async fn start_countdown(
     let args = build_clip_args_ext(
         &ClipArgsOptions {
             inputs: vec![StreamInput {
-                url: countdown_graph(font_name.as_deref(), total_s),
+                url: countdown_graph_on(backdrop, font_name.as_deref(), total_s),
                 headers: Vec::new(),
             }],
             input_format: Some("lavfi".into()),
@@ -1602,7 +1612,21 @@ impl ClipFactory for RealClipFactory {
         item: QueueItem,
         seconds: f64,
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
-        Box::pin(start_countdown(self.clone(), item, seconds))
+        Box::pin(start_countdown(
+            self.clone(),
+            item,
+            seconds,
+            Default::default(),
+        ))
+    }
+
+    fn create_countdown_on(
+        &self,
+        item: QueueItem,
+        seconds: f64,
+        backdrop: crate::pipeline::slate_look::CountdownBackdrop,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        Box::pin(start_countdown(self.clone(), item, seconds, backdrop))
     }
 
     fn create(

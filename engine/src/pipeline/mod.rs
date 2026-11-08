@@ -44,6 +44,7 @@ pub mod monitor;
 pub mod playlist;
 pub mod probe;
 pub mod segmenter;
+pub mod slate_look;
 pub mod slates;
 pub mod temp_downloads;
 pub mod ticker;

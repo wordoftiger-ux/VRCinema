@@ -950,6 +950,7 @@ mod tests {
             brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
+            backdrop: None,
         };
         let mut o = ChannelOptions::new(MAIN_CHANNEL_ID, db, Arc::new(factory), slates);
         o.monitor = Some(MonitorOptions {

@@ -20,6 +20,7 @@ use crate::pipeline::monitor::{
     LOOKAHEAD_S, MonitorFeed, MonitorOptions, MonitorTimeline, MonitorWatch,
 };
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
+use crate::pipeline::slate_look::CountdownBackdrop;
 use crate::pipeline::slates::{SlateKind, Slates, request_url};
 use crate::stats::{ChannelStats, ClipStats, FfmpegInfo, NextInfo, NextState, OnAirInfo};
 
@@ -95,6 +96,18 @@ pub trait ClipFactory: Send + Sync {
     ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
         let _ = (item, seconds);
         Box::pin(async { Err(Msg::new(COUNTDOWN_UNAVAILABLE)) })
+    }
+
+    /// Like [`Self::create_countdown`], drawn on `backdrop` (the last frame of the film or the
+    /// owner's background). Default: the countdown without it.
+    fn create_countdown_on(
+        &self,
+        item: QueueItem,
+        seconds: f64,
+        backdrop: CountdownBackdrop,
+    ) -> BoxFuture<'static, Result<Box<dyn ClipHandle>, Msg>> {
+        let _ = backdrop;
+        self.create_countdown(item, seconds)
     }
 
     /// The OBS stream (`input`: FLV bytes) converted into segments like a live stream; `item`
@@ -663,7 +676,47 @@ pub struct Channel {
     obs_lost_at: Option<u64>,
     /// OBS streams started so far (their source keys differ).
     obs_sessions: u32,
+    /// The newest film segment kept for the last frame behind the waiting slates (None: no
+    /// fresh frame: none kept, or the idle slate aired since).
+    frame: Option<KeptFrame>,
+    /// Film segments kept so far (each kept frame has its number).
+    frames_kept: u64,
+    /// The waiting slate over the last frame, airing or being made.
+    frame_slate: Option<FrameSlate>,
+    /// Frame slates started so far (their folders and source keys differ).
+    frame_jobs: u64,
+    frame_tx: mpsc::UnboundedSender<(u64, Result<Vec<SegmentInfo>, Msg>)>,
+    frame_rx: mpsc::UnboundedReceiver<(u64, Result<Vec<SegmentInfo>, Msg>)>,
+    /// Folders of frame slates taken off the air, and when (removed [FRAME_SLATE_KEEP_MS] later).
+    old_frame_slates: VecDeque<(PathBuf, u64)>,
 }
+
+/// A film segment kept (hard-linked) for its last frame.
+struct KeptFrame {
+    path: PathBuf,
+    duration: f64,
+    n: u64,
+}
+
+/// A waiting slate drawn over a kept frame ([crate::pipeline::slates::render_backdrop]).
+struct FrameSlate {
+    kind: SlateKind,
+    /// The kept frame (its number) and the slate set (its generation) it was made with.
+    frame_n: u64,
+    generation: u32,
+    job: u64,
+    dir: PathBuf,
+    /// None while it is being made.
+    segments: Option<Vec<SegmentInfo>>,
+    /// Could not be made: the plain slate stays.
+    failed: bool,
+    index: usize,
+}
+
+/// A frame slate taken off the air is removed after its segments left the public list and the
+/// broadcaster's retention.
+const FRAME_SLATE_KEEP_MS: u64 =
+    (crate::pipeline::WINDOW_S as u64 + crate::pipeline::slates::RETAIN_S + 30) * 1000;
 
 /// The film resolved ahead of its turn, and how far it got.
 struct Preparing {
@@ -699,6 +752,7 @@ impl Channel {
         let wall_now = o.wall_now.take().unwrap_or_else(system_wall_clock);
         let (prepare_tx, prepare_rx) = mpsc::unbounded_channel();
         let (launch_tx, launch_rx) = mpsc::unbounded_channel();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
         let monitor = o
             .monitor
             .as_ref()
@@ -735,6 +789,13 @@ impl Channel {
             obs_pending: None,
             obs_lost_at: None,
             obs_sessions: 0,
+            frame: None,
+            frames_kept: 0,
+            frame_slate: None,
+            frame_jobs: 0,
+            frame_tx,
+            frame_rx,
+            old_frame_slates: VecDeque::new(),
         }
     }
 
@@ -1954,6 +2015,7 @@ impl Channel {
                 let remaining = c.remaining_s();
                 self.last_slate_kind = None;
                 self.previous_clip_segment = Some(seg.path.clone());
+                self.keep_frame(&seg.path, seg.duration);
                 self.pending_meta.insert(seg.path, meta);
                 self.retry_failed_prefetch(remaining);
                 self.maybe_prefetch(remaining);
@@ -2045,9 +2107,30 @@ impl Channel {
             self.slate_index[slot] = 0;
         }
         self.last_slate_kind = Some(kind);
-        let index = self.slate_index[slot] % list.len();
-        self.slate_index[slot] = index + 1;
-        let seg = &list[index];
+        // The waiting slates over the last frame, once made (the plain one airs meanwhile).
+        let framed = if kind == SlateKind::Idle {
+            // An old film's frame never shows after the idle slate.
+            self.forget_frame();
+            None
+        } else {
+            self.frame_slate_segment(kind)
+        };
+        let (seg, source_key, index) = match framed {
+            Some(framed) => framed,
+            None => {
+                let list = match kind {
+                    SlateKind::Idle => &self.o.slates.idle,
+                    SlateKind::Buffering => &self.o.slates.buffering,
+                    SlateKind::Pause => &self.o.slates.pause,
+                    SlateKind::Fallback => &self.o.slates.fallback,
+                    SlateKind::Brb => &self.o.slates.brb,
+                };
+                let index = self.slate_index[slot] % list.len();
+                self.slate_index[slot] = index + 1;
+                (list[index].clone(), self.o.slates.source_key(kind), index)
+            }
+        };
+        let seg = &seg;
         let item = match kind {
             SlateKind::Buffering | SlateKind::Fallback => {
                 self.current.as_ref().map(|c| c.item.clone())
@@ -2073,9 +2156,139 @@ impl Channel {
         Ok(SourceSegment {
             path: seg.path.clone(),
             duration: seg.duration,
-            source_key: self.o.slates.source_key(kind),
+            source_key,
             index: index as u64,
         })
+    }
+
+    /// Keeps the film segment just handed out (a hard link, no copy) for its last frame.
+    fn keep_frame(&mut self, path: &Path, duration: f64) {
+        let Some(link) = self
+            .o
+            .slates
+            .backdrop
+            .as_ref()
+            .filter(|s| s.frames_on())
+            .map(|s| s.frame_link())
+        else {
+            return;
+        };
+        // The finished frame slate goes: the film is back.
+        self.retire_frame_slate();
+        let _ = std::fs::remove_file(&link);
+        if std::fs::hard_link(path, &link).is_ok() {
+            self.frames_kept += 1;
+            self.frame = Some(KeptFrame {
+                path: link,
+                duration,
+                n: self.frames_kept,
+            });
+        }
+        // A link that could not be replaced (a frame slate still reads it) keeps the previous
+        // frame of the same film.
+    }
+
+    fn forget_frame(&mut self) {
+        self.frame = None;
+        self.retire_frame_slate();
+    }
+
+    /// Takes the frame slate off the air; its folder goes once its segments are gone.
+    fn retire_frame_slate(&mut self) {
+        if let Some(old) = self.frame_slate.take() {
+            let now = (self.now)();
+            self.old_frame_slates.push_back((old.dir, now));
+        }
+    }
+
+    /// Hands finished frame slates to [`Self::frame_slate`] and removes old folders.
+    fn poll_frame_slates(&mut self) {
+        while let Ok((job, result)) = self.frame_rx.try_recv() {
+            let Some(fs) = self.frame_slate.as_mut().filter(|f| f.job == job) else {
+                // Made for a slate that is gone already.
+                continue;
+            };
+            match result {
+                Ok(segments) if !segments.is_empty() => fs.segments = Some(segments),
+                Ok(_) => fs.failed = true,
+                Err(error) => {
+                    fs.failed = true;
+                    let kind = fs.kind.as_str();
+                    self.log(
+                        Msg::new("log.slate_frame_failed")
+                            .arg("kind", kind)
+                            .arg_msg("error", error),
+                    );
+                }
+            }
+        }
+        let now = (self.now)();
+        while self
+            .old_frame_slates
+            .front()
+            .is_some_and(|(_, at)| now.saturating_sub(*at) >= FRAME_SLATE_KEEP_MS)
+        {
+            if let Some((dir, _)) = self.old_frame_slates.pop_front() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    /// The next segment of the waiting slate `kind` over the kept frame; `None`: the plain
+    /// slate (no frame, the frame slate is being made, or it failed). Starts making it.
+    fn frame_slate_segment(&mut self, kind: SlateKind) -> Option<(SegmentInfo, String, usize)> {
+        self.poll_frame_slates();
+        let spec = self
+            .o
+            .slates
+            .backdrop
+            .as_ref()
+            .filter(|s| s.frames_on())?
+            .clone();
+        let frame = self.frame.as_ref()?;
+        let (frame_path, frame_duration, frame_n) = (frame.path.clone(), frame.duration, frame.n);
+        let generation = self.o.slates.generation;
+        let current = self
+            .frame_slate
+            .as_ref()
+            .is_some_and(|f| f.kind == kind && f.frame_n == frame_n && f.generation == generation);
+        if !current {
+            self.retire_frame_slate();
+            self.frame_jobs += 1;
+            let job = self.frame_jobs;
+            self.frame_slate = Some(FrameSlate {
+                kind,
+                frame_n,
+                generation,
+                job,
+                dir: spec.frame_slate_dir(kind, job),
+                segments: None,
+                failed: false,
+                index: 0,
+            });
+            let tx = self.frame_tx.clone();
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let made = crate::pipeline::slates::render_backdrop(
+                        &spec,
+                        kind,
+                        &frame_path,
+                        frame_duration,
+                        job,
+                    )
+                    .await
+                    .map_err(|e| e.message());
+                    let _ = tx.send((job, made));
+                });
+            }
+            return None;
+        }
+        let key = self.o.slates.source_key(kind);
+        let fs = self.frame_slate.as_mut()?;
+        let segments = fs.segments.as_ref().filter(|_| !fs.failed)?;
+        let index = fs.index % segments.len();
+        fs.index = index + 1;
+        Some((segments[index].clone(), format!("{key}-f{}", fs.job), index))
     }
 
     /// The current film ended or there is none: take the prefetched one or the queue head.
@@ -2201,7 +2414,19 @@ impl Channel {
                     .arg("title", &head.title)
                     .arg("seconds", format!("{seconds:.0}")),
             );
-            let start = self.o.factory.create_countdown(head.clone(), seconds);
+            // Over the last frame of the film that just ended, else the owner's background.
+            let frame = self.frame.as_ref().map(|f| (f.path.clone(), f.duration));
+            let backdrop = self
+                .o
+                .slates
+                .backdrop
+                .as_ref()
+                .map(|spec| spec.countdown(frame))
+                .unwrap_or_default();
+            let start = self
+                .o
+                .factory
+                .create_countdown_on(head.clone(), seconds, backdrop);
             let clip = self.launch_with(head.clone(), 0.0, 0, start);
             self.countdown = Some(Countdown {
                 clip,
@@ -2645,6 +2870,7 @@ mod tests {
             brb: vec![info("/slates/brb/0.ts", 0)],
             japanese_font_missing: false,
             font_missing: None,
+            backdrop: None,
         }
     }
 
@@ -3653,6 +3879,7 @@ mod tests {
             brb: Vec::new(),
             japanese_font_missing: false,
             font_missing: None,
+            backdrop: None,
         }
     }
 
@@ -5962,5 +6189,95 @@ mod tests {
         assert_eq!(e.key(), clip_key(&a, 0));
         assert_eq!(e.channel.state().obs, ObsAirState::Off);
         assert!(!film.disposed());
+    }
+    // ---------- The last frame behind the waiting slates (spec 2026-11-07) ----------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_pause_slate_shows_the_last_frame_once_it_is_made() {
+        use crate::pipeline::slate_look::{FrameStyle, SlateLook};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let Some(ffmpeg) = ["ffmpeg.exe", "ffmpeg"]
+            .iter()
+            .map(|n| root.join("bin").join(n))
+            .find(|p| p.exists())
+        else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let slates =
+            crate::pipeline::slates::generate_slates(&crate::pipeline::slates::SlateOptions {
+                ffmpeg_path: ffmpeg.clone(),
+                font_file: tmp.path().join("no-font.ttf"),
+                dir: tmp.path().join("slates"),
+                request_url: String::new(),
+                connecting: false,
+                segment_seconds: 1,
+                generation: 0,
+                lang: Lang::En,
+                japanese_font_dir: tmp.path().to_path_buf(),
+                look: SlateLook {
+                    frame_style: FrameStyle::Blur,
+                    ..SlateLook::default()
+                },
+            })
+            .await
+            .unwrap();
+        let film = tmp.path().join("film.ts");
+        let made = std::process::Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=lime:s=640x360:r=30:d=1",
+            ])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mpegts"])
+            .arg(&film)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let mut e = setup();
+        e.channel.replace_slates(slates);
+        let a = e.add_item("a");
+        e.next();
+        // The start runs on another worker: wait for it (the suite may be busy).
+        for _ in 0..400 {
+            if !e.factory.lock().handles.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        e.flush().await;
+        e.factory.handle(0).lock().pending.push(SegmentInfo {
+            path: film.clone(),
+            duration: 1.0,
+            index: 0,
+        });
+        assert_eq!(e.key(), clip_key(&a, 0));
+        e.channel.pause(PauseReason::Manual);
+        // The plain pause slate airs while the frame slate is made, then the frame slate.
+        assert_eq!(e.key(), "pause");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let framed = loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let s = e.next();
+            if s.source_key != "pause" {
+                break s;
+            }
+            assert!(std::time::Instant::now() < deadline, "no frame slate");
+        };
+        assert_eq!(framed.source_key, "pause-f1");
+        assert_eq!(framed.index, 0);
+        assert_eq!(e.next().index, 1);
+        // The film's own file was only linked (the channel removes it as before).
+        assert!(film.exists());
+        // After the idle slate an old frame never shows again.
+        e.channel.forget_frame();
+        assert!(e.channel.frame.is_none());
+        assert_eq!(e.key(), "pause");
     }
 }

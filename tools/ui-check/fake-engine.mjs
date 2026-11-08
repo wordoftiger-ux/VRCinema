@@ -164,6 +164,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     forceTranscode: false,
     discontinuityTags: true,
     slateLanguage: 'en',
+    slateFrameStyle: 'dim',
+    slateBackgroundAll: false,
     tickerEnabled: true,
     tickerMode: 'interval',
     tickerIntervalS: 60,
@@ -895,6 +897,29 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     return json(res, 200, { ...configView(), restarted });
   }
 
+  async function slateBackground(req, res, path) {
+    const view = () => ({ background: s.slateBg ?? null, maxBytes: 31457280, maxSeconds: 30, maxSide: 4096 });
+    if (path.endsWith('/preview')) {
+      if (!s.slateBg) return coded(res, 404, 'slate_background_none', 'No background of your own is set for the slates.');
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+      return res.end(s.slateBgBytes);
+    }
+    if (req.method === 'GET') return json(res, 200, view());
+    if (req.method === 'DELETE') {
+      s.slateBg = null;
+      return json(res, 200, view());
+    }
+    if (req.method !== 'PUT') return json(res, 404, { error: 'Not Found' });
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const bytes = Buffer.concat(chunks);
+    requests.push({ method: 'PUT', path, body: { bytes: bytes.length, type: req.headers['content-type'] } });
+    if (bytes.subarray(0, 4).toString('latin1') !== '\x89PNG') return coded(res, 422, 'slate_background_unknown', 'This file cannot be used as the slates’ background.');
+    s.slateBgBytes = bytes;
+    s.slateBg = { motion: false, seconds: 0, stamp: Date.now(), source: 'image' };
+    return json(res, 200, view());
+  }
+
   const INTERVALS = [60, 120, 300, 600];
   function settingsRoute(res, req, patch) {
     if (req.method === 'GET') return json(res, 200, { ...s.settings, popularDomains: POPULAR });
@@ -1010,6 +1035,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     }
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
 
+    // The owner's slate background (raw file body): stored in memory, the preview is a PNG.
+    if (path.startsWith('/api/admin/channels/main/slate-background')) return slateBackground(req, res, path);
     const payload = req.method === 'GET' ? null : await body(req).catch(() => null);
     requests.push({ method: req.method, path, search: url.search, body: payload, lang: req.headers['x-vrcinema-lang'] ?? null, at: Date.now() });
     const noWindow = s.remote || s.headless;
