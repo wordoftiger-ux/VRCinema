@@ -325,11 +325,14 @@ async function wizard(lang, tr) {
   await page.waitForSelector('.wz-result');
   await assertScreen(page, lang, 'wizard step 3 960×600');
   await shot(page, `${lang}-wizard-3`);
-  await page.click('[data-next]');
-  await waitFor(() => page.locator('[data-tunnel=online]').count(), 'online', 10000);
-  await sleep(400);
-  await assertScreen(page, lang, 'wizard step 4 online 960×600');
-  await shot(page, `${lang}-wizard-4-online`);
+  // The steps after the picture (spec 2026-11-08-wizard-design), each in the language.
+  for (const [id, wait] of [['viewers', 'input[name=linkMode]'], ['ticker', '[data-ticker]'], ['look', '[data-idle-qr]'], ['internet', '[data-tunnel=online]'], ['extras', '[data-obs-value=server]'], ['summary', '[data-copy-vrchat]']]) {
+    await page.click('[data-next]');
+    await waitFor(async () => (await page.locator('main.wz').getAttribute('data-step')) === id && (await page.locator(wait).count()) > 0, `wizard ${id}`, 10000);
+    await sleep(400);
+    await assertScreen(page, lang, `wizard ${id} 960×600`);
+    await shot(page, `${lang}-wizard-${id}`);
+  }
   check(page.__errors.length === 0, `${lang} wizard: no errors`, page.__errors);
   await page.close();
 }
@@ -337,10 +340,12 @@ async function wizard(lang, tr) {
 try {
   for (const lang of languages) {
     const tr = dict(lang);
-    await windowViews(lang, tr);
-    await phoneViews(lang, tr);
-    await viewerPage(lang, tr);
-    await wizard(lang, tr);
+    // LANG_PARTS=wizard (comma-separated: window, phone, viewer, wizard) checks only those parts.
+    const parts = (process.env.LANG_PARTS ?? 'window,phone,viewer,wizard').split(',');
+    if (parts.includes('window')) await windowViews(lang, tr);
+    if (parts.includes('phone')) await phoneViews(lang, tr);
+    if (parts.includes('viewer')) await viewerPage(lang, tr);
+    if (parts.includes('wizard')) await wizard(lang, tr);
   }
   console.log(`\n${passed} checks passed`);
 } finally {
