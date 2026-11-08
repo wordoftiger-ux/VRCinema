@@ -838,7 +838,48 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       update: s.updateOffer,
       tickerSlow: s.tickerSlow,
       alarms: s.alarms,
+      // Live capture (window session only): scenario `captureRunning` (item ids).
+      capture: s.remote ? null : { running: s.captureRunning ?? [], queued: s.queue.filter((i) => String(i.sourceUrl).startsWith('capture:')).length },
     };
+  }
+
+  // Live capture of this computer (window only; the remote panel has no such routes).
+  const CAPTURE_SOURCES = {
+    platform: 'windows',
+    desktop: true,
+    region: true,
+    screens: [
+      { index: 0, x: 0, y: 0, width: 2560, height: 1440, primary: true },
+      { index: 1, x: 2560, y: 0, width: 1920, height: 1080, primary: false },
+    ],
+    windows: ['Notatnik — szkic.txt', 'VRChat'],
+    cameras: [{ id: '@device_pnp_cam', name: 'Brio 100' }],
+    audio: [{ id: '@device_cm_mic', name: 'Mikrofon (Scarlett Solo USB)' }],
+    fast: true,
+    notes: ['loopback'],
+  };
+  const TINY_JPEG = Buffer.from('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=', 'base64');
+  function captureRoute(res, req, route, payload) {
+    if (route === '/api/desktop/capture/sources' && req.method === 'GET') return json(res, 200, CAPTURE_SOURCES);
+    if (route === '/api/desktop/capture/preview' && req.method === 'POST') {
+      if (s.capturePreviewFail) return coded(res, 422, 'capture_preview_failed', 'No preview: device busy');
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'no-store' });
+      return res.end(TINY_JPEG);
+    }
+    if (route === '/api/desktop/capture' && req.method === 'POST') {
+      const title = String(payload?.title ?? '').trim() || 'Live';
+      const item = queued(nextId++, title, { isLive: true, durationS: null, requesterName: null, requesterBadge: 'host', addedBy: 'admin', sourceUrl: `capture:${'ab'.repeat(16)}` });
+      s.queue.push(item);
+      return json(res, 201, { itemId: item.id, title });
+    }
+    if (route === '/api/desktop/capture/stop' && req.method === 'POST') {
+      const before = s.queue.length;
+      s.queue = s.queue.filter((i) => !String(i.sourceUrl).startsWith('capture:'));
+      const stopped = (s.captureRunning ?? []).length;
+      s.captureRunning = [];
+      return json(res, 200, { stopped, removed: before - s.queue.length });
+    }
+    return json(res, 404, { error: 'Not Found' });
   }
 
   const json = (res, status, body) => {
@@ -1181,6 +1222,10 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (media && req.method === 'GET') return previewMedia(req, res, Number(media[1]));
       const monitorSeg = route.match(/^\/api\/desktop\/monitor\/([a-z0-9-]+)\/(\d+\.ts)$/);
       if (monitorSeg && req.method === 'GET') return monitorSegment(res, monitorSeg[1], monitorSeg[2]);
+      if (route.startsWith('/api/desktop/capture')) {
+        if (mirror) return json(res, 404, { error: 'Not Found' });
+        return captureRoute(res, req, route, payload);
+      }
       if (await desktopRoute(res, req, route, payload)) return undefined;
       if (route === '/api/desktop/tunnel/qr') return sendQr(res);
       // OBS (window only): scenario `obsKey`, `obsStatus` (listening, streaming, failed).

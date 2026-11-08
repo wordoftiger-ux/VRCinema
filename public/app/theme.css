@@ -3236,8 +3236,12 @@ kbd {
 .cap-region .num {
   width: 84px;
 }
-.cap-title {
+.cap .dialog-field .cap-title {
   width: 100%;
+  max-width: none;
+}
+.cap .dialog-fields .dialog-note {
+  margin: 0;
 }
 .cap-empty {
   color: var(--text-faint);
@@ -3258,6 +3262,8 @@ kbd {
   display: block;
   width: 240px;
   max-width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: #000;

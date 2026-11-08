@@ -158,9 +158,20 @@ OBS Studio can stream straight into the channel (RTMP). In the app open **Settin
 - **Allow OBS from other devices on the network** (off by default): only OBS on this computer can connect. Switched on, OBS on another computer of your home network can use the address shown under "Server for other devices". Windows then asks once whether VRCinema may accept connections through the firewall: allow it for **private networks** only. The OBS port (1935) is a separate port the tunnel never forwards, so it is never reachable from the internet through the channel's public link. Five wrong keys from one address within a minute lock that address out for a minute.
 - The server without a window (`.env`) takes OBS only with `OBS_STREAM_KEY` (at least 16 characters); `OBS_PORT`, `OBS_LAN=1` and `OBS_PRIORITY=0` change the rest.
 
+### Capturing this computer (window, screen, camera, microphone)
+
+In the program's window, **Capture** under the link field puts a window, all screens, one screen, a part of the desktop, a camera or only a microphone of this computer into the queue as a live item (it airs when its turn comes; it has no priority like OBS). Pick the sound device, frame rate (15/25/30), resolution (480p–1080p, never above Settings → Advanced), the title viewers see (window titles and device names are never shown to viewers or written to the log) and check one frame with **Preview**. The picture is fitted into a 16:9 frame and converted like a live stream (key frame every segment, 48 kHz stereo, GPU encoders, ticker and QR); the Preview of the Channel view shows it live.
+
+- While a capture runs the title bar shows a red **Capturing** pill; **Stop** ends every capture at once and removes the waiting ones.
+- Only the window itself can capture: the remote panel, the tunnel and viewers cannot list devices or add a capture (403), and a capture cannot be added as a link. A capture lives only until Stop or the end of the program: after a restart, or played again from the history, it is not started again (add it anew).
+- Windows: windows by their title (gdigrab; the capture ends if the title changes or the window closes), screens by their rectangle or with **Fast screen capture** (Desktop Duplication, `ddagrab`; on some computers with several graphics cards the screen numbers may differ), cameras and microphones through DirectShow. What the computer plays: turn on "Stereo Mix" in the sound settings or install a virtual audio cable.
+- Linux (best effort): the X screen or a part of it (`x11grab`, `$DISPLAY`), cameras (`/dev/video*`), PulseAudio/PipeWire sources (`.monitor` = what plays) or ALSA. Single windows are not offered; under Wayland only XWayland content is visible. macOS: not available.
+
 ### Owner's manual test checklist
 
 These need a person at the screen and are not covered by the automatic tests:
+
+- [ ] Capture: a window (and its capture ending when it is closed), one screen with and without fast capture, a camera with a microphone; the Capturing pill appears when the capture airs and Stop ends it within a second; viewers see the chosen title; the remote panel has no Capture button.
 
 - [ ] Clean Windows account (or a PC that never had the app): first run from an empty folder, wizard (language step first), first film plays.
 - [ ] Frameless window, main window and wizard: drag by the title bar, double-click to maximise and back, the minimise / maximise / close buttons (close hides to the tray), Windows snapping (drag to a screen edge, Win+←/→/↑), resize from the edges; the size and position come back after a restart. Check it in the release build (the tests only simulate the window): nothing here may fail silently; a refused one shows "The title bar could not control the window: …".

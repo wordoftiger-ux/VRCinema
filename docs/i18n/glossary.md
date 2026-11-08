@@ -83,6 +83,7 @@ Common to all languages:
 | Blocked sites (blocklist) | blocked sites | zablokowane serwisy | sitios bloqueados | gesperrte Websites | sites bloqués | ブロックしたサイト |
 | Stream key — the secret OBS sends with its stream (Settings → OBS) | stream key | klucz strumienia | clave de transmisión | Streamschlüssel | clé de stream | ストリームキー |
 | OBS on air / Be right back (OBS stream states; OBS menu names stay in English) | OBS live / Be right back | OBS na żywo / Zaraz wracamy | OBS en vivo / Volvemos enseguida | OBS live / Gleich geht’s weiter | OBS en direct / On revient tout de suite | OBSライブ / まもなく再開します |
+| Capture — a window, screen, camera or microphone of this computer aired live (queue → Capture; title bar "Capturing" / Stop). A physical screen is "monitor" in es/fr and ディスプレイ in ja (never the slate words) | capture / Capturing / Stop | przechwytywanie (Przechwyć) / Przechwytywanie / Zatrzymaj | captura (Capturar) / Capturando / Detener | Aufnahme / Aufnahme läuft / Stopp | capture (Capturer) / Capture en cours / Arrêter | キャプチャ / キャプチャ中 / 停止 |
 | Site (a website a link comes from; not a page of the program) | site | serwis | sitio | Website | site | サイト |
 | Limits (for viewers) | limits | limity | límites | Limits | limites | 制限 |
 | Pause / resume | pause / resume | wstrzymaj / wznów | pausar / reanudar | pausieren / fortsetzen | mettre en pause / reprendre | 一時停止 / 再開 |

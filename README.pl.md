@@ -158,9 +158,20 @@ OBS Studio może nadawać prosto do kanału (RTMP). W aplikacji otwórz **Ustawi
 - **Zezwól na OBS z innych urządzeń w sieci** (domyślnie wyłączone): połączyć może się tylko OBS na tym komputerze. Po włączeniu OBS na innym komputerze w sieci domowej użyje adresu z „Serwer dla innych urządzeń”. Windows zapyta wtedy raz, czy VRCinema może przyjmować połączenia przez zaporę: zezwól tylko dla **sieci prywatnych**. Port OBS (1935) to osobny port, którego tunel nigdy nie przekazuje, więc z internetu przez publiczny link kanału nie da się do niego dostać. Pięć złych kluczy z jednego adresu w ciągu minuty blokuje ten adres na minutę.
 - Serwer bez okna (`.env`) przyjmuje OBS tylko z `OBS_STREAM_KEY` (co najmniej 16 znaków); `OBS_PORT`, `OBS_LAN=1` i `OBS_PRIORITY=0` zmieniają resztę.
 
+### Przechwytywanie z tego komputera (okno, ekran, kamera, mikrofon)
+
+W oknie programu przycisk **Przechwyć** pod polem linku dodaje do kolejki okno, wszystkie ekrany, jeden ekran, fragment pulpitu, kamerę albo sam mikrofon tego komputera jako pozycję na żywo (wchodzi na antenę, gdy przyjdzie jej kolej; nie ma priorytetu jak OBS). Wybierz urządzenie dźwięku, liczbę klatek (15/25/30), rozdzielczość (480p–1080p, nigdy powyżej Ustawienia → Zaawansowane), tytuł dla widzów (tytuły okien i nazwy urządzeń nigdy nie trafiają do widzów ani do dziennika) i sprawdź jedną klatkę przyciskiem **Podgląd**. Obraz jest wpasowany w kadr 16:9 i konwertowany jak transmisja na żywo (klatka kluczowa w każdym fragmencie, 48 kHz stereo, kodery GPU, pasek informacyjny i QR); Podgląd w widoku Kanał pokazuje go na żywo.
+
+- Podczas przechwytywania pasek tytułu pokazuje czerwone **Przechwytywanie**; **Zatrzymaj** kończy od razu wszystkie przechwytywania i usuwa czekające.
+- Przechwytywać może tylko samo okno: panel zdalny, tunel i widzowie nie mogą wyświetlić urządzeń ani dodać przechwytywania (403), nie da się go też dodać jako linku. Przechwytywanie żyje tylko do Zatrzymaj albo końca programu: po restarcie lub odtworzeniu z historii nie rusza ponownie (dodaj je od nowa).
+- Windows: okna po tytule (gdigrab; przechwytywanie kończy się, gdy tytuł się zmieni lub okno zostanie zamknięte), ekrany po prostokącie albo z **szybkim przechwytywaniem** (Desktop Duplication, `ddagrab`; przy kilku kartach graficznych numery ekranów mogą się różnić), kamery i mikrofony przez DirectShow. Dźwięk odtwarzany na komputerze: włącz „Miks stereo” w ustawieniach dźwięku albo zainstaluj wirtualny kabel audio.
+- Linux (w miarę możliwości): ekran X lub jego fragment (`x11grab`, `$DISPLAY`), kamery (`/dev/video*`), źródła PulseAudio/PipeWire (`.monitor` = to, co gra) albo ALSA. Pojedyncze okna nie są dostępne; pod Waylandem widać tylko treść XWayland. macOS: niedostępne.
+
 ### Lista testów ręcznych dla właściciela
 
 Tego nie sprawdzają testy automatyczne, potrzebna jest osoba przy ekranie:
+
+- [ ] Przechwytywanie: okno (i koniec przechwytywania po jego zamknięciu), jeden ekran z szybkim przechwytywaniem i bez, kamera z mikrofonem; czerwone Przechwytywanie pojawia się, gdy przechwytywanie jest na antenie, a Zatrzymaj kończy je w ciągu sekundy; widzowie widzą wybrany tytuł; panel zdalny nie ma przycisku Przechwyć.
 
 - [ ] Czyste konto Windows (albo komputer, na którym programu nigdy nie było): pierwsze uruchomienie z pustego folderu, kreator (najpierw krok języka), pierwszy film leci.
 - [ ] Okno bez ramki, główne i kreatora: przeciąganie za pasek tytułu, dwuklik maksymalizuje i przywraca, przyciski minimalizuj / maksymalizuj / zamknij (zamknięcie chowa do zasobnika), przyciąganie do krawędzi Windows (przeciągnięcie do krawędzi ekranu, Win+←/→/↑), zmiana rozmiaru za krawędzie; rozmiar i położenie wracają po restarcie. Sprawdź to w buildzie release (testy tylko symulują okno): nic tu nie może zawieść po cichu; odmowa pokazuje „Pasek tytułu nie mógł sterować oknem: …”.
