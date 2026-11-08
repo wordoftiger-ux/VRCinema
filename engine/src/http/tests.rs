@@ -941,7 +941,8 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
             "maxDurationS": 7200,
             "moderation": false,
             "viewerLists": false,
-            "viewerListMax": 10
+            "viewerListMax": 10,
+            "uploads": null
         })
     );
     let keys: Vec<&String> = body.as_object().unwrap().keys().collect();
