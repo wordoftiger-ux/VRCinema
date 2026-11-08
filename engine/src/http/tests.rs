@@ -37,6 +37,7 @@ use crate::pipeline::channel::{
 use crate::pipeline::monitor::{MonitorFeed, MonitorRow};
 use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream};
 
+mod capture;
 mod ctl;
 mod lists;
 mod nick_pin;

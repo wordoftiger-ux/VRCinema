@@ -3712,4 +3712,114 @@ mod tests {
         assert!(!handle.copies_video(), "always converted");
         handle.dispose();
     }
+
+    fn capture_item(id: i64, token: &str) -> QueueItem {
+        QueueItem {
+            source_url: format!("capture:{token}"),
+            is_live: true,
+            duration_s: None,
+            ..item(id, "Live")
+        }
+    }
+
+    fn desktop_spec() -> crate::capture::CaptureSpec {
+        crate::capture::CaptureSpec {
+            video: crate::capture::Video::Desktop,
+            audio: None,
+            fps: 30,
+            height: 720,
+            fast: false,
+        }
+    }
+
+    /// Only the item a capture was made for, added by the owner, starts it; a copy (the history,
+    /// a restart), a viewer's item, a stopped capture or a factory without captures fail with
+    /// `capture_ended` before anything runs. Nothing is resolved ahead.
+    #[tokio::test]
+    async fn a_capture_starts_only_for_its_own_item_added_by_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = fixture(None, dir, "no-ffmpeg".into(), "no-ffprobe".into());
+        let registry = Arc::new(CaptureRegistry::new("no-ffmpeg".into()));
+        let factory = f.factory.clone().with_capture(Arc::clone(&registry));
+        let token = registry.register(desktop_spec());
+        registry.bind(&token, 10);
+        let ended = |r: Result<Box<dyn ClipHandle>, Msg>| r.err().map(|e| e.key());
+        let copy = capture_item(11, &token);
+        assert_eq!(
+            ended(factory.create(copy, 0.0, 0).await).as_deref(),
+            Some("errors.capture_ended")
+        );
+        let viewer = QueueItem {
+            added_by: AddedBy::Public,
+            ..capture_item(10, &token)
+        };
+        assert_eq!(
+            ended(factory.create(viewer, 0.0, 0).await).as_deref(),
+            Some("errors.capture_ended")
+        );
+        assert_eq!(
+            ended(f.factory.create(capture_item(10, &token), 0.0, 0).await).as_deref(),
+            Some("errors.capture_ended"),
+            "a factory without captures"
+        );
+        assert!(factory.prepare(capture_item(10, &token)).await.is_ok());
+        registry.stop_all();
+        assert_eq!(
+            ended(factory.create(capture_item(10, &token), 0.0, 0).await).as_deref(),
+            Some("errors.capture_ended")
+        );
+    }
+
+    /// Opt-in (`VRCINEMA_CAPTURE_TEST=1`, Windows): the real desktop on air; Stop kills ffmpeg
+    /// within a moment, the clip then ends as played (no error) and nothing counts as running.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_running_capture_stops_at_once_and_ends_as_played() {
+        if std::env::var_os("VRCINEMA_CAPTURE_TEST").is_none() {
+            eprintln!("skip: set VRCINEMA_CAPTURE_TEST=1 to capture this desktop");
+            return;
+        }
+        let bin_dir = std::env::var_os("VRCINEMA_BIN_DIR").map(PathBuf::from);
+        let find = |name: &str| {
+            bin_dir
+                .as_ref()
+                .map(|d| d.join(format!("{name}.exe")))
+                .filter(|p| p.is_file())
+                .or_else(|| bin(name))
+        };
+        let (Some(ffmpeg), Some(ffprobe)) = (find("ffmpeg"), find("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let f = fixture(None, dir, ffmpeg.clone(), ffprobe);
+        let registry = Arc::new(CaptureRegistry::new(ffmpeg));
+        let factory = f.factory.clone().with_capture(Arc::clone(&registry));
+        let token = registry.register(desktop_spec());
+        registry.bind(&token, 10);
+        let mut handle = factory
+            .create(capture_item(10, &token), 0.0, 0)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(registry.running(), [10]);
+        let mut segments = Vec::new();
+        let start = Instant::now();
+        while segments.is_empty() && start.elapsed() < Duration::from_secs(20) {
+            segments.extend(handle.poll());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!segments.is_empty(), "{:?}", handle.error());
+        let log = f.lines.lock().unwrap().join("\n");
+        assert!(log.contains("Capture"), "{log}");
+        registry.stop_all();
+        let start = Instant::now();
+        while !registry.running().is_empty() && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(registry.running().is_empty(), "ffmpeg was stopped");
+        handle.poll();
+        assert_eq!(handle.state(), SegmenterState::Done);
+        assert!(handle.error().is_none());
+        handle.dispose();
+    }
 }
