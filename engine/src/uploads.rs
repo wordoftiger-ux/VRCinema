@@ -1,7 +1,8 @@
-//! Small video files viewers send from the request page (off by default): the settings, the
-//! check of a received file, the folder `<data>/uploads` with its limits and clean-up, and the
-//! resolver of the `upload:<name>` sources. The HTTP side is `http/routes_uploads.rs`.
-//! Spec: `docs/superpowers/specs/2026-11-08-uploads-design.md`.
+//! Small video and audio files viewers send from the request page (off by default): the
+//! settings, the check of a received file, the folder `<data>/uploads` with its limits and
+//! clean-up, and the resolver of the `upload:<name>` sources. The HTTP side is
+//! `http/routes_uploads.rs`. Spec: `docs/superpowers/specs/2026-11-08-uploads-design.md`; a
+//! sound-only file airs with a picture made from it (`2026-11-08-audio-design.md`).
 //!
 //! Every name in the folder is made here (`<32 hex>.<ext>`, `<32 hex>.part`); nothing a client
 //! sends becomes a path.
@@ -51,7 +52,7 @@ const PART_EXT: &str = "part";
 // ---------- Settings ----------
 
 /// The channel's upload settings (keys `viewerUploads`, `viewerUploadMaxMb`,
-/// `viewerUploadMaxS`, `viewerUploadQuotaMb`).
+/// `viewerUploadMaxS`, `viewerUploadAudioMaxS`, `viewerUploadQuotaMb`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadSettings {
@@ -60,6 +61,8 @@ pub struct UploadSettings {
     pub viewer_upload_max_mb: u32,
     /// Longest video (seconds).
     pub viewer_upload_max_s: u32,
+    /// Longest audio file (seconds; it airs with a picture made from its sound).
+    pub viewer_upload_audio_max_s: u32,
     /// All kept files together (MB).
     pub viewer_upload_quota_mb: u32,
 }
@@ -70,6 +73,7 @@ impl Default for UploadSettings {
             viewer_uploads: false,
             viewer_upload_max_mb: 50,
             viewer_upload_max_s: 600,
+            viewer_upload_audio_max_s: 600,
             viewer_upload_quota_mb: 2048,
         }
     }
@@ -85,6 +89,15 @@ impl UploadSettings {
 
     pub fn quota_bytes(&self) -> u64 {
         u64::from(self.viewer_upload_quota_mb) << 20
+    }
+
+    /// The longest file of a kind (seconds): a video, or audio only.
+    pub fn max_s(&self, audio: bool) -> u32 {
+        if audio {
+            self.viewer_upload_audio_max_s
+        } else {
+            self.viewer_upload_max_s
+        }
     }
 
     /// Applies a stored value; `false`: not an upload key. A wrong value keeps the default.
@@ -110,6 +123,9 @@ impl UploadSettings {
         if let Some(v) = p.max_s {
             self.viewer_upload_max_s = v;
         }
+        if let Some(v) = p.audio_max_s {
+            self.viewer_upload_audio_max_s = v;
+        }
         if let Some(v) = p.quota_mb {
             self.viewer_upload_quota_mb = v;
         }
@@ -122,6 +138,7 @@ pub struct UploadPatch {
     pub enabled: Option<bool>,
     pub max_mb: Option<u32>,
     pub max_s: Option<u32>,
+    pub audio_max_s: Option<u32>,
     pub quota_mb: Option<u32>,
 }
 
@@ -145,6 +162,9 @@ pub fn sanitize_key(key: &str, value: &Value, out: &mut UploadPatch) -> Option<R
             number_in(key, value, (1, HARD_MAX_MB)).map(|n| out.max_mb = Some(n))
         }
         "viewerUploadMaxS" => number_in(key, value, MAX_S_RANGE).map(|n| out.max_s = Some(n)),
+        "viewerUploadAudioMaxS" => {
+            number_in(key, value, MAX_S_RANGE).map(|n| out.audio_max_s = Some(n))
+        }
         "viewerUploadQuotaMb" => number_in(key, value, QUOTA_RANGE).map(|n| out.quota_mb = Some(n)),
         _ => return None,
     };
@@ -164,6 +184,9 @@ impl UploadPatch {
         if let Some(v) = self.max_s {
             out.push(("viewerUploadMaxS", v.to_string()));
         }
+        if let Some(v) = self.audio_max_s {
+            out.push(("viewerUploadAudioMaxS", v.to_string()));
+        }
         if let Some(v) = self.quota_mb {
             out.push(("viewerUploadQuotaMb", v.to_string()));
         }
@@ -173,54 +196,70 @@ impl UploadPatch {
 
 // ---------- Names and formats ----------
 
-/// A container the channel accepts: the demuxer ffprobe is forced to and the extension the
-/// file is stored with.
+/// A container the channel accepts: the demuxer ffprobe is forced to and the extensions the
+/// file is stored with (as a video, and with sound only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Format {
     pub demuxer: &'static str,
     pub ext: &'static str,
+    pub audio_ext: &'static str,
 }
 
-const MP4: Format = Format {
-    demuxer: "mov",
-    ext: "mp4",
-};
-const MKV: Format = Format {
-    demuxer: "matroska",
-    ext: "mkv",
-};
-const AVI: Format = Format {
-    demuxer: "avi",
-    ext: "avi",
-};
-const FLV: Format = Format {
-    demuxer: "flv",
-    ext: "flv",
-};
-const TS: Format = Format {
-    demuxer: "mpegts",
-    ext: "ts",
-};
-const MPG: Format = Format {
-    demuxer: "mpeg",
-    ext: "mpg",
-};
-const OGG: Format = Format {
-    demuxer: "ogg",
-    ext: "ogv",
-};
-const WMV: Format = Format {
-    demuxer: "asf",
-    ext: "wmv",
-};
-const FORMATS: [Format; 8] = [MP4, MKV, AVI, FLV, TS, MPG, OGG, WMV];
+const fn format(demuxer: &'static str, ext: &'static str, audio_ext: &'static str) -> Format {
+    Format {
+        demuxer,
+        ext,
+        audio_ext,
+    }
+}
+
+const MP4: Format = format("mov", "mp4", "m4a");
+const MKV: Format = format("matroska", "mkv", "mka");
+const AVI: Format = format("avi", "avi", "avi");
+const FLV: Format = format("flv", "flv", "flv");
+const TS: Format = format("mpegts", "ts", "ts");
+const MPG: Format = format("mpeg", "mpg", "mpg");
+const OGG: Format = format("ogg", "ogv", "ogg");
+const WMV: Format = format("asf", "wmv", "wma");
+// Sound-only containers (an attached cover picture is all the picture they can carry).
+const MP3: Format = format("mp3", "mp3", "mp3");
+const AAC: Format = format("aac", "aac", "aac");
+const FLAC: Format = format("flac", "flac", "flac");
+const WAV: Format = format("wav", "wav", "wav");
+const FORMATS: [Format; 12] = [MP4, MKV, AVI, FLV, TS, MPG, OGG, WMV, MP3, AAC, FLAC, WAV];
+
+impl Format {
+    /// The extension of the stored file.
+    pub fn ext_for(&self, audio: bool) -> &'static str {
+        if audio { self.audio_ext } else { self.ext }
+    }
+}
 
 /// How many first bytes [`sniff`] needs to decide (MPEG-TS: three packets).
 pub const SNIFF_BYTES: usize = 3 * 188 + 1;
 
-/// What the first bytes say the file is. Only binary video containers are accepted: never a
-/// playlist, a text format or a picture (they could make ffmpeg open other files or
-/// addresses, or are no video).
+/// An MPEG audio frame header (MP3 and its relatives) at the start: the 11-bit sync, a known
+/// version and layer, a bit rate other than "bad" and a known sample rate.
+fn mpeg_audio_frame(head: &[u8]) -> bool {
+    let [a, b, c, ..] = *head else {
+        return false;
+    };
+    a == 0xff
+        && b & 0xe0 == 0xe0
+        && (b >> 3) & 0b11 != 0b01
+        && (b >> 1) & 0b11 != 0
+        && c >> 4 != 0xf
+        && (c >> 2) & 0b11 != 0b11
+}
+
+/// An ADTS header (raw AAC) at the start: the 12-bit sync and layer 0.
+fn adts_frame(head: &[u8]) -> bool {
+    matches!(*head, [0xff, b, ..] if b & 0xf6 == 0xf0)
+}
+
+/// What the first bytes say the file is. Only binary video and audio containers are accepted:
+/// never a playlist, a text format or a picture (they could make ffmpeg open other files or
+/// addresses, or are no film).
 pub fn sniff(head: &[u8]) -> Option<Format> {
     let at = |offset: usize, magic: &[u8]| head.get(offset..offset + magic.len()) == Some(magic);
     if at(4, b"ftyp") {
@@ -229,6 +268,8 @@ pub fn sniff(head: &[u8]) -> Option<Format> {
         Some(MKV)
     } else if at(0, b"RIFF") && at(8, b"AVI ") {
         Some(AVI)
+    } else if at(0, b"RIFF") && at(8, b"WAVE") {
+        Some(WAV)
     } else if at(0, b"FLV\x01") {
         Some(FLV)
     } else if at(0, b"\x47") && at(188, b"\x47") && at(376, b"\x47") {
@@ -239,6 +280,12 @@ pub fn sniff(head: &[u8]) -> Option<Format> {
         Some(OGG)
     } else if at(0, b"\x30\x26\xb2\x75\x8e\x66\xcf\x11") {
         Some(WMV)
+    } else if at(0, b"fLaC") {
+        Some(FLAC)
+    } else if at(0, b"ID3") || mpeg_audio_frame(head) {
+        Some(MP3)
+    } else if adts_frame(head) {
+        Some(AAC)
     } else {
         None
     }
@@ -256,7 +303,7 @@ fn valid_name(name: &str) -> bool {
     };
     id.len() == 32
         && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        && FORMATS.iter().any(|f| f.ext == ext)
+        && FORMATS.iter().any(|f| f.ext == ext || f.audio_ext == ext)
 }
 
 /// The file name inside the uploads folder of an `upload:` source, only when it is exactly
@@ -296,44 +343,65 @@ pub fn title_from_name(raw: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Probed {
     pub duration_s: f64,
+    /// The picture's size (sound only: 0 × 0).
     pub width: u64,
     pub height: u64,
+    /// Sound only (cover art at most): it airs with a picture made from its sound.
+    pub audio: bool,
 }
 
-/// Reads ffprobe's JSON: a real video stream (not cover art) of a sane size and a known
-/// length. Errors are for the viewer.
+/// A positive finite length from ffprobe's text (or number).
+fn seconds(v: &Value) -> Option<f64> {
+    v.as_str()
+        .and_then(|d| d.trim().parse::<f64>().ok())
+        .or_else(|| v.as_f64())
+        .filter(|d| d.is_finite() && *d > 0.0)
+}
+
+/// Reads ffprobe's JSON. A video: its picture stream (the first video stream that is not an
+/// attached picture, chosen as playback chooses it) of a known, sane size. Sound only: an
+/// audio stream; attached pictures count as cover art only, and each must have a known, sane
+/// size too (the channel draws the cover). Either needs a known length (sound only: the
+/// file's, else the audio stream's, as playback reads it). Errors are for the viewer.
 pub fn read_probe(info: &Value) -> Result<Probed, Msg> {
+    use crate::pipeline::probe::{is_cover_stream, main_video_stream};
     let not_video = || Msg::error("upload_not_video");
     let streams = info["streams"].as_array().ok_or_else(not_video)?;
-    let picture = streams.iter().find(|s| {
-        s["codec_type"] == "video"
-            && s["disposition"]["attached_pic"].as_i64().unwrap_or(0) == 0
-            && s["width"].as_u64().unwrap_or(0) > 0
-            && s["height"].as_u64().unwrap_or(0) > 0
-    });
-    let Some(video) = picture else {
-        return Err(if streams.iter().any(|s| s["codec_type"] == "audio") {
-            Msg::error("upload_no_picture")
-        } else {
-            not_video()
-        });
+    let sane = |s: &Value| {
+        let (w, h) = (
+            s["width"].as_u64().unwrap_or(0),
+            s["height"].as_u64().unwrap_or(0),
+        );
+        (w > 0 && h > 0 && w <= MAX_WIDTH && h <= MAX_HEIGHT).then_some((w, h))
     };
-    let (width, height) = (
-        video["width"].as_u64().unwrap_or(0),
-        video["height"].as_u64().unwrap_or(0),
-    );
-    if width > MAX_WIDTH || height > MAX_HEIGHT {
+    let format_length = seconds(&info["format"]["duration"]);
+    if let Some(video) = main_video_stream(streams) {
+        let (width, height) = sane(video).ok_or_else(not_video)?;
+        return Ok(Probed {
+            duration_s: format_length.ok_or_else(not_video)?,
+            width,
+            height,
+            audio: false,
+        });
+    }
+    let sound = streams
+        .iter()
+        .find(|s| s["codec_type"] == "audio")
+        .ok_or_else(not_video)?;
+    let covers_sane = streams
+        .iter()
+        .filter(|s| s["codec_type"] == "video" && is_cover_stream(s))
+        .all(|s| sane(s).is_some());
+    if !covers_sane {
         return Err(not_video());
     }
-    let duration_s = info["format"]["duration"]
-        .as_str()
-        .and_then(|d| d.parse::<f64>().ok())
-        .filter(|d| d.is_finite() && *d > 0.0)
-        .ok_or_else(not_video)?;
     Ok(Probed {
-        duration_s,
-        width,
-        height,
+        duration_s: format_length
+            .or_else(|| seconds(&sound["duration"]))
+            .ok_or_else(not_video)?,
+        width: 0,
+        height: 0,
+        audio: true,
     })
 }
 
@@ -347,7 +415,7 @@ pub async fn probe_file(ffprobe: &Path, file: &Path, format: Format) -> Result<P
         "-f",
         format.demuxer,
         "-show_entries",
-        "format=duration:stream=codec_type,width,height:stream_disposition=attached_pic",
+        "format=duration:stream=index,codec_type,width,height,duration:stream_disposition=attached_pic",
         "-of",
         "json",
         "-i",
@@ -621,9 +689,9 @@ impl Slot {
     }
 
     /// Moves the checked part file to its final name and returns the item's source
-    /// (`upload:<id>.<ext>`).
-    pub fn finish(&self, format: Format) -> std::io::Result<String> {
-        let name = format!("{}.{}", self.id, format.ext);
+    /// (`upload:<id>.<ext>`; `audio`: the extension of a sound-only file of the format).
+    pub fn finish(&self, format: Format, audio: bool) -> std::io::Result<String> {
+        let name = format!("{}.{}", self.id, format.ext_for(audio));
         std::fs::rename(&self.part, self.store.dir.join(&name))?;
         Ok(format!("{SCHEME}{name}"))
     }

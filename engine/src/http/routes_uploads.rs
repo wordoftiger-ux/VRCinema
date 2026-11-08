@@ -1,5 +1,5 @@
-//! A viewer sends a small video file (`POST /api/channels/main/upload`, the file as the raw
-//! body). Off unless the owner allows it (Settings → Channel). The same nick, block, limit and
+//! A viewer sends a small video or audio file (`POST /api/channels/main/upload`, the file as
+//! the raw body; sound only airs with a picture made from it). Off unless the owner allows it (Settings → Channel). The same nick, block, limit and
 //! approval rules as a link; the bytes are counted as they arrive and the file is checked
 //! before it is queued. Spec: `docs/superpowers/specs/2026-11-08-uploads-design.md`.
 
@@ -168,7 +168,7 @@ async fn upload(
             let take = (SNIFF_BYTES - head.len()).min(chunk.len());
             head.extend_from_slice(&chunk[..take]);
             if head.len() >= SNIFF_BYTES {
-                // Not a video container: refused before the rest is read.
+                // Not a video or audio container: refused before the rest is read.
                 format =
                     Some(sniff(&head).ok_or_else(|| not_video(Msg::error("upload_not_video")))?);
             }
@@ -194,14 +194,15 @@ async fn upload(
     if !settings.uploads.viewer_uploads {
         return Err(uploads_off());
     }
+    // A sound-only file has its own longest length; the channel's maximum applies to both.
     let mut rules = settings.clone();
     rules.max_duration_s = settings
         .max_duration_s
-        .min(f64::from(settings.uploads.viewer_upload_max_s));
+        .min(f64::from(settings.uploads.max_s(probed.audio)));
     let meta = MediaMeta {
         title: text_header(&headers, "x-upload-name")
             .and_then(|n| title_from_name(&n))
-            .unwrap_or_else(|| "Video".to_string()),
+            .unwrap_or_else(|| if probed.audio { "Audio" } else { "Video" }.to_string()),
         duration_s: Some(probed.duration_s),
         is_live: false,
         is_playlist: false,
@@ -212,7 +213,7 @@ async fn upload(
     }
     claim_viewer(&state, &viewer)?;
     let source_url = slot
-        .finish(format)
+        .finish(format, probed.audio)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let item = state.with_db(|c| {
         QueueRepo::new(c).add(&NewItem {

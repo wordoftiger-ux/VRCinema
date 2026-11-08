@@ -171,25 +171,33 @@ function ViewerLists({ settings, say }) {
     <//>`;
 }
 
-/** Video files from viewers: the switch, the largest file, the longest video and all files together. */
+/** Video and audio files from viewers: the switch, the largest file, the longest video, the longest audio and all files together. */
 function ViewerUploads({ settings, say }) {
+  const minutes = (s) => String(Math.max(1, Math.round((s ?? 600) / 60)));
   const fromSettings = () => ({
     maxMb: String(settings.viewerUploadMaxMb ?? 50),
-    maxMin: String(Math.max(1, Math.round((settings.viewerUploadMaxS ?? 600) / 60))),
+    maxMin: minutes(settings.viewerUploadMaxS),
+    audioMaxMin: minutes(settings.viewerUploadAudioMaxS),
     quotaMb: String(settings.viewerUploadQuotaMb ?? 2048),
   });
   const [form, setForm] = useState(fromSettings);
-  const key = JSON.stringify([settings.viewerUploadMaxMb, settings.viewerUploadMaxS, settings.viewerUploadQuotaMb]);
+  const key = JSON.stringify([settings.viewerUploadMaxMb, settings.viewerUploadMaxS, settings.viewerUploadAudioMaxS, settings.viewerUploadQuotaMb]);
   useEffect(() => setForm(fromSettings()), [key]);
   const on = Boolean(settings.viewerUploads);
   const submit = (e) => {
     e.preventDefault();
     const n = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, Number(v)]));
     const whole = Object.values(n).every(Number.isInteger);
-    if (!whole || n.maxMb < 1 || n.maxMb > 200 || n.maxMin < 1 || n.maxMin > 120 || n.quotaMb < 100 || n.quotaMb > 100000) {
+    const length = (m) => m >= 1 && m <= 120;
+    if (!whole || n.maxMb < 1 || n.maxMb > 200 || !length(n.maxMin) || !length(n.audioMaxMin) || n.quotaMb < 100 || n.quotaMb > 100000) {
       return say('err', t('settings.channel.uploads_invalid'));
     }
-    saveChannelWith(say, { viewerUploadMaxMb: n.maxMb, viewerUploadMaxS: n.maxMin * 60, viewerUploadQuotaMb: n.quotaMb }, t('settings.channel.uploads_saved'));
+    saveChannelWith(say, {
+      viewerUploadMaxMb: n.maxMb,
+      viewerUploadMaxS: n.maxMin * 60,
+      viewerUploadAudioMaxS: n.audioMaxMin * 60,
+      viewerUploadQuotaMb: n.quotaMb,
+    }, t('settings.channel.uploads_saved'));
   };
   const field = (name, label, min, max) => html`
     <label class="limit"><span>${label}</span>
@@ -205,6 +213,7 @@ function ViewerUploads({ settings, say }) {
       <form class="limits" data-form="viewer-uploads" onSubmit=${submit}>
         ${field('maxMb', t('settings.channel.uploads_max_mb'), 1, 200)}
         ${field('maxMin', t('settings.channel.uploads_max_min'), 1, 120)}
+        ${field('audioMaxMin', t('settings.channel.uploads_max_audio_min'), 1, 120)}
         ${field('quotaMb', t('settings.channel.uploads_quota'), 100, 100000)}
         <button type="submit" class="btn pri" disabled=${!on}>${t('settings.save')}</button>
       </form>

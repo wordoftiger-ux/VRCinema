@@ -1,6 +1,7 @@
-// Browser check of video files from viewers: the owner's switch and limits (Settings →
-// Channel), the request page's file box (picker, the size checked before sending, progress,
-// the nick and device key in headers, the engine's refusal shown), the phone width, and the
+// Browser check of video and audio files from viewers: the owner's switch and limits (Settings
+// → Channel, audio length apart), the request page's file box (picker with audio types, the
+// limits, the size checked before sending, progress, the nick and device key in headers, an
+// MP3 queued, the engine's refusal shown), the phone width, and the
 // "sent file" detail in the Channel view's queue — in headless Brave against the fake engine.
 //
 //   PLAYWRIGHT_CORE=<path to playwright-core/index.mjs> node tools/ui-check/uploads.mjs <shots dir> [port]
@@ -90,7 +91,7 @@ try {
   const appErrors = watch(app);
   await app.goto(`${base}/admin#/settings/channel`);
   await app.waitForSelector('#view[data-section="channel"]');
-  const sw = 'button[role=switch][aria-label="Allow viewers to upload small video files"]';
+  const sw = 'button[role=switch][aria-label="Allow viewers to send small video and audio files"]';
   await app.waitForSelector(sw);
   check((await app.$eval(sw, (b) => b.getAttribute('aria-checked'))) === 'false', 'the switch is off by default');
   check(await app.$eval('form[data-form="viewer-uploads"] input[name=maxMb]', (i) => i.disabled), 'the limits wait for the switch');
@@ -110,10 +111,11 @@ try {
   mark = (await requests()).length;
   await app.fill('form[data-form="viewer-uploads"] input[name=maxMb]', '1');
   await app.fill('form[data-form="viewer-uploads"] input[name=maxMin]', '5');
+  await app.fill('form[data-form="viewer-uploads"] input[name=audioMaxMin]', '20');
   await app.click('form[data-form="viewer-uploads"] button[type=submit]');
   await waitFor(
-    async () => (await requests()).slice(mark).some((r) => r.method === 'PUT' && JSON.stringify(r.body) === '{"viewerUploadMaxMb":1,"viewerUploadMaxS":300,"viewerUploadQuotaMb":2048}'),
-    'the limits save in MB and seconds',
+    async () => (await requests()).slice(mark).some((r) => r.method === 'PUT' && JSON.stringify(r.body) === '{"viewerUploadMaxMb":1,"viewerUploadMaxS":300,"viewerUploadAudioMaxS":1200,"viewerUploadQuotaMb":2048}'),
+    'the limits save in MB and seconds, audio apart',
   );
   await app.locator('form[data-form="viewer-uploads"]').scrollIntoViewIfNeeded();
   await app.screenshot({ path: join(shots, 'settings-uploads.png') });
@@ -121,7 +123,10 @@ try {
   // ---------- The request page: the file box ----------
   await page.waitForSelector('.v-file', { timeout: 8000 });
   const box = page.locator('.v-file');
-  check((await box.innerText()).includes('Up to 1 MB and 5 min long.'), 'the limits are shown', await box.innerText());
+  await waitFor(async () => (await box.innerText()).includes('Up to 1 MB; videos up to 5 min, audio up to 20 min. Audio airs with a picture made from it.'), 'the limits are shown, audio apart');
+  check((await box.innerText()).includes('Or send a video or audio file'), 'the box offers audio too', await box.innerText());
+  const accept = await page.$eval('.v-file input[type=file]', (i) => i.accept.split(','));
+  check(['audio/*', '.mp3', '.flac', '.ogg', '.oga', '.opus', '.m4a', '.aac', '.wav', 'video/*', '.mp4'].every((x) => accept.includes(x)), 'the picker takes audio files', accept);
   check((await page.locator(SUBMIT).isDisabled()), 'nothing to send yet');
   await page.setInputFiles('.v-file input[type=file]', { name: 'big.mp4', mimeType: 'video/mp4', buffer: mp4(1048577) });
   await page.waitForSelector('.v-file[data-file=chosen]');
@@ -145,10 +150,17 @@ try {
   await waitFor(async () => (await page.locator('.v-item').allInnerTexts()).some((t) => t.includes('Mój klip')), 'the file is in the queue on the page');
 
   await scenario({ uploadDelayMs: 0 });
+  const mp3 = Buffer.alloc(4000);
+  mp3.write('ID3\x04', 0, 'latin1');
+  await page.setInputFiles('.v-file input[type=file]', { name: 'Piosenka.mp3', mimeType: 'audio/mpeg', buffer: mp3 });
+  await page.click(SUBMIT);
+  await waitFor(async () => (await page.locator('.v-item').allInnerTexts()).some((t) => t.includes('Piosenka')), 'an audio file is queued like a video');
+  check((await uploads()).at(-1)?.name === 'Piosenka.mp3', 'the audio file was sent as it is');
+
   await page.setInputFiles('.v-file input[type=file]', { name: 'notes.mp4', mimeType: 'video/mp4', buffer: Buffer.from('hello, not a video') });
   await page.click(SUBMIT);
   await page.waitForSelector('.v-error[data-code=upload_not_video]');
-  check((await page.locator('.v-error').innerText()).includes('isn’t a video'), 'the engine’s refusal is shown');
+  check((await page.locator('.v-error').innerText()).includes('isn’t a video or audio file'), 'the engine’s refusal is shown');
   await page.screenshot({ path: join(shots, 'viewer-upload.png'), fullPage: true });
 
   // Phone width: no horizontal scroll, controls large enough.

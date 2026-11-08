@@ -217,18 +217,28 @@ fn parse_rate(rate: Option<&Value>) -> f64 {
     if r.is_finite() { r } else { 0.0 }
 }
 
+/// An attached picture (cover art) of ffprobe's stream list: not a video stream. The check of
+/// a viewer's file uses this too, so it decides "video" and "audio only" as playback does.
+pub fn is_cover_stream(s: &Value) -> bool {
+    s.get("disposition")
+        .and_then(|d| d.get("attached_pic"))
+        .is_some_and(js_truthy)
+}
+
+/// The stream a source's picture comes from: the first video stream that is no cover.
+pub fn main_video_stream(streams: &[Value]) -> Option<&Value> {
+    streams.iter().find(|s| {
+        s.get("codec_type").and_then(Value::as_str) == Some("video") && !is_cover_stream(s)
+    })
+}
+
 pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
     let streams: &[Value] = j
         .get("streams")
         .and_then(Value::as_array)
         .map_or(&[], Vec::as_slice);
     let is_type = |s: &Value, t: &str| s.get("codec_type").and_then(Value::as_str) == Some(t);
-    let is_cover = |s: &Value| {
-        s.get("disposition")
-            .and_then(|d| d.get("attached_pic"))
-            .is_some_and(js_truthy)
-    };
-    let Some(video) = streams.iter().find(|s| is_type(s, "video") && !is_cover(s)) else {
+    let Some(video) = main_video_stream(streams) else {
         return audio_only(j, streams);
     };
 
@@ -293,12 +303,7 @@ fn audio_only(j: &Value, streams: &[Value]) -> Result<VideoInfo, ProbeError> {
     };
     let cover_stream = streams
         .iter()
-        .find(|s| {
-            is_type(s, "video")
-                && s.get("disposition")
-                    .and_then(|d| d.get("attached_pic"))
-                    .is_some_and(js_truthy)
-        })
+        .find(|s| is_type(s, "video") && is_cover_stream(s))
         .and_then(|s| s.get("index").and_then(Value::as_i64));
     let positive = |v: f64| (v.is_finite() && v > 0.0).then_some(v);
     let duration = positive(js_number(format.and_then(|f| f.get("duration"))))
