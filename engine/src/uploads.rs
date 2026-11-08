@@ -713,6 +713,8 @@ impl MediaResolver for UploadResolver {
             }],
             duration_s: None,
             is_live: false,
+            thumbnail: None,
+            artist: None,
         })
     }
 }

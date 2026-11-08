@@ -1496,5 +1496,18 @@
   "schedule.title": "指定時刻に開始",
   "meter.clip": "クリッピング（音が大きすぎます）。クリックでリセット",
   "meter.label": "音量レベル",
-  "meter.title": "ピーク{peak} dBFS・ラウドネス{lufs} LUFS"
+  "meter.title": "ピーク{peak} dBFS・ラウドネス{lufs} LUFS",
+  "log.clip_audio": "動画#{id}「{title}」：音声のみ、画像付きで変換（{picture}）{resume}",
+  "log.audio_cover_failed": "動画#{id}「{title}」：カバー画像を読み込めませんでした（{error}）。別の画像を表示します。",
+  "log.audio_picture_failed": "動画#{id}「{title}」：音声用の画像を描画できませんでした（{error}）。よりシンプルな画像を表示します。",
+  "settings.channel.audio": "音声ファイル",
+  "settings.channel.audio_hint": "映像のない音楽や音声（MP3、FLAC、Ogg、Opus、M4A、WAVファイル、SoundCloudのリンク）は、音声から作った画像付きで放送します。",
+  "settings.channel.audio_visual": "音声の画像",
+  "settings.channel.audio_visual_hint": "タイトルとアーティストはファイルのタグ（またはサイト）から取得します。カバー画像：ファイルの画像またはサイトのサムネイル。",
+  "settings.channel.audio_visual_auto": "カバー画像（なければ波形）",
+  "settings.channel.audio_visual_cover": "カバー画像",
+  "settings.channel.audio_visual_waveform": "波形",
+  "settings.channel.audio_visual_spectrum": "スペクトラムバー",
+  "settings.channel.audio_visual_off": "オフ（タイトルとアーティスト）",
+  "settings.channel.audio_visual_saved": "保存しました。次の音声ファイルから適用されます。"
 }

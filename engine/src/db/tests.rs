@@ -465,6 +465,7 @@ fn settings_serialize_with_camel_case_keys() {
             "maxHeight": 0,
             "slateFrameStyle": "dim",
             "slateBackgroundAll": false,
+            "audioVisual": "auto",
         })
     );
     // Keys are emitted in the same order as the TS object.
@@ -518,7 +519,8 @@ fn settings_serialize_with_camel_case_keys() {
             "oscHost",
             "oscPort",
             "oscTemplate",
-            "oscRepeatS"
+            "oscRepeatS",
+            "audioVisual"
         ]
     );
 }

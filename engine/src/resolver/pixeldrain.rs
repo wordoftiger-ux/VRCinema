@@ -267,6 +267,7 @@ impl MediaResolver for PixeldrainResolver {
             title: info.name,
             duration_s,
             is_live: false,
+            ..Default::default()
         })
     }
 }

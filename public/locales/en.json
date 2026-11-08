@@ -1514,5 +1514,18 @@
   "schedule.title": "Start at a set time",
   "meter.clip": "Clipping (the sound was too loud) — click to reset",
   "meter.label": "Sound level",
-  "meter.title": "Peak {peak} dBFS · loudness {lufs} LUFS"
+  "meter.title": "Peak {peak} dBFS · loudness {lufs} LUFS",
+  "log.clip_audio": "Video #{id} \"{title}\": audio only, transcoding with a picture ({picture}){resume}",
+  "log.audio_cover_failed": "Video #{id} \"{title}\": the cover could not be read ({error}). Another picture is shown.",
+  "log.audio_picture_failed": "Video #{id} \"{title}\": the picture for the audio could not be drawn ({error}). A simpler picture is shown.",
+  "settings.channel.audio": "Audio files",
+  "settings.channel.audio_hint": "Music and other sound without a picture (MP3, FLAC, Ogg, Opus, M4A, WAV files, SoundCloud links) airs with a picture made from it.",
+  "settings.channel.audio_visual": "Picture for audio",
+  "settings.channel.audio_visual_hint": "Title and artist come from the file’s tags (or the site). Cover art: the file’s picture or the site’s thumbnail.",
+  "settings.channel.audio_visual_auto": "Cover art, else waveform",
+  "settings.channel.audio_visual_cover": "Cover art",
+  "settings.channel.audio_visual_waveform": "Waveform",
+  "settings.channel.audio_visual_spectrum": "Spectrum bars",
+  "settings.channel.audio_visual_off": "Off (title and artist)",
+  "settings.channel.audio_visual_saved": "Saved. It applies from the next audio file."
 }

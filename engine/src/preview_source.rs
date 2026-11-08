@@ -352,6 +352,12 @@ pub fn content_type(file: &Path) -> &'static str {
         "mov" => "video/quicktime",
         "ts" | "m2ts" => "video/mp2t",
         "ogv" => "video/ogg",
+        // Audio files (the Preview's player plays them too).
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "m4a" | "aac" => "audio/mp4",
+        "wav" => "audio/wav",
         _ => "application/octet-stream",
     }
 }
@@ -428,6 +434,8 @@ mod tests {
         assert!(!is_disk_source("https://youtu.be/x"));
         assert_eq!(content_type(Path::new("a/B.MP4")), "video/mp4");
         assert_eq!(content_type(Path::new("a.webm")), "video/webm");
+        assert_eq!(content_type(Path::new("a.MP3")), "audio/mpeg");
+        assert_eq!(content_type(Path::new("a.opus")), "audio/ogg");
         assert_eq!(content_type(Path::new("a")), "application/octet-stream");
     }
 
@@ -467,6 +475,7 @@ mod tests {
                 title: String::new(),
                 duration_s: None,
                 is_live: false,
+                ..Default::default()
             })
         }
         async fn download_preview(

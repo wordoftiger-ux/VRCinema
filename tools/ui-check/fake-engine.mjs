@@ -172,6 +172,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     oscPort: 9000,
     oscTemplate: '▶ {title} — {added}',
     oscRepeatS: 0,
+    audioVisual: 'auto',
     tickerEnabled: true,
     tickerMode: 'interval',
     tickerIntervalS: 60,

@@ -1550,5 +1550,18 @@
   "schedule.title": "Start o wybranej godzinie",
   "meter.clip": "Przesterowanie (dźwięk za głośny) — kliknij, by wyzerować",
   "meter.label": "Poziom dźwięku",
-  "meter.title": "Szczyt {peak} dBFS · głośność {lufs} LUFS"
+  "meter.title": "Szczyt {peak} dBFS · głośność {lufs} LUFS",
+  "log.clip_audio": "Film #{id} „{title}”: tylko dźwięk, konwersja z obrazem ({picture}){resume}",
+  "log.audio_cover_failed": "Film #{id} „{title}”: nie udało się odczytać okładki ({error}). Pokazany jest inny obraz.",
+  "log.audio_picture_failed": "Film #{id} „{title}”: nie udało się narysować obrazu do dźwięku ({error}). Pokazany jest prostszy obraz.",
+  "settings.channel.audio": "Pliki dźwiękowe",
+  "settings.channel.audio_hint": "Muzyka i inny dźwięk bez obrazu (pliki MP3, FLAC, Ogg, Opus, M4A, WAV, linki SoundCloud) leci z obrazem utworzonym z dźwięku.",
+  "settings.channel.audio_visual": "Obraz do dźwięku",
+  "settings.channel.audio_visual_hint": "Tytuł i wykonawca pochodzą ze znaczników pliku (albo ze strony). Okładka: obraz z pliku albo miniatura ze strony.",
+  "settings.channel.audio_visual_auto": "Okładka, inaczej fala",
+  "settings.channel.audio_visual_cover": "Okładka",
+  "settings.channel.audio_visual_waveform": "Fala dźwięku",
+  "settings.channel.audio_visual_spectrum": "Słupki widma",
+  "settings.channel.audio_visual_off": "Wyłączony (tytuł i wykonawca)",
+  "settings.channel.audio_visual_saved": "Zapisano. Działa od następnego pliku dźwiękowego."
 }

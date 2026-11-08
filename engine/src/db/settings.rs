@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::i18n::{Lang, Msg};
 use crate::pipeline::advanced::{AdvancedPatch, AdvancedSettings};
+use crate::pipeline::audio_visual::{AudioPatch, AudioSettings};
 use crate::pipeline::slate_look::{SlateLookPatch, SlateLookSettings};
 use crate::pipeline::ticker::{
     INTERVALS_S, MAX_MESSAGE_CHARS, MAX_MESSAGES, TickerMode, TickerQr, TickerSettings, TickerSpeed,
@@ -77,6 +78,9 @@ pub struct ChannelSettings {
     /// Settings → Channel → VRChat: the film on air in the owner's chatbox (`oscEnabled`, ...).
     #[serde(flatten)]
     pub osc: crate::osc::OscSettings,
+    /// The picture of audio-only sources (`audioVisual`).
+    #[serde(flatten)]
+    pub audio: AudioSettings,
 }
 
 fn serialize_lang<S: Serializer>(lang: &Lang, s: S) -> Result<S::Ok, S::Error> {
@@ -107,6 +111,7 @@ impl Default for ChannelSettings {
             slate_look: SlateLookSettings::default(),
             uploads: UploadSettings::default(),
             osc: crate::osc::OscSettings::default(),
+            audio: AudioSettings::default(),
         }
     }
 }
@@ -154,6 +159,7 @@ pub struct SettingsPatch {
     pub slate_look: SlateLookPatch,
     pub uploads: UploadPatch,
     pub osc: crate::osc::OscPatch,
+    pub audio: AudioPatch,
 }
 
 fn normalize_domain(v: &str) -> String {
@@ -328,6 +334,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
                 .or_else(|| crate::pipeline::advanced::sanitize_key(key, value, &mut out.advanced))
                 .or_else(|| crate::uploads::sanitize_key(key, value, &mut out.uploads))
                 .or_else(|| crate::osc::sanitize_key(key, value, &mut out.osc))
+                .or_else(|| crate::pipeline::audio_visual::sanitize_key(key, value, &mut out.audio))
             {
                 Some(result) => result?,
                 None => return Err(Msg::error("unknown_setting").arg("key", key)),
@@ -456,6 +463,7 @@ impl<'a> SettingsRepo<'a> {
                     if !s.slate_look.read_stored(&key, &value)
                         && !s.uploads.read_stored(&key, &value)
                         && !s.osc.read_stored(&key, &value)
+                        && !s.audio.read_stored(&key, &value)
                     {
                         s.advanced.read_stored(&key, &value);
                     }
@@ -563,6 +571,9 @@ impl<'a> SettingsRepo<'a> {
                 stmt.execute(params![channel_id, key, value])?;
             }
             for (key, value) in patch.osc.entries() {
+                stmt.execute(params![channel_id, key, value])?;
+            }
+            for (key, value) in patch.audio.entries() {
                 stmt.execute(params![channel_id, key, value])?;
             }
         }

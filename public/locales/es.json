@@ -1532,5 +1532,18 @@
   "schedule.title": "Iniciar a una hora fija",
   "meter.clip": "Saturación (el sonido estaba demasiado alto): haga clic para restablecer",
   "meter.label": "Nivel de sonido",
-  "meter.title": "Pico {peak} dBFS · sonoridad {lufs} LUFS"
+  "meter.title": "Pico {peak} dBFS · sonoridad {lufs} LUFS",
+  "log.clip_audio": "Video #{id} \"{title}\": solo audio, conversión con imagen ({picture}){resume}",
+  "log.audio_cover_failed": "Video #{id} \"{title}\": no se pudo leer la portada ({error}). Se muestra otra imagen.",
+  "log.audio_picture_failed": "Video #{id} \"{title}\": no se pudo dibujar la imagen del audio ({error}). Se muestra una imagen más simple.",
+  "settings.channel.audio": "Archivos de audio",
+  "settings.channel.audio_hint": "La música y otros sonidos sin imagen (archivos MP3, FLAC, Ogg, Opus, M4A, WAV, enlaces de SoundCloud) se emiten con una imagen creada a partir del sonido.",
+  "settings.channel.audio_visual": "Imagen para el audio",
+  "settings.channel.audio_visual_hint": "El título y el artista vienen de las etiquetas del archivo (o del sitio). Portada: la imagen del archivo o la miniatura del sitio.",
+  "settings.channel.audio_visual_auto": "Portada; si no, forma de onda",
+  "settings.channel.audio_visual_cover": "Portada",
+  "settings.channel.audio_visual_waveform": "Forma de onda",
+  "settings.channel.audio_visual_spectrum": "Barras de espectro",
+  "settings.channel.audio_visual_off": "Desactivada (título y artista)",
+  "settings.channel.audio_visual_saved": "Guardado. Se aplica desde el próximo archivo de audio."
 }

@@ -14,12 +14,18 @@ use crate::db::{AddedBy, ChannelSettings, ItemStatus, QueueItem, QueueRepo, Sett
 use crate::i18n::{Lang, Msg};
 use crate::live::LiveValue;
 use crate::pipeline::advanced::AdvancedSettings;
+use crate::pipeline::audio_visual::{
+    AudioLook, CoverSource, Picture, PreparedVisual, VisualJob, prepare as prepare_visual,
+    wants_cover,
+};
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{
     ClipArgsOptions, ClipExtras, MAX_HEIGHT, RateLimit, ReadRate, build_clip_args_ext, clip_fades,
     height_caps, light_profile,
 };
-use crate::pipeline::probe::{ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video};
+use crate::pipeline::probe::{
+    AudioTags, ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video,
+};
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::pipeline::slate_look::{Backdrop, backdrop_source, text_shadow};
 use crate::pipeline::slates::{FontChoice, font_for, qr_image, request_url, system_fonts_dir};
@@ -762,6 +768,7 @@ async fn probe_download(
         title: String::new(),
         duration_s,
         is_live: false,
+        ..Default::default()
     };
     let info = prober
         .probe(&d.ffprobe_path, &stream.inputs)
@@ -1084,6 +1091,104 @@ async fn run_ticker(
     slow.store(false, Ordering::Relaxed);
 }
 
+/// Log entry written when an audio-only clip starts, with its picture.
+pub fn audio_start_line(item: &QueueItem, picture: Picture, start_at_s: f64) -> Msg {
+    let resume = if start_at_s > 0.0 {
+        Msg::new("log.clip_resume").arg("seconds", (start_at_s + 0.5).floor() as i64)
+    } else {
+        Msg::text("")
+    };
+    Msg::new("log.clip_audio")
+        .arg("id", item.id)
+        .arg("title", &item.title)
+        .arg("picture", picture.as_str())
+        .arg_msg("resume", resume)
+}
+
+/// What the picture of an audio-only clip is made of.
+struct AudioStart<'a> {
+    item: &'a QueueItem,
+    tags: &'a AudioTags,
+    stream: &'a ResolvedStream,
+    look: AudioLook,
+    /// The height of the converted picture.
+    height: u32,
+    out_dir: &'a Path,
+    /// A viewer's link: the thumbnail address is checked like the media's.
+    viewer: bool,
+}
+
+/// The picture of an audio-only clip: the title and artist from the tags (else the queue's
+/// title and the site's artist), the cover from the file or the site's thumbnail. What goes
+/// wrong is logged; the picture is then simpler, the clip still starts.
+async fn prepare_audio_visual(d: &ClipFactoryDeps, a: &AudioStart<'_>) -> PreparedVisual {
+    let one_line = |s: &str| s.replace(['\r', '\n'], " ").trim().to_string();
+    let title = if a.tags.title.is_empty() {
+        one_line(&a.item.title)
+    } else {
+        a.tags.title.clone()
+    };
+    let artist = if a.tags.artist.is_empty() {
+        a.stream.artist.as_deref().map(one_line).unwrap_or_default()
+    } else {
+        a.tags.artist.clone()
+    };
+    let cover = match (a.tags.cover_stream, &a.stream.thumbnail) {
+        (Some(stream), _) => a.stream.inputs.first().map(|input| CoverSource::Embedded {
+            input: input.clone(),
+            stream,
+        }),
+        (None, Some(thumbnail)) if wants_cover(a.look) => {
+            let url = if a.viewer {
+                check_media_url(thumbnail, d.host_resolver.as_ref())
+                    .await
+                    .ok()
+            } else {
+                Some(thumbnail.clone())
+            };
+            // No headers: the media's may carry a site's cookies.
+            url.map(|url| {
+                CoverSource::Thumbnail(StreamInput {
+                    url,
+                    headers: Vec::new(),
+                })
+            })
+        }
+        _ => None,
+    };
+    let font = font_for(
+        Lang::En,
+        &format!("{title} {artist}"),
+        &d.font_file,
+        &system_fonts_dir(),
+    );
+    let font_name = font
+        .file()
+        .is_file()
+        .then(|| place_ticker_font(font.file(), &d.clips_dir).ok())
+        .flatten();
+    let visual = prepare_visual(VisualJob {
+        ffmpeg: &d.ffmpeg_path,
+        out_dir: a.out_dir,
+        look: a.look,
+        height: a.height,
+        title: &title,
+        artist: &artist,
+        font: font_name.as_deref(),
+        cover,
+    })
+    .await;
+    if let Some(log) = &d.log {
+        for (key, error) in &visual.problems {
+            log(Msg::new(key)
+                .arg("id", a.item.id)
+                .arg("title", &a.item.title)
+                .arg_msg("error", error.clone()));
+        }
+    }
+    visual
+}
+
 async fn start_clip(
     factory: RealClipFactory,
     item: QueueItem,
@@ -1138,6 +1243,25 @@ async fn start_clip(
     // Settings → Advanced, maximum output resolution (automatic: 1080; 720 for a converted
     // picture in the light profile).
     let (convert_cap, copy_cap) = height_caps(settings.advanced.max_height, light);
+    // An audio-only source airs with a picture made from its sound (spec 2026-11-08).
+    let visual = match &info.audio {
+        Some(tags) if stream.inputs.len() == 1 => Some(
+            prepare_audio_visual(
+                &d,
+                &AudioStart {
+                    item: &item,
+                    tags,
+                    stream: &stream,
+                    look: settings.audio.audio_visual,
+                    height: convert_cap,
+                    out_dir: &out_dir,
+                    viewer,
+                },
+            )
+            .await,
+        ),
+        _ => None,
+    };
     let ticker = if settings.ticker.enabled {
         prepare_ticker(
             &d,
@@ -1170,6 +1294,7 @@ async fn start_clip(
     let extras = ClipExtras {
         max_height: Some(convert_cap),
         light,
+        audio_visual: visual.as_ref().map(|v| v.graph.clone()),
         ..clip_extras(adv, clip_len_s, subs.clone(), start_at_s)
     };
     // Fades are drawn on a converted picture, so they force the conversion like the ticker.
@@ -1187,12 +1312,17 @@ async fn start_clip(
     };
     let mode = capped_mode(mode, &info, copy_cap);
     // Without the ticker and the subtitles (the fallback when ffmpeg cannot draw them).
+    // The plain restart runs in another folder: an audio picture there uses no file.
     let plain_extras = ClipExtras {
         subtitles: None,
+        audio_visual: visual.as_ref().map(|v| v.plain_graph.clone()),
         ..extras.clone()
     };
     if let Some(log) = &d.log {
-        log(clip_start_line(&item, mode, &info, start_at_s));
+        log(match &visual {
+            Some(v) => audio_start_line(&item, v.picture, start_at_s),
+            None => clip_start_line(&item, mode, &info, start_at_s),
+        });
     }
     let options = ClipArgsOptions {
         inputs: stream.inputs,
@@ -1273,7 +1403,8 @@ async fn start_clip(
                 }
             });
             let args = build_clip_args_ext(&options, &extras);
-            let cwd = subs.as_ref().map(|_| out_dir.clone());
+            // The audio picture too ([`STILL_FILE`] and its texts).
+            let cwd = (subs.is_some() || visual.is_some()).then(|| out_dir.clone());
             let seg = ClipSegmenter::start(&d.ffmpeg_path, args, out_dir.clone(), cwd);
             (Arc::new(seg), None, fallback)
         }
@@ -1756,6 +1887,7 @@ mod tests {
                 title: "plik".into(),
                 duration_s: Some(6.0),
                 is_live: false,
+                ..Default::default()
             })
         }
     }
@@ -1874,6 +2006,7 @@ mod tests {
                 title: "film".into(),
                 duration_s: Some(6.0),
                 is_live: false,
+                ..Default::default()
             })
         }
     }
@@ -2467,6 +2600,100 @@ mod tests {
 
         handle.dispose();
         assert!(wait_until(|| !out_dir.exists(), Duration::from_secs(10)).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_audio_file_airs_with_its_cover_and_can_be_resumed() {
+        let (Some(ffmpeg), Some(ffprobe)) = (bin("ffmpeg"), bin("ffprobe")) else {
+            eprintln!("skip: bin/ffmpeg or bin/ffprobe missing");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("piosenka 1.flac");
+        let args: Vec<OsString> = [
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:duration=5",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=200x200:rate=1:duration=1",
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-c:v",
+            "png",
+            "-disposition:v",
+            "attached_pic",
+            "-c:a",
+            "flac",
+            "-metadata",
+            "ARTIST=Zespół",
+            "-t",
+            "5",
+        ]
+        .iter()
+        .map(OsString::from)
+        .chain([source.as_os_str().to_owned()])
+        .collect();
+        let made = crate::process::run_process(&ffmpeg, &args, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(made.code, Some(0), "{}", made.stderr);
+        let f = fixture(Some(source), dir, ffmpeg, ffprobe);
+
+        for (n, start_at_s) in [(1, 0.0), (2, 2.0)] {
+            let mut handle = f
+                .factory
+                .create(f.item.clone(), start_at_s, 0)
+                .await
+                .unwrap();
+            let out_dir = f.clips.join(format!("{}-0-{n}", f.item.id));
+            assert!(out_dir.join("cover.png").is_file(), "the cover was read");
+            assert!(
+                out_dir.join("bg.png").is_file(),
+                "the still picture was drawn"
+            );
+            assert!(!handle.copies_video());
+            let mut segments = Vec::new();
+            let finished = wait_until(
+                || {
+                    segments.extend(handle.poll());
+                    handle.state() != SegmenterState::Running
+                },
+                Duration::from_secs(60),
+            )
+            .await;
+            assert!(finished);
+            segments.extend(handle.poll());
+            assert_eq!(handle.state(), SegmenterState::Done, "{:?}", handle.error());
+            // 4 s segments of 5 s (3 s after the resume).
+            assert_eq!(
+                segments.len(),
+                if start_at_s > 0.0 { 1 } else { 2 },
+                "{segments:?}"
+            );
+            handle.dispose();
+        }
+        let lines = f.lines.lock().unwrap().clone();
+        assert_eq!(
+            lines,
+            [
+                format!(
+                    "Video #{} \"Test\": audio only, transcoding with a picture (cover)",
+                    f.item.id
+                ),
+                format!(
+                    "Video #{} \"Test\": audio only, transcoding with a picture (cover), resuming from 2 s",
+                    f.item.id
+                ),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

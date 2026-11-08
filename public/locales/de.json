@@ -1514,5 +1514,18 @@
   "schedule.title": "Zu einer festen Zeit starten",
   "meter.clip": "Übersteuerung (Ton zu laut) – zum Zurücksetzen klicken",
   "meter.label": "Tonpegel",
-  "meter.title": "Spitze {peak} dBFS · Lautheit {lufs} LUFS"
+  "meter.title": "Spitze {peak} dBFS · Lautheit {lufs} LUFS",
+  "log.clip_audio": "Video #{id} „{title}“: nur Ton, Konvertierung mit Bild ({picture}){resume}",
+  "log.audio_cover_failed": "Video #{id} „{title}“: Das Cover konnte nicht gelesen werden ({error}). Ein anderes Bild wird gezeigt.",
+  "log.audio_picture_failed": "Video #{id} „{title}“: Das Bild zum Ton konnte nicht gezeichnet werden ({error}). Ein einfacheres Bild wird gezeigt.",
+  "settings.channel.audio": "Audiodateien",
+  "settings.channel.audio_hint": "Musik und anderer Ton ohne Bild (MP3-, FLAC-, Ogg-, Opus-, M4A-, WAV-Dateien, SoundCloud-Links) läuft mit einem Bild, das aus dem Ton entsteht.",
+  "settings.channel.audio_visual": "Bild zum Ton",
+  "settings.channel.audio_visual_hint": "Titel und Interpret stammen aus den Tags der Datei (oder von der Website). Cover: das Bild der Datei oder das Vorschaubild der Website.",
+  "settings.channel.audio_visual_auto": "Cover, sonst Wellenform",
+  "settings.channel.audio_visual_cover": "Cover",
+  "settings.channel.audio_visual_waveform": "Wellenform",
+  "settings.channel.audio_visual_spectrum": "Spektrumbalken",
+  "settings.channel.audio_visual_off": "Aus (Titel und Interpret)",
+  "settings.channel.audio_visual_saved": "Gespeichert. Gilt ab der nächsten Audiodatei."
 }

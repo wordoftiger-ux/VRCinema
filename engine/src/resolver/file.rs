@@ -86,6 +86,7 @@ impl MediaResolver for FileResolver {
             }],
             duration_s: None,
             is_live: false,
+            ..Default::default()
         })
     }
 }

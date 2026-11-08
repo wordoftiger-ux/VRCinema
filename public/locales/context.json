@@ -1460,5 +1460,18 @@
   "schedule.title": "New interface: title of the dialog that sets when a queued video starts.",
   "meter.clip": "New interface, Channel view: label and tooltip of the red light of the level meter; it lights for 3 s when the sound reaches full scale.",
   "meter.label": "New interface, Channel view: screen-reader name of the level meter beside the Preview and On air (peak bars, loudness in LUFS, clipping light).",
-  "meter.title": "New interface, Channel view: tooltip of the level meter; dBFS and LUFS are units, keep them."
+  "meter.title": "New interface, Channel view: tooltip of the level meter; dBFS and LUFS are units, keep them.",
+  "log.clip_audio": "Log entry (Settings, Log tab; the log file on disk keeps the English text). An audio-only file or link (no video track) starts airing; the program makes a picture for it. {picture} is a technical word (cover, waveform, spectrum, plain); {resume} is log.clip_resume or empty.",
+  "log.audio_cover_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The cover art of an audio file (or the site's thumbnail) could not be read; {error} is ffmpeg's message.",
+  "log.audio_picture_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). The picture shown during an audio file (background, cover, title) could not be drawn; {error} is ffmpeg's message.",
+  "settings.channel.audio": "New interface, Settings view, Channel: title of the block about audio-only files and links (no video track). Max ~30 characters.",
+  "settings.channel.audio_hint": "New interface, Settings view, Channel: hint under the block title. File types and SoundCloud are names, keep them.",
+  "settings.channel.audio_visual": "New interface, Settings view, Channel: label of a list (what picture airs during an audio file). Max ~40 characters.",
+  "settings.channel.audio_visual_hint": "New interface, Settings view, Channel: hint. Tags are the metadata inside a music file; the thumbnail is the picture a site such as SoundCloud gives.",
+  "settings.channel.audio_visual_auto": "New interface, Settings view, Channel: list option, the default (the cover art when there is one, otherwise the waveform). Max ~30 characters.",
+  "settings.channel.audio_visual_cover": "New interface, Settings view, Channel: list option (the album cover picture). Max ~30 characters.",
+  "settings.channel.audio_visual_waveform": "New interface, Settings view, Channel: list option (a moving line drawn from the sound). Max ~30 characters.",
+  "settings.channel.audio_visual_spectrum": "New interface, Settings view, Channel: list option (moving frequency bars). Max ~30 characters.",
+  "settings.channel.audio_visual_off": "New interface, Settings view, Channel: list option (no picture effect: the plain dark background with the title and artist). Max ~30 characters.",
+  "settings.channel.audio_visual_saved": "New interface, Settings view, Channel: confirmation."
 }
