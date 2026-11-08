@@ -246,6 +246,7 @@ mod tests {
                 title: self.0.into(),
                 duration_s: Some(1.0),
                 is_live: false,
+                ..Default::default()
             })
         }
     }

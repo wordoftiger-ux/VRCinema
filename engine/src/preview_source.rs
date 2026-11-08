@@ -465,6 +465,7 @@ mod tests {
                 title: String::new(),
                 duration_s: None,
                 is_live: false,
+                ..Default::default()
             })
         }
         async fn download_preview(

@@ -898,6 +898,7 @@ mod tests {
                     title: "film".into(),
                     duration_s: Some(40.0),
                     is_live: false,
+                    ..Default::default()
                 })
             }
         }

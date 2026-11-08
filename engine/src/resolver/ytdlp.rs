@@ -191,6 +191,17 @@ pub fn parse_ytdlp_resolve(j: &Value) -> Result<ResolvedStream, ResolveError> {
         title: non_empty_title(j.get("title")),
         duration_s: num(j.get("duration")),
         is_live: is_live(j),
+        thumbnail: j
+            .get("thumbnail")
+            .and_then(Value::as_str)
+            .filter(|t| t.starts_with("http://") || t.starts_with("https://"))
+            .map(str::to_string),
+        artist: ["artist", "creator", "uploader"]
+            .iter()
+            .filter_map(|k| j.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .find(|a| !a.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -790,6 +801,31 @@ mod tests {
                 headers: vec![("Referer".into(), "https://cda.pl".into())],
             }]
         );
+    }
+
+    #[test]
+    fn an_audio_only_site_gives_its_thumbnail_and_artist() {
+        // SoundCloud: one audio format, the uploader as the artist.
+        let r = parse_ytdlp_resolve(&json!({
+            "title": "Track", "duration": 200, "url": "https://cf-media.sndcdn.com/a.mp3",
+            "acodec": "mp3", "vcodec": "none", "uploader": " DJ ",
+            "thumbnail": "https://i1.sndcdn.com/artworks-t500x500.jpg"
+        }))
+        .unwrap();
+        assert_eq!(r.inputs.len(), 1);
+        assert_eq!(
+            r.thumbnail.as_deref(),
+            Some("https://i1.sndcdn.com/artworks-t500x500.jpg")
+        );
+        assert_eq!(r.artist.as_deref(), Some("DJ"));
+        // The artist wins over the uploader; only web addresses count as thumbnails.
+        let r = parse_ytdlp_resolve(&json!({
+            "url": "https://x/a.m4a", "artist": "Band", "uploader": "Label - Topic",
+            "thumbnail": "file:///C:/x.jpg"
+        }))
+        .unwrap();
+        assert_eq!(r.artist.as_deref(), Some("Band"));
+        assert_eq!(r.thumbnail, None);
     }
 
     #[test]

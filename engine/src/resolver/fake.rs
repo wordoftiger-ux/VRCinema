@@ -147,6 +147,7 @@ impl MediaResolver for FakeResolver {
                 title: meta.title.clone(),
                 duration_s: meta.duration_s,
                 is_live: meta.is_live,
+                ..Default::default()
             }),
             _ => Err(ResolveError::new("fałszywy resolver nie odtwarza")),
         }

@@ -42,6 +42,7 @@ impl MediaResolver for PathResolver {
             title: url.to_string(),
             duration_s: Some(6.0),
             is_live: false,
+            ..Default::default()
         })
     }
 }

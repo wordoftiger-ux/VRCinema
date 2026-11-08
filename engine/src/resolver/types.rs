@@ -19,12 +19,16 @@ pub struct StreamInput {
 }
 
 /// A source resolved into concrete inputs (video, optionally a separate audio input).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedStream {
     pub inputs: Vec<StreamInput>,
     pub title: String,
     pub duration_s: Option<f64>,
     pub is_live: bool,
+    /// The site's picture of the media (yt-dlp's `thumbnail`): the cover of an audio-only one.
+    pub thumbnail: Option<String>,
+    /// Who made it, as the site says (yt-dlp's `artist`, else `uploader`).
+    pub artist: Option<String>,
 }
 
 /// What the resolver knows about a requested source before it is queued.
