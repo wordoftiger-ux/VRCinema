@@ -367,6 +367,11 @@ pub struct ClipExtras {
     /// The light profile ([`light_profile`]): libx264 `superfast` and, without a peak limit of
     /// the owner, [`RateLimit::LIGHT`].
     pub light: bool,
+    /// An audio-only source: the filters that make its picture from `[0:a:0]` (see
+    /// `audio_visual::clip_graph`; its last output unlabelled). The picture then takes the
+    /// converted chain (cap, ticker, fades, VA-API upload) in `-filter_complex`; ignored when
+    /// the video is copied.
+    pub audio_visual: Option<String>,
 }
 
 /// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
@@ -503,8 +508,14 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
         );
         format!("{}:a:0", o.inputs.len())
     };
-    push_all(&mut args, &["-map", "0:v:0", "-map", &audio_map]);
-    if add_silence {
+    let visual = x
+        .audio_visual
+        .as_ref()
+        .filter(|_| o.mode == VideoMode::Transcode);
+    let video_map = if visual.is_some() { "[vout]" } else { "0:v:0" };
+    push_all(&mut args, &["-map", video_map, "-map", &audio_map]);
+    // The picture made from the sound ends with it (not a frame later).
+    if add_silence || visual.is_some() {
         push_all(&mut args, &["-shortest"]);
     }
 
@@ -546,7 +557,16 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
             if vaapi {
                 filters.push(VAAPI_UPLOAD.to_string());
             }
-            push_all(&mut args, &["-vf", &filters.join(",")]);
+            match visual {
+                Some(graph) => push_all(
+                    &mut args,
+                    &[
+                        "-filter_complex",
+                        &format!("{graph},{}[vout]", filters.join(",")),
+                    ],
+                ),
+                None => push_all(&mut args, &["-vf", &filters.join(",")]),
+            }
             let light = x.light && o.encoder == VideoEncoder::Libx264;
             let rate = x.rate.unwrap_or(if light {
                 RateLimit::LIGHT
@@ -1155,6 +1175,58 @@ mod tests {
         let args = build(&o);
         assert!(!args.contains(&"-vaapi_device".to_string()));
         assert!(!value_after(&args, "-vf", 0).unwrap().contains("hwupload"));
+    }
+
+    #[test]
+    fn an_audio_only_source_gets_its_picture_from_a_complex_graph() {
+        let mut o = opts();
+        o.mode = VideoMode::Transcode;
+        o.encoder = VideoEncoder::H264Vaapi;
+        o.segment_seconds = 1;
+        o.info = VideoInfo {
+            has_audio: true,
+            audio: Some(Default::default()),
+            ..VideoInfo::default()
+        };
+        o.overlay = Some("drawbox=x=0".into());
+        let x = ClipExtras {
+            fade_in_s: Some(1.0),
+            loudness_target: Some(-16),
+            audio_visual: Some("[0:a:0]showwaves=s=8x8".into()),
+            ..ClipExtras::default()
+        };
+        let args = strs(&build_clip_args_ext(&o, &x));
+        assert_eq!(value_after(&args, "-map", 0).as_deref(), Some("[vout]"));
+        assert_eq!(value_after(&args, "-map", 1).as_deref(), Some("0:a:0"));
+        assert_eq!(count(&args, "-vf"), 0);
+        assert_eq!(
+            value_after(&args, "-filter_complex", 0).as_deref(),
+            Some(
+                "[0:a:0]showwaves=s=8x8,scale=-2:'min(1080,ih)':out_color_matrix=bt709:\
+                 out_range=tv,format=yuv420p,drawbox=x=0,format=yuv420p,fade=t=in:st=0:d=1,\
+                 format=nv12,hwupload[vout]"
+            )
+        );
+        // The sound keeps its own chain; the picture still gets a key frame every segment.
+        let af = value_after(&args, "-af", 0).unwrap();
+        assert!(af.starts_with("aresample=async=1,dynaudnorm"), "{af}");
+        assert!(af.ends_with("afade=t=in:st=0:d=1"), "{af}");
+        assert_eq!(
+            value_after(&args, "-force_key_frames", 0).as_deref(),
+            Some("expr:gte(t,n_forced*1)")
+        );
+        assert_eq!(value_after(&args, "-ar", 0).as_deref(), Some("48000"));
+        assert_eq!(value_after(&args, "-ac", 0).as_deref(), Some("2"));
+        assert_eq!(
+            count(&args, "-shortest"),
+            1,
+            "the picture ends with the sound"
+        );
+        // Never with a copied picture.
+        o.mode = VideoMode::Copy;
+        let args = strs(&build_clip_args_ext(&o, &x));
+        assert_eq!(value_after(&args, "-map", 0).as_deref(), Some("0:v:0"));
+        assert_eq!(count(&args, "-filter_complex"), 0);
     }
 
     #[test]

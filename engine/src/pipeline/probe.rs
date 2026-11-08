@@ -38,6 +38,19 @@ pub struct VideoInfo {
     /// The longest stretch without a key frame in the first [`KEYFRAME_SAMPLE_S`] seconds of
     /// the video; `None`: not measured. A copied video can only be cut at its key frames.
     pub keyframe_gap_s: Option<f64>,
+    /// An audio-only source (no video stream; an attached cover picture is not one): what its
+    /// tags say. `None`: a video.
+    pub audio: Option<AudioTags>,
+}
+
+/// The tags of an audio-only source (empty: not tagged).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioTags {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// The stream index of the attached cover picture, if the file has one.
+    pub cover_stream: Option<i64>,
 }
 
 /// Seconds of the video whose packets are read to measure the key frame spacing.
@@ -210,16 +223,14 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
         .and_then(Value::as_array)
         .map_or(&[], Vec::as_slice);
     let is_type = |s: &Value, t: &str| s.get("codec_type").and_then(Value::as_str) == Some(t);
-    let video = streams
-        .iter()
-        .find(|s| {
-            is_type(s, "video")
-                && !s
-                    .get("disposition")
-                    .and_then(|d| d.get("attached_pic"))
-                    .is_some_and(js_truthy)
-        })
-        .ok_or(ProbeError::NoVideoStream)?;
+    let is_cover = |s: &Value| {
+        s.get("disposition")
+            .and_then(|d| d.get("attached_pic"))
+            .is_some_and(js_truthy)
+    };
+    let Some(video) = streams.iter().find(|s| is_type(s, "video") && !is_cover(s)) else {
+        return audio_only(j, streams);
+    };
 
     let duration = js_number(j.get("format").and_then(|f| f.get("duration")));
     let height = js_number(video.get("height"));
@@ -250,6 +261,58 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
         has_audio: streams.iter().any(|s| is_type(s, "audio")),
         duration_s: (duration.is_finite() && duration > 0.0).then_some(duration),
         keyframe_gap_s: keyframe_gap(j, video),
+        audio: None,
+    })
+}
+
+/// A source without a video stream: audio-only when it has an audio stream (its picture is
+/// made by the clip factory), else [`ProbeError::NoVideoStream`].
+fn audio_only(j: &Value, streams: &[Value]) -> Result<VideoInfo, ProbeError> {
+    let is_type = |s: &Value, t: &str| s.get("codec_type").and_then(Value::as_str) == Some(t);
+    let audio = streams
+        .iter()
+        .find(|s| is_type(s, "audio"))
+        .ok_or(ProbeError::NoVideoStream)?;
+    let format = j.get("format");
+    // Tags of the container (mp3, m4a, flac) or of the audio stream (ogg, opus), any case.
+    let tag = |names: &[&str]| -> String {
+        [format, Some(audio)]
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.get("tags").and_then(Value::as_object))
+            .find_map(|tags| {
+                names.iter().find_map(|name| {
+                    tags.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                        .and_then(|(_, v)| v.as_str())
+                        .map(|s| s.trim().replace(['\r', '\n'], " "))
+                        .filter(|s| !s.is_empty())
+                })
+            })
+            .unwrap_or_default()
+    };
+    let cover_stream = streams
+        .iter()
+        .find(|s| {
+            is_type(s, "video")
+                && s.get("disposition")
+                    .and_then(|d| d.get("attached_pic"))
+                    .is_some_and(js_truthy)
+        })
+        .and_then(|s| s.get("index").and_then(Value::as_i64));
+    let positive = |v: f64| (v.is_finite() && v > 0.0).then_some(v);
+    let duration = positive(js_number(format.and_then(|f| f.get("duration"))))
+        .or_else(|| positive(js_number(audio.get("duration"))));
+    Ok(VideoInfo {
+        has_audio: true,
+        duration_s: duration,
+        audio: Some(AudioTags {
+            title: tag(&["title"]),
+            artist: tag(&["artist", "album_artist", "albumartist", "composer"]),
+            album: tag(&["album"]),
+            cover_stream,
+        }),
+        ..VideoInfo::default()
     })
 }
 
@@ -612,8 +675,50 @@ mod tests {
     }
 
     #[test]
+    fn audio_only_sources_are_analysed_with_their_tags() {
+        // mp3: tags of the container, an attached cover picture.
+        let mp3 = parse_probe_output(&json!({
+            "streams": [
+                {"index": 0, "codec_type": "audio", "codec_name": "mp3"},
+                {"index": 1, "codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}}
+            ],
+            "format": {"duration": "183.5", "tags": {"title": " Tytuł\n", "ARTIST": "Zespół", "album": "Płyta"}}
+        }))
+        .unwrap();
+        assert_eq!(mp3.duration_s, Some(183.5));
+        assert!(mp3.has_audio);
+        assert_eq!(mp3.height, 0);
+        assert_eq!(
+            mp3.audio,
+            Some(AudioTags {
+                title: "Tytuł".into(),
+                artist: "Zespół".into(),
+                album: "Płyta".into(),
+                cover_stream: Some(1),
+            })
+        );
+        // Always converted: there is no picture to copy.
+        assert_eq!(decide_video_mode(&mp3, false), VideoMode::Transcode);
+
+        // opus: tags and duration of the stream, the album artist when there is no artist.
+        let opus = parse_probe_output(&json!({
+            "streams": [{"index": 0, "codec_type": "audio", "duration": "6.5",
+                "tags": {"TITLE": "Ogg", "ALBUM_ARTIST": "Ktoś"}}],
+            "format": {"duration": "N/A"}
+        }))
+        .unwrap();
+        assert_eq!(opus.duration_s, Some(6.5));
+        let tags = opus.audio.unwrap();
+        assert_eq!((tags.title.as_str(), tags.artist.as_str()), ("Ogg", "Ktoś"));
+        assert_eq!(tags.cover_stream, None);
+        // A video stays a video.
+        let video = parse_probe_output(&json!({"streams": [{"codec_type": "video"}]})).unwrap();
+        assert_eq!(video.audio, None);
+    }
+
+    #[test]
     fn errors_when_there_is_no_video() {
-        let err = parse_probe_output(&json!({"streams": [{"codec_type": "audio"}], "format": {}}))
+        let err = parse_probe_output(&json!({"streams": [{"codec_type": "data"}], "format": {}}))
             .unwrap_err();
         assert_eq!(
             err.message().render(crate::i18n::Lang::Pl),
