@@ -187,6 +187,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     viewerUploads: false,
     viewerUploadMaxMb: 50,
     viewerUploadMaxS: 600,
+    viewerUploadAudioMaxS: 600,
     viewerUploadQuotaMb: 2048,
     uploadMbps: 0,
     transitionsEnabled: false,
@@ -451,7 +452,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       channelUrl: p.channelUrl,
       requestUrl: p.requestUrl,
       rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation, viewerLists: s.settings.viewerLists, viewerListMax: s.settings.viewerListMax,
-        uploads: s.settings.viewerUploads ? { maxMb: s.settings.viewerUploadMaxMb, maxDurationS: Math.min(s.settings.maxDurationS, s.settings.viewerUploadMaxS) } : null },
+        uploads: s.settings.viewerUploads ? { maxMb: s.settings.viewerUploadMaxMb, maxDurationS: Math.min(s.settings.maxDurationS, s.settings.viewerUploadMaxS), maxAudioS: Math.min(s.settings.maxDurationS, s.settings.viewerUploadAudioMaxS) } : null },
     };
   }
 
@@ -540,10 +541,10 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     return json(res, 201, { status: pending ? 'pending_approval' : 'queued', item: publicItem(item) });
   }
 
-  // A viewer's video file (POST …/upload, raw body; nick, key and file name in headers) like
-  // the engine: 403 uploads_off with the setting off, a body not starting like an MP4 or
-  // Matroska file 415 upload_not_video; else queued (or pending) with the file name as the
-  // title. Scenario `uploadDelayMs` delays the answer. Each upload is kept in `uploads`.
+  // A viewer's video or audio file (POST …/upload, raw body; nick, key and file name in
+  // headers) like the engine: 403 uploads_off with the setting off, a body not starting like
+  // an MP4, Matroska or ID3-tagged MP3 file 415 upload_not_video; else queued (or pending)
+  // with the file name as the title. Scenario `uploadDelayMs` delays the answer. Each upload is kept in `uploads`.
   async function viewerUpload(req, res) {
     const pl = req.headers['x-vrcinema-lang'] === 'pl';
     const chunks = [];
@@ -557,13 +558,13 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     if (s.uploadDelayMs) await sleep(s.uploadDelayMs);
     if (!s.settings.viewerUploads) return coded(res, 403, 'uploads_off', pl ? 'Wysyłanie plików jest wyłączone na tym kanale.' : 'Sending files is turned off on this channel.');
     const head = bytes.subarray(0, 8).toString('latin1');
-    if (head.slice(4, 8) !== 'ftyp' && !head.startsWith('\x1a\x45\xdf\xa3')) {
-      return coded(res, 415, 'upload_not_video', pl ? 'Ten plik nie jest filmem, który kanał może odtworzyć (działają MP4, WebM, MKV, MOV, AVI i podobne).' : 'This file isn’t a video the channel can play (MP4, WebM, MKV, MOV, AVI and similar work).');
+    if (head.slice(4, 8) !== 'ftyp' && !head.startsWith('\x1a\x45\xdf\xa3') && !head.startsWith('ID3')) {
+      return coded(res, 415, 'upload_not_video', pl ? 'Ten plik nie jest filmem ani plikiem dźwiękowym, które kanał może odtworzyć (działają MP4, WebM, MKV, MOV, AVI, MP3, FLAC, Ogg, M4A, WAV i podobne).' : 'This file isn’t a video or audio file the channel can play (MP4, WebM, MKV, MOV, AVI, MP3, FLAC, Ogg, M4A, WAV and similar work).');
     }
     if (nick && !/^[0-9a-f]{32}$/.test(key ?? '')) return coded(res, 400, 'invalid_device_key', 'The device key must be 32 hexadecimal characters.');
     const badge = key ? { hue: parseInt(key.slice(0, 3), 16) % 360, shape: parseInt(key[3], 16) % 12 } : null;
     const title = String(name ?? 'Video').replace(/^.*[\\/]/, '').replace(/\.[^.]{1,5}$/, '') || 'Video';
-    const item = queued(nextId++, title, { requesterName: nick || null, requesterBadge: badge, sourceUrl: `upload:${'0'.repeat(32)}.mp4` });
+    const item = queued(nextId++, title, { requesterName: nick || null, requesterBadge: badge, sourceUrl: `upload:${'0'.repeat(32)}.${head.startsWith('ID3') ? 'mp3' : 'mp4'}` });
     const pending = s.settings.moderation;
     if (pending) s.pendingItems.push({ ...item, status: 'pending_approval' });
     else s.queue.push(item);

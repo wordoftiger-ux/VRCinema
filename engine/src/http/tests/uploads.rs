@@ -88,8 +88,14 @@ async fn uploads_are_off_by_default_and_the_page_learns_the_limits() {
     let state = u.h.send(get("/api/channels/main/state")).await.json();
     assert_eq!(
         state["rules"]["uploads"],
-        json!({"maxMb": 20, "maxDurationS": 600})
+        json!({"maxMb": 20, "maxDurationS": 600, "maxAudioS": 600})
     );
+    u.allow(UploadPatch {
+        audio_max_s: Some(1800),
+        ..Default::default()
+    });
+    let state = u.h.send(get("/api/channels/main/state")).await.json();
+    assert_eq!(state["rules"]["uploads"]["maxAudioS"], 1800);
     assert!(u.files().is_empty());
 }
 
@@ -184,25 +190,128 @@ async fn the_viewer_limits_apply_before_anything_is_read() {
     assert!(u.files().is_empty());
 }
 
-fn make_mp4(out: &Path) -> bool {
+fn ffmpeg(args: &[&str], out: &Path) -> bool {
     let Some(ffmpeg) = bin("ffmpeg") else {
         return false;
     };
     std::process::Command::new(ffmpeg)
-        .args([
-            "-v",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=s=160x120:d=1",
-        ])
-        .args(["-c:v", "libx264", "-f", "mp4"])
+        .args(["-v", "error", "-y"])
+        .args(args)
         .arg(out)
         .status()
         .unwrap()
         .success()
+}
+
+fn make_mp4(out: &Path) -> bool {
+    ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=s=160x120:d=1",
+            "-c:v",
+            "libx264",
+            "-f",
+            "mp4",
+        ],
+        out,
+    )
+}
+
+/// An MP3 of `seconds` with ID3 tags and a cover picture (an attached PNG).
+fn make_mp3(out: &Path, seconds: u32) -> bool {
+    let cover = out.with_extension("png");
+    ffmpeg(
+        &["-f", "lavfi", "-i", "color=c=red:s=64x64", "-frames:v", "1"],
+        &cover,
+    ) && ffmpeg(
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=f=440:d={seconds}"),
+            "-i",
+            &cover.to_string_lossy(),
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-c:a",
+            "libmp3lame",
+            "-c:v",
+            "png",
+            "-disposition:v",
+            "attached_pic",
+            "-id3v2_version",
+            "3",
+            "-metadata",
+            "title=Tune",
+            "-metadata",
+            "artist=Band",
+            "-f",
+            "mp3",
+        ],
+        out,
+    )
+}
+
+/// Real ffmpeg: an MP3 with cover art is queued as sound only (`.mp3`, its own length limit)
+/// and airs through the audio picture (playback's probe sees sound only with that cover); the
+/// cover never counts as the picture, so the audio limit applies, not the video one.
+#[tokio::test]
+async fn a_real_mp3_with_cover_art_is_queued_as_audio_with_its_own_limit() {
+    let u = harness();
+    let tmp = tempfile::tempdir().unwrap();
+    let song = tmp.path().join("song.mp3");
+    if bin("ffprobe").is_none() || !make_mp3(&song, 12) {
+        eprintln!("no ffmpeg/ffprobe in bin/: skipped");
+        return;
+    }
+    let bytes = std::fs::read(&song).unwrap();
+    // Audio limited to 10 s (the video limit is longer): refused as too long, nothing kept.
+    u.allow(UploadPatch {
+        max_s: Some(600),
+        audio_max_s: Some(10),
+        ..Default::default()
+    });
+    let res = u.h.send(upload(&bytes)).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+    assert_eq!(res.json()["code"], "too_long");
+    assert!(u.files().is_empty(), "{:?}", u.files());
+    // Audio may be longer than videos: accepted.
+    u.allow(UploadPatch {
+        max_s: Some(10),
+        audio_max_s: Some(60),
+        ..Default::default()
+    });
+    let res =
+        u.h.send(upload(&bytes).header("x-upload-name", "C%3A%5Cmusic%5Cmy%20song.mp3"))
+            .await;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.text());
+    let item = &u.h.list(ItemStatus::Queued)[0];
+    assert_eq!(item.title, "my song");
+    assert!(
+        item.source_url.starts_with("upload:") && item.source_url.ends_with(".mp3"),
+        "{}",
+        item.source_url
+    );
+    assert!((item.duration_s.unwrap() - 12.0).abs() < 0.5);
+    let path = u.store.file_of(&item.source_url).expect("the file is kept");
+    assert!(!res.text().contains(&*path.to_string_lossy()));
+    let input = crate::resolver::StreamInput {
+        url: path.to_string_lossy().into_owned(),
+        headers: Vec::new(),
+    };
+    let played = crate::pipeline::probe::probe_video(&bin("ffprobe").unwrap(), &[input])
+        .await
+        .unwrap();
+    let tags = played.audio.expect("plays as sound only");
+    assert_eq!(
+        (tags.title.as_str(), tags.artist.as_str()),
+        ("Tune", "Band")
+    );
+    assert!(tags.cover_stream.is_some(), "with its cover");
 }
 
 /// Real ffprobe: a small MP4 is queued with the viewer's nick, waits for approval, and its file

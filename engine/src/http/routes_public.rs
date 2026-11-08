@@ -102,7 +102,10 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
             "uploads": (settings.uploads.viewer_uploads && state.uploads.is_some()).then(|| json!({
                 "maxMb": settings.uploads.viewer_upload_max_mb.clamp(1, crate::uploads::HARD_MAX_MB),
                 "maxDurationS": num_json(
-                    settings.max_duration_s.min(f64::from(settings.uploads.viewer_upload_max_s)),
+                    settings.max_duration_s.min(f64::from(settings.uploads.max_s(false))),
+                ),
+                "maxAudioS": num_json(
+                    settings.max_duration_s.min(f64::from(settings.uploads.max_s(true))),
                 ),
             })),
         }),

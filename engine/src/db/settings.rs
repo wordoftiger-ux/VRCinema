@@ -72,7 +72,7 @@ pub struct ChannelSettings {
     /// The slates' last frame and the owner's background (`slateFrameStyle`, ...).
     #[serde(flatten)]
     pub slate_look: SlateLookSettings,
-    /// Video files from viewers (`viewerUploads`, ...).
+    /// Video and audio files from viewers (`viewerUploads`, ...).
     #[serde(flatten)]
     pub uploads: UploadSettings,
     /// Settings → Channel → VRChat: the film on air in the owner's chatbox (`oscEnabled`, ...).

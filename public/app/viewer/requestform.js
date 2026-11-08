@@ -1,7 +1,7 @@
 // "Add a video": the link, the nick (with this device's icon) and what the channel accepts.
 // With the owner's "lists" setting on, the link field takes several links (one per line) and
 // playlists; the answer lists what was added and why the rest was left out. With the owner's
-// "video files" setting on, a small video file can be sent instead of a link.
+// "video files" setting on, a small video or audio file can be sent instead of a link.
 
 import { useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
@@ -15,7 +15,8 @@ import { channel, refresh, showToast } from './store.js';
 
 const NICK_MAX = 24;
 export const UPLOAD_ROUTE = '/api/channels/main/upload';
-const UPLOAD_ACCEPT = 'video/*,.mkv,.mov,.mp4,.webm,.avi,.flv,.ts,.mpg,.mpeg,.ogv,.wmv';
+export const UPLOAD_ACCEPT = 'video/*,audio/*,.mkv,.mov,.mp4,.webm,.avi,.flv,.ts,.mpg,.mpeg,.ogv,.wmv,'
+  + '.mp3,.flac,.ogg,.oga,.opus,.m4a,.aac,.wav,.mka,.wma';
 
 /**
  * Sends `file` as the raw body with the viewer's nick and key in headers; `onProgress` gets
@@ -71,8 +72,18 @@ function FileBox({ uploads, file, onFile, busy }) {
               <input type="file" class="sr-only" name="file" accept=${UPLOAD_ACCEPT} disabled=${busy}
                 onChange=${(e) => { onFile(e.target.files?.[0] ?? null); e.target.value = ''; }} /></label>
             <span>${t('viewer.upload_drop')}</span></span>`}
-      <small>${t('viewer.upload_limits', { mb: uploads.maxMb, limit: formatLimit(uploads.maxDurationS) })}</small>
+      <small>${uploadLimits(uploads)}</small>
     </div>`;
+}
+
+/** The file limits: one length for both kinds, or the video's and the audio's. */
+function uploadLimits({ maxMb, maxDurationS, maxAudioS }) {
+  const limit = formatLimit(maxDurationS);
+  const audio = formatLimit(maxAudioS ?? maxDurationS);
+  const limits = audio === limit
+    ? t('viewer.upload_limits', { mb: maxMb, limit })
+    : t('viewer.upload_limits_audio', { mb: maxMb, limit, audio });
+  return sentences(limits, t('viewer.upload_audio_note'));
 }
 
 /** The text of a failed request, in the page's language. */

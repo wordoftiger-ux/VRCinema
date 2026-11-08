@@ -408,12 +408,16 @@ fn settings_serialize_with_camel_case_keys() {
         "viewerUploads",
         "viewerUploadMaxMb",
         "viewerUploadMaxS",
+        "viewerUploadAudioMaxS",
         "viewerUploadQuotaMb",
     ]
     .iter()
     .map(|k| rest.as_object_mut().unwrap().remove(*k).unwrap())
     .collect();
-    assert_eq!(uploads, [json!(false), json!(50), json!(600), json!(2048)]);
+    assert_eq!(
+        uploads,
+        [json!(false), json!(50), json!(600), json!(600), json!(2048)]
+    );
     for (key, expected) in [
         ("oscEnabled", json!(false)),
         ("oscHost", json!("127.0.0.1")),
@@ -514,6 +518,7 @@ fn settings_serialize_with_camel_case_keys() {
             "viewerUploads",
             "viewerUploadMaxMb",
             "viewerUploadMaxS",
+            "viewerUploadAudioMaxS",
             "viewerUploadQuotaMb",
             "oscEnabled",
             "oscHost",
