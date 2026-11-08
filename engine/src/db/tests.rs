@@ -402,8 +402,20 @@ fn slate_language_is_validated_stored_and_read_back() {
 #[test]
 fn settings_serialize_with_camel_case_keys() {
     let v = serde_json::to_value(ChannelSettings::default()).unwrap();
+    // The VRChat keys apart (one `json!` of every key is too deep for the macro).
+    let mut without_osc = v.clone();
+    for (key, expected) in [
+        ("oscEnabled", json!(false)),
+        ("oscHost", json!("127.0.0.1")),
+        ("oscPort", json!(9000)),
+        ("oscTemplate", json!("▶ {title} — {added}")),
+        ("oscRepeatS", json!(0)),
+    ] {
+        let got = without_osc.as_object_mut().unwrap().remove(key);
+        assert_eq!(got, Some(expected), "{key}");
+    }
     assert_eq!(
-        v,
+        without_osc,
         json!({
             "linkMode": "all",
             "allowedDomains": ["youtube.com", "youtu.be", "pixeldrain.com", "cda.pl"],
@@ -443,11 +455,6 @@ fn settings_serialize_with_camel_case_keys() {
             "maxHeight": 0,
             "slateFrameStyle": "dim",
             "slateBackgroundAll": false,
-            "oscEnabled": false,
-            "oscHost": "127.0.0.1",
-            "oscPort": 9000,
-            "oscTemplate": "▶ {title} — {added}",
-            "oscRepeatS": 0,
         })
     );
     // Keys are emitted in the same order as the TS object.
