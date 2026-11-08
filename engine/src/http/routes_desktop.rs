@@ -182,8 +182,17 @@ pub(super) fn tunnel_view(core: &AppCore, lang: Lang) -> Value {
     })
 }
 
-async fn info(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -> ApiResult {
+async fn info(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    ReqLang(lang): ReqLang,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
     let core = state.desktop()?;
+    // The captures of this computer: the window's own session only (never a remote panel).
+    let capture = (state.session(&headers) == Some(SessionKind::Desktop))
+        .then(|| super::routes_capture::capture_info(&state))
+        .flatten();
     let s = core.settings();
     let update = core
         .offered_update()
@@ -215,6 +224,7 @@ async fn info(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -
         "tickerSlow": core.ticker_slow(),
         "alarms": state.alarms.get(),
         "sessionViaTunnel": ctx.via_tunnel,
+        "capture": capture,
     })))
 }
 

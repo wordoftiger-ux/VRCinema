@@ -328,6 +328,7 @@ async fn start_channel_loop(
     monitor: Option<Arc<MonitorWatch>>,
     downloads: &TempDownloads,
     obs: Option<crate::obs::ObsHub>,
+    capture: &Arc<crate::capture::CaptureRegistry>,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -371,6 +372,7 @@ async fn start_channel_loop(
         let public_url = live.public_url.clone();
         let downloads = downloads.clone();
         let obs_priority = live.obs_priority.clone();
+        let capture = Arc::clone(capture);
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -394,7 +396,8 @@ async fn start_channel_loop(
                 // hands out local files as media.
                 check_viewer_media: !fake_resolver,
             })
-            .with_downloads(downloads.clone());
+            .with_downloads(downloads.clone())
+            .with_capture(Arc::clone(&capture));
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
                 Arc::clone(&db),
@@ -530,6 +533,10 @@ pub async fn run(
         Some(Arc::clone(&shared_log)),
     );
     let mut slates = None;
+    // The owner's live captures of this computer: in memory, for this run only.
+    let capture = Arc::new(crate::capture::CaptureRegistry::new(
+        config.ffmpeg_path.clone(),
+    ));
     // The OBS input: its own port (never the HTTP one, so never behind the tunnel).
     let obs_hub = (start_channel && config.obs.enabled).then(crate::obs::ObsHub::default);
     let _obs_task = obs_hub.as_ref().map(|hub| {
@@ -556,6 +563,7 @@ pub async fn run(
             monitor.then(|| Arc::clone(&monitor_watch)),
             &downloads,
             obs_hub.clone(),
+            &capture,
         )
         .await?;
         slates = Some(swapper);
@@ -630,6 +638,7 @@ pub async fn run(
         .with_alarms(Arc::clone(&alarms))
         .with_preview(preview)
         .with_obs(obs_hub.clone())
+        .with_capture(Arc::clone(&capture))
         .with_ctl_token(&ctl_token);
         if let Some(configure) = configure_state {
             state = configure(state);

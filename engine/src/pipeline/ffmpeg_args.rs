@@ -372,6 +372,12 @@ pub struct ClipExtras {
     /// converted chain (cap, ticker, fades, VA-API upload) in `-filter_complex`; ignored when
     /// the video is copied.
     pub audio_visual: Option<String>,
+    /// Options of each input (by its index) put right before its `-i`: a capture's device
+    /// format and options (`-f gdigrab -framerate 30`). Inputs without an entry get none.
+    pub input_args: Vec<Vec<String>>,
+    /// The first filters of a converted picture, before every other one (a capture's fit into
+    /// its 16:9 box); ignored when the video is copied.
+    pub pre_filter: Option<String>,
 }
 
 /// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
@@ -465,7 +471,7 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
         // Also the device `hwupload` uploads to.
         push_all(&mut args, &["-vaapi_device", &vaapi_device()]);
     }
-    for input in &o.inputs {
+    for (index, input) in o.inputs.iter().enumerate() {
         args.extend(input_options(input));
         if o.start_at_s > 0.0 {
             push_all(&mut args, &["-ss", &o.start_at_s.to_string()]);
@@ -486,6 +492,9 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
         }
         if let Some(format) = &o.input_format {
             push_all(&mut args, &["-f", format]);
+        }
+        if let Some(extra) = x.input_args.get(index) {
+            args.extend(extra.iter().map(OsString::from));
         }
         args.push("-i".into());
         args.push((&input.url).into());
@@ -522,7 +531,7 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
     match o.mode {
         VideoMode::Copy => push_all(&mut args, &["-c:v", "copy"]),
         VideoMode::Transcode => {
-            let mut filters = Vec::new();
+            let mut filters: Vec<String> = x.pre_filter.iter().cloned().collect();
             if o.info.interlaced {
                 filters.push(DEINTERLACE.to_string());
             }
@@ -1356,5 +1365,49 @@ mod tests {
         let last = raw.last().unwrap();
         assert!(last.to_string_lossy().contains("żółć"));
         assert!(last.to_string_lossy().ends_with("seg_%05d.ts"));
+    }
+
+    /// A capture: each input gets its own options right before its `-i`, and the fit filter
+    /// comes first in the converted chain.
+    #[test]
+    fn per_input_options_precede_their_input_and_the_pre_filter_comes_first() {
+        let o = ClipArgsOptions {
+            inputs: vec![input("desktop", &[]), input("audio=Mic", &[])],
+            mode: VideoMode::Transcode,
+            readrate: None,
+            ..opts()
+        };
+        let x = ClipExtras {
+            input_args: vec![
+                vec![
+                    "-f".into(),
+                    "gdigrab".into(),
+                    "-framerate".into(),
+                    "30".into(),
+                ],
+                vec!["-f".into(), "dshow".into()],
+            ],
+            pre_filter: Some("scale=1920:1080".into()),
+            ..ClipExtras::default()
+        };
+        let args = strs(&build_clip_args_ext(&o, &x));
+        let first = pos(&args, "-i");
+        assert_eq!(
+            args[first - 4..=first + 1],
+            ["-f", "gdigrab", "-framerate", "30", "-i", "desktop"]
+        );
+        let second = first + 2 + pos(&args[first + 2..], "-i");
+        assert_eq!(
+            args[second - 2..=second + 1],
+            ["-f", "dshow", "-i", "audio=Mic"]
+        );
+        assert_eq!(value_after(&args, "-map", 1).as_deref(), Some("1:a:0"));
+        let vf = value_after(&args, "-vf", 0).unwrap();
+        assert!(vf.starts_with("scale=1920:1080,scale=-2:"), "{vf}");
+        // Without them nothing changes.
+        assert_eq!(
+            build_clip_args_ext(&o, &ClipExtras::default()),
+            build_clip_args(&o)
+        );
     }
 }

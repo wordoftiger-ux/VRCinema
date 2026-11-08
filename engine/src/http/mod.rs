@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client_ip;
 mod routes_admin;
+mod routes_capture;
 mod routes_desktop;
 mod routes_monitor;
 mod routes_nick_pin;
@@ -128,6 +129,8 @@ pub struct AppState {
     pub(crate) obs: Option<crate::obs::ObsHub>,
     /// The token of `vrcinema ctl` for this run (see [`crate::ctl`]); `None`: no `ctl`.
     ctl_token: Option<Arc<str>>,
+    /// The live captures of this computer (window only, see [`routes_capture`]); `None`: none.
+    pub(crate) capture: Option<Arc<crate::capture::CaptureRegistry>>,
 }
 
 impl AppState {
@@ -183,6 +186,7 @@ impl AppState {
             },
             obs: None,
             ctl_token: None,
+            capture: None,
             config: Arc::new(config),
             channel_id,
             db,
@@ -251,6 +255,12 @@ impl AppState {
     /// The OBS input (the window shows its listener's state).
     pub fn with_obs(mut self, hub: Option<crate::obs::ObsHub>) -> Self {
         self.obs = hub;
+        self
+    }
+
+    /// The live captures of this computer (`/api/desktop/capture*`).
+    pub fn with_capture(mut self, registry: Arc<crate::capture::CaptureRegistry>) -> Self {
+        self.capture = Some(registry);
         self
     }
 
@@ -1267,7 +1277,9 @@ pub fn build_router(state: AppState) -> Router {
         routes_admin::require_admin,
     ));
     let desktop = if app {
-        routes_desktop::router(state.clone()).merge(routes_monitor::router(state.clone()))
+        routes_desktop::router(state.clone())
+            .merge(routes_monitor::router(state.clone()))
+            .merge(routes_capture::router(state.clone()))
     } else {
         Router::new()
     };

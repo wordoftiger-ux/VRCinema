@@ -2,6 +2,7 @@ pub mod app;
 pub mod app_settings;
 pub mod assets;
 pub mod auto_pause;
+pub mod capture;
 pub mod config;
 pub mod ctl;
 pub mod db;

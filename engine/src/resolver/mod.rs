@@ -155,6 +155,10 @@ impl CompositeResolver {
     }
 
     fn pick(&self, url: &str) -> Result<&dyn MediaResolver, ResolveError> {
+        // A live capture of this computer is no link: only the clip factory opens it.
+        if crate::capture::is_capture_source(url) {
+            return Err(ResolveError::coded("capture_not_a_link"));
+        }
         if crate::uploads::is_upload_source(url) {
             return self
                 .upload
@@ -325,6 +329,18 @@ mod tests {
         assert!(c.fetch_meta("file:///D:/a.mkv").await.is_err());
         assert!(c.resolve("FILE:///D:/a.mkv").await.is_err());
     }
+    #[tokio::test]
+    async fn a_capture_source_is_never_resolved() {
+        let c = CompositeResolver::new(tag("pd"), tag("yt"), Some(tag("local")))
+            .with_file(tag("file"))
+            .with_upload(tag("upload"));
+        for url in ["capture:0123abcd", "CAPTURE:x"] {
+            let e = c.fetch_meta(url).await.unwrap_err();
+            assert_eq!(e.0.key(), "errors.capture_not_a_link", "{url}");
+            assert!(c.resolve(url).await.is_err());
+        }
+    }
+
     #[tokio::test]
     async fn malformed_url_is_an_error_not_a_panic() {
         let c = CompositeResolver::new(tag("pd"), tag("yt"), None);

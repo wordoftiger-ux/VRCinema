@@ -9,6 +9,10 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
+use crate::capture::{
+    CaptureInputs, CaptureRegistry, Platform, capture_inputs, fit_filter, is_capture_source,
+    redact, sensitive_texts, token_of, x_display,
+};
 use crate::config::VideoEncoder;
 use crate::db::{AddedBy, ChannelSettings, ItemStatus, QueueItem, QueueRepo, SettingsRepo};
 use crate::i18n::{Lang, Msg};
@@ -504,6 +508,8 @@ pub struct RealClipFactory {
     downloads: TempDownloads,
     /// Films resolved and analysed ahead of their turn ([`ClipFactory::prepare`]).
     prepared: Arc<Mutex<Vec<PreparedFilm>>>,
+    /// The live captures of this computer (`capture:` items); `None`: none here.
+    capture: Option<Arc<CaptureRegistry>>,
 }
 
 /// How long a film resolved ahead stays usable (a site's address may expire).
@@ -566,6 +572,10 @@ async fn checked_source(d: &ClipFactoryDeps, item: &QueueItem) -> Result<(String
 /// Resolves and analyses `item` ahead of its turn (the same checks as a start) and keeps the
 /// result for its start.
 async fn prepare_film(factory: RealClipFactory, item: QueueItem) -> Result<(), Msg> {
+    // A capture has nothing to resolve (and is live: never prepared by the channel anyway).
+    if is_capture_source(&item.source_url) {
+        return Ok(());
+    }
     let d = Arc::clone(&factory.deps);
     let (source, viewer) = checked_source(&d, &item).await?;
     let probed = resolve_and_probe(
@@ -590,6 +600,7 @@ pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
         prober: Arc::new(FfprobeProber),
         downloads,
         prepared: Arc::new(Mutex::new(Vec::new())),
+        capture: None,
     }
 }
 
@@ -604,6 +615,12 @@ impl RealClipFactory {
     /// film downloaded for one is played by the other (one download per film).
     pub fn with_downloads(mut self, downloads: TempDownloads) -> Self {
         self.downloads = downloads;
+        self
+    }
+
+    /// Airs the owner's live captures ([`crate::capture`]) kept in `registry`.
+    pub fn with_capture(mut self, registry: Arc<CaptureRegistry>) -> Self {
+        self.capture = Some(registry);
         self
     }
 }
@@ -1196,6 +1213,9 @@ async fn start_clip(
     attempt: u32,
     ahead: bool,
 ) -> Result<Box<dyn ClipHandle>, Msg> {
+    if is_capture_source(&item.source_url) {
+        return start_capture(factory, item, attempt).await;
+    }
     // A retry resolves anew (the address resolved ahead may be what failed).
     let prepared = if attempt == 0 {
         factory.take_prepared(&item)
@@ -1209,6 +1229,7 @@ async fn start_clip(
         prober,
         downloads,
         prepared: _,
+        capture: _,
     } = factory;
     // A viewer's link is looked up again now (yt-dlp fetches it anew): its name may have started
     // to point into the owner's network since the request. The owner's films are not limited.
@@ -1727,6 +1748,279 @@ async fn start_obs(
         disposed: false,
         _download: None,
     }))
+}
+
+/// How often a running capture looks whether the owner stopped it.
+const CAPTURE_STOP_CHECK: Duration = Duration::from_millis(250);
+
+/// The ffmpeg arguments of a capture: always converted like a live stream (a key frame every
+/// segment, constant frame rate, AAC 48 kHz stereo), the picture fitted into its `height`-high
+/// 16:9 box first; `overlay`: the info ticker.
+#[allow(clippy::too_many_arguments)]
+pub fn capture_clip_args(
+    c: CaptureInputs,
+    fps: u32,
+    height: u32,
+    encoder: VideoEncoder,
+    light: bool,
+    segment_seconds: u32,
+    out_dir: PathBuf,
+    overlay: Option<String>,
+) -> Vec<OsString> {
+    let info = VideoInfo {
+        codec: "capture".into(),
+        height,
+        pix_fmt: "yuv420p".into(),
+        fps: f64::from(fps),
+        // A live input's timestamps jitter: always made constant.
+        vfr: true,
+        has_audio: c.has_audio,
+        duration_s: None,
+        ..VideoInfo::default()
+    };
+    build_clip_args_ext(
+        &ClipArgsOptions {
+            inputs: c.inputs,
+            input_format: None,
+            mode: VideoMode::Transcode,
+            info,
+            encoder,
+            segment_seconds,
+            out_dir,
+            start_at_s: 0.0,
+            readrate: None,
+            overlay,
+            duration_limit_s: None,
+        },
+        &ClipExtras {
+            max_height: Some(height),
+            light,
+            input_args: c.input_args,
+            pre_filter: Some(fit_filter(height)),
+            ..ClipExtras::default()
+        },
+    )
+}
+
+/// The owner's live capture (`capture:<token>`): only the queue item it was made for, added by
+/// the owner, finds its description; anything else (a copy from the history, a restart of the
+/// program, a stopped capture) fails with `capture_ended`. Converted like a live stream, with the
+/// info ticker as for one; never logged with a window title or a device name.
+async fn start_capture(
+    factory: RealClipFactory,
+    item: QueueItem,
+    attempt: u32,
+) -> Result<Box<dyn ClipHandle>, Msg> {
+    let ended = || Msg::error("capture_ended");
+    let registry = factory.capture.clone().ok_or_else(ended)?;
+    let token = token_of(&item.source_url).ok_or_else(ended)?.to_string();
+    if item.added_by != AddedBy::Admin {
+        return Err(ended());
+    }
+    let spec = registry.lookup(&token, item.id).ok_or_else(ended)?;
+    let d = factory.deps;
+    let settings = {
+        let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+        SettingsRepo::new(&conn)
+            .get(d.channel_id)
+            .map_err(Msg::text)?
+    };
+    let n = factory.counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let out_dir = d
+        .clips_dir
+        .join(format!("capture-{}-{attempt}-{n}", item.id));
+    let out_dir = std::path::absolute(&out_dir).unwrap_or(out_dir);
+    let encoder = d.encoder.get();
+    let light = light_profile(encoder);
+    let (convert_cap, _) = height_caps(settings.advanced.max_height, light);
+    let height = spec.height.min(convert_cap);
+    let inputs = capture_inputs(&spec, Platform::current(), &x_display());
+    let info = VideoInfo {
+        codec: "capture".into(),
+        height,
+        pix_fmt: "yuv420p".into(),
+        fps: f64::from(spec.fps),
+        vfr: true,
+        has_audio: inputs.has_audio,
+        duration_s: None,
+        ..VideoInfo::default()
+    };
+    std::fs::create_dir_all(&out_dir).map_err(Msg::text)?;
+    let ticker = if settings.ticker.enabled {
+        prepare_ticker(
+            &d,
+            &factory.rotation,
+            &TickerStart {
+                item: &item,
+                settings: &settings,
+                info: &info,
+                duration_s: None,
+                start_at_s: 0.0,
+                out_dir: &out_dir,
+                max_height: height,
+            },
+        )
+    } else {
+        None
+    };
+    if let Some(log) = &d.log {
+        log(Msg::new("log.capture_start")
+            .arg("id", item.id)
+            .arg_msg("kind", Msg::new(spec.video.kind_key()))
+            .arg("fps", spec.fps)
+            .arg("height", height));
+    }
+    let args = capture_clip_args(
+        inputs,
+        spec.fps,
+        height,
+        encoder,
+        light,
+        d.segment_seconds,
+        out_dir.clone(),
+        ticker.as_ref().map(|t| t.overlay.clone()),
+    );
+    let seg = Arc::new(ClipSegmenter::start(
+        &d.ffmpeg_path,
+        args,
+        out_dir.clone(),
+        Some(out_dir.clone()),
+    ));
+    // Running until ffmpeg exits; stopped by the owner: killed at once (not only when the
+    // channel next looks at the clip, e.g. one started ahead of its turn).
+    {
+        let seg = Arc::clone(&seg);
+        let registry = Arc::clone(&registry);
+        let token = token.clone();
+        let run = registry.start_run(item.id);
+        tokio::spawn(async move {
+            let _run = run;
+            loop {
+                tokio::select! {
+                    _ = seg.wait() => break,
+                    () = tokio::time::sleep(CAPTURE_STOP_CHECK) => {
+                        if !registry.is_active(&token) {
+                            seg.kill();
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let ticker = ticker.map(|prepared| {
+        let slow = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(run_ticker(
+            prepared.writer,
+            prepared.source,
+            Arc::clone(&seg),
+            Arc::clone(&slow),
+            false,
+            d.log.clone(),
+        ));
+        TickerRun {
+            task: task.abort_handle(),
+            slow,
+            code: prepared.code,
+        }
+    });
+    let inner = RealClipHandle {
+        seg,
+        out_dir,
+        ffmpeg_path: d.ffmpeg_path.clone(),
+        duration_s: None,
+        copies_video: false,
+        probe: ProbeSummary {
+            codec: info.codec.clone(),
+            height,
+            fps: info.fps,
+            pix_fmt: info.pix_fmt.clone(),
+            has_audio: info.has_audio,
+            duration_s: None,
+        },
+        mode: StreamMode::Transcode,
+        encoder: Some(encoder),
+        ticker,
+        fallback: None,
+        produced: false,
+        item_id: item.id,
+        title: item.title.clone(),
+        log: d.log.clone(),
+        disposed: false,
+        _download: None,
+    };
+    Ok(Box::new(CaptureClipHandle {
+        inner,
+        registry,
+        token,
+        sensitive: sensitive_texts(&spec),
+    }))
+}
+
+/// A capture's clip: stopped by the owner it ends as played (what it made still airs), and its
+/// errors never carry the window title or a device name.
+struct CaptureClipHandle {
+    inner: RealClipHandle,
+    registry: Arc<CaptureRegistry>,
+    token: String,
+    sensitive: Vec<String>,
+}
+
+impl CaptureClipHandle {
+    fn stopped(&self) -> bool {
+        !self.registry.is_active(&self.token)
+    }
+}
+
+impl ClipHandle for CaptureClipHandle {
+    fn state(&self) -> SegmenterState {
+        if self.stopped() {
+            return match self.inner.state() {
+                SegmenterState::Idle | SegmenterState::Running => SegmenterState::Running,
+                _ => SegmenterState::Done,
+            };
+        }
+        self.inner.state()
+    }
+
+    fn error(&self) -> Option<Msg> {
+        if self.stopped() {
+            return None;
+        }
+        self.inner.error().map(|e| {
+            Msg::error("capture_failed").arg("detail", redact(&e.render(Lang::En), &self.sensitive))
+        })
+    }
+
+    fn duration_s(&self) -> Option<f64> {
+        None
+    }
+
+    fn poll(&mut self) -> Vec<SegmentInfo> {
+        if self.stopped() {
+            self.inner.kill();
+        }
+        self.inner.poll()
+    }
+
+    fn kill(&mut self) {
+        self.inner.kill();
+    }
+
+    fn ticker_slow(&self) -> bool {
+        self.inner.ticker_slow()
+    }
+
+    fn ticker_code(&self) -> Option<String> {
+        self.inner.ticker_code()
+    }
+
+    fn stats(&self) -> ClipStats {
+        self.inner.stats()
+    }
+
+    fn dispose(&mut self) {
+        self.inner.dispose();
+    }
 }
 
 impl ClipFactory for RealClipFactory {
