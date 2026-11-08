@@ -13,7 +13,7 @@ Two audiences, two registers: the **owner's program** (window, remote panel, tra
 every key outside `viewer.*`) addresses the owner **formally**; the **request page** (`viewer.*`
 keys, and the errors only that page shows: `errors.nick_reserved`, `errors.nick_taken`,
 `errors.too_many_active`, `errors.too_many_requests`, `errors.viewer_lists_off`, `errors.list_full`,
-`errors.duplicate_link`) addresses players **informally**. Errors
+`errors.duplicate_link`, `errors.nick_pin_*`) addresses players **informally**. Errors
 the panel shows too stay formal.
 
 | | Address: program / request page | Register and form | Typography |
@@ -73,6 +73,9 @@ Common to all languages:
 | Device — a viewer's browser (device key) | device | urządzenie | dispositivo | Gerät | appareil | デバイス |
 | Block / unblock (a device) | block / unblock | zablokuj / odblokuj | bloquear / desbloquear | sperren / entsperren | bloquer / débloquer | ブロック / ブロック解除 |
 | Release (a nick) | release | zwolnij | liberar | freigeben | libérer | 解放 |
+| PIN — a viewer's secret that keeps the nick across devices and addresses (4–8 digits or a passphrase) | PIN / passphrase | PIN / hasło | PIN / frase de contraseña | PIN (die PIN) / Passphrase | code PIN / phrase secrète | PIN / パスフレーズ |
+| Recovery code — one-time code shown when a PIN is set; gets the nick back without the PIN | recovery code | kod odzyskiwania | código de recuperación | Wiederherstellungscode | code de récupération | 復旧コード |
+| Reset (a nick's PIN, owner) / sign out (a viewer's other devices) | reset / sign out | resetuj / wyloguj | restablecer / cerrar sesión | zurücksetzen / abmelden | réinitialiser / déconnecter | リセット / サインアウト |
 | Anonymous | anonymous | anonimowo | anónimo | anonym | anonyme | 匿名 |
 | Approval / approve / reject (moderation) | approval / approve / reject | zatwierdzanie / zatwierdź / odrzuć | aprobación / aprobar / rechazar | Freigabe / freigeben / ablehnen | validation / valider / refuser | 承認 / 承認 / 却下 |
 | Waiting for approval | Waiting for approval | Do zatwierdzenia | Pendiente de aprobación | Wartet auf Freigabe | En attente de validation | 承認待ち |
