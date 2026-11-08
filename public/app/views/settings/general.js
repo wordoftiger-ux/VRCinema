@@ -1,6 +1,7 @@
 // Settings → General: the program's language (outside the window also the panel's language in
 // this browser and signing out), starting with Windows, access from the home network and the
 // port (those two stay in the window). A new port or network access restarts the server.
+// In the window also "Run setup again": the wizard (`/wizard?again=1`) with the current settings.
 
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
@@ -62,6 +63,11 @@ export function General() {
           <button type="submit" class="btn" disabled=${!cfg || !windowed}>${t('settings.general.port_save')}</button>
         </form>
       <//>
+      ${windowed
+        ? html`<${Row} title=${t('settings.general.wizard')} hint=${t('settings.general.wizard_hint')}>
+            <a class="btn" href="/wizard?again=1" data-run-wizard>${t('settings.general.wizard_run')}</a>
+          <//>`
+        : null}
       ${mode === 'remote' || mode === 'headless'
         ? html`<${Row} title=${t('settings.general.sign_out')} hint=${t('settings.general.sign_out_hint')}>
             <button type="button" class="btn" data-sign-out onClick=${signOut}>${t('settings.general.sign_out')}</button>

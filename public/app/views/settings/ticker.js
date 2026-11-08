@@ -11,7 +11,7 @@ import { Block, Note, Row, Segmented, Switch, channelSettings, saveChannelWith, 
 
 export const MAX_MESSAGES = 10;
 export const MAX_MESSAGE_CHARS = 200;
-const INTERVALS_S = [60, 120, 300, 600];
+export const INTERVALS_S = [60, 120, 300, 600];
 const SPEED_PX_PER_S = { slow: 120, normal: 180, fast: 270 };
 const FRAME_PX = 1920;
 const FONT_PX = 36;
@@ -54,7 +54,7 @@ function currentText(settings) {
 }
 
 /** The ticker messages: a list with a field to add; every change is saved at once. */
-function Messages({ settings, say }) {
+export function Messages({ settings, say }) {
   const messages = settings.tickerMessages ?? [];
   const [text, setText] = useState('');
   const [editing, setEditing] = useState(null);

@@ -26,7 +26,7 @@ const JOB_DONE_KEYS = {
   install: 'settings.tools.job_install',
   repair: 'settings.tools.job_repair',
 };
-const ENCODER_OPTIONS = [
+export const ENCODER_OPTIONS = [
   { value: 'auto', key: 'settings.tools.enc_auto' },
   { value: 'h264_nvenc', key: 'settings.tools.enc_nvidia' },
   { value: 'h264_qsv', key: 'settings.tools.enc_intel' },

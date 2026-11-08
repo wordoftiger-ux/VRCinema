@@ -10,7 +10,7 @@ import { Block, Row, Switch, saveChannelWith } from './common.js';
 
 export const SLATE_BG_ROUTE = '/api/admin/channels/main/slate-background';
 
-const FRAME_STYLES = [
+export const FRAME_STYLES = [
   { value: 'dim', label: 'settings.channel.slate_frame_dim' },
   { value: 'blur', label: 'settings.channel.slate_frame_blur' },
   { value: 'off', label: 'settings.channel.slate_frame_off' },

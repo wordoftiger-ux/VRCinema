@@ -1,4 +1,5 @@
-// Wizard step 2: downloads the tools the channel runs on, with progress.
+// Wizard: downloads the tools the channel runs on, with progress. A failed download can be
+// retried or skipped (the next step; Settings → Tools repairs it later).
 
 import { useEffect, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
@@ -6,6 +7,7 @@ import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
 import { focusOnMount } from '../focus.js';
 import { TOOL_NAME_KEYS, TOOL_ORDER, rowState } from '../views/settings/tools.js';
+import { settingsPlace } from './common.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,11 +38,10 @@ function Rows({ names, progress, all }) {
     </div>`;
 }
 
-export function ToolsStep({ next, finish }) {
+export function ToolsStep({ nav }) {
   // state: running | done | failed
   const [state, setState] = useState({ phase: 'running', names: TOOL_ORDER, progress: {}, installed: false, error: null });
   const [attempt, setAttempt] = useState(0);
-  const [leaving, setLeaving] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -84,13 +85,6 @@ export function ToolsStep({ next, finish }) {
     };
   }, [attempt]);
 
-  const leave = async () => {
-    try {
-      await finish();
-    } catch (e) {
-      setLeaving(errorText(e));
-    }
-  };
   const { phase, names, progress, installed, error } = state;
   return html`
     <h1 tabindex="-1" ref=${focusOnMount}>${t('wizard.tools_title')}</h1>
@@ -100,14 +94,14 @@ export function ToolsStep({ next, finish }) {
       ? html`<p class="wz-note ok" role="status">${installed ? t('wizard.tools_present') : t('wizard.tools_ready')}</p>`
       : null}
     ${phase === 'failed'
-      ? html`<p class="wz-note err" role="alert">${t('wizard.tools_failed', { error })}</p>`
+      ? html`<p class="wz-note err" role="alert">${t('wizard.tools_failed', { error })}</p>
+          <p class="wz-hint">${t('wizard.tools_skip_hint', { place: settingsPlace('tools') })}</p>`
       : null}
-    ${leaving ? html`<p class="wz-note err" role="alert">${leaving}</p>` : null}
     <div class="wz-actions">
-      ${phase === 'done' ? html`<button type="button" class="btn pri" data-next ref=${focusOnMount} onClick=${next}>${t('wizard.next')}</button>` : null}
+      ${phase === 'done' ? html`<button type="button" class="btn pri" data-next ref=${focusOnMount} onClick=${nav.next}>${t('wizard.next')}</button>` : null}
       ${phase === 'failed'
         ? html`<button type="button" class="btn pri" data-retry onClick=${() => setAttempt(attempt + 1)}>${t('wizard.retry')}</button>
-            <button type="button" class="btn" data-skip onClick=${leave}>${t('wizard.tools_skip')}</button>`
+            <button type="button" class="btn" data-skip onClick=${nav.next}>${t('wizard.skip')}</button>`
         : null}
     </div>`;
 }

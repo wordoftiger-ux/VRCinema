@@ -1202,6 +1202,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       return json(res, 200, {
         window: app,
         encoder: s.encoder,
+        // Scenario `lightProfile`: a computer converting on its processor (Raspberry Pi 5).
+        lightProfile: Boolean(s.lightProfile),
         tickerSlow: s.tickerSlow,
         alarms: s.alarms,
         language: s.language,

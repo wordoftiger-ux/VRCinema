@@ -1,5 +1,8 @@
-// Wizard step 4: the channel on the internet. The program connects by itself (a quick link);
-// "Skip" is there in every state but a working connection, so no network never blocks the end.
+// Wizard: the channel on the internet, and the remote panel. On the first run the program
+// connects by itself (a quick link); on a run again a tunnel switched off stays off until
+// "Connect". No connection never blocks: Next reads "Skip" until the channel is online.
+// "I want a permanent link" ends the wizard in Settings → Internet. Below it the remote panel
+// (switch and password: the Settings → Remote panel component).
 
 import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
@@ -7,10 +10,12 @@ import { t } from '../i18n.js';
 import { api, errorText } from '../api.js';
 import { focusOnMount } from '../focus.js';
 import { copyText } from '../components/playerbar.js';
+import { Remote } from '../views/settings/remote.js';
+import { Later, StepNav } from './common.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function LinkRow({ label, value, name }) {
+export function LinkRow({ label, value, name }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
@@ -37,8 +42,8 @@ async function ensureTunnelOn() {
 
 const sameTunnel = (a, b) => a.state === b.state && a.url === b.url && a.message === b.message;
 
-export function InternetStep({ finish }) {
-  const [tun, setTun] = useState({ state: 'connecting' });
+export function InternetStep({ nav, again, finish }) {
+  const [tun, setTun] = useState({ state: again ? 'loading' : 'connecting' });
   const [failure, setFailure] = useState(null);
   const [retrying, setRetrying] = useState(false);
   const alive = useRef(true);
@@ -46,10 +51,12 @@ export function InternetStep({ finish }) {
   useEffect(() => {
     alive.current = true;
     (async () => {
-      try {
-        await ensureTunnelOn();
-      } catch (e) {
-        if (alive.current) setTun({ state: 'error', message: errorText(e), local: true });
+      if (!again) {
+        try {
+          await ensureTunnelOn();
+        } catch (e) {
+          if (alive.current) setTun({ state: 'error', message: errorText(e), local: true });
+        }
       }
       while (alive.current) {
         try {
@@ -74,12 +81,12 @@ export function InternetStep({ finish }) {
       setFailure(errorText(e));
     }
   };
-  const again = async () => {
+  const connect = async (restart) => {
     setRetrying(true);
     setTun({ state: 'connecting' });
     try {
       await ensureTunnelOn();
-      await api('POST', '/api/desktop/tunnel/restart');
+      if (restart) await api('POST', '/api/desktop/tunnel/restart');
     } catch (e) {
       setTun({ state: 'error', message: errorText(e), local: true });
     } finally {
@@ -89,10 +96,12 @@ export function InternetStep({ finish }) {
 
   const online = tun.state === 'online' && tun.url;
   const bad = tun.state === 'error' || tun.state === 'reconnecting';
+  const off = tun.state === 'off';
+  const shown = online ? 'online' : bad ? tun.state : off ? 'off' : 'connecting';
   return html`
     <h1 tabindex="-1" ref=${focusOnMount}>${t('wizard.net_title')}</h1>
     <p>${t('wizard.net_intro')}</p>
-    <div class="wz-stack" aria-live="polite" data-tunnel=${online ? 'online' : bad ? tun.state : 'connecting'}>
+    <div class="wz-stack" aria-live="polite" data-tunnel=${shown}>
       ${online
         ? html`
             <p class="wz-note ok" role="status">${t('wizard.net_online')}</p>
@@ -102,21 +111,31 @@ export function InternetStep({ finish }) {
               <div class="qr"><img class="qr-img" src=${`/api/desktop/tunnel/qr?for=${encodeURIComponent(tun.url)}`} alt=${t('wizard.net_qr_alt')} width="196" height="196" /></div>
               <p class="wz-hint">${t('wizard.net_qr_hint')}</p>
             </div>
-            <p class="wz-hint">${t('wizard.net_changes')}</p>`
+            <p class="wz-hint">${t('wizard.net_changes')}</p>
+            <div class="wz-inline-actions">
+              <button type="button" class="btn" data-permanent onClick=${() => leave('#/settings/internet')}>${t('wizard.permanent')}</button>
+            </div>`
         : bad
           ? html`
               <p class="wz-note err" role="alert">${tun.message || (tun.state === 'reconnecting' ? t('wizard.net_retrying') : t('wizard.net_failed'))}</p>
-              <p class="wz-hint">${t('wizard.net_skip_hint')}</p>`
-          : html`
-              <p class="wz-note" role="status">${t('wizard.net_connecting')}</p>
-              <div class="bar indeterminate" role="progressbar" aria-label=${t('wizard.net_connecting')}><span></span></div>`}
+              <p class="wz-hint">${t('wizard.net_skip_hint')}</p>
+              <div class="wz-inline-actions">
+                <button type="button" class="btn pri" data-retry disabled=${retrying} onClick=${() => connect(true)}>${t('wizard.retry')}</button>
+              </div>`
+          : off
+            ? html`
+                <p class="wz-note" role="status">${t('wizard.net_off')}</p>
+                <div class="wz-inline-actions">
+                  <button type="button" class="btn pri" data-connect disabled=${retrying} onClick=${() => connect(false)}>${t('wizard.net_connect')}</button>
+                </div>`
+            : html`
+                <p class="wz-note" role="status">${t('wizard.net_connecting')}</p>
+                <div class="bar indeterminate" role="progressbar" aria-label=${t('wizard.net_connecting')}><span></span></div>`}
       ${failure ? html`<p class="wz-note err" role="alert">${failure}</p>` : null}
     </div>
-    <div class="wz-actions">
-      ${online
-        ? html`<button type="button" class="btn pri" data-finish ref=${focusOnMount} onClick=${() => leave()}>${t('wizard.done')}</button>
-            <button type="button" class="btn" data-permanent onClick=${() => leave('#/settings/internet')}>${t('wizard.permanent')}</button>`
-        : html`${bad ? html`<button type="button" class="btn pri" data-retry disabled=${retrying} onClick=${again}>${t('wizard.retry')}</button>` : null}
-            <button type="button" class="btn" data-skip onClick=${() => leave()}>${t('wizard.skip')}</button>`}
-    </div>`;
+    <h2>${t('settings.nav.remote')}</h2>
+    <p class="wz-hint">${t('wizard.remote_intro')}</p>
+    <div class="wz-rows" data-block="remote"><${Remote} /></div>
+    <${Later} sections=${['internet', 'remote']} />
+    <${StepNav} nav=${nav} nextLabel=${online ? null : t('wizard.skip')} />`;
 }

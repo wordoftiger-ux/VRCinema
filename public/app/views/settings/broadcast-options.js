@@ -14,7 +14,7 @@ const JOURNAL = '/api/admin/channels/main/journal';
 const FADES = [0.5, 1, 1.5, 2, 3];
 const TARGETS = [-23, -18, -16, -14];
 /** Settings → Advanced, maximum output resolution (0: automatic). */
-const HEIGHTS = [0, 1080, 720, 480];
+export const HEIGHTS = [0, 1080, 720, 480];
 
 const num = (v) => Number(String(v).replace(',', '.'));
 

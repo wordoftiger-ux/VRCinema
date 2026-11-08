@@ -1,9 +1,12 @@
-// The first-run wizard (window only): language, the tools, the graphics card, the internet.
-// Served at /wizard while the first run is not complete; at the end it goes to the interface.
-// The window has no frame: the wizard brings the interface's title bar.
+// The setup wizard (window only): the program's main options in short steps, each with the
+// engine's defaults already chosen, each skippable and each saved at once as in Settings
+// (spec 2026-11-08-wizard-design). Served at /wizard; on the first run until it is finished,
+// later again from Settings → General ("Run setup again": /wizard?again=1). At the end it
+// goes to the interface. The window has no frame: the wizard brings the interface's title bar.
 
 import { render } from '/static/vendor/preact.mjs';
 import { signal } from '/static/vendor/signals.mjs';
+import { useEffect } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { browserLang, lang, loadLang, t } from '../i18n.js';
 import { api } from '../api.js';
@@ -11,14 +14,23 @@ import { access, firstInfo, setLanguage, toast } from '../store.js';
 import { Icon } from '../icons.js';
 import { Titlebar, inWindow } from '../components/titlebar.js';
 import { focusOnMount } from '../focus.js';
-import { LANGUAGES, LANGUAGE_NAME_KEYS } from '../views/settings/common.js';
+import { LANGUAGES, LANGUAGE_NAME_KEYS, LanguageOptions, Note, Row, channelSettings, loadChannelSettings, saveChannelWith, useNote } from '../views/settings/common.js';
+import { Later } from './common.js';
 import { ToolsStep } from './tools-step.js';
 import { EncoderStep } from './encoder-step.js';
+import { ViewersStep } from './viewers-step.js';
+import { TickerStep } from './ticker-step.js';
+import { LookStep } from './look-step.js';
 import { InternetStep } from './internet-step.js';
+import { ExtrasStep } from './extras-step.js';
+import { SummaryStep } from './summary-step.js';
 
-const STEPS = 4;
-/** The step on show (1..4). */
-const step = signal(1);
+/** Opened again from Settings (`/wizard?again=1`): the options are already set once. */
+const again = new URLSearchParams(location.search).has('again');
+/** The steps of this run (the tools are left out on a run again with every tool there). */
+const steps = signal([]);
+/** The step on show (index in `steps`). */
+const index = signal(0);
 
 /** Finishes the wizard (the first run is complete) and opens the interface at `hash`. */
 export async function finish(hash = '#/channel') {
@@ -26,14 +38,51 @@ export async function finish(hash = '#/channel') {
   location.href = `/admin${hash}`;
 }
 
-function LanguageStep() {
+/** Back / Next / Skip to the end for the step at `i`. */
+function navFor(i) {
+  const list = steps.value;
+  const last = list.length - 1;
+  const go = (n) => {
+    index.value = Math.max(0, Math.min(last, n));
+  };
+  // Skipping to the end makes sense once the tools are behind (they are needed to broadcast).
+  const tools = list.indexOf('tools');
+  return {
+    back: i > 0 ? () => go(list[i - 1] === 'tools' ? i - 2 : i - 1) : null,
+    next: () => go(i + 1),
+    toEnd: i < last && i > tools ? () => go(last) : null,
+  };
+}
+
+function SlateLanguage() {
+  const settings = channelSettings.value;
+  const [note, say] = useNote();
+  useEffect(() => {
+    loadChannelSettings();
+  }, []);
+  if (!settings) return null;
+  const label = t('settings.channel.slate_language');
+  return html`
+    <div class="wz-rows">
+      <${Row} title=${label} hint=${t('settings.channel.slate_language_hint')}>
+        <select class="sel" aria-label=${label} data-slate-language value=${settings.slateLanguage}
+          onChange=${(e) => saveChannelWith(say, { slateLanguage: e.target.value }, t('settings.channel.slate_language_saved'))}>
+          <${LanguageOptions} />
+        </select>
+      <//>
+      <${Note} note=${note} />
+    </div>`;
+}
+
+function LanguageStep({ nav }) {
   const choose = (code) => {
     if (code !== lang.value) setLanguage(code);
   };
   return html`
-    <h1 tabindex="-1" ref=${focusOnMount}>${t('wizard.welcome_title')}</h1>
-    <p>${t('wizard.welcome_intro')}</p>
-    <p>${t('wizard.welcome_setup')}</p>
+    <h1 tabindex="-1" ref=${focusOnMount}>${again ? t('wizard.again_title') : t('wizard.welcome_title')}</h1>
+    ${again
+      ? html`<p>${t('wizard.again_intro')}</p>`
+      : html`<p>${t('wizard.welcome_intro')}</p><p>${t('wizard.welcome_setup')}</p>`}
     <h2 id="wizard-language">${t('wizard.language_title')}</h2>
     <div class="wz-langs" role="group" aria-labelledby="wizard-language">
       ${LANGUAGES.map((code) => html`
@@ -41,8 +90,11 @@ function LanguageStep() {
           onClick=${() => choose(code)}>${t(LANGUAGE_NAME_KEYS[code])}</button>`)}
     </div>
     <p class="wz-hint">${t('wizard.language_hint')}</p>
+    <${SlateLanguage} />
+    <${Later} sections=${['general', 'channel']} />
     <div class="wz-actions">
-      <button type="button" class="btn pri" data-next onClick=${() => (step.value = 2)}>${t('wizard.start')}</button>
+      <button type="button" class="btn pri" data-next onClick=${nav.next}>${again ? t('wizard.next') : t('wizard.start')}</button>
+      ${nav.toEnd ? html`<button type="button" class="btn wz-to-end" data-to-end onClick=${nav.toEnd}>${t('wizard.to_end')}</button>` : null}
     </div>`;
 }
 
@@ -58,25 +110,33 @@ function Toast() {
     </div>`;
 }
 
+const STEP_VIEWS = {
+  language: LanguageStep,
+  tools: ToolsStep,
+  picture: EncoderStep,
+  viewers: ViewersStep,
+  ticker: TickerStep,
+  look: LookStep,
+  internet: InternetStep,
+  extras: ExtrasStep,
+  summary: SummaryStep,
+};
+
 function Wizard() {
-  const n = step.value;
-  const body =
-    n === 1
-      ? html`<${LanguageStep} />`
-      : n === 2
-        ? html`<${ToolsStep} next=${() => (step.value = 3)} finish=${finish} />`
-        : n === 3
-          ? html`<${EncoderStep} next=${() => (step.value = 4)} />`
-          : html`<${InternetStep} finish=${finish} />`;
+  const list = steps.value;
+  const i = index.value;
+  const id = list[i];
+  const View = STEP_VIEWS[id];
+  const total = list.length;
   return html`
     ${inWindow() ? html`<${Titlebar} />` : null}
     <div class="wz-scroll">
-      <main class="wz" data-step=${n}>
+      <main class="wz" data-step=${id} data-again=${again ? 'true' : undefined}>
         <ol class="wz-steps" aria-label=${t('wizard.progress')}>
-          ${Array.from({ length: STEPS }, (_, i) => html`<li class=${i + 1 < n ? 'done' : i + 1 === n ? 'current' : ''}></li>`)}
+          ${list.map((_, n) => html`<li class=${n < i ? 'done' : n === i ? 'current' : ''}></li>`)}
         </ol>
-        <p class="wz-no">${t('wizard.step', { n, total: STEPS })}</p>
-        <div class="wz-body" key=${n}>${body}</div>
+        <p class="wz-no">${t('wizard.step', { n: i + 1, total })}</p>
+        <div class="wz-body" key=${id}><${View} nav=${navFor(i)} again=${again} finish=${finish} /></div>
         <${Toast} />
       </main>
     </div>`;
@@ -98,11 +158,13 @@ async function start() {
     location.replace('/admin');
     return;
   }
-  if (info.firstRunCompleted) {
+  if (info.firstRunCompleted && !again) {
     location.replace('/admin');
     return;
   }
   await loadLang(info.language ?? browserLang());
+  const withTools = !(again && info.toolsOk);
+  steps.value = ['language', ...(withTools ? ['tools'] : []), 'picture', 'viewers', 'ticker', 'look', 'internet', 'extras', 'summary'];
   render(html`<${Wizard} />`, document.getElementById('wizard'));
 }
 
