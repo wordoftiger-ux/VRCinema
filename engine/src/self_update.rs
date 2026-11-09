@@ -14,7 +14,7 @@ use crate::i18n::{Msg, MsgContext, error_msg, msg_error, msg_error_with};
 use crate::tools::download::{download_file, fetch_text, parse_sums, sha256_file};
 
 pub const DEFAULT_API_URL: &str =
-    "https://api.github.com/repos/wordoftiger-ux/vrcinema/releases/latest";
+    "https://api.github.com/repos/wordoftiger-ux/VRCinema/releases/latest";
 const EXE_ASSET: &str = "VRCinema.exe";
 const SUM_ASSET: &str = "VRCinema.exe.sha256";
 const NEW_NAME: &str = "VRCinema.new.exe";

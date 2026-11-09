@@ -7,3 +7,7 @@ data/
 engine/target/
 desktop/target/
 desktop/gen/
+
+# local build and test folders
+/target-*/
+/data-test/

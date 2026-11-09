@@ -414,7 +414,7 @@ Na Debianie, Ubuntu albo Raspberry Pi OS (64-bit):
 sudo apt install -y build-essential cmake pkg-config curl git fonts-dejavu-core
 curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && . "$HOME/.cargo/env"
 git clone https://github.com/wordoftiger-ux/VRCinema.git
-cd vrcinema/engine && cargo build --release
+cd VRCinema/engine && cargo build --release
 
 # Osobny użytkownik i katalog
 sudo useradd --system --home-dir /opt/vrcinema --shell /usr/sbin/nologin vrcinema
@@ -431,7 +431,7 @@ sudo -u vrcinema nano .env            # ADMIN_PASSWORD, SESSION_SECRET, PUBLIC_U
 ### Uruchamianie jako usługa (systemd)
 
 ```bash
-sudo cp ~/vrcinema/deploy/vrcinema.service /etc/systemd/system/
+sudo cp ~/VRCinema/deploy/vrcinema.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now vrcinema
 journalctl -u vrcinema -f             # dziennik (baner pokazuje linki do panelu i kanału)
