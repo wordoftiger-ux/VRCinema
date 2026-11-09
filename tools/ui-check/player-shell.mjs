@@ -177,18 +177,18 @@ try {
   // ---------- Keyboard shortcuts ----------
   await page.click('.view');
   mark = (await requests()).length;
-  for (const key of ['Space', 'ArrowRight', 'Shift+ArrowLeft', 'ArrowLeft', 'Shift+ArrowRight', 'Home', 'n']) {
+  for (const key of ['Space', 'ArrowRight', 'Shift+ArrowLeft', 'ArrowLeft', 'Shift+ArrowRight', 'j', 'l', 'Home', 'n']) {
     await page.keyboard.press(key);
     await page.waitForTimeout(80);
   }
   acts = await waitFor(async () => {
     const a = await actionsSince(mark);
-    return a.length >= 7 ? a : null;
+    return a.length >= 9 ? a : null;
   }, 'shortcut requests');
   check(
     JSON.stringify(acts.map((r) => [r.path.split('/').pop(), r.body])) ===
-      JSON.stringify([['pause', null], ['seek', { byS: 10 }], ['seek', { byS: -60 }], ['seek', { byS: -10 }], ['seek', { byS: 60 }], ['restart', null], ['skip', null]]),
-    'Space, →, Shift+←, ←, Shift+→, Home, N call pause, seek ±10/±60, restart, skip',
+      JSON.stringify([['pause', null], ['seek', { byS: 5 }], ['seek', { byS: -60 }], ['seek', { byS: -5 }], ['seek', { byS: 60 }], ['seek', { byS: -10 }], ['seek', { byS: 10 }], ['restart', null], ['skip', null]]),
+    'Space, →, Shift+←, ←, Shift+→, J, L, Home, N call pause, seek ±5/±60/±10, restart, skip',
     acts.map((r) => [r.path, r.body]),
   );
   // Typing in a text field: no shortcut.
