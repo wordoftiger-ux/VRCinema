@@ -181,23 +181,37 @@ pub fn quit(app: &AppHandle, relaunch: Option<PathBuf>) {
 fn start_updated(exe: &Path) {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg(ARG_AFTER_UPDATE);
-    spawn_outside_job(cmd);
+    let _ = spawn_outside_job(cmd);
 }
 
 /// Starts `cmd` outside this program's job object when possible (it must outlive us: the
 /// updated program, a browser started for a link), else as a plain child.
-fn spawn_outside_job(mut cmd: std::process::Command) {
+fn spawn_outside_job(mut cmd: std::process::Command) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         cmd.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
         if cmd.spawn().is_ok() {
-            return;
+            return Ok(());
         }
         cmd.creation_flags(0);
     }
-    let _ = cmd.spawn();
+    cmd.spawn().map(|_| ())
+}
+
+/// Opens a folder in the file manager or a file in its program (Windows: Explorer; Linux:
+/// `xdg-open`). Settings → About uses it for the data folder and the log only.
+pub fn open_path(path: &Path) -> std::io::Result<()> {
+    let mut cmd = if cfg!(windows) {
+        std::process::Command::new("explorer")
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    cmd.arg(path);
+    spawn_outside_job(cmd)
 }
 
 /// Opens an http(s) address in the user's default browser (Linux: `xdg-open`).
@@ -212,7 +226,7 @@ pub fn open_in_browser(url: &str) {
         std::process::Command::new("xdg-open")
     };
     cmd.arg(url);
-    spawn_outside_job(cmd);
+    let _ = spawn_outside_job(cmd);
 }
 
 fn message_box(text: &str, buttons: rfd::MessageButtons) -> rfd::MessageDialogResult {

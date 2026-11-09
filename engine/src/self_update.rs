@@ -36,6 +36,44 @@ pub struct UpdateInfo {
     pub available: Option<Release>,
     #[serde(skip)]
     pub error: Option<Msg>,
+    /// What kind of problem the check had (`None`: it worked).
+    #[serde(skip)]
+    pub problem: Option<CheckProblem>,
+    /// When the check was made (RFC 3339; set by the app).
+    #[serde(skip)]
+    pub checked_at: Option<String>,
+}
+
+/// Why a check for a new version found nothing, for a readable note in the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckProblem {
+    /// No connection to GitHub (no internet, a firewall, a timeout).
+    Offline,
+    /// 404: the releases page cannot be seen (a private repository or no release yet).
+    NotFound,
+    /// 403 or 429: GitHub's limit of requests for now.
+    Limited,
+    /// Anything else (a server error, an answer that cannot be read).
+    Failed,
+}
+
+impl CheckProblem {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::NotFound => "not_found",
+            Self::Limited => "limited",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn of_status(status: u16) -> Self {
+        match status {
+            404 => Self::NotFound,
+            403 | 429 => Self::Limited,
+            _ => Self::Failed,
+        }
+    }
 }
 
 // Serialized for the HTTP layer (camelCase, version as a string).
@@ -102,21 +140,30 @@ fn parse_release(body: &str) -> Result<Option<Release>> {
     }))
 }
 
-async fn fetch_latest(http: &reqwest::Client, api_base: &str) -> Result<Option<Release>> {
+async fn fetch_latest(
+    http: &reqwest::Client,
+    api_base: &str,
+) -> std::result::Result<Option<Release>, (CheckProblem, anyhow::Error)> {
     let res = http
         .get(api_base)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
-        .msg_context(Msg::error("github_unreachable"))?;
+        .msg_context(Msg::error("github_unreachable"))
+        .map_err(|e| (CheckProblem::Offline, e))?;
     let status = res.status();
     if !status.is_success() {
-        return Err(msg_error(
-            Msg::error("github_status").arg("status", status.as_u16()),
+        return Err((
+            CheckProblem::of_status(status.as_u16()),
+            msg_error(Msg::error("github_status").arg("status", status.as_u16())),
         ));
     }
-    parse_release(&res.text().await?)
+    let body = res
+        .text()
+        .await
+        .map_err(|e| (CheckProblem::Offline, e.into()))?;
+    parse_release(&body).map_err(|e| (CheckProblem::Failed, e))
 }
 
 /// Asks GitHub for the latest release. Never fails: problems end up in `error`, and a release
@@ -127,20 +174,22 @@ pub async fn check_latest(
     current: &Version,
     skipped_version: Option<&str>,
 ) -> UpdateInfo {
-    let (available, error) = match fetch_latest(http, api_base).await {
+    let (available, error, problem) = match fetch_latest(http, api_base).await {
         Ok(release) => {
             let skipped = skipped_version.and_then(parse_version);
             let release = release
                 .filter(|r| r.version > *current)
                 .filter(|r| skipped.as_ref() != Some(&r.version));
-            (release, None)
+            (release, None, None)
         }
-        Err(e) => (None, Some(error_msg(&e))),
+        Err((problem, e)) => (None, Some(error_msg(&e)), Some(problem)),
     };
     UpdateInfo {
         current: current.clone(),
         available,
         error,
+        problem,
+        checked_at: None,
     }
 }
 
@@ -360,6 +409,19 @@ mod tests {
         let info = check_latest(&http(), &api, &v("0.2.0"), None).await;
         assert!(info.available.is_none());
         assert!(info.error.unwrap().to_string().contains("404"));
+        assert_eq!(info.problem, Some(CheckProblem::NotFound));
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_and_a_bad_answer_are_told_apart() {
+        assert_eq!(CheckProblem::of_status(403), CheckProblem::Limited);
+        assert_eq!(CheckProblem::of_status(429), CheckProblem::Limited);
+        assert_eq!(CheckProblem::of_status(502), CheckProblem::Failed);
+        let server = TestServer::start().await;
+        server.put("api/latest", "not json");
+        let api = format!("{}/api/latest", server.base);
+        let info = check_latest(&http(), &api, &v("0.2.0"), None).await;
+        assert_eq!(info.problem, Some(CheckProblem::Failed));
     }
 
     #[tokio::test]
@@ -367,6 +429,7 @@ mod tests {
         let info = check_latest(&http(), "http://127.0.0.1:1/x", &v("0.2.0"), None).await;
         assert!(info.available.is_none());
         assert!(info.error.is_some());
+        assert_eq!(info.problem, Some(CheckProblem::Offline));
     }
 
     #[tokio::test]

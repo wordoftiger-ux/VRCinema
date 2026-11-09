@@ -19,6 +19,8 @@ fn mime_for(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "ico" => "image/x-icon",
+        // The licence texts of the interface's libraries (Settings → About links to them).
+        "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -75,6 +77,10 @@ mod tests {
         assert_eq!(
             asset_from("app/viewer/viewer.css", None).unwrap().1,
             "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            asset_from("vendor/LICENSES.txt", None).unwrap().1,
+            "text/plain; charset=utf-8"
         );
     }
 

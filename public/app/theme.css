@@ -2767,9 +2767,125 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+/* Settings → About */
+.about-head {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-top: 6px;
+}
+
+.about-head .app-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--radius-lg);
+}
+
+.about-id {
+  min-width: 0;
+}
+
+.about-name {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
 .about-version {
-  margin: 10px 0;
-  font-size: 15px;
+  margin: 2px 0 0;
+  color: var(--text-mute);
+}
+
+.about-tagline {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+}
+
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 8px;
+}
+
+.about-links a,
+.about-links .linklike,
+.about-more a,
+.about-table a {
+  color: var(--amber);
+  text-decoration: none;
+}
+
+.about-links a:hover,
+.about-links .linklike:hover,
+.about-more a:hover,
+.about-table a:hover {
+  text-decoration: underline;
+}
+
+.linklike {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.about .pl-actions {
+  align-items: center;
+}
+
+.about-checked {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.about-credits {
+  margin-top: 22px;
+}
+
+.about-credits summary {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.about-license {
+  margin: 10px 0 6px;
+}
+
+.about-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.about-table th,
+.about-table td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.about-table th {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.about-table td small {
+  display: block;
+  color: var(--text-faint);
+}
+
+.about-more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 10px 0 0;
 }
 
 @media (max-width: 700px) {

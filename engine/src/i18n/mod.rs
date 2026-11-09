@@ -278,6 +278,33 @@ impl Msg {
         self
     }
 
+    /// The same message with every text in it passed through `f(field, text)`: the text fields
+    /// (named as in the dictionaries), the fields of nested messages, and texts from outside
+    /// (field `""`). Keys, counts and the shape stay (the system info redacts the log with it).
+    pub fn map_texts(&self, f: &dyn Fn(&str, &str) -> String) -> Msg {
+        let body = match &self.body {
+            Body::Key(key) => Body::Key(key.clone()),
+            Body::Text(text) => Body::Text(f("", text)),
+            Body::Chain(parts) => Body::Chain(parts.iter().map(|p| p.map_texts(f)).collect()),
+        };
+        let args = self
+            .args
+            .iter()
+            .map(|(name, arg)| {
+                let arg = match arg {
+                    Arg::Text(text) => Arg::Text(f(name, text)),
+                    Arg::Msg(msg) => Arg::Msg(msg.map_texts(f)),
+                };
+                (name.clone(), arg)
+            })
+            .collect();
+        Msg {
+            body,
+            args,
+            count: self.count,
+        }
+    }
+
     /// The key of the dictionaries (empty for a text from outside or a chain).
     pub fn key(&self) -> String {
         match &self.body {

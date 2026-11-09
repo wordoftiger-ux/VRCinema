@@ -65,7 +65,7 @@
 // `signedOut`; a wrong one 401 `wrong_password`, scenario `remotePanelOff` 403
 // `remote_panel_off`, messages in the request's language for en/pl); POST /api/admin/logout signs
 // out. The program's routes for the remote panel (fix round 1): /api/admin/{info, config, tools…,
-// encoder/detect, log, update…, restart, tunnel, tunnel/restart, tunnel/named/quick}
+// encoder/detect, log, about, diagnostics, update…, restart, tunnel, tunnel/restart, tunnel/named/quick}
 // answer like the window's (a remote session may PUT only the engine's allowlisted settings, else
 // 403 `window_only`; a server without a window: Fastify's 404). Scenario `sessionViaTunnel`
 // (the session came through the tunnel: switching it off, reconnecting or changing the link
@@ -276,6 +276,13 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       encoder: 'h264_nvenc',
       toolsMissing: [],
       updateOffer: null,
+      // Settings → About: `updateProblem` (offline, not_found, limited, failed) answers the
+      // update check with it; `updateCheck` {at, problem} is the info's last check; `openMissing`
+      // makes POST /api/desktop/open/* answer 409 open_missing; `opened` records them.
+      updateProblem: null,
+      updateCheck: null,
+      openMissing: false,
+      opened: [],
       pickCookies: 'C:/cookies.txt',
       pickSlate: true,
       thumbs: {},
@@ -882,6 +889,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       sessionViaTunnel: false,
       encoder: s.encoder,
       update: s.updateOffer,
+      updateCheck: s.updateCheck,
       tickerSlow: s.tickerSlow,
       alarms: s.alarms,
       // Live capture (window session only): scenario `captureRunning` (item ids).
@@ -1083,6 +1091,22 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
   }
 
   const ENCODER_RESULT = 'h264_nvenc';
+  const REPO = 'https://github.com/wordoftiger-ux/VRCinema';
+  const ABOUT_LINKS = {
+    manual: `${REPO}/blob/main/docs/manual.md`,
+    manualPl: `${REPO}/blob/main/docs/manual.pl.md`,
+    project: REPO,
+    issue: `${REPO}/issues/new`,
+    thirdParty: `${REPO}/blob/main/docs/third-party-licenses.md`,
+    ffmpeg: 'https://github.com/BtbN/FFmpeg-Builds',
+    ytdlp: 'https://github.com/yt-dlp/yt-dlp',
+    deno: 'https://github.com/denoland/deno',
+    cloudflared: 'https://github.com/cloudflare/cloudflared',
+    preact: 'https://github.com/preactjs/preact',
+    hlsjs: 'https://github.com/video-dev/hls.js',
+    tauri: 'https://github.com/tauri-apps/tauri',
+    webview2: 'https://developer.microsoft.com/microsoft-edge/webview2/',
+  };
   // Window-only routes of the Settings view; answers true when it handled the request.
   async function desktopRoute(res, req, path, payload) {
     const lang = req.headers['x-vrcinema-lang'];
@@ -1134,7 +1158,22 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       const lines = lang === 'pl' ? ['VRCinema 0.2.0: start', 'Tunel: w sieci — https://proba-kanalu.trycloudflare.com'] : ['VRCinema 0.2.0: start', 'Tunnel: online — https://proba-kanalu.trycloudflare.com'];
       return done(200, { lines });
     }
-    if (path === '/api/desktop/update' && req.method === 'GET') return done(200, { current: '0.2.0', available: s.updateOffer });
+    if (path === '/api/desktop/update' && req.method === 'GET') {
+      const at = new Date().toISOString();
+      s.updateCheck = { at, problem: s.updateProblem };
+      return done(200, { current: '0.2.0', available: s.updateProblem ? null : s.updateOffer, problem: s.updateProblem, checkedAt: at });
+    }
+    if (path === '/api/desktop/about' && req.method === 'GET') return done(200, ABOUT_LINKS);
+    if (path === '/api/desktop/diagnostics' && req.method === 'GET') {
+      const text = ['VRCinema 0.2.0', 'System: Windows 11 (version 10.0.26200.1, x86_64)', 'Tunnel: quick (online)', '', 'Last problems in the log (0 lines; addresses, names, titles and keys removed):', '  none', ''];
+      return done(200, { text: text.join('\n') });
+    }
+    const open = path.match(/^\/api\/desktop\/open\/(data-folder|log)$/);
+    if (open && req.method === 'POST') {
+      if (s.openMissing) return (coded(res, 409, 'open_missing', 'This file or folder does not exist yet.'), true);
+      s.opened.push(open[1]);
+      return done(200, { ok: true });
+    }
     if (path === '/api/desktop/update/apply' && req.method === 'POST') return done(200, { ok: true, version: s.updateOffer?.version ?? '0.2.0' });
     if (path === '/api/desktop/restart' && req.method === 'POST') return done(200, { ok: true, port });
     return false;
@@ -1218,7 +1257,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       return json(res, 200, { ok: true });
     }
     // The program's routes for the remote panel: the window's, under /api/admin.
-    const MIRRORED = ['info', 'config', 'tools', 'tools/install', 'tools/update', 'tools/repair', 'tools/progress', 'encoder/detect', 'log', 'update', 'update/apply', 'restart', 'tunnel', 'tunnel/restart', 'tunnel/named/quick'];
+    const MIRRORED = ['info', 'config', 'tools', 'tools/install', 'tools/update', 'tools/repair', 'tools/progress', 'encoder/detect', 'log', 'about', 'diagnostics', 'update', 'update/apply', 'restart', 'tunnel', 'tunnel/restart', 'tunnel/named/quick'];
     const mirror = path.startsWith('/api/admin/') && MIRRORED.includes(path.slice('/api/admin/'.length));
     if (mirror && s.signedOut) return coded(res, 401, 'login_required', 'Log in.');
     if (mirror && s.headless) return json(res, 404, { message: `Route ${req.method}:${path} not found`, error: 'Not Found', statusCode: 404 });

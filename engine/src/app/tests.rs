@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 26] = [
+const ROUTES: [(&str, &str); 30] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -29,6 +29,10 @@ const ROUTES: [(&str, &str); 26] = [
     ("POST", "/api/desktop/pick-cookies"),
     ("POST", "/api/desktop/slate-background/pick"),
     ("GET", "/api/desktop/log"),
+    ("GET", "/api/desktop/about"),
+    ("GET", "/api/desktop/diagnostics"),
+    ("POST", "/api/desktop/open/data-folder"),
+    ("POST", "/api/desktop/open/log"),
     ("GET", "/api/desktop/update"),
     ("POST", "/api/desktop/update/apply"),
     ("POST", "/api/desktop/wizard/complete"),
@@ -342,7 +346,7 @@ async fn without_tools_the_server_starts_and_the_settings_are_saved_at_once() {
 // ---------- Access ----------
 
 /// The program's routes for the remote panel (spec section 2: the panel is the same interface).
-const PANEL_ROUTES: [(&str, &str); 16] = [
+const PANEL_ROUTES: [(&str, &str); 18] = [
     ("GET", "/api/admin/info"),
     ("GET", "/api/admin/config"),
     ("PUT", "/api/admin/config"),
@@ -353,6 +357,8 @@ const PANEL_ROUTES: [(&str, &str); 16] = [
     ("GET", "/api/admin/tools/progress"),
     ("POST", "/api/admin/encoder/detect"),
     ("GET", "/api/admin/log"),
+    ("GET", "/api/admin/about"),
+    ("GET", "/api/admin/diagnostics"),
     ("GET", "/api/admin/update"),
     ("POST", "/api/admin/update/apply"),
     ("POST", "/api/admin/restart"),
@@ -587,6 +593,7 @@ async fn every_desktop_route_is_401_without_a_session_and_403_for_a_remote_one()
     let saved = app.saved();
     assert_eq!(saved["firstRunCompleted"], false);
     assert_eq!(saved["ytdlpCookies"], Value::Null);
+    assert!(app.hooks.opened.lock().unwrap().is_empty());
     // The remote session still opens the ordinary admin API.
     let (status, _) = app
         .call("GET", "/api/admin/channels/main", Some(&remote), None)
@@ -986,6 +993,92 @@ async fn the_log_route_returns_the_tail_without_the_window_key() {
     app.stop().await;
 }
 
+/// Settings → About: the system info names the program, the tools and the tunnel's mode but
+/// never the channel's address, a nick, a title, a key or the user's name.
+#[tokio::test]
+async fn the_system_info_is_redacted_and_the_two_own_paths_open() {
+    let app = App::start().await;
+    let cookie = app.window_cookie().await;
+    let (status, _) = app
+        .put_config(
+            &cookie,
+            json!({"publicUrl": "https://kino.example.pl", "pixeldrainApiKey": "klucz-tajny-12345"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    app.engine().log(
+        crate::i18n::Msg::new("log.request_received")
+            .arg("viewer", "Zosia")
+            .arg("title", "Tajny film")
+            .arg("status", "ok"),
+    );
+    app.engine()
+        .log(crate::i18n::Msg::new("log.server_error").arg_msg(
+        "error",
+        crate::i18n::Msg::text(
+            "fetch https://kino.example.pl/live.m3u8?k=abc from 10.0.0.7 failed (kino.example.pl)",
+        ),
+    ));
+    let report = app.get("/api/desktop/diagnostics", &cookie).await;
+    let text = report["text"].as_str().unwrap();
+    // The links of the page come from here (the interface names no web address itself).
+    let links = app.get("/api/desktop/about", &cookie).await;
+    assert_eq!(
+        links["manual"],
+        "https://github.com/wordoftiger-ux/VRCinema/blob/main/docs/manual.md"
+    );
+    assert_eq!(
+        links["issue"],
+        "https://github.com/wordoftiger-ux/VRCinema/issues/new"
+    );
+    for part in [
+        "VRCinema 0.2.0\n",
+        "System: ",
+        "Video encoder: libx264 (setting: auto",
+        "  yt-dlp: missing\n",
+        "  cloudflared: missing\n",
+        "Tunnel: off\n",
+        "Language: pl\n",
+        "Server error: fetch <link> from <ip> failed (<address>)",
+    ] {
+        assert!(text.contains(part), "{part:?} not in {text}");
+    }
+    for secret in [
+        "kino.example",
+        "Zosia",
+        "Tajny",
+        "klucz",
+        "10.0.0.7",
+        "m3u8",
+    ] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    if let Some(profile) = crate::diagnostics::profile_dir() {
+        assert!(!text.contains(&profile), "{text}");
+    }
+    // Opening: the data folder and the log file, never anything else.
+    for (path, expected) in [
+        ("/api/desktop/open/data-folder", app.home.clone()),
+        (
+            "/api/desktop/open/log",
+            app.home.join("logs").join("vrcinema.log"),
+        ),
+    ] {
+        let (status, body) = app
+            .call(
+                "POST",
+                path,
+                Some(&cookie),
+                Some(json!({"path": r"C:\Windows"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert_eq!(app.hooks.opened.lock().unwrap().last(), Some(&expected));
+    }
+    assert_eq!(app.hooks.opened.lock().unwrap().len(), 2);
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn the_wizard_page_is_served_to_the_window_only() {
     let app = App::start().await;
@@ -1380,20 +1473,30 @@ async fn the_update_check_offers_a_newer_release_and_the_info_shows_it() {
     assert_eq!(update["available"]["version"], "99.0.0");
     assert_eq!(update["available"]["notes"], "Nowości");
     assert!(update.get("error").is_none_or(Value::is_null), "{update}");
+    assert_eq!(update["problem"], Value::Null);
     let info = app.get("/api/desktop/info", &cookie).await;
     assert_eq!(info["update"]["version"], "99.0.0");
     app.stop().await;
 }
 
 #[tokio::test]
-async fn an_unreachable_or_private_release_is_quiet() {
+async fn an_unreachable_or_private_release_says_why_in_a_word() {
     let server = TestServer::start().await;
     let api = format!("{}/api/brak", server.base);
     let app = App::start_with(|_, o| o.update_api_url = api.clone()).await;
     let cookie = app.window_cookie().await;
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["updateCheck"], Value::Null);
     let update = app.get("/api/desktop/update", &cookie).await;
     assert_eq!(update["available"], Value::Null);
     assert!(update.get("error").is_none_or(Value::is_null), "{update}");
+    // A private repository (or no release yet) is 404: the window says so in its own words.
+    assert_eq!(update["problem"], "not_found");
+    let at = update["checkedAt"].as_str().unwrap();
+    assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
+    let info = app.get("/api/desktop/info", &cookie).await;
+    assert_eq!(info["updateCheck"]["at"], at);
+    assert_eq!(info["updateCheck"]["problem"], "not_found");
     assert!(
         app.log_text().contains("Checking for updates failed"),
         "{}",

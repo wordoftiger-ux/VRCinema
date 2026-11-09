@@ -4,7 +4,7 @@
 //! program updates. The `/api/desktop/*` routes (`http::routes_desktop`) call into [`AppCore`].
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
 use std::time::Duration;
@@ -22,7 +22,7 @@ use crate::config::{AppConfig, VideoEncoder};
 use crate::engine::Command;
 use crate::http::AppState;
 use crate::http::auth::{AdminAuth, DesktopKey};
-use crate::i18n::{Msg, error_msg, msg_error};
+use crate::i18n::{Lang, Msg, error_msg, msg_error};
 use crate::live::LiveSettings;
 use crate::local_files::{AddReport, add_local_files};
 use crate::logging::LogSink;
@@ -77,6 +77,11 @@ pub trait DesktopHooks: Send + Sync {
     /// The new program is in place: start it with `--after-update` and quit this one. Called
     /// from a background task, shortly after the HTTP answer went out.
     fn restart_after_update(&self);
+    /// Opens a folder in the file manager or a file in its program (Settings → About: the
+    /// data folder and the log; the engine passes only those two paths).
+    fn open_path(&self, _path: &Path) -> anyhow::Result<()> {
+        anyhow::bail!("not available")
+    }
 }
 
 /// Test double for [`DesktopHooks`]: answers from its fields and records the calls.
@@ -86,6 +91,7 @@ pub struct FakeHooks {
     pub autostart_calls: Mutex<Vec<bool>>,
     pub exe: Mutex<Option<PathBuf>>,
     pub update_restarts: AtomicUsize,
+    pub opened: Mutex<Vec<PathBuf>>,
 }
 
 impl DesktopHooks for FakeHooks {
@@ -101,6 +107,10 @@ impl DesktopHooks for FakeHooks {
     }
     fn restart_after_update(&self) {
         self.update_restarts.fetch_add(1, Ordering::SeqCst);
+    }
+    fn open_path(&self, path: &Path) -> anyhow::Result<()> {
+        lock(&self.opened).push(path.to_path_buf());
+        Ok(())
     }
 }
 
@@ -298,6 +308,13 @@ fn failure(code: &'static str, detail: impl std::fmt::Display) -> Msg {
 /// `errors.<code>` with the error and its causes as `detail`, in the reader's language.
 fn failure_of(code: &'static str, e: &anyhow::Error) -> Msg {
     Msg::error(code).arg_msg("detail", error_msg(e))
+}
+
+/// What Settings → About may open on the computer: these two, never a path from the page.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OwnPath {
+    DataFolder,
+    Log,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1043,6 +1060,8 @@ impl AppCore {
                 current: self.options.version.clone(),
                 available: None,
                 error: None,
+                problem: None,
+                checked_at: None,
             };
         }
         let skipped = self.settings().skipped_update_version;
@@ -1056,11 +1075,117 @@ impl AppCore {
         if let Some(e) = info.error.take() {
             self.log(Msg::new("log.update_check_failed").arg_msg("error", e));
         }
+        info.checked_at = Some(chrono::Local::now().to_rfc3339());
         if let Some(release) = &info.available {
             self.log(Msg::new("log.update_available").arg("version", &release.version));
         }
         *lock(&self.update) = Some(info.clone());
         info
+    }
+
+    /// When the latest check was made (RFC 3339) and its problem, if any; `None` before one.
+    pub(crate) fn last_update_check(&self) -> Option<(String, Option<self_update::CheckProblem>)> {
+        lock(&self.update)
+            .as_ref()
+            .and_then(|i| Some((i.checked_at.clone()?, i.problem)))
+    }
+
+    // ---------- Settings → About: the system info, the data folder and the log ----------
+
+    /// The log file the program writes now.
+    pub(crate) fn log_file(&self) -> PathBuf {
+        self.home.join("logs").join(crate::logging::LOG_FILE)
+    }
+
+    /// The system info for a bug report (see [`crate::diagnostics`]).
+    pub(crate) async fn diagnostics(&self) -> String {
+        use crate::diagnostics as d;
+        let s = self.settings();
+        let tunnel_info = self.tunnel_info();
+        let mut hosts: Vec<String> = Vec::new();
+        let mut add_host = |url: &str| {
+            let host = url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_else(|| url.trim().to_string());
+            if !host.is_empty() {
+                hosts.push(host);
+            }
+        };
+        add_host(&s.public_url);
+        if let Some(h) = &s.named_tunnel_hostname {
+            add_host(h);
+        }
+        if let crate::tunnel::TunnelState::Online { url } = &tunnel_info.state {
+            add_host(url);
+        }
+        let secrets = crate::redact::ReportSecrets {
+            profile: d::profile_dir(),
+            hosts,
+        };
+        let state = match &tunnel_info.state {
+            crate::tunnel::TunnelState::Off => "off",
+            crate::tunnel::TunnelState::Connecting => "connecting",
+            crate::tunnel::TunnelState::Online { .. } => "online",
+            crate::tunnel::TunnelState::Reconnecting => "reconnecting",
+            crate::tunnel::TunnelState::Error { .. } => "error",
+        };
+        let tunnel = if s.tunnel_enabled {
+            let mode = match tunnel_info.mode {
+                TunnelModeSetting::Quick => "quick",
+                TunnelModeSetting::Named => "permanent",
+            };
+            format!("{mode} ({state})")
+        } else {
+            "off".to_string()
+        };
+        let channel = if self.channel_running() {
+            "running".to_string()
+        } else {
+            let why = self
+                .channel_error()
+                .map(|m| d::redact_entry(&m, &secrets).render(Lang::En))
+                .unwrap_or_else(|| "not running".to_string());
+            crate::redact::redact_report(&format!("not running: {why}"), &secrets)
+        };
+        let status = self.tools.status();
+        let facts = d::Facts {
+            version: self.options.version.to_string(),
+            os: d::os_description().await,
+            encoder: s.effective_encoder().as_str().to_string(),
+            encoder_setting: s.video_encoder.clone(),
+            detected_encoder: s.detected_encoder.clone(),
+            tools: status
+                .tools
+                .iter()
+                .map(|t| (t.tool.name().to_string(), t.installed, t.version.clone()))
+                .collect(),
+            tunnel,
+            language: s.language.as_str().to_string(),
+            data_folder: crate::redact::redact_report(&self.home.to_string_lossy(), &secrets),
+            channel,
+            made_at: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            problems: d::problem_lines(&self.log.entries(), &secrets, d::PROBLEM_LINES),
+        };
+        d::report(&facts)
+    }
+
+    /// Opens the data folder or the log file in the shell (window only).
+    pub(crate) async fn open_own(&self, what: OwnPath) -> Result<(), OpError> {
+        let path = match what {
+            OwnPath::DataFolder => self.home.clone(),
+            OwnPath::Log => self.log_file(),
+        };
+        if !path.exists() {
+            return Err(OpError::Conflict(Msg::error("open_missing")));
+        }
+        let hooks = Arc::clone(&self.hooks);
+        let target = path.clone();
+        let opened = tokio::task::spawn_blocking(move || hooks.open_path(&target))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+        opened.map_err(|e| OpError::Failed(failure_of("open_failed", &e)))
     }
 
     /// The release found by the latest check, unless the owner skipped that version since.

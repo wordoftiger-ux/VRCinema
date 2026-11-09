@@ -1,7 +1,7 @@
 //! What the engine asks of the window shell: the cookies file picker, start with Windows,
-//! the program file and the restart after an update.
+//! the program file, the restart after an update and opening the data folder or the log.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
@@ -67,5 +67,9 @@ impl DesktopHooks for ShellHooks {
         if let Some(exe) = &self.exe {
             crate::quit(&self.app, Some(exe.clone()));
         }
+    }
+
+    fn open_path(&self, path: &Path) -> anyhow::Result<()> {
+        crate::open_path(path).map_err(|e| anyhow::anyhow!("{e}"))
     }
 }

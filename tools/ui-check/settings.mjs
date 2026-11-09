@@ -623,11 +623,78 @@ try {
   // ---------- About ----------
   await goto(page, 'about');
   await page.waitForSelector('[data-version]');
-  check((await text(page, '[data-version]')) === 'VRCinema, version 0.2.0', 'the version is shown');
+  check((await text(page, '.about-name')) === 'VRCinema', 'the name is shown');
+  check((await text(page, '[data-version]')) === 'Version 0.2.0', 'the version is shown');
+  check((await page.$('.about-head img.app-icon')) !== null, 'with the app icon');
+  check((await text(page, '.about-tagline')).startsWith('Your own cinema in VRChat'), 'and a one-line description');
+  await page.waitForSelector('a[data-link="manual"]');
+  const hrefOf = (sel) => page.$eval(sel, (a) => a.getAttribute('href'));
+  check((await hrefOf('a[data-link="manual"]')) === 'https://github.com/wordoftiger-ux/VRCinema/blob/main/docs/manual.md', 'the manual link comes from the engine');
+  check((await hrefOf('a[data-link="project"]')) === 'https://github.com/wordoftiger-ux/VRCinema', 'the project page link');
+  check((await hrefOf('a[data-link="issue"]')) === 'https://github.com/wordoftiger-ux/VRCinema/issues/new', 'the report-a-problem link');
+  check(
+    await page.$$eval('.about-links a, .about-credits a', (as) => as.every((a) => a.target === '_blank' && a.rel === 'noopener')),
+    'the links open outside the window (the shell sends them to the browser)',
+  );
   await shot(page, 'after-settings-about-en.png');
+  await page.click('[data-link="shortcuts"]');
+  await page.waitForSelector('dl.shortcuts');
+  check(true, 'Keyboard shortcuts opens the shortcuts dialog');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !document.querySelector('dl.shortcuts'));
   await clickText(page, 'Check for updates');
-  await page.waitForFunction(() => document.querySelector('.set-note.ok')?.textContent.includes('You have the latest version (0.2.0)'));
+  await page.waitForFunction(() => document.querySelector('.set-note.ok')?.textContent.includes('You have the latest version (0.2.0).'));
   check(true, 'a check with nothing new says so');
+  await page.waitForSelector('[data-checked]');
+  check((await text(page, '[data-checked]')).startsWith('Last checked: '), 'the time of the last check is shown', await text(page, '[data-checked]'));
+  await scenario({ updateProblem: 'not_found' });
+  await clickText(page, 'Check for updates');
+  await page.waitForFunction(() => document.querySelector('.set-note.err')?.textContent.includes('the releases page is not reachable'));
+  check(true, 'a private repository (404) gets a readable note, not a raw error');
+  await scenario({ updateProblem: 'offline' });
+  await clickText(page, 'Check for updates');
+  await page.waitForFunction(() => document.querySelector('.set-note.err')?.textContent.includes('no connection to GitHub'));
+  check(true, 'no internet gets its own note');
+  await scenario({ updateProblem: null });
+  // Diagnostics: the system info on the clipboard, the data folder and the log.
+  m = await mark();
+  await clickText(page, 'Copy system info');
+  await page.waitForFunction(() => document.querySelector('.sblock:has([data-open]) .set-note.ok')?.textContent.includes('The system info is on the clipboard'));
+  check((await since(m)).some((r) => r.path === '/api/desktop/diagnostics'), 'Copy system info asks the engine for the report');
+  // Windows' clipboard hands the lines back with CR LF.
+  const clip = (await page.evaluate(() => navigator.clipboard.readText())).replaceAll('\r\n', '\n');
+  check(clip.startsWith('VRCinema 0.2.0\nSystem: '), 'and puts it on the clipboard', clip);
+  m = await mark();
+  await clickText(page, 'Open data folder');
+  a = await actions(m, 'open data folder');
+  check(a[0].path === '/api/desktop/open/data-folder' && a[0].body == null, 'Open data folder → POST /api/desktop/open/data-folder (no path from the page)', a[0]);
+  m = await mark();
+  await clickText(page, 'Open log');
+  a = await actions(m, 'open log');
+  check(a[0].path === '/api/desktop/open/log', 'Open log → POST /api/desktop/open/log', a[0]);
+  await scenario({ openMissing: true });
+  await clickText(page, 'Open log');
+  await page.waitForFunction(() => document.querySelector('.sblock:has([data-open]) .set-note.err')?.textContent.includes('does not exist yet'));
+  check(true, 'a missing log says so');
+  // The browser logs that refused request (409) on purpose.
+  page.__errors.splice(0, page.__errors.length, ...page.__errors.filter((e) => !/status of 409/.test(e)));
+  await scenario({ openMissing: false });
+  // Licences and credits: collapsed until opened.
+  check(!(await page.$eval('[data-credits]', (d) => d.open)), 'the licences are collapsed');
+  await page.click('[data-credits] summary');
+  await page.waitForSelector('[data-credits][open] .about-table');
+  check((await text(page, '[data-license]')).includes('MIT licence') && (await text(page, '[data-license]')).includes('wordoftiger-ux'), "the program's own licence line", await text(page, '[data-license]'));
+  const credits = await page.$$eval('[data-credits] tbody tr', (rows) => rows.map((r) => r.innerText));
+  check(credits.length === 9, 'nine entries in the credits', credits);
+  check(credits[0].includes('FFmpeg') && credits[0].includes('GPL-3.0-or-later'), 'FFmpeg with its real licence', credits[0]);
+  check(credits.some((c) => c.includes('WebView2') && c.includes('Microsoft')), 'WebView2 named as a Microsoft component');
+  check((await hrefOf('a[data-link="third-party"]')).endsWith('/docs/third-party-licenses.md'), 'the full list links to docs/third-party-licenses.md');
+  check((await hrefOf('a[data-link="vendor-licenses"]')) === '/static/vendor/LICENSES.txt', 'and the shipped licence texts');
+  const licenseTexts = await fetch(`${base}/static/vendor/LICENSES.txt`);
+  check(licenseTexts.ok, 'which the server has');
+  check(await noOverflow(page), 'no horizontal overflow with the credits open');
+  await page.$eval('[data-credits] .about-table', (e) => e.scrollIntoView());
+  await shot(page, 'after-settings-about-credits-en.png');
   await scenario({ updateOffer: { version: '0.3.0', notes: 'Fixes.' } });
   await clickText(page, 'Check for updates');
   await page.waitForSelector('[data-banner=update]');
@@ -715,7 +782,15 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-log]')?.textContent.includes('VRCinema'));
   check(true, 'log: read remotely');
   await goto(page, 'about');
-  check(await page.$eval('#view .sform .pl-actions button', (b) => !b.disabled), 'about: checking for an update works remotely');
+  check(await page.$eval('[data-check]', (b) => !b.disabled), 'about: checking for an update works remotely');
+  await page.waitForSelector('a[data-link="manual"]');
+  check(true, 'about: the links come from /api/admin/about');
+  check(await page.$eval('[data-copy-info]', (b) => !b.disabled), 'about: the system info can be copied remotely');
+  check(await page.$$eval('[data-open]', (bs) => bs.every((b) => b.disabled)), 'about: opening the data folder and the log stays in the window');
+  check((await page.$$('#view .sblock .window-only-hint')).length === 1, 'and says so');
+  await clickText(page, 'Copy system info');
+  await page.waitForFunction(() => document.querySelector('.sblock:has([data-open]) .set-note.ok')?.textContent.includes('The system info is on the clipboard'));
+  check(true, 'about: the remote copy works through /api/admin/diagnostics');
   let all = await requests();
   const windowCalls = all.filter((r) => r.path.startsWith('/api/desktop/') && r.path !== '/api/desktop/info');
   check(windowCalls.length === 0, 'no window route was asked beyond the first info (403)', windowCalls.map((r) => r.path));

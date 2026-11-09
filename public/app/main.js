@@ -28,7 +28,8 @@ import { AirVolume, PlayerBar } from './components/playerbar.js';
 import { Preview } from './components/preview.js';
 import { announceAirWindow } from './components/screens.js';
 import { MenuLayer, menu } from './components/menu.js';
-import { DialogLayer, dialog, openDialog } from './components/dialog.js';
+import { DialogLayer, dialog } from './components/dialog.js';
+import { openShortcuts } from './components/shortcuts.js';
 import { DropZone } from './components/dropzone.js';
 import { pasteLink } from './components/addlink.js';
 import { ChannelView } from './views/channel.js';
@@ -41,36 +42,7 @@ import { StatusStrip } from './components/status.js';
 import { LoginView } from './views/login.js';
 import { Guard } from './components/guard.js';
 
-// ---------- Keyboard shortcuts ----------
-
-const kbd = (k) => html`<kbd>${k}</kbd>`;
-const plus = (...keys) => keys.map((k, i) => html`${i ? ' + ' : ''}${kbd(k)}`);
-const either = (...keys) => keys.map((k, i) => html`${i ? ' / ' : ''}${kbd(k)}`);
-
-function openShortcuts() {
-  const rows = () => [
-    [either(t('shortcuts.key_space'), 'K'), 'shortcuts.play_pause'],
-    [either('←', '→'), 'shortcuts.seek_5'],
-    [either('J', 'L'), 'shortcuts.seek_10'],
-    [[...plus(t('shortcuts.key_shift'), '←'), ' / ', kbd('→')], 'shortcuts.seek_60'],
-    [plus(t('shortcuts.key_wheel')), 'shortcuts.wheel'],
-    [plus(t('shortcuts.key_home')), 'shortcuts.restart'],
-    [plus('N'), 'shortcuts.next'],
-    [plus('I'), 'shortcuts.stats'],
-    [plus('S'), 'shortcuts.sync'],
-    [plus(t('shortcuts.key_ctrl'), 'V'), 'shortcuts.paste'],
-    [plus('?'), 'shortcuts.help'],
-  ];
-  openDialog({
-    title: () => t('shortcuts.title'),
-    body: () => html`
-      <p class="dialog-intro">${t('shortcuts.intro')}</p>
-      <dl class="shortcuts">
-        ${rows().map(([keys, key]) => html`<dt>${keys}</dt><dd>${t(key)}</dd>`)}
-      </dl>`,
-    buttons: [{ key: 'ui.close', primary: true }],
-  });
-}
+// ---------- Keyboard shortcuts (the dialog is in components/shortcuts.js) ----------
 
 /** Where typing goes: no shortcut acts there. */
 function typingIn(el) {

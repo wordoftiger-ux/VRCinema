@@ -20,7 +20,7 @@ use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, PanelSession, ReqLang, asset_response, json_ok,
     json_response,
 };
-use crate::app::{AppCore, ConfigPatch, OpError, ToolsJob};
+use crate::app::{AppCore, ConfigPatch, OpError, OwnPath, ToolsJob};
 use crate::app_settings::TunnelModeSetting;
 use crate::i18n::{Lang, Msg, error_msg};
 use crate::tools::Tool;
@@ -75,6 +75,10 @@ pub(super) fn router(state: AppState) -> Router<AppState> {
             post(super::routes_slates::pick),
         )
         .route("/api/desktop/log", get(log))
+        .route("/api/desktop/about", get(about_links))
+        .route("/api/desktop/diagnostics", get(diagnostics))
+        .route("/api/desktop/open/data-folder", post(open_data_folder))
+        .route("/api/desktop/open/log", post(open_log))
         .route("/api/desktop/update", get(update_check))
         .route("/api/desktop/update/apply", post(update_apply))
         .route("/api/desktop/wizard/complete", post(wizard_complete))
@@ -112,6 +116,8 @@ pub(super) fn panel_router() -> Router<AppState> {
         .route("/api/admin/tools/progress", get(tools_progress))
         .route("/api/admin/encoder/detect", post(encoder_detect))
         .route("/api/admin/log", get(log))
+        .route("/api/admin/about", get(about_links))
+        .route("/api/admin/diagnostics", get(diagnostics))
         .route("/api/admin/update", get(update_check))
         .route("/api/admin/update/apply", post(update_apply))
         .route("/api/admin/restart", post(restart))
@@ -220,6 +226,7 @@ async fn info(
         "encoder": s.effective_encoder().as_str(),
         "detectedEncoder": s.detected_encoder,
         "update": update,
+        "updateCheck": update_check_view(&core),
         "tunnel": tunnel_view(&core, lang),
         "tunnelEnabled": s.tunnel_enabled,
         "paused": paused,
@@ -614,7 +621,75 @@ async fn log(State(state): State<AppState>, ReqLang(lang): ReqLang) -> ApiResult
     Ok(json_ok(&json!({ "lines": core.log.tail(lang) })))
 }
 
-/// Checks GitHub now. A failure (no network, private repository) only goes to the log.
+/// The project's repository (the manual, the issues, the list of licences).
+const REPO_URL: &str = "https://github.com/wordoftiger-ux/VRCinema";
+
+/// The pages of the projects Settings → About credits (the interface itself names no web
+/// address: it only loads from this program).
+const CREDIT_URLS: [(&str, &str); 8] = [
+    ("ffmpeg", "https://github.com/BtbN/FFmpeg-Builds"),
+    ("ytdlp", "https://github.com/yt-dlp/yt-dlp"),
+    ("deno", "https://github.com/denoland/deno"),
+    ("cloudflared", "https://github.com/cloudflare/cloudflared"),
+    ("preact", "https://github.com/preactjs/preact"),
+    ("hlsjs", "https://github.com/video-dev/hls.js"),
+    ("tauri", "https://github.com/tauri-apps/tauri"),
+    (
+        "webview2",
+        "https://developer.microsoft.com/microsoft-edge/webview2/",
+    ),
+];
+
+/// Where the links of Settings → About lead (they open in the browser).
+async fn about_links() -> ApiResult {
+    let blob = |path: &str| format!("{REPO_URL}/blob/main/{path}");
+    let mut links = Map::new();
+    for (name, url) in [
+        ("manual", blob("docs/manual.md")),
+        ("manualPl", blob("docs/manual.pl.md")),
+        ("project", REPO_URL.to_string()),
+        ("issue", format!("{REPO_URL}/issues/new")),
+        ("thirdParty", blob("docs/third-party-licenses.md")),
+    ] {
+        links.insert(name.into(), Value::from(url));
+    }
+    for (name, url) in CREDIT_URLS {
+        links.insert(name.into(), Value::from(url));
+    }
+    Ok(json_ok(&Value::Object(links)))
+}
+
+/// The system info for a bug report (plain text; no address, key, nick or title).
+async fn diagnostics(State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    Ok(json_ok(&json!({ "text": core.diagnostics().await })))
+}
+
+/// Opens the data folder in the file manager (window only; always that folder).
+async fn open_data_folder(State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    core.open_own(OwnPath::DataFolder).await?;
+    Ok(json_ok(&json!({ "ok": true })))
+}
+
+/// Opens the log file (window only; always the program's own log).
+async fn open_log(State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    core.open_own(OwnPath::Log).await?;
+    Ok(json_ok(&json!({ "ok": true })))
+}
+
+/// The latest check for a new version: when (RFC 3339) and what went wrong (`offline`,
+/// `not_found`, `limited`, `failed` or null); null before the first check.
+fn update_check_view(core: &AppCore) -> Value {
+    core.last_update_check().map_or(
+        Value::Null,
+        |(at, problem)| json!({ "at": at, "problem": problem.map(|p| p.as_str()) }),
+    )
+}
+
+/// Checks GitHub now. A failure (no network, private repository, a limit) goes to the log and
+/// comes back as `problem` for a readable note; nothing is offered then.
 async fn update_check(State(state): State<AppState>) -> ApiResult {
     let core = state.desktop()?;
     let info = core.check_update().await;
@@ -624,6 +699,8 @@ async fn update_check(State(state): State<AppState>) -> ApiResult {
     Ok(json_ok(&json!({
         "current": info.current.to_string(),
         "available": available,
+        "problem": info.problem.map(|p| p.as_str()),
+        "checkedAt": info.checked_at,
     })))
 }
 

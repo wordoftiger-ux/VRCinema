@@ -6,6 +6,7 @@ pub mod capture;
 pub mod config;
 pub mod ctl;
 pub mod db;
+pub mod diagnostics;
 pub mod engine;
 pub mod home;
 pub mod http;
