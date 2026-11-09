@@ -19,8 +19,8 @@ use crate::i18n::{Lang, Msg};
 use crate::live::LiveValue;
 use crate::pipeline::advanced::AdvancedSettings;
 use crate::pipeline::audio_visual::{
-    AudioLook, CoverSource, Picture, PreparedVisual, VisualJob, prepare as prepare_visual,
-    wants_cover,
+    AudioLook, CoverSource, NextSlot, Picture, PreparedVisual, VisualJob,
+    prepare as prepare_visual, wants_cover,
 };
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{
@@ -57,6 +57,9 @@ pub const TICKER_READRATE: f64 = 1.0;
 
 /// How often a running ticker re-reads what it shows (and ffmpeg's progress).
 const TICKER_REFRESH: Duration = Duration::from_millis(500);
+/// How often the "Up next" line of an audio picture looks at the queue (ffmpeg re-reads it
+/// once a second).
+const AUDIO_NEXT_REFRESH: Duration = Duration::from_millis(1000);
 
 pub type SharedLogFn = Arc<dyn Fn(Msg) + Send + Sync>;
 
@@ -794,6 +797,52 @@ async fn probe_download(
     Ok((stream, info, Some(film)))
 }
 
+/// The title of the film after `item_id`: the first queued one that is not this one (a
+/// prefetched clip is itself still queued).
+fn next_title(
+    conn: &Connection,
+    channel_id: i64,
+    item_id: i64,
+) -> rusqlite::Result<Option<String>> {
+    Ok(QueueRepo::new(conn)
+        .list_by_status(channel_id, &[ItemStatus::Queued])?
+        .into_iter()
+        .find(|i| i.id != item_id)
+        .map(|i| i.title))
+}
+
+/// Keeps the "Up next" line of an audio-only clip's picture up to date while it runs (the
+/// queue changes: a film added, removed, moved). `written`: the title the line has now.
+async fn run_audio_next(
+    slot: NextSlot,
+    db: Arc<Mutex<Connection>>,
+    channel_id: i64,
+    item_id: i64,
+    dir: PathBuf,
+    seg: Arc<ClipSegmenter>,
+    mut written: Option<String>,
+) {
+    while seg.state() == SegmenterState::Running {
+        tokio::time::sleep(AUDIO_NEXT_REFRESH).await;
+        let next = {
+            let conn = db.lock().unwrap_or_else(PoisonError::into_inner);
+            next_title(&conn, channel_id, item_id)
+        };
+        let Ok(next) = next else { continue };
+        if next == written {
+            continue;
+        }
+        let (slot, dir, title) = (slot.clone(), dir.clone(), next.clone());
+        // Writing may wait for ffmpeg reading the file: not on a runtime thread.
+        let done = tokio::task::spawn_blocking(move || slot.write(&dir, title.as_deref()))
+            .await
+            .is_ok_and(|r| r.is_ok());
+        if done {
+            written = next;
+        }
+    }
+}
+
 /// Where a running ticker reads what it shows.
 #[derive(Clone)]
 struct ContentSource {
@@ -810,14 +859,7 @@ impl ContentSource {
         let (settings, next) = {
             let conn = self.db.lock().unwrap_or_else(PoisonError::into_inner);
             let settings = SettingsRepo::new(&conn).get(self.channel_id)?;
-            // The next film is the first queued one that is not this one (a prefetched clip
-            // is itself still queued).
-            let next = QueueRepo::new(&conn)
-                .list_by_status(self.channel_id, &[ItemStatus::Queued])?
-                .into_iter()
-                .find(|i| i.id != self.item_id)
-                .map(|i| i.title);
-            (settings, next)
+            (settings, next_title(&conn, self.channel_id, self.item_id)?)
         };
         let lang = match settings.slate_language {
             Lang::Ja if !self.japanese_font => Lang::En,
@@ -1133,6 +1175,8 @@ struct AudioStart<'a> {
     out_dir: &'a Path,
     /// A viewer's link: the thumbnail address is checked like the media's.
     viewer: bool,
+    /// The slate language (of the "Up next" line).
+    lang: Lang,
 }
 
 /// The picture of an audio-only clip: the title and artist from the tags (else the queue's
@@ -1173,12 +1217,22 @@ async fn prepare_audio_visual(d: &ClipFactoryDeps, a: &AudioStart<'_>) -> Prepar
         }
         _ => None,
     };
+    let next = {
+        let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+        next_title(&conn, d.channel_id, a.item.id).ok().flatten()
+    };
+    let label = crate::i18n::t(a.lang, "visual.up_next", &[("title", "")]);
     let font = font_for(
-        Lang::En,
-        &format!("{title} {artist}"),
+        a.lang,
+        &format!("{title} {artist} {label} {}", next.as_deref().unwrap_or("")),
         &d.font_file,
         &system_fonts_dir(),
     );
+    // Japanese without a Japanese font: the line in English (like the slates).
+    let lang = match a.lang {
+        Lang::Ja if !font.has_japanese() => Lang::En,
+        lang => lang,
+    };
     let font_name = font
         .file()
         .is_file()
@@ -1193,6 +1247,8 @@ async fn prepare_audio_visual(d: &ClipFactoryDeps, a: &AudioStart<'_>) -> Prepar
         artist: &artist,
         font: font_name.as_deref(),
         cover,
+        lang,
+        next_title: next.as_deref(),
     })
     .await;
     if let Some(log) = &d.log {
@@ -1277,6 +1333,7 @@ async fn start_clip(
                     height: convert_cap,
                     out_dir: &out_dir,
                     viewer,
+                    lang: settings.slate_language,
                 },
             )
             .await,
@@ -1430,6 +1487,19 @@ async fn start_clip(
             (Arc::new(seg), None, fallback)
         }
     };
+    // The audio picture's "Up next" line follows the queue while the clip runs (it ends with
+    // the clip's ffmpeg).
+    if let Some(slot) = visual.as_ref().and_then(|v| v.next.clone()) {
+        tokio::spawn(run_audio_next(
+            slot,
+            Arc::clone(&d.db),
+            d.channel_id,
+            item.id,
+            out_dir.clone(),
+            Arc::clone(&seg),
+            None,
+        ));
+    }
     Ok(Box::new(RealClipHandle {
         seg,
         out_dir,
