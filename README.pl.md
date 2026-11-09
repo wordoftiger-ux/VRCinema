@@ -30,8 +30,6 @@ Gdy kolejka jest pusta, kanał pokazuje spokojny ekran oczekiwania (z kodem QR d
 5. **Dodawaj filmy**: wklej link do okna (albo naciśnij <kbd>Ctrl</kbd>+<kbd>V</kbd>) albo przeciągnij na nie pliki wideo.
 
 > Windows może napisać „System Windows ochronił ten komputer", bo plik nie jest podpisany. Kliknij **Więcej informacji**, a potem **Uruchom mimo to**.
->
-> W VRChat każdy, kto ogląda, musi włączyć w ustawieniach **Allow Untrusted URLs**. W instancjach publicznych VRChat może mimo to zablokować link, więc kanał jest głównie na prywatne instancje ze znajomymi.
 
 ## Co potrafi
 
@@ -62,11 +60,10 @@ Gdy kolejka jest pusta, kanał pokazuje spokojny ekran oczekiwania (z kodem QR d
 - To Twój komputer wysyła wideo, więc liczy się **prędkość wysyłania** (upload): im więcej osób ogląda, tym więcej potrzeba. Program ostrzega, gdy łącze wygląda na za słabe.
 - Większość filmów jest tylko przepakowywana, a nie konwertowana, więc obciążenie komputera jest niewielkie.
 - Wszystko jest w `%LOCALAPPDATA%\VRCinema`. Usunięcie tego folderu resetuje program.
-- Dawniej program nazywał się VRCinema. Jeśli używałeś go wcześniej, Twoje ustawienia zostają.
 
 ## Bez okna
 
-Na Linuksie, Raspberry Pi albo VPS jest też serwer bez okna z tym samym panelem. Zobacz [instrukcję](docs/manual.pl.md#linux-serwer-bez-okna).
+Na Linuksie jest też serwer bez okna z tym samym panelem. Zobacz [instrukcję](docs/manual.pl.md#linux-serwer-bez-okna).
 
 ## Używaj rozsądnie
 
