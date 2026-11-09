@@ -79,8 +79,10 @@ async function openApp(hash) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   // The checks send refused values on purpose: the browser logs their 400 answers.
-  page.on('console', (m) => m.type() === 'error' && !/status of 400/.test(m.text()) && errors.push(m.text()));
-  page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && errors.push(`${r.status()} ${r.url()}`));
+  // On air plays in the mini player on every view; this fake engine has no stream (/live 404).
+  const noStream = (url) => /\/live\//.test(url ?? '');
+  page.on('console', (m) => m.type() === 'error' && !/status of 400/.test(m.text()) && !noStream(m.location()?.url) && errors.push(m.text()));
+  page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && !noStream(r.url()) && errors.push(`${r.status()} ${r.url()}`));
   await page.goto(`${base}/admin${hash}`);
   await page.waitForSelector('.player .play');
   page.__errors = errors;

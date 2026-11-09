@@ -114,8 +114,9 @@ function onKeyDown(e) {
     if (can.current) action = skip;
   } else if ((e.key === 'i' || e.key === 'I') && plain) action = toggleStats;
   else if ((e.key === 's' || e.key === 'S') && plain) {
-    // Only where the monitor runs (the window's Channel view); its button does the same.
-    if (monitorRunning()) action = syncMonitor;
+    // Only where the monitor runs (the window's Channel view, not the mini player); its button
+    // does the same.
+    if (monitorRunning() && route.value.view === 'channel') action = syncMonitor;
   } else if (e.key === '?' && plain) action = openShortcuts;
   if (!action) return;
   e.preventDefault();
@@ -136,7 +137,6 @@ function onPaste(e) {
 
 function View() {
   const { view, section } = route.value;
-  if (view === 'channel') return html`<${ChannelView} onShortcuts=${openShortcuts} />`;
   if (view === 'history') return html`<${HistoryView} />`;
   if (view === 'share') return html`<${ShareView} />`;
   if (view === 'settings') return html`<${SettingsView} />`;
@@ -202,14 +202,17 @@ function App() {
       </div>`;
   }
   // On a phone the rail is a tab bar at the bottom and the player bar sits under the preview
-  // (in the Channel view).
+  // (in the Channel view). The Channel view stays mounted on the other tabs (after the open
+  // view, in the same place of the tree): its screens keep playing in the mini player.
+  const mini = route.value.view !== 'channel';
   return html`
-    <div class=${`app ${inWindow() ? 'in-window' : 'in-browser'}${phone ? ' phone' : ''}`}>
+    <div class=${`app ${inWindow() ? 'in-window' : 'in-browser'}${phone ? ' phone' : ''}${mini ? ' has-mini' : ''}`}>
       ${inWindow() ? html`<${Titlebar} />` : phone ? html`<${PhoneTop} />` : null}
       <${StatusStrip} />
       <div class="body">
         <${Rail} />
-        <${View} />
+        ${mini ? html`<${View} />` : null}
+        <${ChannelView} onShortcuts=${openShortcuts} mini=${mini} />
       </div>
       <${Toast} />
       <${DropZone} />

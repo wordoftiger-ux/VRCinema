@@ -444,20 +444,21 @@ try {
   check(await page.$eval('.player .play', (b) => b.disabled), 'nothing playing and not paused: the button is off');
   await scenario({ playing: 'film' });
 
-  // ---------- Leaving the view stops it ----------
+  // ---------- Another view: it keeps playing in the mini player ----------
   await scenario({ monitorFeed: { clips: [clipA], firstSeq: 100, antenna: 102, aired: 105 } });
   await waitFor(async () => (await stateOf(page)) === 'playing', 'playing again');
   await page.click('.rail-history');
-  await waitFor(async () => (await stateOf(page)) === 'off', 'leaving the Channel view stops the monitor');
+  await page.waitForSelector('.mini-player .screen-monitor');
   await sleep(500);
+  check((await stateOf(page)) === 'playing', 'in another view the monitor plays on in the mini player');
   const away = (await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length;
   await sleep(2500);
-  check((await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length === away, 'no monitor requests in another view');
+  check((await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length > away, 'it keeps reading its list there');
   await page.keyboard.press('s');
-  check((await page.$('.toast')) === null, 'S does nothing where there is no monitor');
+  check((await page.$('.toast')) === null, 'S does nothing outside the Channel view');
   await page.click('.rail-channel');
-  await waitFor(async () => (await stateOf(page)) === 'playing', 'back in the Channel view the monitor plays again');
-  check(true, 'coming back starts it again');
+  await waitFor(async () => (await stateOf(page)) === 'playing', 'back in the Channel view the monitor plays');
+  check(true, 'coming back it still plays');
 
   // The shortcuts dialog names S.
   await page.keyboard.press('?');

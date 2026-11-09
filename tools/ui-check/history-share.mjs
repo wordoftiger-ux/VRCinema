@@ -74,8 +74,11 @@ async function openApp(hash, { remote = false } = {}) {
   await page.addInitScript(FAKE_TAURI);
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
-  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && errors.push(`${r.status()} ${r.url()}`));
+  // The screens play in the mini player on every view: this fake engine has no stream (/live
+  // 404) and does not know the files of History's films that "Play now" sends to the Preview.
+  const noStream = (url) => /\/live\/|\/api\/desktop\/preview\?/.test(url ?? '');
+  page.on('console', (m) => m.type() === 'error' && !noStream(m.location()?.url) && errors.push(m.text()));
+  page.on('response', (r) => r.status() >= 400 && !r.url().includes('/api/') && !noStream(r.url()) && errors.push(`${r.status()} ${r.url()}`));
   await page.goto(`${base}/admin${hash}`);
   await page.waitForSelector('.player .play');
   page.__errors = errors;

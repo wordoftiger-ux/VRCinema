@@ -38,6 +38,27 @@ export async function makeTestFilm() {
   return { file, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+/** A 2-minute audio-only MP4 (AAC, music-like: notes changing four times a second) for the Preview. */
+export async function makeTestSong() {
+  if (!existsSync(FFMPEG)) throw new Error(`bin/ffmpeg.exe not found (${FFMPEG})`);
+  const dir = mkdtempSync(join(tmpdir(), 'ui-check-song-'));
+  const file = join(dir, 'song.mp4');
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', "aevalsrc='0.5*sin(2*PI*(110+80*floor(t*4))*t)*(0.5+0.5*sin(2*PI*2*t))+0.3*sin(2*PI*(880+600*sin(t*3))*t)':s=48000:d=120",
+    '-c:a', 'aac', '-movflags', '+faststart',
+    file,
+  ];
+  await new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', reject);
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err}`))));
+  });
+  return { file, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 export async function makeTestStream({ color = null } = {}) {
   if (!existsSync(FFMPEG)) throw new Error(`bin/ffmpeg.exe not found (${FFMPEG})`);
   const dir = mkdtempSync(join(tmpdir(), 'ui-check-hls-'));

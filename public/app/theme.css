@@ -3333,3 +3333,273 @@ kbd {
 .cap-stop:hover {
   filter: brightness(1.1);
 }
+
+/* ---------- Film perforation behind the views (admin app only) ----------
+   Two rows of small rounded holes, like the edges of a film strip, along the top and the bottom
+   of the view area: low contrast, from the theme's tokens, static (nothing moves), drawn under
+   everything (no element and no 44 px target changes). Off where more contrast is asked for. */
+
+.app > .body {
+  --perf-hole: color-mix(in srgb, var(--text) 6%, transparent);
+  --perf-band: color-mix(in srgb, var(--bg-deep) 65%, transparent);
+  --perf-step: 22px;
+  background-image:
+    radial-gradient(4px 3px at 50% 50%, var(--perf-hole) 92%, transparent 100%),
+    radial-gradient(4px 3px at 50% 50%, var(--perf-hole) 92%, transparent 100%),
+    linear-gradient(var(--perf-band), var(--perf-band)),
+    linear-gradient(var(--perf-band), var(--perf-band));
+  background-size:
+    var(--perf-step) 14px,
+    var(--perf-step) 14px,
+    100% 16px,
+    100% 16px;
+  background-position:
+    calc(var(--rail-w) + 4px) 1px,
+    calc(var(--rail-w) + 4px) calc(100% - 1px),
+    0 0,
+    0 100%;
+  background-repeat: repeat-x;
+}
+
+@media (prefers-contrast: more), (forced-colors: active) {
+  .app > .body {
+    background-image: none;
+  }
+}
+
+/* ---------- Mini player (components/mini.js) ----------
+   The Channel's screens, small, while another tab is open: the same players, restyled. */
+
+.mini-player {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--player-h) + 16px);
+  z-index: 15; /* under the toast, the menus and the dialogs */
+  width: 320px;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line-focus);
+  border-radius: var(--radius-xl);
+  background: var(--bg-deep);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+/* Room under the open view's last controls: they scroll clear of the mini player. */
+.app.has-mini > .body > .view {
+  padding-bottom: calc(320px * 9 / 16 + 32px);
+}
+
+.mini-player .stage {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  gap: 2px;
+}
+
+.mini-player .stage.dual {
+  align-items: stretch;
+}
+
+.mini-player .screen {
+  min-height: 0;
+}
+
+.mini-player .screen-cap,
+.mini-player .stage-caption,
+.mini-player .screen-actions,
+.mini-player .screen-tools,
+.mini-player .stats,
+.mini-player .seek-bubble,
+.mini-player .monitor-fallback,
+.mini-player .air-away,
+.mini-player .screen-monitor.is-off {
+  display: none;
+}
+
+.mini-player .video,
+.mini-player .stage.dual .video,
+.mini-player .monitor-box {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+}
+
+.mini-player .stage.screens .screen.role-pip {
+  top: 6px;
+  right: 6px;
+  width: 36%;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.mini-player .stage.screens .screen.role-pip .video,
+.mini-player .stage.screens .screen.role-pip .monitor-box {
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+.mini-player .monitor-note,
+.mini-player .monitor-badge {
+  font-size: 11px;
+}
+
+.mini-back {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mini-back:focus-visible {
+  outline-offset: -3px;
+}
+
+.mini-mute {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line-focus);
+  border-radius: var(--radius);
+  background: rgba(10, 11, 18, 0.8);
+  color: var(--text);
+}
+
+.mini-mute[aria-pressed="true"] {
+  color: var(--amber);
+}
+
+@media (max-width: 699.98px) {
+  .mini-player {
+    right: 8px;
+    bottom: calc(var(--player-h) + 8px + env(safe-area-inset-bottom));
+    width: 184px;
+  }
+
+  .mini-mute {
+    width: 44px;
+    height: 44px;
+  }
+
+  .app.has-mini > .body > .view {
+    padding-bottom: calc(184px * 9 / 16 + 24px);
+  }
+}
+
+/* ---------- The Preview of an audio-only film (components/audioscreen.js) ---------- */
+
+.audio-screen {
+  position: absolute;
+  inset: 0;
+  container-type: size;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  column-gap: 5%;
+  row-gap: 4cqh;
+  align-items: center;
+  padding: 6cqh 6cqw 5cqh;
+  background: radial-gradient(120% 100% at 20% 15%, var(--line-strong), var(--bg-deep));
+  color: var(--amber); /* the bars */
+}
+
+.as-art {
+  height: 100%;
+  max-height: 100%;
+  aspect-ratio: 1 / 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.as-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.as-note {
+  font-size: 30cqh;
+  color: var(--text-faint);
+}
+
+.as-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1.5cqh;
+  min-width: 0;
+  color: var(--text);
+}
+
+.as-text > * {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.as-badge {
+  padding: 1px 6px;
+  border: 1px solid var(--line-focus);
+  border-radius: var(--radius-sm);
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
+.as-title {
+  font-size: clamp(13px, 7cqh, 28px);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.as-artist {
+  font-size: clamp(12px, 5cqh, 20px);
+  color: var(--text-dim);
+}
+
+.as-time {
+  font-size: clamp(11px, 4cqh, 15px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-mute);
+}
+
+.as-next {
+  font-size: clamp(11px, 4.5cqh, 16px);
+  color: var(--amber);
+}
+
+.as-bars {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 20cqh;
+  display: block;
+}
+
+/* Small (the picture-in-picture corner): the cover, the title and the bars; in the mini player
+   (On air may sit in its corner) the cover and the bars. */
+.audio-screen.is-compact .as-text > :not(.as-title),
+.mini-player .audio-screen .as-text {
+  display: none;
+}
+
+.mini-player .audio-screen {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+}

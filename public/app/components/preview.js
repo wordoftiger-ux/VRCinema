@@ -16,6 +16,7 @@ import { monitorAheadS, previewMode } from './monitor.js';
 import { copyText, previewMuted, previewVolume } from './playerbar.js';
 import { airBehindS } from './sourceplayer.js';
 import { Meter, setListening } from './meters.js';
+import { isMini, mutedByMini } from './mini.js';
 import { StatsOverlay, previewShown, previewStats, statsOpen, toggleStats } from './stats.js';
 import {
   abilities,
@@ -253,7 +254,8 @@ export function Preview({ dual = false, role = 'side', tools = null, onActivate 
   const video = useRef(null);
   const player = useRef(null);
   const volume = previewVolume.value;
-  const muted = previewMuted.value || volume === 0;
+  // The mini player's mute silences it too (its own volume stays as set).
+  const muted = previewMuted.value || volume === 0 || mutedByMini();
   const delay = previewDelayS.value;
 
   useEffect(() => {
@@ -284,7 +286,8 @@ export function Preview({ dual = false, role = 'side', tools = null, onActivate 
   };
 
   // Beside the monitor the screen is narrow: the stats overlay then spreads over the stage.
-  const stats = statsOpen.value ? html`<${StatsOverlay} delayS=${delay} />` : null;
+  // Not in the mini player (too small; nothing is read for it there).
+  const stats = statsOpen.value && !isMini.value ? html`<${StatsOverlay} delayS=${delay} />` : null;
   const pip = dual && role === 'pip';
   const box = html`
     <div class="video" tabindex="0" aria-label=${t('preview.label')}

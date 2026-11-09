@@ -36,6 +36,8 @@ import { access, attachPreview, control, obsState, showToast } from '../store.js
 import { airBehindS, sourcePlayer, sourceReason, sourceState } from './sourceplayer.js';
 import { monitorMuted, monitorVolume, nudgeMonitorVolume } from './volume.js';
 import { Meter, setListening } from './meters.js';
+import { mutedByMini } from './mini.js';
+import { AudioScreen } from './audioscreen.js';
 
 export { monitorMuted };
 
@@ -605,9 +607,11 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
     };
   }, [inWindow]);
 
+  // The mini player's mute silences it too (its own switch stays as set).
+  const silenced = muted || mutedByMini();
   useEffect(() => {
-    for (const v of [fileVideo.current, hlsVideo.current]) setListening(v, volume, muted);
-  }, [volume, muted]);
+    for (const v of [fileVideo.current, hlsVideo.current]) setListening(v, volume, silenced);
+  }, [volume, silenced]);
 
   // The mouse wheel over the Preview sets its volume.
   const onWheel = (e) => {
@@ -641,6 +645,7 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
         onClick=${pip && onActivate ? onActivate : undefined}>
         <video ref=${fileVideo} class=${`pv-file${mode === 'fallback' ? ' is-hidden' : ''}`} muted playsinline preload="auto"></video>
         <video ref=${hlsVideo} class=${`pv-hls${mode === 'fallback' ? '' : ' is-hidden'}`} muted playsinline></video>
+        ${inWindow && mode === 'file' ? html`<${AudioScreen} video=${() => fileVideo.current} compact=${pip} />` : null}
         <${Overlay} inWindow=${inWindow} known=${known} supported=${supported} state=${state} mode=${mode} />
         ${fallbackNote ? html`<div class="monitor-fallback" role="note" title=${t('preview.fallback_hint')}>${t('preview.fallback')}</div>` : null}
         ${inWindow && obsState.value === 'live'

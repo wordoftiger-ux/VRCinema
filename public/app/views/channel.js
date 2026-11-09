@@ -3,8 +3,13 @@
 // (the channel as the viewers get it, a few seconds behind) is a picture-in-picture in its
 // corner, swapped by a click, beside it, or in a window of its own (components/screens.js).
 // On a phone, and in a remote panel, there is one screen: On air.
+//
+// The app shell keeps this view mounted on the other tabs too (`mini`): only its screens show
+// then, small, in the mini player (components/mini.js), so the players keep playing.
 
 import { html } from '../html.js';
+import { t } from '../i18n.js';
+import { MiniControls } from '../components/mini.js';
 import { Preview } from '../components/preview.js';
 import { MonitorScreen } from '../components/monitor.js';
 import { QueuePanel } from '../components/queue.js';
@@ -31,12 +36,18 @@ function Screens() {
     </section>`;
 }
 
-export function ChannelView({ onShortcuts }) {
+/**
+ * `mini`: another tab is open; the screens stay (the same players) in the mini player. The root
+ * element and the screens keep their place in the tree either way, so nothing is remounted.
+ */
+export function ChannelView({ onShortcuts, mini = false }) {
   const phone = narrow.value;
   return html`
-    <main class="view channel" id="view" data-view="channel">
+    <div class=${mini ? 'mini-player' : 'view channel'} id=${mini ? undefined : 'view'}
+      data-view=${mini ? undefined : 'channel'} role=${mini ? 'region' : 'main'}
+      aria-label=${mini ? t('mini.region') : undefined}>
       ${phone ? html`<section class="stage"><${Preview} /></section>` : html`<${Screens} />`}
-      ${phone ? html`<${PlayerBar} onShortcuts=${onShortcuts} />` : null}
-      <${QueuePanel} />
-    </main>`;
+      ${mini ? html`<${MiniControls} />` : phone ? html`<${PlayerBar} onShortcuts=${onShortcuts} />` : null}
+      ${mini ? null : html`<${QueuePanel} />`}
+    </div>`;
 }

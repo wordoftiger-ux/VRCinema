@@ -173,6 +173,31 @@ function read(tapped) {
   return { peaks, lufs: loudness(squares) };
 }
 
+/**
+ * The spectrum of `video`'s sound (left channel, before the host's volume: it moves while
+ * muted too) as bytes into `out` (from 0 Hz up, 2048 bins to half the sample rate); false
+ * while there is no tap (no click in the window yet, or the element cannot be tapped).
+ */
+export function spectrum(video, out) {
+  const tapped = tap(video);
+  if (!tapped || ctx?.state !== 'running') return false;
+  const a = tapped.raw[0];
+  if (!tapped.bins) {
+    tapped.bins = new Uint8Array(a.frequencyBinCount);
+    // The byte scale of the spectrum only (the meters read the samples): music from −80 to −10 dB.
+    a.minDecibels = -80;
+    a.maxDecibels = -10;
+  }
+  a.getByteFrequencyData(tapped.bins);
+  out.set(tapped.bins.subarray(0, out.length));
+  return true;
+}
+
+/** The sample rate of the window's sound (Hz); 48000 before it starts. */
+export function sampleRate() {
+  return ctx?.sampleRate ?? 48000;
+}
+
 const toDb = (v) => (v > 0 ? 20 * Math.log10(v) : -Infinity);
 const share = (db) => Math.max(0, Math.min(1, (db - FLOOR_DB) / -FLOOR_DB));
 
