@@ -303,12 +303,14 @@ export function Preview({ dual = false, role = 'side', tools = null, onActivate 
   const caption = pip ? t('monitor.on_air') : airCaption(delay);
   const meter = pip ? null : html`<${Meter} video=${() => video.current} />`;
   if (dual) {
+    // The overlay beside the screen, not in it: the small screen (positioned) would hold it in
+    // its corner; the stage spreads it over both screens whatever the layout.
     return html`
       <div class=${`screen screen-air role-${role}`}>
         <p class="stage-caption screen-cap"><span>${caption}</span>${meter}</p>
         ${box}
-        ${stats}
-      </div>`;
+      </div>
+      ${stats}`;
   }
   return html`
     ${box}

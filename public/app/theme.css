@@ -1195,6 +1195,11 @@ kbd {
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
 }
 
+/* On air's stats overlay spreads over the stage, above the small screen too. */
+.stage.screens > .stats {
+  z-index: 5;
+}
+
 .stage.screens .screen.role-pip .screen-cap {
   position: absolute;
   top: 4px;
