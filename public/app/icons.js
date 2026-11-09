@@ -43,7 +43,7 @@ const PATHS = {
  * taskbar icon comes from): title bar, phone header, sign-in screen.
  */
 export function AppIcon({ size = 16 }) {
-  return html`<img class="app-icon" src="/app-icon.png" alt="" aria-hidden="true" width=${size} height=${size}
+  return html`<img class="app-icon" src="/app-icon.png?v=3" alt="" aria-hidden="true" width=${size} height=${size}
     onError=${(e) => (e.currentTarget.hidden = true)} />`;
 }
 

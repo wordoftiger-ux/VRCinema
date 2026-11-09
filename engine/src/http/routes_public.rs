@@ -63,7 +63,7 @@ async fn app_icon() -> Response {
     (
         [
             (axum::http::header::CONTENT_TYPE, "image/png"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
         ],
         APP_ICON,
     )
