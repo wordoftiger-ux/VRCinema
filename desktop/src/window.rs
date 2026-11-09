@@ -339,9 +339,11 @@ fn open_air_window(app: &AppHandle, url: Url) {
             .on_new_window(|_url, _features| NewWindowResponse::Deny)
             .data_directory(app.state::<Shell>().home.join(WEBVIEW_DIR))
             .build();
-        if let Err(e) = built {
-            app.state::<Shell>()
-                .log(Msg::new("log.window_create_failed").arg("error", e));
+        match built {
+            Ok(window) => set_app_icon(&window),
+            Err(e) => app
+                .state::<Shell>()
+                .log(Msg::new("log.window_create_failed").arg("error", e)),
         }
     });
 }
@@ -422,6 +424,14 @@ pub fn open_panel(app: &AppHandle) {
     }
 }
 
+/// The window's own icon (taskbar, Alt+Tab, corner of the title bar) from the same picture the
+/// title bar of the page shows, so no other icon of the bundle can take its place.
+fn set_app_icon(window: &tauri::WebviewWindow) {
+    if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")) {
+        let _ = window.set_icon(icon);
+    }
+}
+
 fn create(app: &AppHandle, url: Url) -> tauri::Result<()> {
     let nav_app = app.clone();
     let new_window_app = app.clone();
@@ -471,6 +481,7 @@ fn create(app: &AppHandle, url: Url) -> tauri::Result<()> {
         let _ = window.set_position(PhysicalPosition::new(place.x, place.y));
         let _ = window.set_size(PhysicalSize::new(place.w, place.h));
     }
+    set_app_icon(&window);
     let _ = window.show();
     let _ = window.set_focus();
     let app = app.clone();

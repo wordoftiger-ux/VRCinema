@@ -205,7 +205,10 @@ pub fn create(app: &AppHandle, lang: Lang) -> tauri::Result<()> {
                 crate::window::open_panel(tray.app_handle());
             }
         });
-    if let Some(icon) = app.default_window_icon() {
+    // The same picture as the window's icon (the bundle's other icon files cannot take its place).
+    if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png")) {
+        builder = builder.icon(icon);
+    } else if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
     builder.build(app)?;
