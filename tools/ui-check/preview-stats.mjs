@@ -58,6 +58,24 @@ const rowText = (page, label, nth = 0) =>
     return rows[n] ? rows[n].lastElementChild.textContent.trim() : null;
   }, [label, nth]);
 
+const setLayout = (page, layout) =>
+  page.evaluate(async (l) => { (await import('/static/app/components/screens.js')).airLayout.value = l; }, layout);
+/**
+ * On air's caption with On air as the main screen (`swapped`): as the small screen it says just
+ * "On air" (the figure goes to the Preview's caption, spec deviation 4). Back to `pip` after.
+ */
+async function mainAirCaption(page, re) {
+  await setLayout(page, 'swapped');
+  let caption = '';
+  try {
+    await waitFor(async () => re.test((caption = await text(page, '.screen-air .stage-caption'))), `On air caption ${re}`);
+  } catch {
+    // The check below reports what it said.
+  }
+  await setLayout(page, 'pip');
+  return caption;
+}
+
 async function waitFor(fn, what, timeout = 8000) {
   const start = Date.now();
   for (;;) {
@@ -94,8 +112,9 @@ try {
   check(true, 'the preview is playing (the picture moves on)');
   const delay = await delayOf(page);
   check(delay >= 0 && delay < 20, 'previewDelayS is a measured number of seconds', delay);
-  const caption = await text(page, '.stage-caption');
-  check(/^On air · about \d+ s behind the server$/.test(caption), 'caption of the On air screen carries the measured delay', caption);
+  check((await text(page, '.screen-air .stage-caption')) === 'On air', 'On air as the small screen: its caption is just "On air"');
+  const caption = await mainAirCaption(page, /^On air · about \d+ s behind the server$/);
+  check(/^On air · about \d+ s behind the server$/.test(caption), 'caption of the On air screen (main) carries the measured delay', caption);
   check(Math.abs(Number(caption.match(/\d+/)[0]) - (await delayOf(page))) <= 2, 'the caption number is the measured delay, rounded');
   await page.screenshot({ path: join(shots, 'after-preview-en-1100x680.png') });
 
@@ -136,15 +155,15 @@ try {
   check(true, 'visible again: loading and playing resume, the delay is measured again');
 
   // Volume and mute: the signals drive the video, the choice is remembered in localStorage.
-  await page.click('.vol .icon-button');
+  await page.click('.vol-air .icon-button');
   await waitFor(() => page.$eval('.video video', (e) => e.muted), 'the video is muted');
   let v = await page.$eval('.video video', (e) => ({ muted: e.muted }));
   check(v.muted === true && (await page.evaluate(() => localStorage.getItem('vrcinema.previewMuted'))) === 'true', 'mute: the video is muted and the choice is stored', v);
-  await page.click('.vol .icon-button');
+  await page.click('.vol-air .icon-button');
   await waitFor(() => page.$eval('.video video', (e) => !e.muted), 'the video is unmuted');
   v = await page.$eval('.video video', (e) => ({ muted: e.muted, volume: e.volume }));
   check(v.muted === false && (await page.evaluate(() => localStorage.getItem('vrcinema.previewMuted'))) === 'false', 'unmute: the video has its sound again and the choice is stored', v);
-  await page.$eval('.vol input[type=range]', (e) => {
+  await page.$eval('.vol-air input[type=range]', (e) => {
     e.value = '0.3';
     e.dispatchEvent(new Event('input', { bubbles: true }));
   });
@@ -173,6 +192,9 @@ try {
   await page.click('.menu [role=menuitem]');
   await waitFor(async () => (await requests()).slice(m).some((r) => r.path.endsWith('/resume')), 'menu: Resume sends resume');
   check(true, 'menu: Resume sends resume');
+  // The seek bubble shows on On air as the main screen only (not as the small one): swap.
+  await setLayout(page, 'swapped');
+  await page.waitForSelector('.screen-air.role-main');
   await page.click('.video', { button: 'right' });
   await page.click('.menu button:nth-of-type(3)'); // +10 s
   await waitFor(async () => (await requests()).slice(m).find((r) => r.path.endsWith('/seek') && r.body?.byS === 10), 'menu: +10 s sends seek byS 10');
@@ -304,7 +326,7 @@ try {
   check((await rowText(page, 'Pozycja serwera')) === '1:42.0 / 3:33.0 · próba 1', 'row values follow the language', await rowText(page, 'Pozycja serwera'));
   const raw = await page.$eval('.stage', (e) => e.textContent.match(/\b(stats|preview)\.[a-z_0-9]+/g));
   check(raw === null, 'no untranslated keys in the stage', raw);
-  const plCaption = await text(page, '.stage-caption');
+  const plCaption = await mainAirCaption(page, /^Na antenie · ok\. \d+ s za serwerem$/);
   check(/^Na antenie · ok\. \d+ s za serwerem$/.test(plCaption), 'the caption follows the language', plCaption);
   await page.screenshot({ path: join(shots, 'after-stats-pl-1100x680.png') });
   await page.evaluate(async () => (await import('/static/app/store.js')).setLanguage('en'));
@@ -342,6 +364,8 @@ try {
   await sleep(1500);
   check((await text(page, '.stage-caption')) === 'On air', 'no stream: the caption is just "On air"');
   check((await delayOf(page)) === null, 'no stream: the delay stays unknown');
+  await setLayout(page, 'swapped'); // the bubble shows on On air as the main screen
+  await page.waitForSelector('.screen-air.role-main');
   await page.evaluate(async () => { (await import('/static/app/store.js')).seekBubble.value += 1; });
   await waitFor(() => page.$('.seek-bubble'), 'bubble without any measurement');
   check((await text(page, '.seek-bubble')).endsWith('Viewers will see this in a few seconds'), 'no measurement at all: the bubble says "a few seconds"');

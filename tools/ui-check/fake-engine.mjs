@@ -83,6 +83,8 @@ const TYPES = {
 export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, previewFile = null } = {}) {
   if (port === 8080) throw new Error('never port 8080');
   let requests = [];
+  /** When the live list started to grow (its first request after a reset). */
+  let liveStartedAt = null;
   let uploads = [];
   let liveRequests = [];
   let monitorInFlight = 0;
@@ -218,6 +220,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
   ];
 
   function reset() {
+    liveStartedAt = null;
     requests = [];
     uploads = [];
     liveRequests = [];
@@ -637,11 +640,38 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
           tunnel: { state: 'online', onlineS: 4320, reconnects: 1, connections: 4, locations: ['waw01', 'fra02'] },
         };
 
+  // The folder's list (40 s) would run out a few seconds after a player joins at its live edge:
+  // it grows like a channel instead, one segment per segment length since the first request
+  // after a reset, the folder's segments over and over (n.ts is segment n % count, with a
+  // discontinuity at each new round).
+  async function liveList() {
+    const lines = (await readFile(join(hlsDir, 'main.m3u8'), 'utf8')).replace('#EXT-X-ENDLIST', '').split(/\r?\n/);
+    const first = lines.findIndex((l) => l.startsWith('#EXTINF'));
+    const head = lines.slice(0, first).filter(Boolean);
+    const segs = [];
+    for (let i = first; i < lines.length; i += 1) {
+      if (lines[i].startsWith('#EXTINF')) segs.push(lines[i]);
+    }
+    return { head, segs };
+  }
+
   async function serveLive(res, name) {
     if (!hlsDir || !s.hls || !/^(main\.m3u8|\d+\.ts)$/.test(name)) return json(res, 404, { error: 'Not Found' });
     try {
-      let bytes = await readFile(join(hlsDir, name));
-      if (name.endsWith('.m3u8')) bytes = Buffer.from(bytes.toString('utf8').replace('#EXT-X-ENDLIST', ''));
+      let bytes;
+      const { head, segs } = await liveList();
+      if (name.endsWith('.m3u8')) {
+        liveStartedAt ??= Date.now();
+        const count = segs.length + Math.floor((Date.now() - liveStartedAt) / 2000);
+        const out = [...head];
+        for (let i = 0; i < count; i += 1) {
+          if (i > 0 && i % segs.length === 0) out.push('#EXT-X-DISCONTINUITY');
+          out.push(segs[i % segs.length], `${i}.ts`);
+        }
+        bytes = Buffer.from(`${out.join('\n')}\n`);
+      } else {
+        bytes = await readFile(join(hlsDir, `${Number(name.slice(0, -3)) % segs.length}.ts`));
+      }
       res.writeHead(200, { 'content-type': name.endsWith('.ts') ? 'video/mp2t' : 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' });
       res.end(bytes);
     } catch {
