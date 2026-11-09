@@ -73,3 +73,4 @@ VRCinema is meant for watching **privately with friends**. Whoever runs it is re
 
 - The [full manual](docs/manual.md) has every setting, troubleshooting and the technical details.
 - Licence: [MIT](LICENSE).
+- [Third-party software and licences](docs/third-party-licenses.md) (FFmpeg, yt-dlp, Deno, cloudflared, the interface and Rust libraries).

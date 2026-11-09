@@ -73,3 +73,4 @@ VRCinema służy do oglądania **prywatnie ze znajomymi**. Kto uruchamia program
 
 - [Pełna instrukcja](docs/manual.pl.md) z każdym ustawieniem, rozwiązywaniem problemów i szczegółami technicznymi.
 - Licencja: [MIT](LICENSE).
+- [Oprogramowanie innych autorów i licencje](docs/third-party-licenses.md) (FFmpeg, yt-dlp, Deno, cloudflared, biblioteki interfejsu i Rusta; po angielsku).
