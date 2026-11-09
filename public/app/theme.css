@@ -1346,8 +1346,14 @@ kbd {
 
 .stage-caption {
   margin: 8px 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   color: var(--text-faint);
+}
+.stage-caption > span {
+  min-width: 0;
 }
 
 .seek-bubble {
@@ -3117,6 +3123,20 @@ kbd {
 .meter.clipping .meter-clip {
   background: var(--red);
   border-color: var(--red);
+}
+/* Phone: the same 10 px light, pressed on 44 px around it (the margins keep the line height). */
+@media (max-width: 699.98px) {
+  .meter-clip {
+    width: 44px;
+    height: 44px;
+    margin: -17px -17px -17px -11px;
+    border: 0;
+    border-radius: 0;
+    background: radial-gradient(circle, transparent 4px, var(--line-control) 4px 5px, transparent 5.5px);
+  }
+  .meter.clipping .meter-clip {
+    background: radial-gradient(circle, var(--red) 5px, transparent 5.5px);
+  }
 }
 
 .qi-marks {
