@@ -70,7 +70,7 @@ pub struct Shell {
     window_port: Mutex<Option<u16>>,
     /// The engine's ports whose page may use the window commands (see `window`).
     controls_ports: Mutex<BTreeSet<u16>>,
-    /// The app's data folder (`%LOCALAPPDATA%\VRCinema`, the old `VRCinema` one, or `VRCINEMA_HOME`).
+    /// The app's data folder (`%LOCALAPPDATA%\VRCinema` or `VRCINEMA_HOME`).
     pub home: PathBuf,
 }
 
@@ -274,9 +274,8 @@ fn spawn_watchdog(after: Duration, on_expire: impl FnOnce() + Send + 'static) {
     });
 }
 
-/// Removes `VRCinema.old.exe` (or `VRCinema.old.exe`, from an update made by a version still
-/// called VRCinema) left by an update, in the background (it may take a while for the old
-/// program to go away).
+/// Removes `VRCinema.old.exe` left by an update, in the background (it may take a while for
+/// the old program to go away).
 fn spawn_update_cleanup(exe: PathBuf) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || finish_update(&exe))
 }
@@ -284,10 +283,10 @@ fn spawn_update_cleanup(exe: PathBuf) -> std::thread::JoinHandle<()> {
 /// After an update: waits until the old program is gone (its renamed file can be deleted
 /// only then) and removes it.
 fn finish_update(exe: &Path) {
-    let leftovers = vrcinema::self_update::leftover_paths(exe);
+    let leftover = vrcinema::self_update::leftover_path(exe);
     for _ in 0..AFTER_UPDATE_WAITS {
         tauri::async_runtime::block_on(vrcinema::self_update::cleanup_after_update(exe));
-        if leftovers.iter().all(|old| !old.exists()) {
+        if !leftover.exists() {
             return;
         }
     }
@@ -306,30 +305,6 @@ fn engine_options() -> AppOptions {
         options.update_api_url = url;
     }
     options
-}
-
-/// Name of the autostart entry (a value under `HKCU\...\CurrentVersion\Run`, named after the
-/// program) written by the versions called VRCinema.
-#[cfg(windows)]
-const LEGACY_AUTOSTART_NAME: &str = "VRCinema";
-
-/// Removes the autostart entry of the versions called VRCinema, if there is one (it would start
-/// the program a second time, or point at a file that is gone).
-#[cfg(windows)]
-fn remove_legacy_autostart() -> Result<(), String> {
-    auto_launch::AutoLaunch::new(
-        LEGACY_AUTOSTART_NAME,
-        "",
-        auto_launch::WindowsEnableMode::Dynamic,
-        &[] as &[&str],
-    )
-    .disable()
-    .map_err(|e| e.to_string())
-}
-
-#[cfg(not(windows))]
-fn remove_legacy_autostart() -> Result<(), String> {
-    Ok(())
 }
 
 /// Starts the engine and shows the window (unless started with Windows). Runs in Tauri's
@@ -366,10 +341,6 @@ fn start(
     }
     if args.after_update {
         engine.log(Msg::new("log.started_after_update"));
-    }
-    // The entry of the versions called VRCinema goes; the setting below writes the `VRCinema` one.
-    if let Err(e) = remove_legacy_autostart() {
-        engine.log(Msg::new("log.autostart_refresh_failed").arg("error", e));
     }
     // Keeps the autostart entry pointing at this file (the program may have been moved).
     if engine.settings().autostart
@@ -581,16 +552,13 @@ mod tests {
         let exe = tmp.path().join("VRCinema.exe");
         std::fs::write(&exe, b"new").unwrap();
         std::fs::write(tmp.path().join("VRCinema.old.exe"), b"old").unwrap();
-        // Left by an update that a version still called VRCinema made.
-        std::fs::write(tmp.path().join("VRCinema.old.exe"), b"older").unwrap();
         spawn_update_cleanup(exe.clone()).join().unwrap();
-        assert!(!tmp.path().join("VRCinema.old.exe").exists());
         assert!(!tmp.path().join("VRCinema.old.exe").exists());
         assert!(exe.exists());
     }
 
     #[test]
     fn the_program_reports_the_desktop_version() {
-        assert_eq!(engine_options().version, Version::new(0, 2, 0));
+        assert_eq!(engine_options().version, Version::new(0, 3, 0));
     }
 }
