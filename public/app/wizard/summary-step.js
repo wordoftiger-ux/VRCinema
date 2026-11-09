@@ -20,7 +20,7 @@ export function SummaryStep({ nav, finish }) {
     refreshInfo();
   }, []);
   const address = publicAddress.value;
-  const base = address ? String(address).replace(/\/+$/, '') : `http://127.0.0.1:${info.value?.port ?? 8080}`;
+  const base = address ? String(address).replace(/\/+$/, '') : `${location.protocol}//127.0.0.1:${info.value?.port ?? 8080}`;
   const link = `${base}/live/main.m3u8`;
 
   const copy = async () => {

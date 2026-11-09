@@ -3313,8 +3313,11 @@ mod tests {
         let lines = lines.lock().unwrap().clone();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].starts_with("Video #1 \"Test\" could not start with the info ticker (")
-                && lines[0].ends_with("It starts again without the ticker."),
+            // The handle here has no ticker task (as with a clip of subtitles only), so the
+            // restart says it was the subtitles; with a ticker the line names the ticker.
+            lines[0].starts_with(
+                "ffmpeg could not draw the subtitles of video #1 \"Test\"; it starts again without them"
+            ),
             "{lines:?}"
         );
         assert!(wait_until(|| !out_dir.exists(), Duration::from_secs(10)).await);
