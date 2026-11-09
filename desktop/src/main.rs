@@ -573,6 +573,9 @@ mod tests {
 
     #[test]
     fn the_program_reports_the_desktop_version() {
-        assert_eq!(engine_options().version, Version::parse(env!("CARGO_PKG_VERSION")).unwrap());
+        assert_eq!(
+            engine_options().version,
+            Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
+        );
     }
 }
