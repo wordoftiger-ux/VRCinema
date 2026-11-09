@@ -14,6 +14,12 @@
 // `library`: null (switched off: {enabled: false}) or [{name, tree}] where a tree maps a folder
 // name to its tree and a file name to its size in bytes; `libraryAddError`: the code POST …/local
 // answers with.
+// Lists' pictures and "Now loading": every listed item carries `thumb` (scenario `thumbs`
+// {itemId: address}, else null); GET /api/admin/items/<id>/thumb answers a PNG (404 for the
+// ids in scenario `thumbFail`); the panel's `loading` is scenario `loading` ({item,
+// stage, elapsedS, percent} or null, like the engine). POST /api/desktop/slate-background/pick
+// (window only): the native picker of the slates' background; scenario `pickSlate` true
+// (default) stores a PNG like an upload, false answers {picked: false}.
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
 // Nick PIN: POST /api/channels/main/nick/protect and …/nick/adopt (scenario viewerPins, viewerCodes), POST /api/admin/nicks/{skeleton}/reset-pin.
 // Viewer lists: POST /api/channels/main/request-list (settings viewerLists / viewerListMax, scenario listDelayMs), the panel's pendingLists and POST /api/admin/channels/main/lists/{id}.
@@ -269,6 +275,10 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       toolsMissing: [],
       updateOffer: null,
       pickCookies: 'C:/cookies.txt',
+      pickSlate: true,
+      thumbs: {},
+      thumbFail: [],
+      loading: null,
       remotePanelOff: false,
       sessionViaTunnel: false,
       channelDown: false,
@@ -396,6 +406,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     return undefined;
   }
 
+  /** The items with their pictures (scenario `thumbs`). */
+  const withThumbs = (items) => items.map((i) => ({ ...i, thumb: s.thumbs?.[i.id] ?? null }));
+
   function panel() {
     const current =
       s.playing === 'none'
@@ -421,13 +434,14 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       link: s.link ?? null,
       // Scenario `obs`: the OBS stream's state (off, waiting, live, brb).
       obs: { state: s.obs ?? 'off' },
-      playing: current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : [],
-      queue: s.queue,
-      pending: s.pendingItems,
+      playing: withThumbs(current ? [{ ...item(7, current.title), status: 'playing', sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] : []),
+      queue: withThumbs(s.queue),
+      pending: withThumbs(s.pendingItems),
+      loading: s.loading ?? null,
       pendingLists: s.pendingLists
         .map((l) => ({ ...l, itemIds: l.itemIds.filter((id) => s.pendingItems.some((i) => i.id === id)) }))
         .filter((l) => l.itemIds.length >= 2),
-      history: s.history,
+      history: withThumbs(s.history),
       settings: {},
       control: control(),
       // The engine's air clock: a typical viewer `airLatencyS` behind the edge, 12 s of film
@@ -1104,6 +1118,12 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       s.config.detectedEncoder = ENCODER_RESULT;
       return done(200, { detectedEncoder: ENCODER_RESULT, encoder: ENCODER_RESULT });
     }
+    if (path === '/api/desktop/slate-background/pick' && req.method === 'POST') {
+      if (!s.pickSlate) return done(200, { picked: false });
+      s.slateBgBytes = PNG;
+      s.slateBg = { motion: false, seconds: 0, stamp: Date.now(), source: 'image' };
+      return done(200, { background: s.slateBg, maxBytes: 31457280, maxSeconds: 30, maxSide: 4096 });
+    }
     if (path === '/api/desktop/pick-cookies' && req.method === 'POST') {
       if (s.pickCookies) s.config.ytdlpCookies = s.pickCookies;
       return done(200, { picked: Boolean(s.pickCookies), ytdlpCookies: s.config.ytdlpCookies });
@@ -1157,6 +1177,13 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     }
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
 
+    const thumbRoute = path.match(/^\/api\/admin\/items\/(\d+)\/thumb$/);
+    if (thumbRoute && req.method === 'GET') {
+      requests.push({ method: 'GET', path });
+      if (s.thumbFail.includes(Number(thumbRoute[1]))) return coded(res, 404, 'no_such_item', 'There is no such item.');
+      res.writeHead(200, { 'content-type': 'image/png' });
+      return res.end(PNG);
+    }
     // The owner's slate background (raw file body): stored in memory, the preview is a PNG.
     if (path.startsWith('/api/admin/channels/main/slate-background')) return slateBackground(req, res, path);
     if (path === '/api/channels/main/upload' && req.method === 'POST') return viewerUpload(req, res);

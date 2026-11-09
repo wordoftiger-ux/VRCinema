@@ -31,6 +31,22 @@ impl DesktopHooks for ShellHooks {
         dialog.pick_file()
     }
 
+    fn pick_slate_background(&self) -> Option<PathBuf> {
+        // The formats the engine accepts (it checks the file itself again).
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter(
+                "PNG, JPEG, WebP, BMP, GIF, MP4, WebM, MOV, MKV",
+                &[
+                    "png", "jpg", "jpeg", "webp", "bmp", "gif", "mp4", "webm", "mov", "mkv",
+                ],
+            )
+            .add_filter("*.*", &["*"]);
+        if let Some(window) = self.app.get_webview_window(crate::window::MAIN) {
+            dialog = dialog.set_parent(&window);
+        }
+        dialog.pick_file()
+    }
+
     fn set_autostart(&self, on: bool) -> anyhow::Result<()> {
         let autolaunch = self.app.autolaunch();
         let result = if on {

@@ -3333,3 +3333,136 @@ kbd {
 .cap-stop:hover {
   filter: brightness(1.1);
 }
+
+/* ---------- Lists' pictures, "Now loading", a part that failed to draw ---------- */
+
+.th-pic {
+  overflow: hidden;
+  position: relative;
+}
+
+.th-pic img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.q-loading {
+  margin: 4px 0 6px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.qi-loading {
+  cursor: default;
+}
+
+.q-loading-pic {
+  position: relative;
+  flex: none;
+  display: flex;
+}
+
+.q-spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: var(--amber);
+  animation: q-spin 0.9s linear infinite;
+}
+
+.q-loading-stage {
+  margin: 0;
+  padding: 0 14px 4px;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.q-loading-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.q-loading-bar {
+  margin: 0 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+  overflow: hidden;
+}
+
+.q-loading-bar span {
+  display: block;
+  height: 100%;
+  background: var(--amber);
+  transition: width 0.4s ease;
+}
+
+.q-loading-bar.indeterminate span {
+  width: 35%;
+  animation: q-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes q-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes q-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .q-spinner,
+  .q-loading-bar.indeterminate span {
+    animation-duration: 3s;
+  }
+}
+
+.crash {
+  margin: 24px auto;
+  max-width: 480px;
+  padding: 18px 20px;
+  border: 1px solid var(--line-card);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.crash-whole {
+  margin: 15vh auto;
+}
+
+.crash-title {
+  color: var(--text-strong);
+}
+
+.crash-hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.crash-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}

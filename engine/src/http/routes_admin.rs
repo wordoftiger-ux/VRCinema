@@ -148,6 +148,47 @@ fn items_json(items: &[QueueItem], lang: Lang) -> Value {
     Value::Array(items.iter().map(|i| admin_item(i, lang)).collect())
 }
 
+/// The film being loaded for the "Now loading" card, or `null`: its item (with its picture),
+/// the stage of its start (`resolving`, `downloading`, `preparing`), the seconds since it
+/// began and `percent` (`null`: not known). Shown from the start until the viewers see it:
+/// while nothing of it is cut, or while the viewers see a waiting slate (not when it was
+/// prepared ahead and follows the film before it straight away).
+fn loading_json(
+    state: &AppState,
+    snapshot: &crate::engine::Snapshot,
+    playing: &[QueueItem],
+    lang: Lang,
+) -> Value {
+    use crate::pipeline::channel::ChannelStatus;
+    use crate::pipeline::loading::LoadStage;
+    let Some(l) = snapshot.stats.loading.as_ref() else {
+        return Value::Null;
+    };
+    let waiting = matches!(
+        snapshot.state.status,
+        ChannelStatus::Idle | ChannelStatus::Buffering | ChannelStatus::Starting
+    );
+    if snapshot.state.paused || !(l.emitted_s == 0.0 || waiting) {
+        return Value::Null;
+    }
+    let Some(item) = playing.iter().find(|i| i.id == l.item_id) else {
+        return Value::Null;
+    };
+    let stage = if l.emitted_s > 0.0 {
+        LoadStage::Preparing
+    } else {
+        state.loading.get(item.id).unwrap_or(LoadStage::Resolving)
+    };
+    let mut row = items_json(std::slice::from_ref(item), lang);
+    super::routes_thumbs::add_thumbs(state, std::slice::from_ref(item), &mut row);
+    json!({
+        "item": row.get(0).cloned().unwrap_or(Value::Null),
+        "stage": stage.as_str(),
+        "elapsedS": l.elapsed_ms / 1000,
+        "percent": Value::Null,
+    })
+}
+
 async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -> ApiResult {
     let id = state.channel_id;
     let (playing, queue, pending, history) = state.with_db(|c| {
@@ -174,14 +215,24 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
             |n| json!({ "itemId": n.item_id, "state": n.state }),
         ),
     );
-    body.insert("playing".into(), items_json(&playing, lang));
-    body.insert("queue".into(), items_json(&queue, lang));
-    body.insert("pending".into(), items_json(&pending, lang));
+    // The pictures of the lists (a film's site picture, YouTube's, or a frame of a disk film).
+    let listed = |items: &[QueueItem]| {
+        let mut json = items_json(items, lang);
+        super::routes_thumbs::add_thumbs(&state, items, &mut json);
+        json
+    };
+    body.insert(
+        "loading".into(),
+        loading_json(&state, &snapshot, &playing, lang),
+    );
+    body.insert("playing".into(), listed(&playing));
+    body.insert("queue".into(), listed(&queue));
+    body.insert("pending".into(), listed(&pending));
     body.insert(
         "pendingLists".into(),
         super::viewer_lists::pending_lists_json(&state)?,
     );
-    body.insert("history".into(), items_json(&history, lang));
+    body.insert("history".into(), listed(&history));
     body.insert("settings".into(), json!(settings));
     body.insert("control".into(), control_json(&snapshot.state));
     body.insert("air".into(), super::air_json(&state, &snapshot));

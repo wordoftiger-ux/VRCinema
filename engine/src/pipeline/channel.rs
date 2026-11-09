@@ -22,7 +22,9 @@ use crate::pipeline::monitor::{
 use crate::pipeline::segmenter::{SegmentInfo, SegmenterState};
 use crate::pipeline::slate_look::CountdownBackdrop;
 use crate::pipeline::slates::{SlateKind, Slates, request_url};
-use crate::stats::{ChannelStats, ClipStats, FfmpegInfo, NextInfo, NextState, OnAirInfo};
+use crate::stats::{
+    ChannelStats, ClipStats, FfmpegInfo, LoadingInfo, NextInfo, NextState, OnAirInfo,
+};
 
 /// A boxed, sendable future (like `futures::future::BoxFuture`).
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -339,6 +341,9 @@ impl ChannelOptions {
 const DEFAULT_STALL_TIMEOUT_S: u64 = 30;
 const DEFAULT_START_TIMEOUT_S: u64 = 120;
 const DEFAULT_PREFETCH_S: f64 = 60.0;
+/// A started film counts as loading until it has aired this long (the viewers' delay and a
+/// margin): the panel shows it as "Now loading" until the viewers see it.
+const LOADING_MAX_EMITTED_S: f64 = crate::pipeline::VIEWER_LAG_S as f64 + 5.0;
 /// The viewers' lag ([`crate::pipeline::VIEWER_LAG_S`]) in segments.
 const DEFAULT_VIEWER_LAG_SEGMENTS: usize = crate::pipeline::VIEWER_LAG_SEGMENTS;
 /// How many aired segments are remembered for `state()`.
@@ -1876,12 +1881,30 @@ impl Channel {
                 cpu_percent: None,
                 rss_bytes: None,
             });
+        // A film's first start (not a relaunch after a pause or a seek, not a retry while on
+        // air, not OBS), until it has aired long enough for the viewers to see it.
+        let now = (self.now)();
+        let loading = self
+            .current
+            .as_ref()
+            .filter(|c| {
+                c.relaunches == 0
+                    && !c.recovering
+                    && !is_obs(c)
+                    && c.emitted_s < LOADING_MAX_EMITTED_S
+            })
+            .map(|c| LoadingInfo {
+                item_id: c.item.id,
+                elapsed_ms: now.saturating_sub(c.started_at),
+                emitted_s: c.emitted_s,
+            });
         ChannelStats {
             ticker_slow: on_air.as_ref().is_some_and(|(_, clip)| clip.ticker_slow),
             on_air: on_air.map(|(info, _)| info),
             hls: None,
             next,
             ffmpeg,
+            loading,
         }
     }
 
@@ -3493,6 +3516,32 @@ mod tests {
         assert_eq!(e.get(a.id).status, ItemStatus::Played);
         assert_eq!(e.get(b.id).status, ItemStatus::Playing);
         assert_eq!(e.channel.prefetched_item_id(), None);
+    }
+
+    #[tokio::test]
+    async fn a_starting_film_is_loading_until_it_has_aired_a_while() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        assert_eq!(e.key(), "buffering");
+        let l = e.channel.stats().loading.expect("the film is loading");
+        assert_eq!((l.item_id, l.emitted_s), (a.id, 0.0));
+        e.flush().await;
+        e.factory.handle(0).produce(10);
+        e.next();
+        let l = e
+            .channel
+            .stats()
+            .loading
+            .expect("still loading after one segment");
+        assert_eq!(l.emitted_s, 4.0);
+        for _ in 0..4 {
+            e.next();
+        }
+        assert_eq!(
+            e.channel.stats().loading,
+            None,
+            "aired longer than the viewers' delay"
+        );
     }
 
     #[tokio::test]

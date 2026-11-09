@@ -8,6 +8,7 @@ pub mod journal;
 pub mod lists;
 pub mod queue;
 pub mod settings;
+pub mod thumbs;
 
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -18,6 +19,7 @@ pub use queue::{ACTIVE_STATUSES, AddedBy, ItemStatus, NewItem, QueueItem, QueueR
 pub use settings::{
     ChannelSettings, LinkMode, SettingsPatch, SettingsRepo, sanitize_settings_patch,
 };
+pub use thumbs::{is_public_thumbnail, set_thumbnail, thumbnails, youtube_thumbnail};
 
 pub const MAIN_CHANNEL_ID: i64 = 1;
 pub const MAIN_CHANNEL_SLUG: &str = "main";
@@ -84,6 +86,7 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(MIGRATIONS)?;
     conn.execute_batch(lists::SCHEMA)?;
     conn.execute_batch(journal::SCHEMA)?;
+    conn.execute_batch(thumbs::SCHEMA)?;
     add_column_if_missing(conn, "queue_items", "requester_key_hash", "TEXT")?;
     // In and out points (film seconds) and the start time (Unix ms) of an item.
     add_column_if_missing(conn, "queue_items", "in_s", "REAL")?;

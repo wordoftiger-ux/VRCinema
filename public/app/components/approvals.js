@@ -21,7 +21,7 @@ function Pending({ item }) {
   const sub = [lengthText(item), requester(item)].filter(Boolean).join(' · ');
   return html`
     <li class="qi qi-pending" data-id=${item.id}>
-      <${Thumb} id=${item.id} />
+      <${Thumb} id=${item.id} src=${item.thumb} />
       <${ItemText} item=${item} sub=${sub} />
       <span class="act">
         <button type="button" class="act-button yes" aria-label=${named('queue.approve_label')}

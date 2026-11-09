@@ -70,6 +70,10 @@ pub(super) fn router(state: AppState) -> Router<AppState> {
         .route("/api/desktop/tools/progress", get(tools_progress))
         .route("/api/desktop/encoder/detect", post(encoder_detect))
         .route("/api/desktop/pick-cookies", post(pick_cookies))
+        .route(
+            "/api/desktop/slate-background/pick",
+            post(super::routes_slates::pick),
+        )
         .route("/api/desktop/log", get(log))
         .route("/api/desktop/update", get(update_check))
         .route("/api/desktop/update/apply", post(update_apply))

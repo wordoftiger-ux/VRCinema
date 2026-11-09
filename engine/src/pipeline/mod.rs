@@ -41,6 +41,7 @@ pub mod broadcaster;
 pub mod channel;
 pub mod clip_factory;
 pub mod ffmpeg_args;
+pub mod loading;
 pub mod monitor;
 pub mod playlist;
 pub mod probe;

@@ -1,6 +1,7 @@
 // What every list of videos shows for one: a picture, the title (with the LIVE mark), and a
 // line of details with the requester's icon.
 
+import { useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
 import { t, videoTitle } from '../i18n.js';
 import { RequesterBadge } from './badge.js';
@@ -11,9 +12,21 @@ export const isLocal = (item) => String(item.sourceUrl ?? '').startsWith('local:
 export const isUpload = (item) => String(item.sourceUrl ?? '').startsWith('upload:');
 export const isWeb = (item) => /^https?:\/\//i.test(String(item.sourceUrl ?? ''));
 
-/** The picture of a video: the engine has none to give, so a coloured stand-in. */
-export function Thumb({ id }) {
-  return html`<span class=${`th th-${Math.abs(Number(id) || 0) % 4}`} aria-hidden="true"></span>`;
+/**
+ * The picture of a video: `src` (the item's `thumb`: the site's picture, loaded without a
+ * referrer, or the engine's frame of a disk file), else (or when it does not load) a coloured
+ * stand-in.
+ */
+export function Thumb({ id, src = null }) {
+  const [failed, setFailed] = useState(null);
+  const cls = `th th-${Math.abs(Number(id) || 0) % 4}`;
+  if (src && failed !== src) {
+    return html`<span class=${`${cls} th-pic`} aria-hidden="true">
+      <img src=${src} alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" draggable="false"
+        onError=${() => setFailed(src)} />
+    </span>`;
+  }
+  return html`<span class=${cls} aria-hidden="true"></span>`;
 }
 
 /** `3:52` — empty for a live stream or a video of unknown length. */

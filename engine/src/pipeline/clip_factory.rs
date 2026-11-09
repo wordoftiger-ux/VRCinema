@@ -27,6 +27,7 @@ use crate::pipeline::ffmpeg_args::{
     ClipArgsOptions, ClipExtras, MAX_HEIGHT, RateLimit, ReadRate, build_clip_args_ext, clip_fades,
     height_caps, light_profile,
 };
+use crate::pipeline::loading::{LoadStage, LoadStages};
 use crate::pipeline::probe::{
     AudioTags, ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video,
 };
@@ -510,6 +511,8 @@ pub struct RealClipFactory {
     prepared: Arc<Mutex<Vec<PreparedFilm>>>,
     /// The live captures of this computer (`capture:` items); `None`: none here.
     capture: Option<Arc<CaptureRegistry>>,
+    /// What each film's start is doing (the panel's "Now loading").
+    loading: LoadStages,
 }
 
 /// How long a film resolved ahead stays usable (a site's address may expire).
@@ -585,6 +588,7 @@ async fn prepare_film(factory: RealClipFactory, item: QueueItem) -> Result<(), M
         &item,
         &source,
         viewer,
+        None,
     )
     .await?;
     factory.keep_prepared(&item, probed);
@@ -601,6 +605,7 @@ pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
         downloads,
         prepared: Arc::new(Mutex::new(Vec::new())),
         capture: None,
+        loading: LoadStages::default(),
     }
 }
 
@@ -621,6 +626,12 @@ impl RealClipFactory {
     /// Airs the owner's live captures ([`crate::capture`]) kept in `registry`.
     pub fn with_capture(mut self, registry: Arc<CaptureRegistry>) -> Self {
         self.capture = Some(registry);
+        self
+    }
+
+    /// Reports the stage of every start in `loading` (read by the panel).
+    pub fn with_loading(mut self, loading: LoadStages) -> Self {
+        self.loading = loading;
         self
     }
 }
@@ -714,8 +725,28 @@ async fn probe_or_fallback(
 /// What a clip plays: the stream, its analysis and the downloaded film it holds, if any.
 type Probed = (ResolvedStream, VideoInfo, Option<Lease>);
 
+/// Keeps the site's picture of a film (yt-dlp's `thumbnail`) for the lists of the panel: only
+/// an `https` address of a named host (never a bare IP address or a local name, which the
+/// owner's browser would then ask for); for a viewer's film only from a big site's picture
+/// server (a viewer's own server would learn the owner's address from the request).
+fn remember_thumbnail(d: &ClipFactoryDeps, item: &QueueItem, stream: &ResolvedStream) {
+    let allowed = |u: &&str| {
+        if item.added_by == AddedBy::Public {
+            crate::db::thumbs::is_known_site_picture(u)
+        } else {
+            crate::db::is_public_thumbnail(u)
+        }
+    };
+    let Some(url) = stream.thumbnail.as_deref().filter(allowed) else {
+        return;
+    };
+    let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = crate::db::set_thumbnail(&conn, item.id, url);
+}
+
 /// Resolves and probes the source; a TikTok film, or one whose address was refused to
-/// ffprobe (HTTP 403/401), is downloaded by yt-dlp and played from the disk.
+/// ffprobe (HTTP 403/401), is downloaded by yt-dlp and played from the disk. `loading`: the
+/// start's stages are reported there (not for a film resolved ahead of its turn).
 async fn resolve_and_probe(
     d: &ClipFactoryDeps,
     downloads: &TempDownloads,
@@ -723,24 +754,33 @@ async fn resolve_and_probe(
     item: &QueueItem,
     source: &str,
     viewer: bool,
+    loading: Option<&LoadStages>,
 ) -> Result<Probed, Msg> {
     let stream = d.resolver.resolve(source).await.map_err(|e| e.0)?;
+    remember_thumbnail(d, item, &stream);
     let stream = checked_inputs(d, viewer, stream).await?;
     let live = item.is_live || stream.is_live;
     let duration_s = stream.duration_s;
+    let downloading = || {
+        if let Some(l) = loading {
+            l.set(item.id, LoadStage::Downloading);
+        }
+    };
     // TikTok's addresses answer 403 to everything but yt-dlp: not even probed.
-    if !live
-        && is_tiktok(source)
-        && let Some(found) =
+    if !live && is_tiktok(source) {
+        downloading();
+        if let Some(found) =
             download_and_probe(d, downloads, prober, item, source, duration_s).await
-    {
-        return found;
+        {
+            return found;
+        }
     }
     match probe_or_fallback(d, prober, item, source, viewer, stream).await? {
         Ok((stream, info)) => Ok((stream, info, None)),
         // The address was refused (any site): yt-dlp may still fetch the film itself. When
         // that fails too, the refusal is what the start fails with.
         Err(error) if !live && error.access_denied() => {
+            downloading();
             match download_and_probe(d, downloads, prober, item, source, duration_s).await {
                 Some(Ok(found)) => Ok(found),
                 _ => Err(error.message()),
@@ -1230,7 +1270,9 @@ async fn start_clip(
         downloads,
         prepared: _,
         capture: _,
+        loading,
     } = factory;
+    loading.set(item.id, LoadStage::Resolving);
     // A viewer's link is looked up again now (yt-dlp fetches it anew): its name may have started
     // to point into the owner's network since the request. The owner's films are not limited.
     let (source, viewer) = checked_source(&d, &item).await?;
@@ -1243,9 +1285,19 @@ async fn start_clip(
             (checked_inputs(&d, viewer, stream).await?, info, lease)
         }
         (None, None) => {
-            resolve_and_probe(&d, &downloads, prober.as_ref(), &item, &source, viewer).await?
+            resolve_and_probe(
+                &d,
+                &downloads,
+                prober.as_ref(),
+                &item,
+                &source,
+                viewer,
+                Some(&loading),
+            )
+            .await?
         }
     };
+    loading.set(item.id, LoadStage::Preparing);
     let settings = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         SettingsRepo::new(&conn)

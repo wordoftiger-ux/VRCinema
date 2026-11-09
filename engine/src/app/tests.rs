@@ -16,7 +16,7 @@ use crate::tools::test_server::{TestServer, build_zip};
 /// Nothing listens on the discard port: requests there fail at once.
 const NOWHERE: &str = "http://127.0.0.1:9";
 
-const ROUTES: [(&str, &str); 25] = [
+const ROUTES: [(&str, &str); 26] = [
     ("GET", "/api/desktop/info"),
     ("GET", "/api/desktop/config"),
     ("PUT", "/api/desktop/config"),
@@ -27,6 +27,7 @@ const ROUTES: [(&str, &str); 25] = [
     ("GET", "/api/desktop/tools/progress"),
     ("POST", "/api/desktop/encoder/detect"),
     ("POST", "/api/desktop/pick-cookies"),
+    ("POST", "/api/desktop/slate-background/pick"),
     ("GET", "/api/desktop/log"),
     ("GET", "/api/desktop/update"),
     ("POST", "/api/desktop/update/apply"),
@@ -562,6 +563,17 @@ async fn every_desktop_route_is_401_without_a_session_and_403_for_a_remote_one()
             "{method} {path}"
         );
     }
+    // The window's own picker of the slates' background: cancelled (the shell's default).
+    let (status, picked) = app
+        .call(
+            "POST",
+            "/api/desktop/slate-background/pick",
+            Some(&window),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{picked}");
+    assert_eq!(picked, json!({"picked": false}));
     // The window gets the monitor (an empty list without a film).
     let (status, list) = app
         .call("GET", "/api/desktop/monitor.m3u8", Some(&window), None)

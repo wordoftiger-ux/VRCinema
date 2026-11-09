@@ -79,17 +79,46 @@ async fn upload(State(state): State<AppState>, ctx: Ctx, body: Bytes) -> ApiResu
             &[],
         ));
     }
-    let media = media(&state)?.clone();
+    store(&state, &body).await
+}
+
+/// Stores `bytes` as the background and makes the slates again; the new state.
+async fn store(state: &AppState, bytes: &[u8]) -> ApiResult {
+    let media = media(state)?.clone();
     let stored = {
         let _one = UPLOADS.lock().await;
-        store_background(&media.tools(), &media.data_dir, &body).await
+        store_background(&media.tools(), &media.data_dir, bytes).await
     };
     let background = stored.map_err(|e| match e.code() {
         Some(_) => ApiError::from_msg(StatusCode::UNPROCESSABLE_ENTITY, e),
         None => ApiError::Internal(e.to_string()),
     })?;
-    refresh_slates(&state);
+    refresh_slates(state);
     Ok(json_ok(&info_json(Some(&background))))
+}
+
+/// The window's native picker (`POST /api/desktop/slate-background/pick`): the file chosen
+/// is stored like an upload; `{"picked": false}` when the owner cancelled.
+pub(super) async fn pick(State(state): State<AppState>) -> ApiResult {
+    let core = state.desktop()?;
+    media(&state)?;
+    let Some(path) = core.pick_slate_background().await else {
+        return Ok(json_ok(&json!({ "picked": false })));
+    };
+    let len = std::fs::metadata(&path)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .len();
+    // Not read at all when larger than an upload may be.
+    if len > MAX_UPLOAD_BYTES as u64 {
+        return Err(ApiError::from_msg(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            crate::i18n::Msg::error("slate_background_too_big").arg("max", MAX_UPLOAD_BYTES >> 20),
+        ));
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    store(&state, &bytes).await
 }
 
 async fn remove(State(state): State<AppState>, ctx: Ctx) -> ApiResult {

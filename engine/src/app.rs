@@ -64,6 +64,12 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub trait DesktopHooks: Send + Sync {
     /// Native "open file" dialog for the yt-dlp cookies file; `None` when cancelled.
     fn pick_cookies_file(&self) -> Option<PathBuf>;
+    /// Native "open file" dialog for the slates' own background (an image, a GIF or a short
+    /// video); `None` when cancelled. The window picks it here rather than with the web
+    /// view's own file chooser (which once left the window blank).
+    fn pick_slate_background(&self) -> Option<PathBuf> {
+        None
+    }
     /// Switches start with Windows on or off.
     fn set_autostart(&self, on: bool) -> anyhow::Result<()>;
     /// The running `VRCinema.exe` (target of self-update); `None` where updating is impossible.
@@ -885,6 +891,14 @@ impl AppCore {
         })
         .await?;
         Ok(Some(path))
+    }
+
+    /// Native picker for the slates' background; the file chosen, `None` when cancelled.
+    pub(crate) async fn pick_slate_background(self: &Arc<Self>) -> Option<PathBuf> {
+        let hooks = Arc::clone(&self.hooks);
+        tokio::task::spawn_blocking(move || hooks.pick_slate_background())
+            .await
+            .unwrap_or(None)
     }
 
     pub(crate) async fn complete_wizard(&self) -> Result<(), OpError> {

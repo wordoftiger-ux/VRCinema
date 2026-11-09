@@ -1,7 +1,10 @@
 // Browser check of Settings → Channel → Slates (spec 2026-11-07): the last-frame style saves
-// `slateFrameStyle`, a picked file is uploaded as the raw body and its preview shows, "Restore
-// default" removes it, the switch saves `slateBackgroundAll`, the texts exist in Polish too,
-// against the fake engine, in headless Brave with a temporary profile.
+// `slateFrameStyle`; in the program's window the program's own picker stores the file (no web
+// file field: the window once went blank behind the web view's chooser) and the view still
+// shows with the new preview; a cancelled pick changes nothing; "Restore default" removes it;
+// a remote panel uploads a picked file as the raw body; a section that fails to draw shows a
+// message with "Try again" (the rail still works); the switch saves `slateBackgroundAll`, the
+// texts exist in Polish too, against the fake engine, in headless Brave with a temporary profile.
 //
 //   PLAYWRIGHT_CORE=<path to playwright-core/index.mjs> node tools/ui-check/slates.mjs <shots dir> [port]
 
@@ -74,18 +77,63 @@ try {
   const style = await waitFor(async () => (await requests()).find((r) => r.method === 'PUT' && r.body?.slateFrameStyle), 'style saved');
   check(style.body.slateFrameStyle === 'blur', 'the style is saved', style.body);
 
-  // A picked file is sent as the raw body; the preview appears; it is removed again.
-  await page.setInputFiles('.slate-bg input[type=file]', pngFile);
-  const put = await waitFor(async () => (await requests()).find((r) => r.method === 'PUT' && r.path.endsWith('/slate-background')), 'upload');
-  check(put.body.bytes === PNG.length && put.body.type === 'image/png', 'the file goes as it is', put.body);
+  // The window: the program's own picker (the engine stores the file); the view still shows,
+  // with the new preview, and nothing failed to draw.
+  check(!(await page.$('.slate-bg input[type=file]')), 'the window has no web file field');
+  await page.click('button[data-action="slate-bg-pick"]');
+  await waitFor(async () => (await requests()).find((r) => r.method === 'POST' && r.path === '/api/desktop/slate-background/pick'), 'native pick');
   await page.waitForSelector('img.slate-bg-preview');
-  check(await page.$eval('img.slate-bg-preview', (i) => i.complete && i.naturalWidth === 1), 'the preview loads');
+  await waitFor(() => page.$eval('img.slate-bg-preview', (i) => i.complete && i.naturalWidth === 1), 'the preview loads');
+  check(true, 'the preview of the picked file loads');
   check((await view()).includes('Background saved.'), 'the owner is told', await view());
+  const after = await page.evaluate(() => ({
+    crash: Boolean(document.querySelector('[data-crash]')),
+    rail: Boolean(document.querySelector('.rail')),
+    blocks: document.querySelectorAll('#view[data-section="channel"] .set-rows > *').length,
+    text: document.getElementById('root').innerText.length,
+  }));
+  check(!after.crash && after.rail && after.blocks > 5 && after.text > 500, 'after the pick the whole view still renders', after);
   await page.$eval('.slate-bg', (e) => e.scrollIntoView({ block: 'center' }));
   await page.screenshot({ path: join(shots, 'slates-channel-en.png') });
   await page.click('button[data-action="slate-bg-remove"]');
   await page.waitForSelector('.slate-bg-empty');
   check((await view()).includes('Default background restored.'), 'restore default');
+  // A cancelled pick changes nothing.
+  await call('/__test/scenario', { pickSlate: false });
+  const picks = async () => (await requests()).filter((r) => r.path === '/api/desktop/slate-background/pick').length;
+  await page.click('button[data-action="slate-bg-pick"]');
+  await waitFor(async () => (await picks()) === 2, 'second pick');
+  await sleep(300);
+  check(Boolean(await page.$('.slate-bg-empty')) && !(await page.$('.slate-bg[data-busy="true"]')), 'cancelled: still the default, not busy');
+  await call('/__test/scenario', { pickSlate: true });
+
+  // A remote panel (no window): a picked file is sent as the raw body; the preview appears.
+  await call('/__test/scenario', { remote: true });
+  const remote = await ctx.newPage();
+  remote.on('pageerror', (e) => errors.push(String(e)));
+  await remote.goto(`${base}/admin#/settings/channel`);
+  await remote.waitForSelector('#view[data-section="channel"] .slate-bg input[type=file]', { state: 'attached' });
+  await remote.setInputFiles('.slate-bg input[type=file]', pngFile);
+  const put = await waitFor(async () => (await requests()).find((r) => r.method === 'PUT' && r.path.endsWith('/slate-background')), 'upload');
+  check(put.body.bytes === PNG.length && put.body.type === 'image/png', 'the file goes as it is', put.body);
+  await remote.waitForSelector('img.slate-bg-preview');
+  check(Boolean(await remote.$('#view[data-section="channel"] .set-rows')) && !(await remote.$('[data-crash]')), 'the remote panel still shows the view after the upload');
+  await remote.click('button[data-action="slate-bg-remove"]');
+  await remote.waitForSelector('.slate-bg-empty');
+  await remote.close();
+  await call('/__test/scenario', { remote: false });
+
+  // A section that fails to draw: a message with "Try again" instead of a frozen window.
+  await page.evaluate(async () => {
+    (await import('/static/app/views/settings/common.js')).channelSettings.value = { linkMode: 'allowlist' };
+  });
+  await page.waitForSelector('[data-crash]');
+  check(Boolean(await page.$('.rail')) && Boolean(await page.$('.snav')), 'the rail and the sections stay usable', await page.$eval('#root', (e) => e.innerText.slice(0, 200)));
+  await page.screenshot({ path: join(shots, 'slates-crash-en.png') });
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).loadChannelSettings());
+  await page.click('[data-crash-retry]');
+  await page.waitForSelector('#view[data-section="channel"] .slate-bg');
+  check(!(await page.$('[data-crash]')), '"Try again" draws the section again');
 
   // The switch for all slates.
   await page.click('button[role=switch][aria-label="Behind all slates"]');

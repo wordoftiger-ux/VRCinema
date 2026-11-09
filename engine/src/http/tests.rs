@@ -3460,6 +3460,59 @@ async fn the_panel_shows_the_control_state_and_the_public_state_does_not() {
     assert!(public.get("control").is_none());
 }
 
+#[tokio::test]
+async fn the_panel_shows_the_film_being_loaded_and_the_pictures_of_the_lists() {
+    let h = Harness::new();
+    let cookie = h.login().await;
+    let playing = h.add("Loading", ItemStatus::Playing);
+    let queued = h.add("Next", ItemStatus::Queued);
+    h.with_db(|c| {
+        c.execute(
+            "UPDATE queue_items SET source_url = 'https://youtu.be/dQw4w9WgXcQ' WHERE id = ?",
+            [queued.id],
+        )
+        .unwrap();
+        crate::db::set_thumbnail(c, playing.id, "https://cdn.example/p.jpg").unwrap();
+    });
+    let loading = |emitted_s: f64, status: ChannelStatus| {
+        let mut snapshot = (**h.snapshots.borrow()).clone();
+        snapshot.state.status = status;
+        snapshot.stats.loading = Some(crate::stats::LoadingInfo {
+            item_id: playing.id,
+            elapsed_ms: 4200,
+            emitted_s,
+        });
+        h.snapshots.send_replace(Arc::new(snapshot));
+    };
+    let panel = || async {
+        h.send(get("/api/admin/channels/main").cookie(&cookie))
+            .await
+            .json()
+    };
+    loading(0.0, ChannelStatus::Playing);
+    let body = panel().await;
+    assert_eq!(body["loading"]["item"]["id"], playing.id);
+    assert_eq!(body["loading"]["item"]["title"], "Loading");
+    assert_eq!(
+        body["loading"]["item"]["thumb"],
+        "https://cdn.example/p.jpg"
+    );
+    assert_eq!(body["loading"]["stage"], "resolving");
+    assert_eq!(body["loading"]["elapsedS"], 4);
+    assert_eq!(body["loading"]["percent"], Value::Null);
+    assert_eq!(
+        body["queue"][0]["thumb"],
+        "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"
+    );
+    assert_eq!(body["playing"][0]["thumb"], "https://cdn.example/p.jpg");
+    // Cut already, the viewers still wait on a slate: preparing.
+    loading(6.0, ChannelStatus::Buffering);
+    assert_eq!(panel().await["loading"]["stage"], "preparing");
+    // The viewers see films (prepared ahead, it follows straight away): no card.
+    loading(6.0, ChannelStatus::Playing);
+    assert_eq!(panel().await["loading"], Value::Null);
+}
+
 // ---------- nerd stats ----------
 
 const STATS_ROUTE: &str = "/api/admin/channels/main/stats";
@@ -3509,6 +3562,7 @@ fn stats_snapshot(h: &Harness) -> Arc<Snapshot> {
             rss_bytes: None,
         }),
         ticker_slow: false,
+        loading: None,
     };
     Arc::new(snapshot)
 }

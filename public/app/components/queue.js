@@ -7,7 +7,9 @@
 // viewer (asked first; optionally blocking the device). "Clear queue" in the heading removes
 // every waiting video; both bulk removals can be undone for a few seconds and touch the video
 // on air only when the owner ticks it in the dialog. In the program's window a tip under the
-// list says that video files can be dropped on it (a remote panel cannot take a drop).
+// list says that video files can be dropped on it (a remote panel cannot take a drop). While a
+// film starts (it has left the queue, the viewers do not see it yet) a "Now loading" row at the
+// top of the list says what loads, who added it and how far its start is.
 
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
@@ -332,7 +334,7 @@ function QueueList({ items }) {
             onPointerUp=${(e) => finish(e, true)} onPointerCancel=${(e) => finish(e, false)}
             onKeyDown=${(e) => onKeyDown(e, item, index)}
             onContextMenu=${(e) => onContextMenu(e, item, index)}>
-            <${Thumb} id=${item.id} />
+            <${Thumb} id=${item.id} src=${item.thumb} />
             <${ItemText} item=${item} />
             <${RowMarks} item=${item} />
             <button type="button" class="icon-button qi-more" aria-label=${t('queue.more', { title: videoTitle(item.title) })}
@@ -342,6 +344,40 @@ function QueueList({ items }) {
           </li>`,
       )}
     </ul>`;
+}
+
+// ---------- Now loading ----------
+
+const LOAD_STAGES = ['resolving', 'downloading', 'preparing'];
+
+/** The film being started (the engine's `loading`): its picture, title, who added it, the stage. */
+export function LoadingRow({ loading }) {
+  const item = loading?.item;
+  if (!item) return null;
+  const stage = LOAD_STAGES.includes(loading.stage) ? loading.stage : 'resolving';
+  const percent = Number.isFinite(loading.percent) ? Math.max(0, Math.min(100, Math.round(loading.percent))) : null;
+  const elapsed = Number.isFinite(loading.elapsedS) ? Math.max(0, Math.round(loading.elapsedS)) : null;
+  const progress = percent !== null
+    ? t('loading.percent', { percent })
+    : elapsed !== null ? t('loading.elapsed', { seconds: elapsed }) : '';
+  return html`
+    <section class="q-loading" aria-labelledby="q-loading-title" data-loading=${item.id} data-stage=${stage}>
+      <h3 class="sec" id="q-loading-title">${t('loading.title')}</h3>
+      <div class="qi qi-loading">
+        <span class="q-loading-pic">
+          <${Thumb} id=${item.id} src=${item.thumb} />
+          <span class="q-spinner" aria-hidden="true"></span>
+        </span>
+        <${ItemText} item=${item} />
+      </div>
+      <p class="q-loading-stage" role="status">
+        <span>${t(`loading.stage_${stage}`)}</span>
+        ${progress ? html`<span class="q-loading-time">${progress}</span>` : null}
+      </p>
+      <div class=${percent === null ? 'q-loading-bar indeterminate' : 'q-loading-bar'} aria-hidden="true">
+        <span style=${percent === null ? undefined : `width: ${percent}%`}></span>
+      </div>
+    </section>`;
 }
 
 // ---------- The panel ----------
@@ -366,6 +402,7 @@ export function QueuePanel() {
         ${obsState.value === 'live' || obsState.value === 'brb'
           ? html`<p class="q-obs" role="status" data-obs=${obsState.value}><span class="live-tag">OBS</span> ${t('queue.obs_waits')}</p>`
           : null}
+        <${LoadingRow} loading=${channel.value?.loading} />
         <${Library} />
         ${pending.length ? html`<${Approvals} items=${pending} />` : null}
         ${pending.length ? html`<h3 class="sec">${t('queue.section_queued')}</h3>` : null}

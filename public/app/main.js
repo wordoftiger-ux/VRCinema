@@ -38,6 +38,7 @@ import { toggleStats } from './components/stats.js';
 import { monitorRunning, syncMonitor } from './components/monitor.js';
 import { StatusStrip } from './components/status.js';
 import { LoginView } from './views/login.js';
+import { Guard } from './components/guard.js';
 
 // ---------- Keyboard shortcuts ----------
 
@@ -134,6 +135,11 @@ function onPaste(e) {
   pasteLink(text);
 }
 
+/** The view on show; a view that fails to draw shows a message (and the rail still works). */
+function GuardedView() {
+  return html`<${Guard} key=${route.value.view}><${View} /><//>`;
+}
+
 function View() {
   const { view, section } = route.value;
   if (view === 'channel') return html`<${ChannelView} onShortcuts=${openShortcuts} />`;
@@ -209,7 +215,7 @@ function App() {
       <${StatusStrip} />
       <div class="body">
         <${Rail} />
-        <${View} />
+        <${GuardedView} />
       </div>
       <${Toast} />
       <${DropZone} />
@@ -296,7 +302,7 @@ async function start() {
   }
   const program = info?.language ?? environment.value?.language;
   await loadLang(access.value === 'window' ? program : (chosenLang() ?? program ?? browserLang()));
-  render(html`<${App} />`, document.getElementById('root'));
+  render(html`<${Guard} whole><${App} /><//>`, document.getElementById('root'));
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('paste', onPaste);
   startPolling();

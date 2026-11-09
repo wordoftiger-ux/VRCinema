@@ -4,6 +4,7 @@
 import { html } from '../html.js';
 import { t } from '../i18n.js';
 import { route } from '../components/rail.js';
+import { Guard } from '../components/guard.js';
 import { General } from './settings/general.js';
 import { Internet } from './settings/internet.js';
 import { ChannelSettings } from './settings/channel.js';
@@ -39,7 +40,7 @@ export function SettingsView() {
       </nav>
       <div class="sform">
         <h1>${t(key)}</h1>
-        <${Section} key=${current} />
+        <${Guard} key=${current}><${Section} /><//>
       </div>
     </main>`;
 }

@@ -329,6 +329,7 @@ async fn start_channel_loop(
     downloads: &TempDownloads,
     obs: Option<crate::obs::ObsHub>,
     capture: &Arc<crate::capture::CaptureRegistry>,
+    loading: &crate::pipeline::loading::LoadStages,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -373,6 +374,7 @@ async fn start_channel_loop(
         let downloads = downloads.clone();
         let obs_priority = live.obs_priority.clone();
         let capture = Arc::clone(capture);
+        let loading = loading.clone();
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -397,7 +399,8 @@ async fn start_channel_loop(
                 check_viewer_media: !fake_resolver,
             })
             .with_downloads(downloads.clone())
-            .with_capture(Arc::clone(&capture));
+            .with_capture(Arc::clone(&capture))
+            .with_loading(loading.clone());
             let mut options = ChannelOptions::new(
                 MAIN_CHANNEL_ID,
                 Arc::clone(&db),
@@ -550,6 +553,8 @@ pub async fn run(
             },
         )))
     });
+    // What the start of a film is doing, for the panel's "Now loading".
+    let loading = crate::pipeline::loading::LoadStages::default();
     let (handle, engine_task) = if start_channel {
         let (handle, task, swapper) = start_channel_loop(
             &config,
@@ -564,6 +569,7 @@ pub async fn run(
             &downloads,
             obs_hub.clone(),
             &capture,
+            &loading,
         )
         .await?;
         slates = Some(swapper);
@@ -639,6 +645,8 @@ pub async fn run(
         .with_preview(preview)
         .with_obs(obs_hub.clone())
         .with_capture(Arc::clone(&capture))
+        .with_loading(loading.clone())
+        .with_thumbs(config.data_dir.join("thumbs"), config.ffmpeg_path.clone())
         .with_ctl_token(&ctl_token);
         if let Some(configure) = configure_state {
             state = configure(state);

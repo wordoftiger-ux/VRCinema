@@ -333,6 +333,19 @@ pub struct ChannelStats {
     /// The film on air converts slower than real time because of the info ticker (the app
     /// shows a banner).
     pub ticker_slow: bool,
+    /// The film being started (its first start, not a relaunch after a pause or a seek), while
+    /// it has not aired long: the panel's "Now loading" card.
+    pub loading: Option<LoadingInfo>,
+}
+
+/// The start of a film as the channel sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadingInfo {
+    pub item_id: i64,
+    /// Since the start was asked for (milliseconds).
+    pub elapsed_ms: u64,
+    /// Seconds of it cut so far (0: nothing yet).
+    pub emitted_s: f64,
 }
 
 /// The tunnel, as the stats show it.

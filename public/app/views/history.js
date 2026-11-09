@@ -64,7 +64,7 @@ function Row({ item }) {
   const addable = isWeb(item);
   return html`
     <li class="qi hist-row" data-id=${item.id} data-outcome=${kind}>
-      <${Thumb} id=${item.id} />
+      <${Thumb} id=${item.id} src=${item.thumb} />
       <${ItemText} item=${item} sub=${details(item, kind)} />
       <span class=${`stt s-${kind}`} title=${kind === 'skipped' && item.error ? item.error : undefined}>${t(STATUS_KEYS[kind])}</span>
       <span class="hist-actions">

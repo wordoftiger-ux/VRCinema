@@ -11,6 +11,7 @@ mod routes_public;
 mod routes_queue;
 mod routes_slates;
 mod routes_stream;
+mod routes_thumbs;
 mod routes_uploads;
 mod viewer_lists;
 
@@ -131,6 +132,11 @@ pub struct AppState {
     ctl_token: Option<Arc<str>>,
     /// The live captures of this computer (window only, see [`routes_capture`]); `None`: none.
     pub(crate) capture: Option<Arc<crate::capture::CaptureRegistry>>,
+    /// What the start of the film being loaded is doing (the panel's "Now loading").
+    pub(crate) loading: crate::pipeline::loading::LoadStages,
+    /// The frames made for the films of the owner's disk and viewers' files (`None`: none,
+    /// e.g. in tests).
+    pub(crate) thumbs: Option<Arc<routes_thumbs::ThumbCache>>,
 }
 
 impl AppState {
@@ -201,6 +207,8 @@ impl AppState {
             monitor_watch: Arc::default(),
             queue_undo: Arc::default(),
             preview: None,
+            loading: Default::default(),
+            thumbs: None,
             air_viewers: Arc::default(),
             alarms: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
@@ -255,6 +263,18 @@ impl AppState {
     /// The OBS input (the window shows its listener's state).
     pub fn with_obs(mut self, hub: Option<crate::obs::ObsHub>) -> Self {
         self.obs = hub;
+        self
+    }
+
+    /// Shares the stages of the films' starts with the clip factory.
+    pub fn with_loading(mut self, loading: crate::pipeline::loading::LoadStages) -> Self {
+        self.loading = loading;
+        self
+    }
+
+    /// Makes the frames of disk films in `dir` with `ffmpeg` (`/api/admin/items/<id>/thumb`).
+    pub fn with_thumbs(mut self, dir: std::path::PathBuf, ffmpeg: std::path::PathBuf) -> Self {
+        self.thumbs = Some(Arc::new(routes_thumbs::ThumbCache::new(dir, ffmpeg)));
         self
     }
 
@@ -1271,6 +1291,7 @@ pub fn build_router(state: AppState) -> Router {
     }
     .merge(routes_queue::router())
     .merge(routes_slates::router())
+    .merge(routes_thumbs::router())
     .merge(viewer_lists::admin_router())
     .route_layer(middleware::from_fn_with_state(
         state.clone(),
