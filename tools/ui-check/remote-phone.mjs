@@ -111,10 +111,11 @@ const smallTargets = (page, root) =>
           const r = e.getBoundingClientRect();
           const s = getComputedStyle(e);
           if (r.width === 0 || r.height === 0 || s.visibility === 'hidden') return false;
-          // A slider is pressed on its hit strip around it, a radio button or a checkbox on its label.
+          // A slider is pressed on its hit strip around it, a radio button, a checkbox or a hidden file
+          // input on its label.
           const box = e.matches('[role=slider]')
             ? e.closest('.track-hit').getBoundingClientRect()
-            : e.matches('input[type=radio], input[type=checkbox]') && e.closest('label')
+            : e.matches('input[type=radio], input[type=checkbox], input[type=file]') && e.closest('label')
               ? e.closest('label').getBoundingClientRect()
               : r;
           const text = e.matches('input[type=text], input[type=url], input[type=password], input[type=radio], input[type=checkbox], select, .txt');
