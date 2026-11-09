@@ -1,6 +1,6 @@
 # systemd unit of the headless VRCinema server (Linux, no window).
 #
-# Layout (see README, "Linux (server without window)"):
+# Layout (see docs/manual.md, "Linux (server without window)"):
 #   /opt/vrcinema/vrcinema      the program
 #   /opt/vrcinema/.env         settings (ADMIN_PASSWORD, SESSION_SECRET, PUBLIC_URL, ...)
 #   /opt/vrcinema/bin/         yt-dlp, ffmpeg, ffprobe, deno (from `vrcinema setup`)

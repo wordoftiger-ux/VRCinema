@@ -1,470 +1,78 @@
-# VRCinema (VRChat HLS Channel)
-
-A small self-hosted server that turns links (YouTube, pixeldrain, CDA and anything else
-[yt-dlp](https://github.com/yt-dlp/yt-dlp) understands) and video files from your own disk into
-**one continuous live HLS channel**. Paste the channel link into a video player in a VRChat world once,
-and the queue plays back to back. Everyone in the lobby sees the same moment.
-
-Polish version: [README.pl.md](README.pl.md). The program speaks English, Polish, Spanish, German, French and Japanese (beta).
-
-- **Player window / owner panel** (`/admin`): live preview, pause, seek, play now, the queue and the history, stats for nerds, settings.
-- **Public request page** (`/`): friends can suggest videos with a nick, with rate limits and optional approval.
-- **Never goes off air**: an idle screen plays when the queue is empty, so the VRChat player never disconnects.
-- **Info ticker**: an optional band burned into the picture with the title, who added it, what comes next, your messages, a QR code of the request page and a progress line.
-- **Light on CPU**: H.264 sources up to 1080p are repackaged without re-encoding. Everything else is converted, optionally on an NVIDIA, Intel or AMD GPU.
-
-> **Intended for private watching with friends.** Whoever runs the server is responsible for what it streams.
-> Re-streaming content you don't have rights to may break copyright law and the terms of the sites you stream from.
-
-## Desktop app (Windows)
-
-`VRCinema.exe` is the whole server in one window: no Node.js, no installer, no `.env` file.
-
-- **Download** `VRCinema.exe` from the [Releases](https://github.com/wordoftiger-ux/vrcinema/releases) page (about 25 MB) and put it anywhere, for example on the desktop. Windows 10/11, 64-bit; it needs the Microsoft Edge WebView2 Runtime, which is already part of Windows 11 and most Windows 10 installations (the app tells you where to get it if it is missing).
-- **First run**: a wizard asks for the language (it starts with the language of Windows), downloads the tools (ffmpeg, yt-dlp, the Deno runtime that YouTube needs and cloudflared for the public link, about 300 MB in total) into `%LOCALAPPDATA%\VRCinema`, tests your graphics card to pick the encoder (NVIDIA, Intel, AMD or CPU), starts the channel and shows its public link. Short skippable steps then cover the main options with their defaults already chosen (who can add videos, the info ticker, slates and audio, the remote panel password, OBS and the VRChat chatbox) and end with a summary: **Copy link for VRChat** and a quick test. After that the app opens straight to the player; **Settings** → **General** → **Run setup again** opens the wizard again.
-- **SmartScreen**: the file is not code-signed, so Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**.
-- **Adding films**: paste a link into the field above the queue (or press Ctrl+V anywhere outside a text field), or drag video files or whole folders onto the window. Dropped files are played from where they are on your disk.
-- **Tray**: closing the window keeps the channel running in the tray (a balloon tells you the first time). The tray menu opens the window, copies the channel link or the request page link, skips the current film and quits. **Quit** from the tray stops the channel and every ffmpeg process.
-- **Remote panel**: off by default; the panel is reachable only from this computer. To manage the channel from another device (a phone, a laptop), set a password in **Settings** → **Remote panel** (see [Remote panel and phone](#remote-panel-and-phone)).
-- **Updates**: the app checks for a newer `VRCinema.exe` at start and every 24 hours and offers to install it (the file is verified with its SHA-256 and the old one is kept until the new one runs). This needs the repository's releases to be public.
-- **Data**: everything is in `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Set `VRCINEMA_HOME` to use another folder. Deleting the folder resets the app.
-- **Renamed from VRCinema**: VRCinema is the new name of VRCinema; nothing has to be set up again.
-  - An existing `%LOCALAPPDATA%\VRCinema` folder stays in use as long as there is no `%LOCALAPPDATA%\VRCinema` folder: nothing is moved, so the settings, the queue, the tools, the permanent link and the window's saved state are all kept. To switch to the new name, quit the app and rename the folder to `VRCinema`. The same holds for `~/.local/share/vrcinema` on Linux.
-  - An update installed by VRCinema keeps the program file's name (`VRCinema.exe`); rename it to `VRCinema.exe` whenever you like (with the app closed). If **Start VRCinema with Windows** is on, the old `VRCinema` autostart entry is replaced by a `VRCinema` one at the next start.
-  - Unchanged on purpose: the environment variables (`VRCINEMA_HOME` and the other `VRCINEMA_*`), the Cloudflare tunnel (`vrcinema`) and the files in the data folder (`vrcinema.db`, `logs\vrcinema.log`).
-  - The program from `engine/` and the Linux download is now called `vrcinema` (it was `vrcinema`), so the command line is `vrcinema ctl` and the systemd unit is `deploy/vrcinema.service`. An existing `/opt/vrcinema` installation keeps working with its old unit; to move it, follow [Linux (server without window)](#linux-server-without-window) and copy `.env` and `data/` over.
-- **Size and memory** (measured, release build): `VRCinema.exe` is 25 MB. While a film plays with the window open it uses about 45 MB itself; the WebView2 processes that draw the window take about 600 MB while the live preview plays; cloudflared takes about 40 MB and ffmpeg is separate (about 30 MB when copying, about 300 MB when converting on the graphics card).
-- **No window** (a server, Docker): see [VPS with Docker](#vps-with-docker), [Rust version](#rust-version-experimental) and [Linux (server without window)](#linux-server-without-window) below; the headless `vrcinema` server has the same panel and request page.
-
-### The player
+<p align="center">
+  <img src="desktop/icons/icon.png" alt="VRCinema" width="128">
+</p>
 
-The window looks and works like a media player. It has no Windows frame: the 32-pixel bar at the top is the title bar (drag it to move the window, double-click it to maximise; the minimise, maximise and close buttons are on the right; Windows snapping works). Close hides the window in the tray. The window remembers its size, position and maximised state.
+<h1 align="center">VRCinema</h1>
 
-- **Rail on the left** with four views:
-  - **Channel**: two screens side by side, **Preview** (the newest material, see below) and **On air** (the stream as the viewers get it, "On air · about 12 s behind the server"), the **Up next** queue (drag to reorder; the menu of an item has **Play now**, **Move to the top**, **Copy link** and **Remove from the queue**), the link field, **Pending approval** when approval is on, and the drop zone for files.
-  - **History**: what has been on the channel (played, skipped, error) with **Play now** / **Try again** and **Add to queue**.
-  - **Share**: the channel link for VRChat, the request page with its QR code, the internet status and the permanent link.
-  - **Settings**: General (language, autostart, home network, port), Internet, Channel (links from viewers, limits, approval, language of the slates, info ticker, viewer nicks, conversion), Tools, Remote panel, Advanced, Log, About.
-- **Player bar at the bottom**: the title and who added it; −10 s, ⏮ (from the beginning), pause/resume, ⏭ (next video), +10 s; a timeline you can click or drag (it shows the time under the pointer); the preview volume; the internet status; **Copy link** (the channel link for the VRChat player).
-- **Keyboard shortcuts** (when the focus is not in a text field; **?** shows the list):
+<p align="center"><b>Your own cinema in VRChat.</b><br>
+Paste a link or drop a video file, and the whole lobby watches it together, at the same moment.</p>
 
-  | Key | Action |
-  |---|---|
-  | Space | Pause / resume |
-  | ← / → | Back / forward 10 s |
-  | Shift + ← / → | Back / forward 60 s |
-  | Home | From the beginning of this video |
-  | N | Next video |
-  | I | Stats for nerds |
-  | S | Sync Preview with on-air |
-  | Ctrl + V | Add the link on the clipboard to the queue |
-  | ? | Keyboard shortcuts |
+<p align="center"><a href="README.pl.md">Po polsku</a> · <a href="docs/manual.md">Full manual</a></p>
 
-- **Context menu**: right-click a queue item or the On air screen (its menu has **Stats for nerds** and **Copy channel link**). Shift+F10 or the Menu key opens it from the keyboard; Alt+↑/↓ moves the focused queue item.
+---
 
-### Controls and the delay
+## What is it?
 
-- **Pause** shows "Paused — back in a moment" on the channel and keeps the position; **Resume** continues from the same place after a few seconds of the buffering screen. Pause, seek and ⏮ are off for live streams (⏭ works).
-- **Seeking** (±10 s, ±60 s, the timeline, ⏮) restarts the same film at the new position. Several quick clicks are merged into one jump (the app waits 0.7 s after the last one), so eight clicks of +10 s are one jump of 80 s. A seek during a pause only moves the paused position. Seeking to the last second plays the next video.
-- **Accuracy**: a copied (not converted) film jumps to the key frame at or before the target, up to one key-frame interval of the source earlier, at most about 1.25 s (only such sources are copied; the time shows "≈"); a converted film (for example with the info ticker on) jumps exactly.
-- **Play now** (queue or History) puts the video on air at once; the current one ends as skipped. From History it is added again as a new queue entry (same link and nick).
-- **The delay**: the channel is cut into 1-second segments; the playlist announces a target duration of 4 s, so players start about 12 s behind the live edge (as before with 4-second segments), so **viewers see every change (pause, seek, next video) about 10–15 seconds later** than you press the button. The On air screen has the same delay; after a seek a bubble says "Viewers will see this in about N s". The Preview screen shows the change a few seconds after the click (next section).
-- **A manual pause survives server restarts** (a new port, home network access, repaired tools) **but not an app restart**: after quitting and starting VRCinema again the channel plays.
+VRCinema is a Windows program that turns the videos **you** pick into one never-ending live channel. You give VRChat a single link, once. After that you only add films to a queue, and they play one after another, for everybody, in sync.
 
-### Preview and On air
+- **You** add films from YouTube and many other sites, or from your own disk.
+- **Your friends** can suggest films too, from a simple web page (with a nick, and optionally with your approval).
+- **The world's video player** in VRChat plays the channel link. It never has to be changed.
 
-The Channel view shows two screens, like a broadcasting program:
+When the queue is empty, the channel shows a calm waiting screen (with a QR code to the request page), so the player in VRChat never disconnects.
 
-- **Preview** (left) plays the newest segments the server already has, in real time: after a seek, **Play now**, ⏮ or ⏭ it shows the new picture as soon as ffmpeg has cut its first segment (about 1–2 s for a file; a link that yt-dlp has to resolve takes longer), not after the viewers' 10–15 s. The caption says how far it is ahead of the air ("Preview · about 12 s ahead of on-air"). It starts muted (the speaker button next to the caption switches its own sound; the volume in the player bar is On air's). While the channel is paused it stands still on the picture the film will resume from.
-- **The controls count from Preview**: pause (button, Space) freezes Preview at once on the frame you see, and the channel pauses there: On air plays on to the end of the segment holding that frame (the player bar says "Pause pending"), then pauses; resume goes on from that segment's end (at most one segment, 1 s, past the frozen frame; Preview starts from there), so viewers neither miss nor see anything twice. If the server has already sent that frame on, it pauses at once. A seek while paused (also while the pause is pending) only moves where the film resumes; On air still plays up to the pause first. If the film ends before the pause point, the channel pauses at its end and the next video waits for **Resume**. ±10 s / ±60 s (buttons and arrows) jump from Preview's position, and the player bar shows Preview's time; right after a seek it shows the target (Preview may still show the old picture for a few seconds), so a second ±10 s counts from the target. Without Preview (remote panel, phone, nothing on it) the server's position is used, as before.
-- **On air** (right) is the channel's stream exactly as VRChat plays it, with the delay caption, the stats for nerds and the right-click menu.
-- **Sync with on-air** (button under Preview, key **S**) puts Preview on what the viewers see now. Right after a skip what is on air may no longer be kept; a message then says so. It is off for live streams.
-- No extra ffmpeg runs for Preview: it plays the segments of the film being cut. Each segment it has listed stays readable for 90 s after it aired (at most 256 MiB in total, in `clips\_monitor` of the data folder; removed when the channel stops; the still picture of a pause stays as long as the pause), so the film's own files are cleaned up exactly as before. The server reads ahead for Preview only while the window shows it.
-- Preview is only in the program's window. In the remote panel it is grey ("Available in the program on the computer"); on a phone only On air is shown.
+## Getting started
 
-### Stats for nerds
+1. **Download** `VRCinema.exe` from the [Releases](https://github.com/wordoftiger-ux/VRCinema/releases) page. No installer: put it anywhere and run it. (Windows 10/11, 64-bit.)
+2. **Follow the short setup.** It downloads the helper tools it needs, picks the best video encoder for your computer and starts the channel. You can skip every step, the defaults are fine.
+3. **Copy the link for VRChat** at the end of the setup (later: the **Copy link** button at the bottom of the window).
+4. **Paste it** into the video player of a VRChat world.
+5. **Add films**: paste a link into the window (or press <kbd>Ctrl</kbd>+<kbd>V</kbd>), or drag video files onto it.
 
-Press **I** or right-click the preview → **Stats for nerds**: an overlay like YouTube's, refreshed every second while it is open. It shows the film on air (source, resolution, copy or conversion, encoder, ready segments), the HLS channel (sequence, discontinuities, whether the timestamps are continuous), the next film, ffmpeg (speed, CPU, memory), viewers (players that fetched a segment in the last 30 s, fetches per minute, upload with a 60-second graph), the tunnel (state, time online, reconnects, Cloudflare locations) and the preview in the window (delay, buffer, dropped frames). **Copy** copies it as text. Viewer addresses are only counted, never shown.
+> Windows may say "Windows protected your PC" because the file is not code-signed. Click **More info**, then **Run anyway**.
+>
+> In VRChat, everybody watching has to enable **Allow Untrusted URLs** in the settings. In Public instances VRChat may block the link anyway, so the channel is mostly meant for private instances with friends.
 
-### Languages
+## What you can do
 
-- Three separate choices: **the program** (window, remote panel, tray, log: **Settings** → **General** → **Language**, and the first wizard step; it starts with the language of Windows if it is one of the six, otherwise English), **the slates and the info ticker** (**Settings** → **Channel** → **Language of the slates**, English by default — the language your VRChat viewers read), and **the request page** (each viewer picks it with the switch at the top; it starts with the browser's language and is remembered in that browser).
-- Languages: English, Polski, Español, Deutsch, Français and 日本語 (beta). Error messages of the server come in the viewer's or panel's language.
-- **Server without a window** (`vrcinema` with `.env`): English unless `LANGUAGE=pl` (or `es`, `de`, `fr`, `ja`) is set in `.env`; there is no language switch in its panel.
-- **Japanese is a beta**: the texts were translated without a native speaker. All Japanese texts with their English source and context are in [docs/i18n/ja-review.md](docs/i18n/ja-review.md) for a native review. The slates and the ticker use the Windows font Yu Gothic (Meiryo as a fallback); without either the slates stay in English (with a log entry).
-- **Contributing a translation**: the dictionaries are `public/locales/<language>.json` (English, `en.json`, is the source). `public/locales/context.json` says where each text appears and its length limit, and [docs/i18n/glossary.md](docs/i18n/glossary.md) fixes the terms. Keep the `{placeholders}` and the plural categories; `cargo test` in `engine/` checks every language for missing keys, placeholders, plurals and lengths.
+**Run the show**
+- A **Preview** of the film you are working with (it reacts at once: pause, jump, skip) and an **On air** picture of what the viewers see, a few seconds later.
+- A queue with "play next", cutting the start or the end of a film, starting a film at a given time and a countdown before it begins.
+- Remove everything a viewer added, or block them.
+- A small player stays with you when you open the other tabs.
 
-### Info ticker
+**Let friends join**
+- A request page for viewers: they add links (or small video and music files) under a nick protected by a PIN.
+- Limits, approval, playlists from viewers and a block list: you decide how open it is.
 
-An optional band burned into the picture of the stream, so everyone in VRChat sees it: "▶ Now: <title> · added by <nick | Host> · next: <title> · add a video: <address>" plus your own messages, a QR code of the request page in the bottom right corner with the caption "Add a video", and a thin progress line at the bottom edge.
+**Make it look good**
+- An info band on the picture: the title, who added it, what is next, your own messages, a QR code and a progress line.
+- Slates for pauses and waiting, with your own picture if you like. Music gets a cover and moving bars.
+- Optional smooth fades, loudness levelling and subtitles.
 
-- **Settings** → **Channel** → **Info ticker**: on/off; mode **From time to time** (every 1, 2, 5 or 10 minutes; each time the information about the video and then the next of your messages) or **Continuous** (the information and all messages in a loop); scrolling speed (the panel shows how long the text stays on screen); show the next video; show the address; QR code **Off**, **With the band** or **Always**; progress line; up to 10 messages of up to 200 characters (they are not translated).
-- **Hardware**: with the ticker on, every film is converted (the ticker is drawn into the picture), which is light on an NVIDIA, Intel or AMD graphics card and heavy on the processor. It is switched on by default only when the wizard found a graphics card encoder. If the computer cannot keep up (conversion slower than real time for 30 s), the log and the panel say so: turn the ticker off or use the graphics card (**Settings** → **Tools**).
-- **When changes show up**: the text (your messages, "next", the address, the language of the slates, queue changes) changes on the stream within about **20–60 seconds** (the film is prepared ahead of time; about 20 s for the film on air, up to about a minute for a film that was prepared in advance). Switching the ticker on or off, the mode, interval, speed, QR code or progress line restarts the film on air from where it is (a few seconds of the buffering screen); so does a new public address while the QR code is shown.
-- The text is white with a shadow on a dark band; the progress line is amber. Live streams have no progress line.
+**Go further**
+- A **public link** is built in: no account and no setup. A permanent link on your own domain is optional.
+- **OBS** can go live on the channel (and takes priority over the queue).
+- Show a window, a screen or a camera from this computer.
+- A **remote panel** to run the channel from a phone, and a short "now playing" text in the VRChat chat box.
+- Six languages: English, Polish, Spanish, German, French and Japanese (beta).
 
-### VRChat chatbox (OSC)
+## Good to know
 
-The program can show the video on air in **your own VRChat chatbox** (the bubble above your avatar), for example "▶ Never Gonna Give You Up — added by Kasia".
+- Your computer sends the video, so your **upload speed** matters: the more people watch, the more it needs. The program warns you when the connection looks too weak.
+- Most videos are only repackaged, not converted, so the load on your computer is small.
+- Everything is stored in `%LOCALAPPDATA%\VRCinema`. Deleting that folder resets the program.
+- It was formerly called VRCinema. If you used it before, your settings are kept.
 
-- **Settings** → **Channel** → **VRChat chatbox**: on/off (off by default), the address and port (default `127.0.0.1` and `9000`, VRChat's OSC input), the text with the fields `{title}`, `{nick}` (the viewer's nick, empty for your own videos) and `{added}` ("added by …" in the language of the slates; default `▶ {title} — {added}`), and **Send again** (only when the video changes, or every 10 s to 5 min, because VRChat hides the chatbox after a while).
-- **It reaches VRChat only when the program runs on the same PC as VRChat**, or when the address is set to the PC that runs VRChat (its home network address) and that PC accepts UDP on the port. OSC must be switched on in VRChat: **Action Menu** → **Options** → **OSC** → **Enabled**. On a VPS or a Raspberry Pi the default address reaches nothing.
-- What is sent: one OSC message `/chatbox/input` with the text, "send now" (so VRChat's keyboard does not open) and "no notification sound"; when the video changes and on the repeat, never more often than once every 1.5 s (VRChat's limit). Titles and nicks come from viewers: line breaks and control characters are removed and the text is cut to 144 characters (VRChat's limit).
-### Viewer nicks
+## Without a window
 
-- Viewers can type a nick (up to 24 characters) on the request page. The first request with a nick creates a random device key in that browser; the server keeps only its SHA-256 hash. The nick then belongs to that device for 30 days after its last use: the same nick from another browser or device is refused ("This nick is already taken by someone else"). Look-alike nicks count as the same nick: capitals, accents, spaces, dots, dashes, invisible characters and Cyrillic or Greek look-alikes are ignored (Kasia, KASIA, kásia, K a s i a, Ka5ia are one nick). "Host" and its translations are reserved.
-- Next to the nick the panel and the request page show an icon (a colour and a shape) made from the device key. It is a **visual aid** to spot impersonation, not proof of identity. Your own videos show the **Host** badge.
-- **Settings** → **Channel** → **Viewer nicks** lists the nicks with their icons; **Release** frees a nick, **Block device** refuses requests from that device (and **Unblock** lifts it).
-- Limits: a nick needs the device key, so it works only in a browser that keeps its site data; a viewer in a private window or after clearing the site data gets a new key, so the old nick shows as taken; they can pick another nick or send without one. A blocked viewer can still send requests **without a nick** from a new browser profile (anonymously); the request limits per address still apply, and approval (**Settings** → **Channel** → approval) stops anything you don't want.
+On Linux, a Raspberry Pi or a VPS there is also a headless server with the same panel. See the [manual](docs/manual.md#linux-server-without-window).
 
-### Remote panel and phone
+## Please use it responsibly
 
-- The remote panel is the same interface as the window at `<public address>/admin` (or `http://<this computer>:<port>/admin` with home network access), after logging in with the password from **Settings** → **Remote panel**. It can do everything the window can **except five things that stay in the window**: the port and home network access, the password and switching the remote panel off, **Trust Cloudflare headers** (it decides who a request comes from), the Cloudflare login (and therefore setting up and deleting the permanent link), and picking the cookies file (a file dialog on the computer; the remote panel can detach it and sees only its file name, not its folder). Dropping files and the first-run wizard are window-only too. Those places show "Available in the program on the computer".
-- **Sign out**: **Settings** → **General** → **Sign out** (on a phone: the icon at the top right). Changing the password or switching the remote panel off signs out every remote device.
-- **Tunnel switch**: when you opened the panel through the tunnel, switching the tunnel off (or reconnecting it, or changing between the quick and the permanent link) asks first, because it ends your own connection ("You will lose access to this panel").
-- **Phone layout**: below 700 px of width the rail becomes tabs at the bottom and the player bar sits under the preview with bigger buttons. The pixeldrain API key can be replaced but is never shown back.
+VRCinema is meant for watching **privately with friends**. Whoever runs it is responsible for what is streamed. Re-streaming films you have no rights to can break copyright law and the terms of the sites they come from.
 
-### Public link (built-in tunnel)
+## More
 
-The app puts the channel on the internet by itself: no account, no terminal, no address to type.
-
-- **Quick tunnel, on by default**: at start the app runs its own copy of [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) and gets an address such as `https://abc-def.trycloudflare.com`. The player bar shows **Online** and **Copy link** copies the channel link (`<address>/live/main.m3u8`); the tray menu copies it too.
-- **The address changes every time the app starts** (and when the tunnel has to reconnect). Give friends the new link, or set up a permanent link (below).
-- **It replaces running your own cloudflared.** If you started `cloudflared tunnel --url …` yourself with the previous version, you no longer need to. While the built-in tunnel is on, the public address typed by hand (**Settings** → **Advanced**) and the "trust Cloudflare" option are not used; they apply only with the tunnel switched off in **Settings** → **Internet**. A configuration from the previous version gets the tunnel switched on too, and the app downloads the missing cloudflared by itself in the background (again every 5 minutes while it fails, e.g. without internet).
-- **QR code on the idle screen**: while the queue is empty the channel shows "No videos in the queue" with a QR code of the request page and the address under it, so friends in VRChat can scan it with a phone and add a film. A new address replaces it live, without a restart. Without an address the screen says "Connecting to the internet…". (The slates use the language of the slates, English by default.)
-- **Switching it off**: **Settings** → **Internet** → "Share the channel on the internet". With the tunnel off the channel is reachable only from this computer (or at the address entered by hand).
-- **VRChat and untrusted addresses**: every viewer has to enable **Allow Untrusted URLs** in VRChat. According to VRChat's feedback board, since VRChat build 1546 that setting no longer opens every address in **Public** and **Group Public** instances: there only the domains the world's creator allowed play. A `trycloudflare.com` link may therefore play only in Friends+, Friends, Invite or Group instances, and a permanent link on your own domain does not change that unless the world allows your domain. We have not verified this ourselves: try it in the instance type you use (see the checklist below).
-
-### Permanent link (your own domain)
-
-A link that never changes needs a free [Cloudflare](https://dash.cloudflare.com/sign-up) account and a domain of your own:
-
-1. Buy a domain at any registrar (a cheap one is fine) and [add it to your Cloudflare account](https://developers.cloudflare.com/fundamentals/setup/manage-domains/add-site/): Cloudflare gives you two nameservers to set at the registrar. Wait until Cloudflare shows the domain as **Active**.
-2. In VRCinema open **Settings** → **Internet** → **Set up a permanent link**. The app opens your browser once: log in to Cloudflare and authorize the domain. The app waits 5 minutes for the login; **Cancel** stops it, and after a cancel or a timeout **Try again** starts it again. With an account that has no domain yet the login never finishes (add the domain first, step 1).
-3. Type the full host name for the channel, for example `kanal.example.com`. The app creates a tunnel called `vrcinema` and a DNS record for that name. If the name already has a record, it asks whether to replace it or pick another name.
-
-From then on the channel link is `https://kanal.example.com/live/main.m3u8`, also after restarts and port changes. **Back to the quick tunnel** goes back to the quick tunnel (the permanent link stays set up); **Delete the permanent link** deletes the tunnel (if the DNS record is still there afterwards, delete it in the Cloudflare dashboard). The Cloudflare certificate and the tunnel credentials stay in `%LOCALAPPDATA%\VRCinema\tunnel\` and are never shown or logged.
-
-### Automatic pause
-
-Viewers don't miss part of a film because the connection dropped:
-
-- **Internet lost** (on by default): when the tunnel has been down for 10 seconds, the film pauses and the channel shows "Paused — back in a moment". When the tunnel is back, the film resumes from the same place. Shorter drops pause nothing.
-- **Nobody watching** (off by default): after 30 seconds without a viewer the film pauses; it resumes as soon as someone starts watching (the preview in the window counts as a viewer while the window is visible; a minimised window or one hidden in the tray stops the preview).
-- Live streams are never paused. Both options are in **Settings** → **Internet** → "Pausing the channel". A resumed film starts after a few seconds of the buffering screen; that is expected.
-
-### Streaming from OBS
-
-OBS Studio can stream straight into the channel (RTMP). In the app open **Settings** → **OBS** and copy the two values into OBS → Settings → Stream: Service "Custom…", **Server** `rtmp://127.0.0.1:1935/live` and the **Stream key** shown there (keep it secret; "New key" replaces it at once).
-
-- **OBS has priority over the queue** (on by default): when OBS starts streaming, the film on air pauses exactly where it is and OBS goes on air within a few seconds; when you stop streaming, the film continues from the same point. Off: OBS waits until the film on air ends.
-- A short drop shows "Be right back" for up to 10 seconds; if OBS reconnects in time, it simply goes on, otherwise the queue continues.
-- The stream is always converted by the channel (a key frame every segment, 48 kHz stereo sound, at most 1080p30), so it can be anything OBS sends. The info ticker and its QR code are drawn on it like on any live stream. The Preview shows it live; seeking and pause are off while OBS is on air (stop streaming in OBS to return to the queue).
-- **Allow OBS from other devices on the network** (off by default): only OBS on this computer can connect. Switched on, OBS on another computer of your home network can use the address shown under "Server for other devices". Windows then asks once whether VRCinema may accept connections through the firewall: allow it for **private networks** only. The OBS port (1935) is a separate port the tunnel never forwards, so it is never reachable from the internet through the channel's public link. Five wrong keys from one address within a minute lock that address out for a minute.
-- The server without a window (`.env`) takes OBS only with `OBS_STREAM_KEY` (at least 16 characters); `OBS_PORT`, `OBS_LAN=1` and `OBS_PRIORITY=0` change the rest.
-
-### Capturing this computer (window, screen, camera, microphone)
-
-In the program's window, **Capture** under the link field puts a window, all screens, one screen, a part of the desktop, a camera or only a microphone of this computer into the queue as a live item (it airs when its turn comes; it has no priority like OBS). Pick the sound device, frame rate (15/25/30), resolution (480p–1080p, never above Settings → Advanced), the title viewers see (window titles and device names are never shown to viewers or written to the log) and check one frame with **Preview**. The picture is fitted into a 16:9 frame and converted like a live stream (key frame every segment, 48 kHz stereo, GPU encoders, ticker and QR); the Preview of the Channel view shows it live.
-
-- While a capture runs the title bar shows a red **Capturing** pill; **Stop** ends every capture at once and removes the waiting ones.
-- Only the window itself can capture: the remote panel, the tunnel and viewers cannot list devices or add a capture (403), and a capture cannot be added as a link. A capture lives only until Stop or the end of the program: after a restart, or played again from the history, it is not started again (add it anew).
-- Windows: windows by their title (gdigrab; the capture ends if the title changes or the window closes), screens by their rectangle or with **Fast screen capture** (Desktop Duplication, `ddagrab`; on some computers with several graphics cards the screen numbers may differ), cameras and microphones through DirectShow. What the computer plays: turn on "Stereo Mix" in the sound settings or install a virtual audio cable.
-- Linux (best effort): the X screen or a part of it (`x11grab`, `$DISPLAY`), cameras (`/dev/video*`), PulseAudio/PipeWire sources (`.monitor` = what plays) or ALSA. Single windows are not offered; under Wayland only XWayland content is visible. macOS: not available.
-
-### Owner's manual test checklist
-
-These need a person at the screen and are not covered by the automatic tests:
-
-- [ ] Capture: a window (and its capture ending when it is closed), one screen with and without fast capture, a camera with a microphone; the Capturing pill appears when the capture airs and Stop ends it within a second; viewers see the chosen title; the remote panel has no Capture button.
-
-- [ ] Clean Windows account (or a PC that never had the app): first run from an empty folder, wizard (language step first), first film plays.
-- [ ] Frameless window, main window and wizard: drag by the title bar, double-click to maximise and back, the minimise / maximise / close buttons (close hides to the tray), Windows snapping (drag to a screen edge, Win+←/→/↑), resize from the edges; the size and position come back after a restart. Check it in the release build (the tests only simulate the window): nothing here may fail silently; a refused one shows "The title bar could not control the window: …".
-- [ ] Second monitor with a different scale (e.g. 100 % and 150 %): move the window there, quit, start again; it opens on that monitor at the right size; maximised there too.
-- [ ] First start on a small or high-DPI screen (e.g. a 1366×768 laptop or 4K at 200 %): the window fits on the screen (minimum 960×600) and nothing is cut off.
-- [ ] Minimise for about 60 s and restore: the preview jumps back to live (not 60 s behind) and its delay caption settles; while minimised or hidden in the tray the preview stops fetching the stream (the stats for nerds show the viewers drop); a window that is only covered by another window keeps playing.
-- [ ] Preview in the release build: play a film, press +60 s, ⏮, **Play now** on another video and ⏭; the left screen changes within a few seconds, the right one about 12 s later; **Sync with on-air** (and S) makes both show the same; pause shows a still picture, resume plays on; minimise for a minute and restore: Preview plays again. The window at its minimum size (960×600) still shows both screens.
-- [ ] Remote panel on a real phone: log in at `<public address>/admin`, the tabs at the bottom, the player bar under the preview, pause and seek work, window-only items say "Available in the program on the computer", sign out works; a wrong password is refused; switching the panel off or changing the password logs the phone out.
-- [ ] `/desktop-login`: open `http://127.0.0.1:<port>/desktop-login?key=anything` in a normal browser: it ends on `/admin` with the sign-in screen, never the panel (the window uses a one-time key of its own).
-- [ ] Info ticker in VRChat: with the ticker on, watch a film in a VRChat world: the band is readable on the world's screen at a normal distance, the QR code can be scanned with a phone from VRChat and opens the request page, the progress line moves.
-- [ ] Allow Untrusted URLs: play the channel link in a **Public** or **Group Public** instance and in a Friends or Invite instance (with Allow Untrusted URLs on). Note where it plays (see the VRChat note above).
-- [ ] Japanese review: a native speaker reads [docs/i18n/ja-review.md](docs/i18n/ja-review.md) (and the app with 日本語 chosen) and sends corrections.
-- [ ] Drag and drop end to end: one file, several files, a folder, a non-video file (skipped); the page shows the result and the film plays.
-- [ ] Following a port change: change the port in **Settings** → **General**; the window reloads on the new address.
-- [ ] Cookies picker: choose a cookies file in **Settings** → **Advanced** and add a link that needs it.
-- [ ] Autostart on/off: with Windows it starts in the tray without a window; off removes it.
-- [ ] Update restart: install a locally served newer release; the app restarts and the old file disappears.
-- [ ] Link clicks: external links in the panel open in the default browser, the window stays on the app.
-- [ ] Tray menu items: open the window, copy the channel link and the request page link, skip, quit; double click on the icon.
-- [ ] Close-to-tray balloon: closing the window hides it and shows the notice once.
-- [ ] Second launch: with the app running (window hidden in the tray, or minimized), start `VRCinema.exe` again; the existing window comes back to the front and no second copy starts (also after **Quit**: a new launch starts normally within a few seconds).
-- [ ] Repair: with broken tools (e.g. replace `tools\ffmpeg.exe` in the data folder with an empty file and restart the app) the panel says the channel did not start and offers to restart the channel and to repair the tools (**Settings** → **Tools**); repairing brings the channel back.
-- [ ] Permanent link end to end with a real domain: **Set up a permanent link** opens the browser once for the Cloudflare login; the host name step follows; the channel plays at `https://<host>/live/main.m3u8` and keeps that link after an app restart and a port change. Quitting VRCinema (tray → **Quit**) during or after the login does not close the browser. A host name that already has a DNS record shows the replace question, and replacing works. **Back to the quick tunnel** and **Delete the permanent link** work (the tunnel disappears from the Cloudflare dashboard).
-- [ ] QR code from VRChat: with an empty queue, scan the QR code on the idle screen in a VRChat world with a phone; the request page opens, and a film added there plays.
-- [ ] Automatic pause: during a film unplug the network cable (or switch Wi-Fi off) for at least 15 s; the status shows "No internet" and the film pauses; after reconnecting the tunnel comes back (the same address if cloudflared kept running, a new one if it had to restart) and the film continues from the same place.
-- [ ] Update from the previous version: start the new `VRCinema.exe` on the data folder of the previous version (its `config.json`); the tunnel is on; the app downloads cloudflared by itself in the background; the panel shows the download, never "the channel is not on air", then the public link; a film may pause while the download takes longer than 10 s. Links from viewers keep the old list of allowed sites (mode "Only allowed sites").
-
-## Requirements
-
-- Windows 10/11 or Linux (macOS works with ffmpeg from Homebrew).
-- [Node.js](https://nodejs.org) **22.18 or newer** (24 recommended).
-- A public HTTPS address so other players can reach you, e.g. [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) or a VPS.
-
-ffmpeg and yt-dlp are downloaded automatically into `bin/`.
-
-> The Node.js server is the previous implementation. The new interface of stage 4 is served only by the desktop app and the Rust server (`vrcinema`, below); the Node.js server's old panel page is no longer in the repository, so use the Rust server for a server without a window.
-
-## Quick start (Windows)
-
-1. Download or clone this repository.
-2. Double-click **`start.bat`**. The first run installs dependencies, downloads ffmpeg and yt-dlp, and opens `.env` in Notepad.
-3. In `.env` set `ADMIN_PASSWORD` (at least 8 characters) and `SESSION_SECRET` (any long random string), save, then run `start.bat` again.
-4. Open `http://localhost:8080/admin`, log in and paste a link.
-
-Manual equivalent:
-
-```powershell
-npm install
-npm run setup     # downloads ffmpeg/ffprobe/yt-dlp, creates .env
-npm start
-```
-
-## Making it reachable from VRChat
-
-The desktop app does this by itself (see [Public link](#public-link-built-in-tunnel) above). This section is for the Node.js server and the headless `vrcinema` server.
-
-Every player downloads the stream from your server, so it needs a public address.
-
-```powershell
-winget install --id Cloudflare.cloudflared
-cloudflared tunnel --url http://localhost:8080
-```
-
-cloudflared prints an address such as `https://abc-def.trycloudflare.com`.
-
-1. In `.env` set `TRUST_CLOUDFLARE=true` and `PUBLIC_URL=https://abc-def.trycloudflare.com`, then restart the server.
-2. The link for VRChat is `https://abc-def.trycloudflare.com/live/main.m3u8`.
-
-Notes:
-
-- **Every player in the lobby must enable "Allow Untrusted URLs"** in VRChat settings. Your domain is not on VRChat's allowlist. In Public and Group Public instances even that may not be enough (since VRChat build 1546 the world's list of allowed domains decides there; see [the note above](#public-link-built-in-tunnel)).
-- **Paste the link into the world's normal video URL field.** Some worlds have special "custom media" menus that only accept their own services.
-- The quick tunnel address changes every time cloudflared restarts. Tip: put the channel link into a [Pastebin](https://pastebin.com) paste and give friends the paste's *raw* link. VRChat follows it to your channel, and you only edit the paste when the tunnel address changes.
-- Quick tunnels are meant for testing and Cloudflare's free network is not designed for heavy video traffic. For regular use, a VPS is more reliable (see below).
-
-### Bandwidth
-
-Each viewer pulls their own stream: about 6 Mbit/s at 1080p, so 10 viewers need about 60 Mbit/s of upload.
-
-## Playing files from your disk
-
-List the folders you want to share in `.env`, separated by semicolons:
-
-```ini
-MEDIA_DIRS=D:\Movies;E:\Series
-```
-
-The panel of a server without a window then shows **Files on disk** under the link field in the **Channel** view: pick a folder from the list, open its subfolders, and add one file (**Add to queue**) or every video of the folder in natural order (episode 2 before 10, **Add the whole folder**). The panel API does the same (`/api/admin/library`, `/api/admin/channels/main/local`). Only the owner can do this. Viewers only see the title, never the path. In the desktop app drag files or folders onto the window instead.
-
-## Settings
-
-| Setting (admin panel) | Default |
-|---|---|
-| Links from viewers | any site (a new database); an existing database keeps its list in the "Only allowed sites" mode |
-| Longest video a viewer may request | 2 hours |
-| Requests per address | 3 per 10 minutes |
-| Queued videos per person | 5 |
-| Approve requests before they are queued | off |
-
-The owner can add anything yt-dlp supports, live streams, YouTube playlists and pixeldrain lists. These limits don't apply to the owner.
-
-### Links from viewers and your home network
-
-The link mode (**Settings** → **Channel** → **Links from viewers**; `linkMode` in the channel settings) is **Any site** (`all`; the default for a new database), **Only allowed sites** (`allowlist`: only the listed sites and their subdomains; what an existing database becomes, with the list it had) or **All except blocked sites** (`blocklist`: every site except the listed ones). Both lists are always kept; **Add popular sites** fills in YouTube, Twitch, Kick, Vimeo, Dailymotion, pixeldrain, CDA, SoundCloud, bilibili, niconico, Streamable, Reddit, X/Twitter and TikTok. In the "Only allowed sites" mode the request page lists the allowed sites.
-
-In every mode, a link from a viewer must be `http` or `https` and must not point into your own network: `localhost`, `*.local`, `*.lan`, `*.home.arpa`, `*.internal` and single-word names such as `nas` are refused, and so is any name that resolves to a loopback, private (RFC 1918, `fc00::/7`), link-local, CGNAT (`100.64.0.0/10`), multicast or otherwise reserved address (also an IPv4 address written inside an IPv6 one). A name whose lookup times out is refused too; a lookup that fails for another reason (the name does not exist, the DNS server fails) lets the link through to yt-dlp, which then reports the error itself (the check fails open; see DNS rebinding below). The check runs when the link arrives and again when the video starts (the name may have changed). The address of the video that yt-dlp finds is checked the same way and ffprobe and ffmpeg are given exactly the checked address, never the text yt-dlp wrote; an address with a backslash, a space or a control character is refused. Links added by the owner are never limited.
-
-Known limits (what is checked is the address, not what happens after it is fetched):
-
-- yt-dlp's own redirects, and ffmpeg's HTTP redirects (a public video address that answers 302 to a page on your network), are not checked.
-- A playlist or manifest (HLS, DASH) on a public address may list segments on your network; ffmpeg follows them.
-- A name that changes its answer between the check and the fetch (DNS rebinding) is not caught.
-- What a page on your network says can leak: through yt-dlp's generic extractor the title or the error text of such a page could show up as a queue title or an item error.
-
-If your network matters more than convenience, use the `allowlist` mode with sites you trust.
-
-### Video and audio files from viewers
-
-Off by default: **Settings** → **Channel** → **Video and audio from viewers** → **Allow viewers to send small video and audio files**. The request page then gets a file box next to the link field. Limits (same block): largest file (50 MB, at most 200 MB), longest video (10 min), longest audio (10 min; the channel's own maximum applies to both) and all files together (2048 MB). An audio file (music) airs with a picture made from it, the one chosen under **Audio files** (cover art, waveform, …). A file counts like a link: the nick and device checks, blocked devices, the requests per address, the queued videos per person and the approval of requests all apply, and the queue shows it with the viewer's nick ("sent file").
-
-- The size is counted on the bytes that actually arrive (not only the `Content-Length`); one upload per address and three at once; each piece of the body must come within 30 s and the whole file within 20 min; 2 GB stay free on the disk.
-- Only binary video and audio containers pass (MP4/MOV/M4A, WebM/MKV, AVI, FLV, MPEG-TS/PS, Ogg/Opus, WMV, MP3, AAC, FLAC, WAV), recognised by their first bytes, then read by ffprobe with that format forced and only local files allowed. Playlists, text and pictures are refused. Cover art inside an audio file is only ever the cover, never the "video": the audio length limit applies, and the cover must have a sane size. The file gets a name the server makes (`DATA_DIR/uploads/<random>.<ext>`); the name the browser sent is only used for the title.
-- A file is deleted about 90 s after its video aired, failed, was rejected or removed (also by **Clear queue** and **Remove all from this viewer**; their **Undo** works within that minute). When the total is full, files no video needs any more go first, oldest first; if that is not enough the upload is refused. Turning the switch off refuses new files at once; files already in the queue stay and air.
-- Through the Cloudflare tunnel one request can carry at most 100 MB (Cloudflare's limit), so larger files fail there; on a quick tunnel big files may also be slow.
-`.env` options are documented in [.env.example](.env.example). They cover the language (`LANGUAGE`), the GPU encoder (`VIDEO_ENCODER=h264_nvenc`), YouTube cookies (`YTDLP_COOKIES`), a pixeldrain API key, and paths.
-
-## First transition test in VRChat
-
-The VRChat player (AVPro) usually handles switching between videos with different resolutions well, but players differ.
-Queue two short videos of different quality and watch the switch. If the picture freezes or the player disconnects, change these in the panel settings:
-
-1. Turn off "Mark transitions between videos in the stream" (**Settings** → **Channel**; the `EXT-X-DISCONTINUITY` tag).
-2. If that doesn't help, turn it back on and enable "Always convert the picture". The desktop app converts on the graphics card it found; the headless server needs `VIDEO_ENCODER=h264_nvenc` (or `h264_qsv`, `h264_amf`) in `.env`.
-
-## VPS with Docker
-
-Create `deploy/.env`:
-
-```ini
-ADMIN_PASSWORD=your-long-password
-SESSION_SECRET=any-long-random-string
-DOMAIN=tv.example.com
-```
-
-Point the domain at the server, then:
-
-```bash
-cd deploy
-docker compose up -d --build
-```
-
-Caddy obtains the HTTPS certificate automatically. Channel link: `https://tv.example.com/live/main.m3u8`.
-
-## Troubleshooting
-
-- **A video ends up in history with an error.** The reason is shown next to it. yt-dlp updates itself at start and once a day.
-- **YouTube asks to sign in.** Export browser cookies to `cookies.txt` and set `YTDLP_COOKIES`.
-- **pixeldrain hits its download limit.** Set `PIXELDRAIN_API_KEY`.
-- **Viewers see a black screen.** Check "Allow Untrusted URLs" and that the link starts with `https://`. In a Public or Group Public instance try a Friends or Invite instance (see the VRChat note in [Public link](#public-link-built-in-tunnel)).
-
-## Rust version (experimental)
-
-There is a second implementation of the same server written in Rust, in `engine/`. It is a drop-in replacement: same HTTP API, same `.env`, same `data/` folder and database. It is one small executable instead of a Node.js process, and it uses about 22 MB of RAM (release build) while a film plays (measured working set; the debug build uses 29 MB; ffmpeg is a separate process and is not included).
-The Node.js version stays in this repository until the switch-over is done.
-
-```powershell
-cd engine
-cargo build --release     # needs Rust; result: engine\target\release\vrcinema.exe
-cd ..
-engine\target\release\vrcinema.exe setup   # downloads ffmpeg/ffprobe/yt-dlp/Deno (checksums verified), creates .env
-engine\target\release\vrcinema.exe         # starts the channel (run it from the project folder)
-```
-
-Run only one version at a time on the same `data/` folder. To go back, stop `vrcinema` and start the Node.js version (`npm start`); the database is compatible both ways, with limits: the Node.js version ignores nicks and the link modes (and the other stage 4 settings), and shows the reasons the Rust server saved (why a video failed or was skipped) as the raw stored text.
-Switch over from a fresh PowerShell window: overrides set earlier with `$env:PORT` or `$env:DATA_DIR` linger in the old window and win over `.env`. The Rust version locks the data folder (`vrcinema.lock`), so a second Rust server on the same `data/` folder refuses to start.
-
-## Command line (`vrcinema ctl`)
-
-`vrcinema ctl` steers the program that is running on this computer: the server without a window or the desktop app (the `vrcinema` program from `engine/` or the Linux download; the desktop app's own `VRCinema.exe` has no console).
-
-```
-vrcinema ctl status                     # what is on air, the pause, the queue
-vrcinema ctl queue list                 # the video on air and the queue (#numbers)
-vrcinema ctl queue add https://youtu.be/dQw4w9WgXcQ
-vrcinema ctl queue remove 12            # a number from queue list
-vrcinema ctl queue clear                # the video on air keeps playing
-vrcinema ctl skip
-vrcinema ctl pause | resume
-vrcinema ctl seek 1:30                  # from the start; seek +10 / seek -10 from here
-vrcinema ctl play-now 12
-vrcinema ctl settings get               # the settings ctl may change (list below)
-vrcinema ctl settings set oscEnabled true
-vrcinema ctl --json status              # the program's answer as JSON (errors too: {"ok": false, "error", "code", "exitCode"})
-```
-
-- **How it signs in.** Each time the program starts it writes `ctl.json` to its data folder (`data/` next to `.env`, or `%LOCALAPPDATA%\VRCinema\data` / `~/.local/share/vrcinema/data` for the desktop app) with its local address and a new random token; the file is removed when the program stops. `ctl` finds it by itself (`--data-dir <folder>` for another folder). The token is accepted only from this computer (`127.0.0.1`/`::1`) and never through the tunnel or a reverse proxy; it cannot open the window's own settings. Keep the data folder private (on Linux the file is readable by its owner only).
-- **Without the file** (an older server, or one bound to a single network address) `ctl` signs in with the admin password: `ADMIN_PASSWORD` from the environment or `.env`, or `--password-stdin` (for example `cat secret.txt | vrcinema ctl --password-stdin status`). The password is never accepted as an argument, because other users of the computer can see command lines.
-- `--url http://127.0.0.1:8080` picks the address; an address on another computer needs `--allow-remote` and the password (the token never leaves the computer).
-- **Exit codes**: `0` done, `1` the program refused (the reason is printed, e.g. "Nothing is playing right now."), `2` wrong usage, `3` no running program found or it cannot be reached, `4` not authorized (token or password refused). Messages follow `LANGUAGE` of the environment or `.env`.
-- **Settings ctl may change**: `moderation`, `viewerLists`, `viewerListMax`, `maxDurationS`, `maxActivePerRequester`, `requestLimitCount`, `requestLimitWindowS`, `slateLanguage`, `tickerEnabled`, `oscEnabled`, `oscTemplate`, `oscRepeatS` (a value is read as JSON when it is one: `true`, `30`; otherwise as text). The program checks the values as in the panel.
-- There is no volume command: the volume is the host's own player in VRChat.
-## Linux (server without window)
-
-The headless `vrcinema` server runs on Linux, on x86_64 and on 64-bit ARM (for example a Raspberry Pi 5). There is no window: you run the channel from the web panel the server serves (`http://<server>:8080/admin`), from any browser, also a phone. Linux support is new; please report what does not work.
-
-### Install
-
-On Debian, Ubuntu or Raspberry Pi OS (64-bit):
-
-```bash
-# Build the program (needs a C compiler for SQLite and TLS; a few minutes, ~30 min on a Pi 5)
-sudo apt install -y build-essential cmake pkg-config curl git fonts-dejavu-core
-curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && . "$HOME/.cargo/env"
-git clone https://github.com/wordoftiger-ux/vrcinema.git
-cd vrcinema/engine && cargo build --release
-
-# Its own user and folder
-sudo useradd --system --home-dir /opt/vrcinema --shell /usr/sbin/nologin vrcinema
-sudo install -d -o vrcinema -g vrcinema /opt/vrcinema
-sudo install -m 755 target/release/vrcinema /opt/vrcinema/
-sudo install -m 644 ../.env.example /opt/vrcinema/
-cd /opt/vrcinema
-sudo -u vrcinema ./vrcinema setup      # yt-dlp, ffmpeg, ffprobe, Deno into bin/; creates .env
-sudo -u vrcinema nano .env            # ADMIN_PASSWORD, SESSION_SECRET, PUBLIC_URL, ...
-```
-
-`setup` downloads the Linux builds for your processor (yt-dlp, the static ffmpeg of BtbN, Deno; `--cloudflared` adds cloudflared), checks every file against its published SHA-256, resumes an interrupted download and makes the programs executable. `setup --force` downloads them again (an update). On other systems (32-bit ARM, macOS) it stops with a hint: install ffmpeg, ffprobe and yt-dlp with the package manager and set `FFMPEG_PATH`, `FFPROBE_PATH` and `YTDLP_PATH` in `.env`.
-
-### Run it as a service (systemd)
-
-```bash
-sudo cp ~/vrcinema/deploy/vrcinema.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now vrcinema
-journalctl -u vrcinema -f             # the log (the banner shows the panel and channel links)
-```
-
-`systemctl stop` / `restart` sends SIGTERM: the channel stops cleanly with its ffmpeg and yt-dlp. The unit kills the service's whole control group, so nothing is left behind even after a crash. The unit runs as the `vrcinema` user and may write only to `/opt/vrcinema`; a `DATA_DIR` or `MEDIA_DIRS` elsewhere must be readable (and `DATA_DIR` added to `ReadWritePaths=`).
-
-### Firewall and the public address
-
-- **Panel and stream**: TCP `PORT` (8080). Behind a reverse proxy (Caddy, nginx) open only 80/443 (`sudo ufw allow 80,443/tcp`), set `TRUST_PROXY=true` and, if the proxy runs on the same machine, `HOST=127.0.0.1`. Without a proxy: `sudo ufw allow 8080/tcp`.
-- **Cloudflare quick tunnel**: `./vrcinema setup --cloudflared`, then `bin/cloudflared tunnel --url http://localhost:8080`; set `TRUST_CLOUDFLARE=true` and `PUBLIC_URL` (see [Making it reachable from VRChat](#making-it-reachable-from-vrchat)). No port needs to be open. For a permanent address run cloudflared as its own service (`cloudflared service install`).
-- **OBS** (`OBS_STREAM_KEY`): TCP 1935 (`OBS_PORT`). It listens only on the machine itself unless `OBS_LAN=1`; then allow only your own address (`sudo ufw allow from 203.0.113.7 to any port 1935 proto tcp`). It never goes through the tunnel.
-
-### Graphics card
-
-`VIDEO_ENCODER=auto` tests the hardware encoders at start, in this order: NVIDIA NVENC (NVIDIA driver), Intel Quick Sync, AMD AMF, then **VA-API** (`h264_vaapi`: Intel and AMD graphics through `intel-media-va-driver` or `mesa-va-drivers`). The first that encodes a one-second test picture wins; if none does, it falls back to `libx264` (the processor). Films that need no conversion cost almost no processor time either way.
-
-- VA-API needs access to `/dev/dri`: uncomment `SupplementaryGroups=video render` in the unit (or add your user to the `render` group). `vainfo` (package `vainfo`) shows whether the driver works.
-- The device is `/dev/dri/renderD128`; with several graphics cards set another one with `VAAPI_DEVICE=/dev/dri/renderD129` in `.env` (the desktop app: Settings → Tools, "VA-API device").
-- `VIDEO_ENCODER=h264_vaapi` forces it. Every software step (ticker, subtitles, fades, countdown, OBS) stays as it is; the picture is uploaded to the graphics card only for encoding, with a key frame every segment.
-
-### Raspberry Pi 5
-
-The Pi 5 has **no hardware H.264 encoder** (it can decode, not encode), so it converts on its processor. VRCinema notices this (64-bit ARM Linux with `libx264`) and switches to a **light profile**: the `superfast` preset, 3 Mbit/s instead of 6 by default, and converted pictures at most **720p30**. Films that can be copied as they are (H.264 up to 1080p30) are still copied, which costs almost nothing. The log says so at start, and Settings → Advanced shows a note next to **Maximum output resolution** (automatic, 1080p, 720p, 480p). Leave it at automatic or 720p; 1080p conversion on a Pi 5 falls behind.
-
-**A separate SD card.** If your Pi runs another system (for example Batocera), keep that card as it is and put Raspberry Pi OS on a second card (or a USB/NVMe drive), then just swap cards:
-
-1. On a PC, install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and choose *Raspberry Pi 5* → **Raspberry Pi OS Lite (64-bit)** (or the desktop edition) → the new card. In the settings (gear) set a host name, user, password and Wi-Fi, and enable SSH.
-2. Put the card in the Pi, start it, wait a minute, then `ssh <user>@<hostname>.local`.
-3. `sudo apt update && sudo apt full-upgrade -y`, then follow [Install](#install) and [Run it as a service](#run-it-as-a-service-systemd) above (building takes about 30 minutes on a Pi 5). `VIDEO_ENCODER=auto` finds no hardware encoder and the light profile turns on by itself.
-4. To go back to the other system, shut down (`sudo poweroff`) and swap the card.
-
-**What to expect.**
-
-- Films that are copied: a few percent of the processor. A 720p30 conversion: roughly 2–3 of the 4 cores; the info ticker, fades or subtitles add to it. Two conversions at once (the next film is prepared while one airs) can briefly use all four.
-- Use the official **Active Cooler** (or a case with a fan) and the official 27 W power supply: without cooling the Pi 5 throttles under a long conversion and the stream stutters. `vcgencmd measure_temp` shows the temperature (keep it below about 80 °C) and `vcgencmd get_throttled` must say `throttled=0x0`.
-- Use the **64-bit** Raspberry Pi OS. The 32-bit system has no ready-made ffmpeg (`setup` stops; use the system's ffmpeg as described above).
-- Put `DATA_DIR` on an SSD or USB drive rather than the SD card: segments are written all the time.
-- Every viewer pulls about 3 Mbit/s of a converted film (more for a copied one), so your upload decides how many people can watch.
-
-### The window app on Linux
-
-The desktop app (`VRCinema`) has its Linux parts in place (data in `$XDG_DATA_HOME/vrcinema` or `~/.local/share/vrcinema`, links open with `xdg-open`, no self-update: releases carry only `VRCinema.exe`), but it has not been built or tested on Linux yet. Building it needs the WebKitGTK development packages (`libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`). Use the server without window above.
-
-## How it works
-
-yt-dlp (or the disk library) resolves a video. ffmpeg cuts it into 1-second MPEG-TS segments, repackaging H.264 without re-encoding whenever possible: only when the source already matches what a conversion would make (H.264 in a common profile and level, 8-bit 4:2:0, at most 1080p30 at a constant rate, progressive, SDR, BT.709 or untagged) and has a key frame at least every 1.25 s (ffprobe reads the packets of its first 6 s); a source with key frames further apart (most YouTube and many local files) is converted, with a key frame forced every second.
-TikTok videos (and any video whose address the site refuses to ffmpeg with HTTP 403/401) are first downloaded whole by yt-dlp into `data\temp` (at most 200 MB, within 100 s; never a live stream) and played from there; the file is deleted about 3 minutes after the video's last clip ends (a resume or a seek reuses it), and the folder is emptied at every start. A vertical (9:16) video is always converted and letterboxed into a 16:9 picture with black bars.
-A broadcaster publishes the segments in real time and rewrites their timestamps, so videos and idle screens form one continuous timeline.
-Design notes: [docs/superpowers/specs](docs/superpowers/specs).
-
-```powershell
-npm test          # some tests use the real ffmpeg from ./bin
-npm run typecheck
-```
-
-## License
-
-[MIT](LICENSE)
+- The [full manual](docs/manual.md) has every setting, troubleshooting and the technical details.
+- Licence: [MIT](LICENSE).
