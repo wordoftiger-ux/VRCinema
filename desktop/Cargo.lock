@@ -2710,60 +2710,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vrcinema"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "axum",
- "base64 0.23.1",
- "chrono",
- "futures-util",
- "getrandom 0.4.3",
- "hmac",
- "image",
- "libc",
- "local-ip-address",
- "qrcode",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tar",
- "thiserror 2.0.21",
- "tokio",
- "tower-http 0.7.1",
- "unicode-normalization",
- "url",
- "windows-sys 0.61.2",
- "xz2",
- "zip",
-]
-
-[[package]]
-name = "vrcinema-desktop"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "vrcinema",
- "rfd",
- "semver",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-single-instance",
- "tempfile",
- "tokio",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "muda"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5480,6 +5426,60 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vrcinema"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "chrono",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hmac",
+ "image",
+ "libc",
+ "local-ip-address",
+ "qrcode",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower-http 0.7.1",
+ "unicode-normalization",
+ "url",
+ "windows-sys 0.61.2",
+ "xz2",
+ "zip",
+]
+
+[[package]]
+name = "vrcinema-desktop"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "rfd",
+ "semver",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-single-instance",
+ "tempfile",
+ "tokio",
+ "vrcinema",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "vswhom"

@@ -3,8 +3,6 @@ name = "vrcinema"
 version = "0.1.0"
 edition = "2024"
 
-# The package (and the library the desktop app links) has the internal name `vrcinema`; only
-# the program is called after the product.
 [[bin]]
 name = "vrcinema"
 path = "src/main.rs"

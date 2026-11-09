@@ -12,12 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use vrcinema::app::{AppEngine, AppOptions};
-use vrcinema::app_settings::AppSettings;
-use vrcinema::i18n::{Lang, Msg, error_msg, system_lang, t};
 use semver::Version;
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_autostart::ManagerExt;
+use vrcinema::app::{AppEngine, AppOptions};
+use vrcinema::app_settings::AppSettings;
+use vrcinema::i18n::{Lang, Msg, error_msg, system_lang, t};
 
 const WEBVIEW2_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 const ARG_AUTOSTART: &str = "--autostart";

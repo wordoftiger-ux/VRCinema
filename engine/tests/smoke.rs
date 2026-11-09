@@ -6,11 +6,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use vrcinema::config::load_config;
-use vrcinema::server::{RunOptions, run};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
+use vrcinema::config::load_config;
+use vrcinema::server::{RunOptions, run};
 
 /// Minimal HTTP/1.0 GET (no extra client dependency): returns (status, body).
 async fn get(addr: SocketAddr, path: &str) -> (u16, String) {

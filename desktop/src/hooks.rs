@@ -3,9 +3,9 @@
 
 use std::path::PathBuf;
 
-use vrcinema::app::DesktopHooks;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_autostart::ManagerExt;
+use vrcinema::app::DesktopHooks;
 
 pub struct ShellHooks {
     app: AppHandle,
