@@ -1661,5 +1661,11 @@
   "errors.capture_unavailable": "Przechwytywanie nie jest tu dostępne.",
   "log.capture_start": "Przechwytywanie #{id} rozpoczęte ({kind}, {fps} kl./s, {height}p)",
   "log.capture_added": "Przechwytywanie #{id} dodane do kolejki ({kind})",
-  "log.capture_stopped": "Przechwytywanie zatrzymane przez właściciela (zakończone: {count})"
+  "log.capture_stopped": "Przechwytywanie zatrzymane przez właściciela (zakończone: {count})",
+  "visual.up_next": "Następnie: {title}",
+  "mini.region": "Miniodtwarzacz",
+  "mini.back": "Wróć do kanału",
+  "mini.mute": "Wycisz miniodtwarzacz",
+  "mini.unmute": "Włącz dźwięk miniodtwarzacza",
+  "preview.audio": "Tylko dźwięk"
 }

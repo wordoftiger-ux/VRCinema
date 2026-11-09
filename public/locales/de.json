@@ -1625,5 +1625,11 @@
   "errors.capture_unavailable": "Aufnahmen sind hier nicht verfügbar.",
   "log.capture_start": "Aufnahme #{id} gestartet ({kind}, {fps} fps, {height}p)",
   "log.capture_added": "Aufnahme #{id} zur Warteschlange hinzugefügt ({kind})",
-  "log.capture_stopped": "Aufnahme vom Betreiber beendet (beendet: {count})"
+  "log.capture_stopped": "Aufnahme vom Betreiber beendet (beendet: {count})",
+  "visual.up_next": "Als Nächstes: {title}",
+  "mini.region": "Mini-Player",
+  "mini.back": "Zurück zum Kanal",
+  "mini.mute": "Mini-Player stummschalten",
+  "mini.unmute": "Ton des Mini-Players einschalten",
+  "preview.audio": "Nur Ton"
 }

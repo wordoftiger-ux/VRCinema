@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod client_ip;
 mod routes_admin;
+mod routes_audio;
 mod routes_capture;
 mod routes_desktop;
 mod routes_monitor;
@@ -1301,6 +1302,7 @@ pub fn build_router(state: AppState) -> Router {
         routes_desktop::router(state.clone())
             .merge(routes_monitor::router(state.clone()))
             .merge(routes_capture::router(state.clone()))
+            .merge(routes_audio::router(state.clone()))
     } else {
         Router::new()
     };

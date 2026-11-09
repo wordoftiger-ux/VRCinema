@@ -1607,5 +1607,11 @@
   "errors.capture_unavailable": "ここではキャプチャを利用できません。",
   "log.capture_start": "キャプチャ#{id}を開始しました（{kind}、{fps} fps、{height}p）",
   "log.capture_added": "キャプチャ#{id}をキューに追加しました（{kind}）",
-  "log.capture_stopped": "オーナーがキャプチャを停止しました（終了：{count}件）"
+  "log.capture_stopped": "オーナーがキャプチャを停止しました（終了：{count}件）",
+  "visual.up_next": "次：{title}",
+  "mini.region": "ミニプレーヤー",
+  "mini.back": "チャンネルに戻る",
+  "mini.mute": "ミニプレーヤーをミュート",
+  "mini.unmute": "ミニプレーヤーのミュートを解除",
+  "preview.audio": "音声のみ"
 }

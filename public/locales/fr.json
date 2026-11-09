@@ -1643,5 +1643,11 @@
   "errors.capture_unavailable": "La capture n’est pas disponible ici.",
   "log.capture_start": "Capture #{id} démarrée ({kind}, {fps} i/s, {height}p)",
   "log.capture_added": "Capture #{id} ajoutée à la file d’attente ({kind})",
-  "log.capture_stopped": "Capture arrêtée par le propriétaire (terminées : {count})"
+  "log.capture_stopped": "Capture arrêtée par le propriétaire (terminées : {count})",
+  "visual.up_next": "À suivre : {title}",
+  "mini.region": "Mini-lecteur",
+  "mini.back": "Retour à la chaîne",
+  "mini.mute": "Couper le son du mini-lecteur",
+  "mini.unmute": "Rétablir le son du mini-lecteur",
+  "preview.audio": "Son uniquement"
 }

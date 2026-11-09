@@ -4,8 +4,11 @@
 //!
 //! Per clip the still part (background, cover, texts) is drawn once into the clip folder
 //! ([`STILL_FILE`]); the clip's graph ([`clip_graph`]) loops it at [`FPS`] and overlays the
-//! visualiser (or a hidden clock) made from `[0:a:0]`, so the picture follows the sound's pace
-//! and ends with it. Everything else (cap, ticker, fades, encoder) is the converted chain of
+//! visualiser (the cover picture: spectrum bars under it; or a hidden clock) made from
+//! `[0:a:0]`, so the picture moves with the music, follows the sound's pace and ends with it.
+//! The "Up next" line is drawn by the clip graph from [`NEXT_FILE`], which ffmpeg re-reads once
+//! a second while the clip factory keeps it up to date (like the ticker's text). Everything
+//! else (cap, ticker, fades, encoder) is the converted chain of
 //! [`crate::pipeline::ffmpeg_args::build_clip_args_ext`].
 
 use std::ffi::OsString;
@@ -15,9 +18,10 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::i18n::Msg;
+use crate::i18n::{self, Lang, Msg};
 use crate::pipeline::ffmpeg_args::input_options;
 use crate::pipeline::slate_look::run_tool;
+use crate::pipeline::ticker::TickerText;
 use crate::resolver::types::StreamInput;
 
 // ---------- Settings ----------
@@ -120,12 +124,23 @@ impl AudioSettings {
 
 // ---------- The picture ----------
 
-/// Frames per second of the picture.
-pub const FPS: u32 = 30;
+/// Frames per second of the picture (light on the processor).
+pub const FPS: u32 = 25;
+/// The picture is at most this many lines high (light on the processor; the texts and the bars
+/// need no more).
+pub const MAX_HEIGHT: u32 = 720;
 /// The cover picture extracted into the clip folder.
 pub const COVER_FILE: &str = "cover.png";
 /// The still part of the picture, drawn into the clip folder.
 pub const STILL_FILE: &str = "bg.png";
+/// The "Up next: <title>" line, re-read by ffmpeg while the clip runs (empty: no next film).
+pub const NEXT_FILE: &str = "av-next.txt";
+/// The title and the artist for the window's Preview (`/api/desktop/audio/<id>`).
+pub const META_FILE: &str = "audio.json";
+/// How often ffmpeg re-reads [`NEXT_FILE`]: every this many frames (once a second).
+const NEXT_RELOAD: u32 = FPS;
+/// How many spectrum bars the cover picture shows.
+pub const BARS: u32 = 48;
 /// The slates' background colour.
 const BG: &str = "0x14161c";
 /// The colour of the visualisers (the ticker's accent).
@@ -284,31 +299,60 @@ pub fn wrap(text: &str, max_px: f64, size: u32, max_lines: usize) -> Vec<String>
     lines
 }
 
-/// The texts of `picture` on a `size` frame: the title (up to 2 or 3 lines) and the artist.
-pub fn layout(picture: Picture, size: (u32, u32), title: &str, artist: &str) -> Vec<Line> {
+/// Where the texts of a picture go: the still lines (title, artist) and the slot of the
+/// "Up next" line, which the clip graph draws from [`NEXT_FILE`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout {
+    pub lines: Vec<Line>,
+    /// Its `text` is empty: the line is written while the clip runs.
+    pub next: Line,
+    /// How wide the "Up next" line may be.
+    pub next_max_px: f64,
+}
+
+/// The texts of `picture` on a `size` frame: the title (up to 2 or 3 lines), the artist and
+/// the slot of the "Up next" line under them.
+pub fn layout(picture: Picture, size: (u32, u32), title: &str, artist: &str) -> Layout {
     let (w, h) = (f64::from(size.0), f64::from(size.1));
     let k = h / 1080.0;
     let px = |v: f64| (v * k).round() as u32;
-    let (title_px, artist_px, max_w, title_lines, x, top) = match picture {
-        Picture::Plain => (px(76.0), px(46.0), w * 0.84, 2, None, None),
-        Picture::Waveform | Picture::Spectrum => {
-            (px(64.0), px(42.0), w * 0.84, 2, None, Some(px(110.0)))
-        }
+    let (title_px, artist_px, next_px, max_w, title_lines, x, top) = match picture {
+        Picture::Plain => (px(76.0), px(46.0), px(40.0), w * 0.84, 2, None, None),
+        Picture::Waveform | Picture::Spectrum => (
+            px(64.0),
+            px(42.0),
+            px(36.0),
+            w * 0.84,
+            2,
+            None,
+            Some(px(110.0)),
+        ),
         Picture::Cover => {
-            let (art_x, side) = cover_box(size);
+            let (art_x, _, side) = cover_box(size);
             let col = art_x + side + even(w * 0.05);
             let col_w = (w - f64::from(col) - w * 0.06).max(w * 0.2);
-            (px(60.0), px(40.0), col_w, 3, Some(col), None)
+            (px(60.0), px(40.0), px(36.0), col_w, 3, Some(col), None)
         }
     };
     let title_lines = wrap(title, max_w, title_px, title_lines);
     let artist_lines = wrap(artist, max_w, artist_px, 1);
     let line_h = |size: u32| (f64::from(size) * 1.25).round() as u32;
     let gap = if artist_lines.is_empty() { 0 } else { px(24.0) };
+    let next_gap = px(30.0);
     let total = title_lines.len() as u32 * line_h(title_px)
         + gap
-        + artist_lines.len() as u32 * line_h(artist_px);
-    let mut y = top.unwrap_or_else(|| size.1.saturating_sub(total) / 2);
+        + artist_lines.len() as u32 * line_h(artist_px)
+        + next_gap
+        + line_h(next_px);
+    let mut y = match (top, picture) {
+        (Some(top), _) => top,
+        // Beside the cover: centred on it.
+        (None, Picture::Cover) => {
+            let (_, art_y, side) = cover_box(size);
+            (art_y + side / 2).saturating_sub(total / 2)
+        }
+        (None, _) => size.1.saturating_sub(total) / 2,
+    };
     let mut out = Vec::new();
     for (i, text) in title_lines.into_iter().enumerate() {
         out.push(Line {
@@ -333,13 +377,61 @@ pub fn layout(picture: Picture, size: (u32, u32), title: &str, artist: &str) -> 
         });
         y += line_h(artist_px);
     }
-    out
+    Layout {
+        lines: out,
+        next: Line {
+            file: NEXT_FILE.to_string(),
+            text: String::new(),
+            size: next_px,
+            color: ACCENT,
+            x,
+            y: y + next_gap,
+        },
+        next_max_px: max_w,
+    }
 }
 
-/// The cover's square on the frame: its left edge and side.
-fn cover_box(size: (u32, u32)) -> (u32, u32) {
+/// The cover's square on the frame: its left edge, its top edge and its side (in the upper
+/// part: the bars sit under it).
+fn cover_box(size: (u32, u32)) -> (u32, u32, u32) {
     let (w, h) = (f64::from(size.0), f64::from(size.1));
-    (even(w * 0.09), even(h * 0.62))
+    (even(w * 0.09), even(h * 0.1), even(h * 0.5))
+}
+
+/// The bars under the cover: left edge, top edge, the width of one bar with its gap, height.
+fn bars_box(size: (u32, u32)) -> (u32, u32, u32, u32) {
+    let (w, h) = (f64::from(size.0), f64::from(size.1));
+    let pitch = even(w * 0.88 / f64::from(BARS));
+    let left = (size.0.saturating_sub(pitch * BARS) / 2) & !1;
+    (left, even(h * 0.68), pitch, even(h * 0.18))
+}
+
+/// The spectrum bars made from the sound (transparent around them): [`BARS`] bands of the
+/// musical range (the sound resampled to 11 kHz, log frequency scale, cube root amplitude,
+/// smoothed over two windows), drawn small and scaled up without smoothing, with transparent
+/// gaps cut between the bars. Light: a 48-pixel-wide spectrum per frame.
+fn bars_filter(size: (u32, u32)) -> String {
+    let (_, _, pitch, height) = bars_box(size);
+    let width = pitch * BARS;
+    let gap = (pitch / 4).max(1);
+    // `gap` more lines on top: drawgrid's top line, cropped away.
+    let tall = height + gap;
+    format!(
+        "aformat=channel_layouts=mono,aresample=11025,showfreqs=s={BARS}x{tall}:mode=bar:\
+         fscale=log:ascale=cbrt:win_size=1024:averaging=2:rate={FPS}:colors={ACCENT},\
+         scale={width}:{tall}:flags=neighbor,drawgrid=w={pitch}:h=0:t={gap}:c=black@0:replace=1,\
+         crop={width}:{height}:0:{gap}"
+    )
+}
+
+/// The texts' shadow over the cover (none on the plain colour).
+fn shadow(picture: Picture, size: (u32, u32)) -> String {
+    if picture == Picture::Cover {
+        let d = (3.0 * f64::from(size.1) / 1080.0).round().max(1.0);
+        format!(":shadowcolor=black@0.7:shadowx={d}:shadowy={d}")
+    } else {
+        String::new()
+    }
 }
 
 /// The lavfi graph of the still picture (one frame): background (the blurred cover), the cover
@@ -348,24 +440,19 @@ pub fn still_graph(picture: Picture, size: (u32, u32), font: &str, lines: &[Line
     let (w, h) = size;
     let k = f64::from(h) / 1080.0;
     let mut graph = if picture == Picture::Cover {
-        let (art_x, side) = cover_box(size);
+        let (art_x, art_y, side) = cover_box(size);
         let blur = (30.0 * k).round().max(2.0);
         format!(
             "movie={COVER_FILE},split[av_c1][av_c2];\
              [av_c1]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1,\
              gblur=sigma={blur},drawbox=x=0:y=0:w=iw:h=ih:color=black@0.55:t=fill[av_bg];\
              [av_c2]scale={side}:{side}:force_original_aspect_ratio=decrease,setsar=1[av_art];\
-             [av_bg][av_art]overlay=x={art_x}+({side}-w)/2:y=(H-h)/2"
+             [av_bg][av_art]overlay=x={art_x}+({side}-w)/2:y={art_y}+({side}-h)/2"
         )
     } else {
         format!("color=c={BG}:s={w}x{h}:d=1")
     };
-    let shadow = if picture == Picture::Cover {
-        let d = (3.0 * k).round().max(1.0);
-        format!(":shadowcolor=black@0.7:shadowx={d}:shadowy={d}")
-    } else {
-        String::new()
-    };
+    let shadow = shadow(picture, size);
     for line in lines {
         let x = line
             .x
@@ -408,8 +495,14 @@ pub fn still_args(graph: &str) -> Vec<OsString> {
 
 /// The clip's picture from `[0:a:0]` (its last output unlabelled, see
 /// `ClipExtras::audio_visual`): the still picture looped (`still`; else the plain colour) under
-/// the visualiser, or a hidden 2×2 clock that makes the picture end with the sound.
-pub fn clip_graph(picture: Picture, size: (u32, u32), still: bool) -> String {
+/// the visualiser (the cover: spectrum bars under it), or a hidden 2×2 clock that makes the
+/// picture end with the sound. `next`: the font and the slot of the "Up next" line.
+pub fn clip_graph(
+    picture: Picture,
+    size: (u32, u32),
+    still: bool,
+    next: Option<(&str, &Line)>,
+) -> String {
     let (w, h) = size;
     let bg = if still {
         format!("movie={STILL_FILE},format=yuv420p,loop=loop=-1:size=1,fps={FPS}")
@@ -433,11 +526,75 @@ pub fn clip_graph(picture: Picture, size: (u32, u32), still: bool) -> String {
             ),
             format!("x=(W-w)/2:y={vy}"),
         ),
-        Picture::Cover | Picture::Plain => {
-            (format!("showwaves=s=2x2:rate={FPS}"), "x=W:y=H".into())
+        Picture::Cover => {
+            let (x, y, _, _) = bars_box(size);
+            (bars_filter(size), format!("x={x}:y={y}"))
         }
+        Picture::Plain => (format!("showwaves=s=2x2:rate={FPS}"), "x=W:y=H".into()),
     };
-    format!("{bg}[av_bg];[0:a:0]{visual}[av_v];[av_bg][av_v]overlay={at}:shortest=1,format=yuv420p")
+    let mut graph =
+        format!("{bg}[av_bg];[0:a:0]{visual}[av_v];[av_bg][av_v]overlay={at}:shortest=1");
+    if let Some((font, line)) = next {
+        let x = line
+            .x
+            .map_or_else(|| "(w-text_w)/2".to_string(), |x| x.to_string());
+        graph.push_str(&format!(
+            ",drawtext=fontfile={font}:textfile={file}:reload={NEXT_RELOAD}:expansion=none:\
+             fontsize={size}:fontcolor={color}{shadow}:x={x}:y={y}",
+            file = line.file,
+            size = line.size,
+            color = line.color,
+            shadow = shadow(picture, size),
+            y = line.y,
+        ));
+    }
+    graph.push_str(",format=yuv420p");
+    graph
+}
+
+/// The "Up next" line of a running clip: its language and how much room it has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextSlot {
+    /// The slate language (English when Japanese has no font).
+    pub lang: Lang,
+    pub max_px: f64,
+    pub size: u32,
+}
+
+impl NextSlot {
+    /// "Up next: <title>" on one line (cut with "…"); empty without a next film. The title as
+    /// the ticker shows it: control characters become spaces, the stored default title is
+    /// "Untitled" in the slate language. drawtext reads it from a file without expansion, so
+    /// no character needs escaping.
+    pub fn text(&self, next_title: Option<&str>) -> String {
+        let title = next_title
+            .map(|t| {
+                if t == crate::resolver::ytdlp::NO_TITLE {
+                    i18n::t(self.lang, "player.untitled", &[])
+                } else {
+                    t.chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect::<String>()
+                        .trim()
+                        .to_string()
+                }
+            })
+            .filter(|t| !t.is_empty());
+        let Some(title) = title else {
+            return String::new();
+        };
+        let line = i18n::t(self.lang, "visual.up_next", &[("title", &title)]);
+        wrap(&line, self.max_px, self.size, 1)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// Writes the line for `next_title` into the clip folder `dir` (in place: ffmpeg may be
+    /// reading it).
+    pub fn write(&self, dir: &Path, next_title: Option<&str>) -> std::io::Result<()> {
+        TickerText::write_in_place(&dir.join(NEXT_FILE), &self.text(next_title))
+    }
 }
 
 /// What [`prepare`] needs.
@@ -453,6 +610,10 @@ pub struct VisualJob<'a> {
     /// The font as ffmpeg sees it from the clip folder; `None`: no texts.
     pub font: Option<&'a str>,
     pub cover: Option<CoverSource>,
+    /// The language of the "Up next" line (the slate language the font can draw).
+    pub lang: Lang,
+    /// The next film's title when the clip starts.
+    pub next_title: Option<&'a str>,
 }
 
 /// The prepared picture of an audio-only clip.
@@ -465,12 +626,14 @@ pub struct PreparedVisual {
     pub plain_graph: String,
     /// What went wrong (a log key and the error); the picture is simpler then, never missing.
     pub problems: Vec<(&'static str, Msg)>,
+    /// The "Up next" line to keep up to date while the clip runs (`None`: not drawn).
+    pub next: Option<NextSlot>,
 }
 
 /// Reads the cover (when the look may show it), draws the still picture into the clip folder
 /// and returns the clip's graph. A failure falls back to a simpler picture.
 pub async fn prepare(job: VisualJob<'_>) -> PreparedVisual {
-    let size = canvas(job.height);
+    let size = canvas(job.height.min(MAX_HEIGHT));
     let mut problems = Vec::new();
     let mut has_cover = false;
     if let Some(source) = job.cover.as_ref().filter(|_| wants_cover(job.look)) {
@@ -491,10 +654,11 @@ pub async fn prepare(job: VisualJob<'_>) -> PreparedVisual {
         }
     }
     let picture = picture_for(job.look, has_cover);
-    let lines = job
+    let texts = job
         .font
-        .map(|_| layout(picture, size, job.title, job.artist))
-        .unwrap_or_default();
+        .map(|_| layout(picture, size, job.title, job.artist));
+    let lines = texts.as_ref().map(|l| l.lines.clone()).unwrap_or_default();
+    write_meta(&job);
     let drawn = draw_still(&job, picture, size, &lines).await;
     let (picture, still) = match drawn {
         Ok(()) => (picture, true),
@@ -508,12 +672,44 @@ pub async fn prepare(job: VisualJob<'_>) -> PreparedVisual {
             (simpler, false)
         }
     };
+    // The "Up next" line goes with the texts of the still picture (not on the simpler one).
+    let next = match (&texts, job.font) {
+        (Some(texts), Some(font)) if still => {
+            let slot = NextSlot {
+                lang: job.lang,
+                max_px: texts.next_max_px,
+                size: texts.next.size,
+            };
+            match slot.write(job.out_dir, job.next_title) {
+                Ok(()) => Some((font, slot, &texts.next)),
+                Err(e) => {
+                    problems.push(("log.audio_picture_failed", Msg::text(e)));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     PreparedVisual {
         picture,
-        graph: clip_graph(picture, size, still),
-        plain_graph: clip_graph(picture, size, false),
+        graph: clip_graph(
+            picture,
+            size,
+            still,
+            next.as_ref().map(|(font, _, line)| (*font, *line)),
+        ),
+        plain_graph: clip_graph(picture, size, false, None),
         problems,
+        next: next.map(|(_, slot, _)| slot),
     }
+}
+
+/// The title and the artist for the window's Preview ([`META_FILE`]); not written: the
+/// Preview shows the queue's title.
+fn write_meta(job: &VisualJob<'_>) {
+    let meta = serde_json::json!({ "title": job.title, "artist": job.artist });
+    let _ = std::fs::create_dir_all(job.out_dir)
+        .and_then(|()| std::fs::write(job.out_dir.join(META_FILE), meta.to_string()));
 }
 
 async fn draw_still(

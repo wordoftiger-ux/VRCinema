@@ -10,6 +10,7 @@ import { lang, t, tn } from '../i18n.js';
 import { Icon } from '../icons.js';
 import { control, showToast, tunnel } from '../store.js';
 import { copyText, formatTime } from './playerbar.js';
+import { isMini } from './mini.js';
 
 const STATS = '/api/admin/channels/main/stats';
 const EVERY_MS = 1000;
@@ -22,7 +23,8 @@ export const previewStats = signal({ bufferS: null, dropped: null });
 export const previewShown = signal(false);
 
 export function toggleStats() {
-  if (previewShown.value) statsOpen.value = !statsOpen.value;
+  // Not while On air is in the mini player (another tab is open).
+  if (previewShown.value && !isMini.value) statsOpen.value = !statsOpen.value;
 }
 
 // ---------- Formatting ----------

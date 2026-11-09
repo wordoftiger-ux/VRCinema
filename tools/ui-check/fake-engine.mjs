@@ -38,6 +38,8 @@
 // the controls act on (POST …/play-now switches it, position 0); `seekPending` the control flag;
 // the panel carries `air` (`airLatencyS`). GET /__test/live lists the /live requests with
 // their X-VRCinema-Air header. GET /app-icon.png serves desktop/icons/icon.png.
+// The Preview of an audio-only film: GET /api/desktop/audio/<id> answers scenario `audioMeta`
+// ({title, artist, cover}) for any id; 404 without it.
 // Controls: `controlDelayMs` delays the answers of …/pause, …/resume and …/seek; with `armPause`
 // a pause with `atS` only arms (`pausePending`, like the engine before the segment end).
 // Scenario `viewerStateDelayMs`: GET /api/channels/main/state answers that late (setting it
@@ -1277,6 +1279,11 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (!mirror && noWindow) return coded(res, 403, 'window_only', 'Window only');
       if (route === '/api/desktop/monitor.m3u8' && req.method === 'GET') return monitorList(res, url.searchParams);
       if (route === '/api/desktop/preview' && req.method === 'GET') return previewStatus(res, url.searchParams);
+      const audio = route.match(/^\/api\/desktop\/audio\/(\d+)$/);
+      if (audio && req.method === 'GET') {
+        if (!s.audioMeta) return coded(res, 404, 'no_such_item', 'No such item');
+        return json(res, 200, { itemId: Number(audio[1]), cover: null, ...s.audioMeta });
+      }
       const media = route.match(/^\/api\/desktop\/preview\/(\d+)\/media$/);
       if (media && req.method === 'GET') return previewMedia(req, res, Number(media[1]));
       const monitorSeg = route.match(/^\/api\/desktop\/monitor\/([a-z0-9-]+)\/(\d+\.ts)$/);

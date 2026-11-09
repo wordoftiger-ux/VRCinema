@@ -1625,5 +1625,11 @@
   "errors.capture_unavailable": "Capturing is not available here.",
   "log.capture_start": "Capture #{id} started ({kind}, {fps} fps, {height}p)",
   "log.capture_added": "Capture #{id} added to the queue ({kind})",
-  "log.capture_stopped": "Capture stopped by the owner ({count} ended)"
+  "log.capture_stopped": "Capture stopped by the owner ({count} ended)",
+  "visual.up_next": "Up next: {title}",
+  "mini.region": "Mini player",
+  "mini.back": "Back to Channel",
+  "mini.mute": "Mute the mini player",
+  "mini.unmute": "Unmute the mini player",
+  "preview.audio": "Sound only"
 }

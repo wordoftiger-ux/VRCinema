@@ -331,7 +331,7 @@ try {
   await page.screenshot({ path: join(shots, 'after-stats-pl-1100x680.png') });
   await page.evaluate(async () => (await import('/static/app/store.js')).setLanguage('en'));
 
-  // Leaving the view stops everything; coming back starts the preview again.
+  // Leaving the view: the overlay and its reads stop; On air plays on in the mini player.
   await page.click('.rail-history');
   await waitFor(async () => (await page.$('.stats')) === null, 'leaving the Channel view removes the overlay');
   await sleep(300);
@@ -339,9 +339,9 @@ try {
   await sleep(2200);
   b = await statsReads();
   check(b === a, 'leaving the Channel view stops the stats reads', b - a);
-  check((await delayOf(page)) === null, 'and the delay is unknown again (no preview)');
+  check(Number.isFinite(await delayOf(page)), 'On air plays on in the mini player (its delay is still measured)');
   await page.keyboard.press('i');
-  check((await page.$('.stats')) === null, 'key I does nothing where there is no preview');
+  check((await page.$('.stats')) === null, 'key I does nothing in the mini player');
   check(page.__errors.length === 0, 'no errors in the console', page.__errors);
   await page.close();
 

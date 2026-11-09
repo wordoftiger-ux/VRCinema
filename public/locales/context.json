@@ -1571,5 +1571,11 @@
   "errors.capture_unavailable": "API error (app window): this server has no capture.",
   "log.capture_start": "Log entry: a capture starts airing; {kind} is capture.kind_*; {fps} and {height} numbers. Never names the window or the device.",
   "log.capture_added": "Log entry: the owner added a capture to the queue; {kind} is capture.kind_*.",
-  "log.capture_stopped": "Log entry: the owner pressed Stop; {count} is how many captures ended."
+  "log.capture_stopped": "Log entry: the owner pressed Stop; {count} is how many captures ended.",
+  "visual.up_next": "Drawn into the stream picture of an audio-only file (seen by every viewer in VRChat) and shown on the window's Preview of music, in the slate language on air: the next video in the queue; {title} is its title. Starts with a capital (a line of its own, unlike ticker.next).",
+  "mini.region": "Accessible name of the small floating window with the Channel's screens (Preview and On air) that keeps playing while the owner is on another tab (History, Share, Settings).",
+  "mini.back": "Tooltip and accessible name of the mini player: a click returns to the Channel tab (nav.channel).",
+  "mini.mute": "Button of the mini player: mutes both screens in this window only (the channel's sound for viewers does not change).",
+  "mini.unmute": "Button of the mini player: turns the sound of both screens back on (in this window only).",
+  "preview.audio": "Small label on the Preview while an audio-only file (mp3, flac, SoundCloud…) plays: the file has no picture of its own; viewers see the generated picture."
 }

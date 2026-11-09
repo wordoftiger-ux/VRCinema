@@ -1643,5 +1643,11 @@
   "errors.capture_unavailable": "La captura no está disponible aquí.",
   "log.capture_start": "Captura #{id} iniciada ({kind}, {fps} fps, {height}p)",
   "log.capture_added": "Captura #{id} agregada a la cola ({kind})",
-  "log.capture_stopped": "El propietario detuvo la captura (terminadas: {count})"
+  "log.capture_stopped": "El propietario detuvo la captura (terminadas: {count})",
+  "visual.up_next": "A continuación: {title}",
+  "mini.region": "Minirreproductor",
+  "mini.back": "Volver al canal",
+  "mini.mute": "Silenciar el minirreproductor",
+  "mini.unmute": "Activar el sonido del minirreproductor",
+  "preview.audio": "Solo sonido"
 }
