@@ -1,4 +1,4 @@
-# VRChat HLS Channel
+# VRCinema (VRChat HLS Channel)
 
 A small self-hosted server that turns links (YouTube, pixeldrain, CDA and anything else
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) understands) and video files from your own disk into
@@ -28,6 +28,11 @@ Polish version: [README.pl.md](README.pl.md). The program speaks English, Polish
 - **Remote panel**: off by default; the panel is reachable only from this computer. To manage the channel from another device (a phone, a laptop), set a password in **Settings** → **Remote panel** (see [Remote panel and phone](#remote-panel-and-phone)).
 - **Updates**: the app checks for a newer `VRCinema.exe` at start and every 24 hours and offers to install it (the file is verified with its SHA-256 and the old one is kept until the new one runs). This needs the repository's releases to be public.
 - **Data**: everything is in `%LOCALAPPDATA%\VRCinema` (`config.json`, `tools\`, `data\`, `logs\`). Set `VRCINEMA_HOME` to use another folder. Deleting the folder resets the app.
+- **Renamed from VRCinema**: VRCinema is the new name of VRCinema; nothing has to be set up again.
+  - An existing `%LOCALAPPDATA%\VRCinema` folder stays in use as long as there is no `%LOCALAPPDATA%\VRCinema` folder: nothing is moved, so the settings, the queue, the tools, the permanent link and the window's saved state are all kept. To switch to the new name, quit the app and rename the folder to `VRCinema`. The same holds for `~/.local/share/vrcinema` on Linux.
+  - An update installed by VRCinema keeps the program file's name (`VRCinema.exe`); rename it to `VRCinema.exe` whenever you like (with the app closed). If **Start VRCinema with Windows** is on, the old `VRCinema` autostart entry is replaced by a `VRCinema` one at the next start.
+  - Unchanged on purpose: the environment variables (`VRCINEMA_HOME` and the other `VRCINEMA_*`), the Cloudflare tunnel (`vrcinema`) and the files in the data folder (`vrcinema.db`, `logs\vrcinema.log`).
+  - The program from `engine/` and the Linux download is now called `vrcinema` (it was `vrcinema`), so the command line is `vrcinema ctl` and the systemd unit is `deploy/vrcinema.service`. An existing `/opt/vrcinema` installation keeps working with its old unit; to move it, follow [Linux (server without window)](#linux-server-without-window) and copy `.env` and `data/` over.
 - **Size and memory** (measured, release build): `VRCinema.exe` is 25 MB. While a film plays with the window open it uses about 45 MB itself; the WebView2 processes that draw the window take about 600 MB while the live preview plays; cloudflared takes about 40 MB and ffmpeg is separate (about 30 MB when copying, about 300 MB when converting on the graphics card).
 - **No window** (a server, Docker): see [VPS with Docker](#vps-with-docker), [Rust version](#rust-version-experimental) and [Linux (server without window)](#linux-server-without-window) below; the headless `vrcinema` server has the same panel and request page.
 
