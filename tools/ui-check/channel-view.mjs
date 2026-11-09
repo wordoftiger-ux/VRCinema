@@ -205,7 +205,7 @@ try {
   await page.click('.qi[data-id="8"]', { button: 'right' });
   await page.waitForSelector('.menu [role=menuitem]');
   const items = await page.$$eval('.menu [role=menuitem]', (els) => els.map((e) => [e.textContent.trim(), e.getAttribute('aria-disabled')]));
-  check(JSON.stringify(items) === JSON.stringify([['Play now', 'false'], ['Move to the top', 'true'], ['Move up', 'true'], ['Move down', 'false'], ['Copy link', 'false'], ['Remove from the queue', 'false'], ['Remove all from this viewer', 'false']]), 'right click opens the menu (the first row cannot go to the top or up)', items);
+  check(JSON.stringify(items) === JSON.stringify([['Play now', 'false'], ['Move to the top', 'true'], ['Move up', 'true'], ['Move down', 'false'], ['Copy link', 'false'], ['Trim…', 'false'], ['Start at…', 'false'], ['Remove from the queue', 'false'], ['Remove all from this viewer', 'false']]), 'right click opens the menu (the first row cannot go to the top or up)', items);
   check((await page.$eval('.menu', (e) => e.getAttribute('aria-label'))) === 'Video menu', 'the menu has an accessible name');
   await page.screenshot({ path: join(shots, 'after-channel-menu-en.png') });
   m = await mark();
@@ -216,9 +216,9 @@ try {
   await page.focus('.qi[data-id="10"]');
   await page.keyboard.press('ContextMenu');
   await page.waitForSelector('.menu');
-  check((await page.$$('.menu [role=menuitem]')).length === 7, 'the Menu key opens the menu of the focused row');
+  check((await page.$$('.menu [role=menuitem]')).length === 9, 'the Menu key opens the menu of the focused row');
   await page.keyboard.press('Escape');
-  check(await page.evaluate(() => document.activeElement?.dataset.id === '10'), 'focus returns to the row when the menu closes');
+  check(await page.evaluate(() => document.activeElement?.dataset.id === '10'), 'focus returns to the row when the menu closes', await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 80)));
   await page.keyboard.press('Shift+F10');
   await page.waitForSelector('.menu');
   await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'menuitem');
@@ -306,7 +306,7 @@ try {
   // Kasia's video (her film is on air too): remove both and block her device.
   m = await mark();
   await page.click('.qi[data-id="10"]', { button: 'right' });
-  await page.click('.menu [role=menuitem]:nth-child(8)');
+  await page.click('.menu [role=menuitem]:nth-child(11)'); // 9 items + 2 separators
   await page.waitForSelector('.dialog [data-also-block]');
   a = (await actionsSince(m)).find((x) => x.path.endsWith('/remove-requester'));
   check(a?.body.dryRun === true && a.body.itemId === 10, 'the dialog first asks the engine what would go (dryRun)', a);
@@ -520,12 +520,13 @@ try {
   await page.keyboard.press('Space');
   a = await lastAction(m, 'Space with canPause');
   check(a.path.endsWith('/pause'), 'canSeek false but canPause: Space pauses');
-  await scenario({ playing: 'none' });
+  // The owner's pause above stays resumable with nothing on air (Space would resume): clear it.
+  await scenario({ playing: 'none', paused: false, pauseReasons: [] });
   await page.waitForFunction(() => document.querySelector('.nowp-title')?.textContent === 'Nothing is playing');
   m = await mark();
   for (const key of ['Space', 'n', 'ArrowRight']) await page.keyboard.press(key);
   await page.waitForTimeout(250);
-  check((await actionsSince(m)).length === 0, 'nothing playing: Space, N and → do nothing');
+  check((await actionsSince(m)).length === 0, 'nothing playing: Space, N and → do nothing', await actionsSince(m));
   await page.close();
 
   // ---------- Polling: one read at a time, backoff, stop on 401, timeouts ----------
