@@ -19,6 +19,8 @@ const EXE_ASSET: &str = "VRCinema.exe";
 const SUM_ASSET: &str = "VRCinema.exe.sha256";
 const NEW_NAME: &str = "VRCinema.new.exe";
 const OLD_NAME: &str = "VRCinema.old.exe";
+/// What an update by a version still called VRCinema leaves behind.
+const LEGACY_OLD_NAME: &str = "VRCinema.old.exe";
 const USER_AGENT: &str = concat!("VRCinema/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,11 +212,25 @@ fn swap(
     Ok(())
 }
 
-/// Removes `VRCinema.old.exe` next to `exe_path` (the old process may still be exiting, so retry).
+/// The files an update leaves next to `exe_path`: `VRCinema.old.exe`, and `VRCinema.old.exe`
+/// from an update made by a version still called VRCinema.
+pub fn leftover_paths(exe_path: &Path) -> [PathBuf; 2] {
+    [
+        exe_path.with_file_name(OLD_NAME),
+        exe_path.with_file_name(LEGACY_OLD_NAME),
+    ]
+}
+
+/// Removes the [`leftover_paths`] (the old process may still be exiting, so retry).
 pub async fn cleanup_after_update(exe_path: &Path) {
-    let old: PathBuf = exe_path.with_file_name(OLD_NAME);
     for _ in 0..20 {
-        if !old.exists() || fs::remove_file(&old).is_ok() {
+        let mut left = false;
+        for old in leftover_paths(exe_path) {
+            if old.exists() && fs::remove_file(&old).is_err() {
+                left = true;
+            }
+        }
+        if !left {
             return;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -478,8 +494,11 @@ mod tests {
         let (dir, exe) = setup();
         let old = dir.path().join("VRCinema.old.exe");
         fs::write(&old, b"o").unwrap();
+        let legacy = dir.path().join("VRCinema.old.exe");
+        fs::write(&legacy, b"o").unwrap();
         cleanup_after_update(&exe).await;
         assert!(!old.exists());
+        assert!(!legacy.exists());
         assert!(exe.exists());
         cleanup_after_update(&exe).await; // nothing to remove: no panic
     }

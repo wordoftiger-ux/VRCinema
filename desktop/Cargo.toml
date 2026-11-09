@@ -31,6 +31,8 @@ tokio = { version = "1.53.2", features = ["rt", "macros"] }
 tauri = { version = "2", features = ["tray-icon", "test"] }
 
 [target."cfg(windows)".dependencies]
+# The same version the autostart plugin uses: removes the entry left by the versions called VRCinema.
+auto-launch = "0.6"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
 
 # Smaller debug builds: no debug info for the dependencies (the disk is tight).

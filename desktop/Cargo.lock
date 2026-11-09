@@ -2749,6 +2749,7 @@ name = "vrcinema-desktop"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "auto-launch",
  "vrcinema",
  "rfd",
  "semver",
