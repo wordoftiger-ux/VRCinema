@@ -30,8 +30,6 @@ When the queue is empty, the channel shows a calm waiting screen (with a QR code
 5. **Add films**: paste a link into the window (or press <kbd>Ctrl</kbd>+<kbd>V</kbd>), or drag video files onto it.
 
 > Windows may say "Windows protected your PC" because the file is not code-signed. Click **More info**, then **Run anyway**.
->
-> In VRChat, everybody watching has to enable **Allow Untrusted URLs** in the settings. In Public instances VRChat may block the link anyway, so the channel is mostly meant for private instances with friends.
 
 ## What you can do
 
@@ -62,11 +60,10 @@ When the queue is empty, the channel shows a calm waiting screen (with a QR code
 - Your computer sends the video, so your **upload speed** matters: the more people watch, the more it needs. The program warns you when the connection looks too weak.
 - Most videos are only repackaged, not converted, so the load on your computer is small.
 - Everything is stored in `%LOCALAPPDATA%\VRCinema`. Deleting that folder resets the program.
-- It was formerly called VRCinema. If you used it before, your settings are kept.
 
 ## Without a window
 
-On Linux, a Raspberry Pi or a VPS there is also a headless server with the same panel. See the [manual](docs/manual.md#linux-server-without-window).
+On Linux there is also a headless server with the same panel. See the [manual](docs/manual.md#linux-server-without-window).
 
 ## Please use it responsibly
 
