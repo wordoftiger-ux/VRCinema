@@ -3465,6 +3465,8 @@ kbd {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
 /* ---------- Film perforation behind the views (admin app only) ----------
    Two rows of small rounded holes, like the edges of a film strip, along the top and the bottom
    of the view area: low contrast, from the theme's tokens, static (nothing moves), drawn under
