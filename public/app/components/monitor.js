@@ -54,7 +54,10 @@ const EXPECT_MAX_MS = 60000;
 export const monitorState = signal('off');
 /** How many seconds the monitor plays ahead of on-air; null: not known. */
 export const monitorAheadS = signal(null);
-/** `file` (the film itself, sourceplayer.js), `fallback` (the segments below) or `none`. */
+/**
+ * `file` (the film itself, sourceplayer.js), `interim` (the segments below while the film's
+ * file is prepared), `fallback` (the segments below for good) or `none`.
+ */
 export const previewMode = signal('none');
 
 let current = null;
@@ -507,9 +510,12 @@ function caption(state, ahead) {
   return ahead >= 1 ? t('monitor.ahead', { seconds: Math.round(ahead) }) : t('monitor.in_sync');
 }
 
+/** The Preview shows the engine's segments (for good, or until the film's file is ready). */
+const onSegments = (mode) => mode === 'fallback' || mode === 'interim';
+
 /**
- * The Preview of the window: the film player and, for films without a file, the segment
- * monitor; one interface for store.js. Returns `{stop, retry}`.
+ * The Preview of the window: the film player and, for films without a file (or until their
+ * file is ready), the segment monitor; one interface for store.js. Returns `{stop, retry}`.
  */
 function preview(fileVideo, hlsVideo) {
   let segments = null;
@@ -517,7 +523,7 @@ function preview(fileVideo, hlsVideo) {
   const src = sourcePlayer(fileVideo, {
     onMode(m) {
       mode = m;
-      if (m === 'fallback') {
+      if (onSegments(m)) {
         if (!segments && Hls.isSupported()) segments = watch(hlsVideo);
         fileVideo.pause();
       } else if (segments) {
@@ -528,11 +534,11 @@ function preview(fileVideo, hlsVideo) {
       previewMode.value = m;
     },
     onState(s) {
-      if (mode === 'fallback') return;
+      if (onSegments(mode)) return;
       monitorState.value = s === 'fallback' ? 'none' : s;
     },
   });
-  const active = () => (mode === 'fallback' && segments ? segments : src);
+  const active = () => (onSegments(mode) && segments ? segments : src);
   return {
     position: () => active().position(),
     freeze: () => active().freeze(),
@@ -562,6 +568,12 @@ function Overlay({ inWindow, known, supported, state, mode }) {
   if (!inWindow) return null;
   if (mode === 'file' && sourceState.value === 'preparing') {
     return html`<div class="monitor-note" role="status">${t('preview.preparing')}</div>`;
+  }
+  // The segments play meanwhile; a note says the film itself comes (or, with nothing to show
+  // yet, the note alone).
+  if (mode === 'interim') {
+    const cls = state === 'playing' || state === 'paused' ? 'monitor-fallback monitor-interim' : 'monitor-note';
+    return html`<div class=${cls} role="status" data-interim>${t('preview.preparing')}</div>`;
   }
   if (mode === 'fallback' && !supported) return html`<div class="monitor-note" role="alert">${t('monitor.unsupported')}</div>`;
   if (state === 'none' || mode === 'none') return html`<div class="monitor-note">${t('monitor.none')}</div>`;
@@ -628,7 +640,7 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
       <div class="screen-cap">
         <span class="monitor-caption">${inWindow && !pip ? caption(state, ahead) : t('monitor.title')}</span>
         ${inWindow && !pip
-          ? html`<${Meter} video=${() => (previewMode.peek() === 'fallback' ? hlsVideo.current : fileVideo.current)} />`
+          ? html`<${Meter} video=${() => (onSegments(previewMode.peek()) ? hlsVideo.current : fileVideo.current)} />`
           : null}
         ${inWindow && !pip
           ? html`<button type="button" class="icon-button monitor-mute" aria-label=${muteLabel} title=${muteLabel}
@@ -639,8 +651,8 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
       </div>
       <div class="monitor-box" role="region" aria-label=${t('monitor.label')} onWheel=${onWheel}
         onClick=${pip && onActivate ? onActivate : undefined}>
-        <video ref=${fileVideo} class=${`pv-file${mode === 'fallback' ? ' is-hidden' : ''}`} muted playsinline preload="auto"></video>
-        <video ref=${hlsVideo} class=${`pv-hls${mode === 'fallback' ? '' : ' is-hidden'}`} muted playsinline></video>
+        <video ref=${fileVideo} class=${`pv-file${onSegments(mode) ? ' is-hidden' : ''}`} muted playsinline preload="auto"></video>
+        <video ref=${hlsVideo} class=${`pv-hls${onSegments(mode) ? '' : ' is-hidden'}`} muted playsinline></video>
         <${Overlay} inWindow=${inWindow} known=${known} supported=${supported} state=${state} mode=${mode} />
         ${fallbackNote ? html`<div class="monitor-fallback" role="note" title=${t('preview.fallback_hint')}>${t('preview.fallback')}</div>` : null}
         ${inWindow && obsState.value === 'live'

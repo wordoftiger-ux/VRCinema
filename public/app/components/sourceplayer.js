@@ -5,9 +5,12 @@
 // beginning" and "play now" change the picture at once; the engine gets the same `atS`/`toS`
 // as before and the air follows a few seconds later (a delayed mirror).
 //
-// Until the file is there the Preview says "Preparing…"; a film with no file (live, too long,
-// a viewer's film the air did not download, a failed download) or one this window cannot
-// decode falls back to the engine's segments (monitor.js), reported through `onMode`.
+// Until the file is there the Preview says "Preparing…" and meanwhile shows the engine's
+// segments (`interim`): the air is cut from the same segments, so the Preview is never behind
+// On air while yt-dlp downloads the film (the air reads it from its address at once). A film
+// with no file (live, too long, a viewer's film the air did not download, a failed download)
+// or one this window cannot decode falls back to the engine's segments (monitor.js) for good.
+// Both are reported through `onMode`.
 //
 // The Preview follows the engine where the owner did not act here: another film (a skip, the
 // end of a film, the queue), a pause for another reason (no viewers, the tunnel) or from
@@ -56,7 +59,8 @@ export function steadyBehind(shown, raw) {
 }
 
 /**
- * Plays the Preview's film in `video`. `onMode(mode)`: `file`, `fallback` or `none`.
+ * Plays the Preview's film in `video`. `onMode(mode)`: `file`, `interim` (the segments until
+ * the file is ready), `fallback` or `none`.
  * Returns the Preview interface of store.js plus `playNow(itemId)`, `playNowAnswered(ok)`,
  * `sync()` and `stop()`.
  */
@@ -182,6 +186,8 @@ export function sourcePlayer(video, { onMode, onState }) {
     if (s?.state === 'ready' && s.url) load(s.url, itemId, start ?? engineStart(itemId));
     else if (s?.state === 'preparing') {
       sourceUrl.value = null;
+      // The segments meanwhile: never less than On air (which may already show the film).
+      setMode('interim');
       pollTimer = setTimeout(() => ask(itemId, start), PREPARE_POLL_MS);
     } else fallback(itemId, s?.reason ?? 'unavailable');
   }
@@ -215,7 +221,7 @@ export function sourcePlayer(video, { onMode, onState }) {
       ask(c.itemId);
       return;
     }
-    if (mode === 'fallback' || !ready()) return;
+    if (mode === 'fallback' || mode === 'interim' || !ready()) return;
     const pos = video.currentTime;
     const target = Number(c.positionS) || 0;
     if (c.paused && !frozen) {

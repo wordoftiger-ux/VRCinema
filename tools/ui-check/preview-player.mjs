@@ -255,9 +255,20 @@ try {
   await page.evaluate(() => import('/static/app/store.js').then((m) => m.playNow(9)));
   await waitFor(async () => /Preparing the video/.test(await page.$eval('.screen-monitor .monitor-box', (e) => e.textContent)), '"Preparing…" while the film downloads');
   check(true, '"Preparing…" while the film downloads');
+  // Meanwhile the Preview shows the engine's segments (never behind On air, which may already
+  // show the film): the segment player, not the file player.
+  await waitFor(async () => (await modeOf(page)) === 'interim', 'the segments meanwhile');
+  const shown = await page.evaluate(() => ({
+    hls: !document.querySelector('.screen-monitor video.pv-hls').classList.contains('is-hidden'),
+    file: !document.querySelector('.screen-monitor video.pv-file').classList.contains('is-hidden'),
+    note: Boolean(document.querySelector('.screen-monitor [data-interim]')),
+  }));
+  check(shown.hls && !shown.file && shown.note, 'the segments play meanwhile, with the note', shown);
   await scenario({ previewSource: { 9: 'ready' } });
   await waitFor(async () => (await video(page)).src === '/api/desktop/preview/9/media' && (await video(page)).ready >= 1, 'the film plays once ready', 6000);
   check(true, 'the film plays once ready');
+  await waitFor(async () => (await modeOf(page)) === 'file', 'the file player takes over');
+  check(true, 'then the file player takes over from the segments');
   await scenario({ previewSource: { 10: 'unavailable' } });
   await page.evaluate(() => import('/static/app/store.js').then((m) => m.playNow(10)));
   await waitFor(async () => (await modeOf(page)) === 'fallback', 'no file: the segment Preview instead');
