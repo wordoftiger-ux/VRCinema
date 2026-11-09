@@ -115,7 +115,7 @@ try {
   await page.fill('input[name=nick]', 'Ola');
   mark = (await requests()).length;
   await page.click('.v-submit');
-  await waitFor(async () => (await page.locator('.v-submit').innerText()) === 'Checking 5 links…', 'the button counts the links being checked');
+  await waitFor(async () => (await page.locator('form:not(.v-pin-form) .v-submit').innerText()) === 'Checking 5 links…', 'the button counts the links being checked');
   await page.waitForSelector('.v-list-result');
   const sent = (await requests()).slice(mark).find((r) => r.path === '/api/channels/main/request-list');
   check(JSON.stringify(sent?.body?.urls) === JSON.stringify(['https://youtube.com/playlist?list=PL1', 'https://youtu.be/a', 'http://192.168.0.5/x', 'https://youtu.be/a', 'not a link']), 'blank lines are dropped, the rest sent as urls', sent?.body);

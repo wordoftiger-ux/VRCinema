@@ -181,11 +181,11 @@ try {
   await sendRequest(page, 'https://www.youtube.com/watch?v=taken');
   await page.waitForSelector('.v-error[data-code=nick_taken]');
   check((await text(page, '.v-error')).includes('already taken'), 'nick_taken is shown in English', await text(page, '.v-error'));
-  const suggestion = await page.locator('.v-error .btn').innerText();
+  const suggestion = await page.locator('.v-error .btn:not([data-action=its-mine])').innerText();
   check(/^Use “Tomek\d\d”$/.test(suggestion), 'a different nick is suggested', suggestion);
   check((await page.locator('input[name=url]').getAttribute('aria-invalid')) === 'true', 'the field is marked invalid');
   await shot(page, 'viewer-nick-taken');
-  await page.locator('.v-error .btn').click();
+  await page.locator('.v-error .btn:not([data-action=its-mine])').click();
   check(/^Tomek\d\d$/.test(await page.locator('input[name=nick]').inputValue()), 'the suggestion fills the nick');
   // Final wave M4: the button goes away with the error; the focus goes to the nick field.
   await page.waitForFunction(() => document.activeElement?.name === 'nick', null, { timeout: 2000 }).catch(() => {});
