@@ -68,7 +68,9 @@ export function MenuLayer() {
   const ref = useRef(null);
 
   useEffect(() => {
-    if (!open) return undefined;
+    // Closed before this effect ran (Esc right after the render): Preact still runs the effect
+    // ahead of the next render, and focusing the old menu then would lose the restored focus.
+    if (!open || menu.value !== open) return undefined;
     const root = ref.current;
     // Keep the menu inside the window.
     const r = root.getBoundingClientRect();
