@@ -121,6 +121,45 @@ try {
   check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'no horizontal overflow');
   await page.screenshot({ path: join(shots, 'mini-settings-en.png') });
 
+  // Scrolling through a long section: the mini player covers no control while some corner is free
+  // (bottom right at the top of the list, top right where the bottom one would cover something).
+  await page.evaluate(() => { location.hash = '#/settings/channel'; });
+  await page.waitForSelector('#view[data-view="settings"]');
+  await sleep(400);
+  const sweep = await page.evaluate(async () => {
+    const view = document.querySelector('#view');
+    const scroller = [...document.querySelectorAll('#view, #view *')].reduce((best, el) => (el.scrollHeight - el.clientHeight > (best?.scrollHeight ?? 0) - (best?.clientHeight ?? 0) ? el : best), view);
+    const sel = 'button, input, select, textarea, a[href], summary, [role="switch"], [role="button"], [role="tab"], label';
+    const hits = (rect, mini) => [...view.querySelectorAll(sel)].filter((el) => {
+      if (mini.contains(el)) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.left < rect.right && r.right > rect.left && r.top < rect.bottom && r.bottom > rect.top;
+    }).length;
+    const out = { corners: new Set(), bad: [], steps: 0 };
+    const max = scroller.scrollHeight - scroller.clientHeight;
+    for (let y = 0; y <= max + 1; y += Math.max(60, Math.floor(max / 25))) {
+      scroller.scrollTop = y;
+      await new Promise((r) => setTimeout(r, 120)); 
+      const mini = document.querySelector('.mini-player');
+      const r = mini.getBoundingClientRect();
+      out.corners.add(mini.dataset.corner ?? 'bottom');
+      out.steps += 1;
+      if (hits(r, mini) > 0) {
+        const was = mini.dataset.corner;
+        mini.dataset.corner = was === 'top' ? 'bottom' : 'top';
+        const o = mini.getBoundingClientRect();
+        if (was === undefined) delete mini.dataset.corner; else mini.dataset.corner = was;
+        if (hits({ left: o.left, right: o.right, top: o.top, bottom: o.bottom }, mini) === 0) out.bad.push({ y, corner: was ?? 'bottom', rb: [r.left, r.top, r.right, r.bottom].map(Math.round), ro: [o.left, o.top, o.right, o.bottom].map(Math.round), vt: Math.round(view.getBoundingClientRect().top), cov: [...view.querySelectorAll(sel)].filter((el) => { const q = el.getBoundingClientRect(); return !mini.contains(el) && q.width > 0 && q.height > 0 && q.left < r.right && q.right > r.left && q.top < r.bottom && q.bottom > r.top; }).slice(0, 2).map((el) => el.tagName + '.' + el.className + ' ' + Math.round(el.getBoundingClientRect().left) + ',' + Math.round(el.getBoundingClientRect().top) + ',' + Math.round(el.getBoundingClientRect().right) + ',' + Math.round(el.getBoundingClientRect().bottom)) });
+      }
+    }
+    out.corners = [...out.corners];
+    return out;
+  });
+  check(sweep.steps > 3 && sweep.bad.length === 0, 'the mini player never covers a control while the other corner is free', sweep);
+  console.log('  corners used while scrolling:', sweep.corners.join(', '));
+  await page.evaluate(() => { location.hash = '#/settings/general'; });
+  await sleep(300);
+
   // ---------- Mute, then back to Channel with a click ----------
   await page.click('.mini-mute');
   await waitFor(async () => {

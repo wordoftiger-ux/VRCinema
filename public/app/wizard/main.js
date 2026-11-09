@@ -11,6 +11,7 @@ import { html } from '../html.js';
 import { browserLang, lang, loadLang, t } from '../i18n.js';
 import { api } from '../api.js';
 import { access, firstInfo, setLanguage, toast } from '../store.js';
+import { blockNativeMenu } from '../native-menu.js';
 import { Icon } from '../icons.js';
 import { Titlebar, inWindow } from '../components/titlebar.js';
 import { focusOnMount } from '../focus.js';
@@ -165,6 +166,7 @@ async function start() {
   await loadLang(info.language ?? browserLang());
   const withTools = !(again && info.toolsOk);
   steps.value = ['language', ...(withTools ? ['tools'] : []), 'picture', 'viewers', 'ticker', 'look', 'internet', 'extras', 'summary'];
+  blockNativeMenu();
   render(html`<${Wizard} />`, document.getElementById('wizard'));
 }
 

@@ -22,6 +22,7 @@ import {
   togglePause,
 } from './store.js';
 import { Titlebar, inWindow } from './components/titlebar.js';
+import { blockNativeMenu } from './native-menu.js';
 import { Rail, narrow, route } from './components/rail.js';
 import { AirVolume, PlayerBar } from './components/playerbar.js';
 import { Preview } from './components/preview.js';
@@ -306,6 +307,7 @@ async function start() {
   const program = info?.language ?? environment.value?.language;
   await loadLang(access.value === 'window' ? program : (chosenLang() ?? program ?? browserLang()));
   render(html`<${Guard} whole><${App} /><//>`, document.getElementById('root'));
+  if (access.value === 'window') blockNativeMenu();
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('paste', onPaste);
   startPolling();

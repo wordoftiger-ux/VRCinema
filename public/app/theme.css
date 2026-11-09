@@ -3517,6 +3517,12 @@ kbd {
   overflow: hidden;
 }
 
+/* Where a control of the open view would be covered, the mini player moves up (mini.js). */
+.mini-player[data-corner="top"] {
+  top: var(--mini-top, calc(var(--titlebar-h) + 16px));
+  bottom: auto;
+}
+
 /* Room under the open view's last controls: they scroll clear of the mini player. */
 .app.has-mini > .body > .view {
   padding-bottom: calc(320px * 9 / 16 + 32px);
