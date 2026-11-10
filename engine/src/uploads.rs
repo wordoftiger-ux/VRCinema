@@ -1,8 +1,8 @@
 //! Small video and audio files viewers send from the request page (off by default): the
 //! settings, the check of a received file, the folder `<data>/uploads` with its limits and
 //! clean-up, and the resolver of the `upload:<name>` sources. The HTTP side is
-//! `http/routes_uploads.rs`. Spec: `docs/superpowers/specs/2026-11-08-uploads-design.md`; a
-//! sound-only file airs with a picture made from it (`2026-11-08-audio-design.md`).
+//! `http/routes_uploads.rs`. A
+//! sound-only file airs with a picture made from it.
 //!
 //! Every name in the folder is made here (`<32 hex>.<ext>`, `<32 hex>.part`); nothing a client
 //! sends becomes a path.

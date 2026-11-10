@@ -1,6 +1,6 @@
 //! The look of the slates: the last frame of the film behind the waiting slates (dimmed or
 //! blurred) and the owner's own background (a picture, a GIF or a short video) behind the idle
-//! slate and the countdown. Spec: `docs/superpowers/specs/2026-11-07-slates-design.md`.
+//! slate and the countdown.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

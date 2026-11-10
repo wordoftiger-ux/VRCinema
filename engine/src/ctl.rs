@@ -1,6 +1,5 @@
 //! `vrcinema ctl <command>`: steers a running engine (the server without a window or the desktop
-//! app's) through its admin API on this computer. Spec:
-//! `docs/superpowers/specs/2026-11-08-ctl-osc-design.md`.
+//! app's) through its admin API on this computer.
 //!
 //! Every engine writes `<data dir>/ctl.json` (its local address and a random token, new per run,
 //! removed when it stops). The token counts only from this computer and never through the

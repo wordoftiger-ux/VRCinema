@@ -1,5 +1,4 @@
-//! The film on air in the owner's VRChat chatbox over OSC (Settings → Channel → VRChat; spec
-//! `docs/superpowers/specs/2026-11-08-ctl-osc-design.md`).
+//! The film on air in the owner's VRChat chatbox over OSC (Settings → Channel → VRChat).
 //!
 //! An observer follows the engine's snapshots (the film viewers see) and sends one UDP datagram
 //! `/chatbox/input ,sTF <text>` when the film changes and, optionally, every N seconds — never

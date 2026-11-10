@@ -1,6 +1,5 @@
 //! The owner's slate background (Settings → Channel): what is set, the upload (only from the
 //! window or the home network), its removal and a preview of the idle slate over it.
-//! Spec: `docs/superpowers/specs/2026-11-07-slates-design.md`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -11,3 +11,6 @@ desktop/gen/
 # local build and test folders
 /target-*/
 /data-test/
+
+# local design notes (not published)
+/docs/superpowers/

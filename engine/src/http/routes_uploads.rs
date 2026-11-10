@@ -1,7 +1,7 @@
 //! A viewer sends a small video or audio file (`POST /api/channels/main/upload`, the file as
 //! the raw body; sound only airs with a picture made from it). Off unless the owner allows it (Settings → Channel). The same nick, block, limit and
 //! approval rules as a link; the bytes are counted as they arrive and the file is checked
-//! before it is queued. Spec: `docs/superpowers/specs/2026-11-08-uploads-design.md`.
+//! before it is queued.
 
 use std::sync::PoisonError;
 use std::time::Duration;

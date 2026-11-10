@@ -1,6 +1,6 @@
 //! Audio-only sources (mp3, flac, a SoundCloud link, ...) air as video with a picture made from
 //! the sound: the cover art, a waveform, a spectrum or a plain background with the title and the
-//! artist. Spec: `docs/superpowers/specs/2026-11-08-audio-design.md`.
+//! artist.
 //!
 //! Per clip the still part (background, cover, texts) is drawn once into the clip folder
 //! ([`STILL_FILE`]); the clip's graph ([`clip_graph`]) loops it at [`FPS`] and overlays the

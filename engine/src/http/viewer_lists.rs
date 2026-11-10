@@ -3,8 +3,7 @@
 //! single request (`routes_public::post_request`): the link mode and the home-network
 //! protection before any lookup or yt-dlp call, the request limiter (one hit per pasted link),
 //! the name lookup, the video rules (length, live). A list adds at most `viewerListMax` videos
-//! and never more than the viewer's free places (`maxActivePerRequester`). Spec:
-//! `docs/superpowers/specs/2026-11-06-viewer-lists-design.md`.
+//! and never more than the viewer's free places (`maxActivePerRequester`).
 
 use std::collections::HashSet;
 use std::sync::PoisonError;

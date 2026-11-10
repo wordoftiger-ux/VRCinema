@@ -455,7 +455,6 @@ The desktop app (`VRCinema`) has its Linux parts in place (data in `$XDG_DATA_HO
 yt-dlp (or the disk library) resolves a video. ffmpeg cuts it into 1-second MPEG-TS segments, repackaging H.264 without re-encoding whenever possible: only when the source already matches what a conversion would make (H.264 in a common profile and level, 8-bit 4:2:0, at most 1080p30 at a constant rate, progressive, SDR, BT.709 or untagged) and has a key frame at least every 1.25 s (ffprobe reads the packets of its first 6 s); a source with key frames further apart (most YouTube and many local files) is converted, with a key frame forced every second.
 TikTok videos (and any video whose address the site refuses to ffmpeg with HTTP 403/401) are first downloaded whole by yt-dlp into `data\temp` (at most 200 MB, within 100 s; never a live stream) and played from there; the file is deleted about 3 minutes after the video's last clip ends (a resume or a seek reuses it), and the folder is emptied at every start. A vertical (9:16) video is always converted and letterboxed into a 16:9 picture with black bars.
 A broadcaster publishes the segments in real time and rewrites their timestamps, so videos and idle screens form one continuous timeline.
-Design notes: [docs/superpowers/specs](docs/superpowers/specs).
 
 ```powershell
 npm test          # some tests use the real ffmpeg from ./bin
