@@ -7,13 +7,16 @@
 <p align="center"><b>Your own cinema in VRChat.</b><br>
 Paste a link or drop a video file, and the whole lobby watches it together, at the same moment.</p>
 
-<p align="center"><a href="README.pl.md">Po polsku</a> · <a href="docs/manual.md">Full manual</a></p>
+<p align="center"><a href="https://wordoftiger-ux.github.io/VRCinema/">Website</a> · <a href="README.pl.md">Po polsku</a> · <a href="docs/manual.md">Full manual</a></p>
+
+<p align="center"><img src="docs/images/window.jpg" alt="The VRCinema window with a film on air and a queue of films" width="800"><br>
+<sub>Film in the picture: <a href="https://durian.blender.org/">Sintel</a>, © Blender Foundation, CC BY 3.0.</sub></p>
 
 ---
 
 ## What is it?
 
-VRCinema is a Windows program that turns the videos **you** pick into one never-ending live channel. You give VRChat a single link, once. After that you only add films to a queue, and they play one after another, for everybody, in sync.
+VRCinema is a free Windows program for movie nights and watch parties in VRChat. It turns the videos **you** pick, from YouTube or your own disk, into one never-ending live channel. You give VRChat a single link, once. After that you only add films to a queue, and they play one after another, for everybody, in sync.
 
 - **You** add films from YouTube and many other sites, or from your own disk.
 - **Your friends** can suggest films too, from a simple web page (with a nick, and optionally with your approval).
@@ -72,5 +75,5 @@ VRCinema is meant for watching **privately with friends**. Whoever runs it is re
 ## More
 
 - The [full manual](docs/manual.md) has every setting, troubleshooting and the technical details.
-- Licence: [MIT](LICENSE).
+- Licence: [MIT](LICENSE). [Privacy](https://wordoftiger-ux.github.io/VRCinema/privacy.html).
 - [Third-party software and licences](docs/third-party-licenses.md) (FFmpeg, yt-dlp, Deno, cloudflared, the interface and Rust libraries).
