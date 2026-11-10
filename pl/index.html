@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRCinema: oglądaj filmy i YouTube razem w VRChat</title>
+<meta name="description" content="Darmowy program na Windows do wspólnych seansów w VRChat. Dodaj linki z YouTube i pliki wideo, a cała instancja ogląda je równo z jednego linku.">
+<link rel="canonical" href="https://wordoftiger-ux.github.io/VRCinema/pl/">
+<link rel="alternate" hreflang="en" href="https://wordoftiger-ux.github.io/VRCinema/">
+<link rel="alternate" hreflang="pl" href="https://wordoftiger-ux.github.io/VRCinema/pl/">
+<link rel="alternate" hreflang="x-default" href="https://wordoftiger-ux.github.io/VRCinema/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="VRCinema">
+<meta property="og:title" content="VRCinema: oglądaj filmy i YouTube razem w VRChat">
+<meta property="og:description" content="Darmowy program na Windows do wspólnych seansów w VRChat. Dodaj linki z YouTube i pliki wideo, a cała instancja ogląda je równo z jednego linku.">
+<meta property="og:url" content="https://wordoftiger-ux.github.io/VRCinema/pl/">
+<meta property="og:image" content="https://wordoftiger-ux.github.io/VRCinema/assets/og.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="../assets/icon.png">
+<link rel="stylesheet" href="../assets/style.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"VRCinema","operatingSystem":"Windows 10, Windows 11","applicationCategory":"MultimediaApplication","description":"Darmowy program na Windows do wspólnych seansów w VRChat. Dodaj linki z YouTube i pliki wideo, a cała instancja ogląda je równo z jednego linku.","url":"https://wordoftiger-ux.github.io/VRCinema/pl/","downloadUrl":"https://github.com/wordoftiger-ux/VRCinema/releases/latest/download/VRCinema.exe","image":"https://wordoftiger-ux.github.io/VRCinema/assets/window.jpg","license":"https://opensource.org/licenses/MIT","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Czy znajomi muszą coś instalować?","acceptedAnswer":{"@type":"Answer","text":"Nie. Muszą tylko włączyć „Allow Untrusted URLs” w VRChat, bo Twojego linku nie ma na liście dozwolonych adresów VRChat."}},{"@type":"Question","name":"W jakich światach to działa?","acceptedAnswer":{"@type":"Answer","text":"W światach z odtwarzaczem wideo, do którego można wkleić własny link, na przykład ProTV. W instancjach Public i Group Public lista dozwolonych stron świata może to zablokować, więc najpewniejsze są instancje Friends i Invite. Świat, którego menu przyjmuje tylko własną usługę, nie zadziała."}},{"@type":"Question","name":"Czy to naprawdę za darmo?","acceptedAnswer":{"@type":"Answer","text":"Tak. VRCinema ma otwarty kod na licencji MIT, bez reklam i bez subskrypcji."}},{"@type":"Question","name":"Windows pisze „System Windows ochronił ten komputer”. Czy to normalne?","acceptedAnswer":{"@type":"Answer","text":"Tak, plik nie jest jeszcze podpisany. Kliknij <strong>Więcej informacji</strong>, a potem <strong>Uruchom mimo to</strong>."}},{"@type":"Question","name":"Czego potrzebuje mój komputer?","acceptedAnswer":{"@type":"Answer","text":"To Twój komputer wysyła wideo, więc liczy się prędkość wysyłania: im więcej osób ogląda, tym więcej potrzeba. Program ostrzega, gdy łącze wygląda na za słabe. Większość filmów jest tylko przepakowywana, więc obciążenie komputera jest niewielkie."}},{"@type":"Question","name":"Czy działa na Linuksie?","acceptedAnswer":{"@type":"Answer","text":"Na Linuksie jest serwer bez okna z tym samym panelem. Zobacz <a href=\"https://github.com/wordoftiger-ux/VRCinema/blob/main/docs/manual.pl.md#linux-serwer-bez-okna\">instrukcję</a>."}},{"@type":"Question","name":"Czy mogę pokazać dowolny film?","acceptedAnswer":{"@type":"Answer","text":"VRCinema służy do oglądania prywatnie ze znajomymi. Kto uruchamia program, odpowiada za to, co jest nadawane. Rozpowszechnianie filmów, do których nie masz praw, może naruszać prawo autorskie i regulaminy stron, z których pochodzą."}}]}</script>
+</head>
+<body>
+<a class="lang" href="../" hreflang="en">English</a>
+<header class="stage">
+<div class="curtain l" aria-hidden="true"></div>
+<div class="curtain r" aria-hidden="true"></div>
+<div class="sign">VRCinema</div>
+<div class="screen"><img src="../assets/frame.jpg" width="1600" height="900" alt="Film na kanale, z paskiem na dole pokazującym tytuł, osobę, która go dodała, i to, co będzie dalej" fetchpriority="high"></div>
+<h1>Wieczór filmowy dla całej instancji w VRChat</h1>
+<p class="lede">Wklej link albo upuść plik wideo. Wszyscy w instancji oglądają to razem, w tej samej chwili.</p>
+<a class="go" href="https://github.com/wordoftiger-ux/VRCinema/releases/latest/download/VRCinema.exe">Pobierz na Windows</a>
+<p class="note">Darmowy i otwarty. Bez instalatora i bez konta. Windows 10/11, 64-bit. <a href="https://github.com/wordoftiger-ux/VRCinema">Kod źródłowy na GitHubie</a></p>
+</header>
+<main>
+<section>
+<h2>Jak zacząć</h2>
+<ol class="steps"><li><strong>Pobierz i uruchom</strong> <code>VRCinema.exe</code>. Wrzuć plik gdziekolwiek, niczego nie trzeba instalować.</li><li><strong>Przejdź krótką konfigurację.</strong> Program pobierze potrzebne narzędzia i wybierze najlepszy dla Twojego komputera koder wideo.</li><li><strong>Skopiuj link kanału</strong> i wklej go do odtwarzacza wideo w świecie VRChat.</li><li><strong>Dodawaj filmy.</strong> Wklejaj linki albo przeciągaj pliki na okno. Lecą jeden po drugim, dla wszystkich.</li></ol>
+</section>
+<section>
+<h2>Ty prowadzisz seans</h2>
+<div class="split">
+<figure><img src="../assets/window.jpg" width="1600" height="718" loading="lazy" alt="Okno VRCinema: podgląd, antena, kolejka filmów i przyciski odtwarzacza"></figure>
+<ul><li>Jeden link na cały wieczór. Odtwarzacza w VRChat nie trzeba przestawiać.</li><li>Filmy z YouTube i wielu innych stron albo z własnego dysku.</li><li>Pauza, przewijanie, pomijanie i podgląd, który reaguje od razu.</li><li>Kolejka z „zagraj jako następny”, przycinaniem, startem o wybranej godzinie i odliczaniem.</li><li>Pasek w obrazie z tytułem, osobą, która dodała film, i tym, co dalej.</li><li>Wbudowany link publiczny, bez zakładania konta.</li><li>Na antenę może wejść też OBS, okno, ekran albo kamera.</li></ul>
+</div>
+</section>
+<section>
+<h2>Znajomi dodają filmy z telefonu</h2>
+<div class="split phone">
+<div><p>Udostępnij prostą stronę albo kod QR. Znajomi wklejają link i wpisują nick, bez aplikacji i bez konta.</p><p>Ty decydujesz, jak otwarte to ma być: limity, zatwierdzanie, lista blokad i dozwolone strony.</p><p>VRCinema instaluje tylko gospodarz. Reszta po prostu ogląda w VRChat.</p></div>
+<figure><img src="../assets/viewer.jpg" width="780" height="1560" loading="lazy" alt="Strona zgłoszeń na telefonie: co teraz gra, formularz dodawania filmu i kolejka"></figure>
+</div>
+</section>
+<section>
+<h2>Pytania</h2>
+<details><summary>Czy znajomi muszą coś instalować?</summary><p>Nie. Muszą tylko włączyć „Allow Untrusted URLs” w VRChat, bo Twojego linku nie ma na liście dozwolonych adresów VRChat.</p></details>
+<details><summary>W jakich światach to działa?</summary><p>W światach z odtwarzaczem wideo, do którego można wkleić własny link, na przykład ProTV. W instancjach Public i Group Public lista dozwolonych stron świata może to zablokować, więc najpewniejsze są instancje Friends i Invite. Świat, którego menu przyjmuje tylko własną usługę, nie zadziała.</p></details>
+<details><summary>Czy to naprawdę za darmo?</summary><p>Tak. VRCinema ma otwarty kod na licencji MIT, bez reklam i bez subskrypcji.</p></details>
+<details><summary>Windows pisze „System Windows ochronił ten komputer”. Czy to normalne?</summary><p>Tak, plik nie jest jeszcze podpisany. Kliknij <strong>Więcej informacji</strong>, a potem <strong>Uruchom mimo to</strong>.</p></details>
+<details><summary>Czego potrzebuje mój komputer?</summary><p>To Twój komputer wysyła wideo, więc liczy się prędkość wysyłania: im więcej osób ogląda, tym więcej potrzeba. Program ostrzega, gdy łącze wygląda na za słabe. Większość filmów jest tylko przepakowywana, więc obciążenie komputera jest niewielkie.</p></details>
+<details><summary>Czy działa na Linuksie?</summary><p>Na Linuksie jest serwer bez okna z tym samym panelem. Zobacz <a href="https://github.com/wordoftiger-ux/VRCinema/blob/main/docs/manual.pl.md#linux-serwer-bez-okna">instrukcję</a>.</p></details>
+<details><summary>Czy mogę pokazać dowolny film?</summary><p>VRCinema służy do oglądania prywatnie ze znajomymi. Kto uruchamia program, odpowiada za to, co jest nadawane. Rozpowszechnianie filmów, do których nie masz praw, może naruszać prawo autorskie i regulaminy stron, z których pochodzą.</p></details>
+</section>
+</main>
+<footer><div>
+<p>Film na obrazkach: <a href="https://durian.blender.org/">Sintel</a>, © Blender Foundation, CC BY 3.0.</p>
+<p>Projekt niezależny, niezwiązany z VRChat Inc.</p>
+<p><a href="https://github.com/wordoftiger-ux/VRCinema/blob/main/docs/manual.pl.md">Instrukcja</a> &nbsp; <a href="privacy.html">Prywatność</a> &nbsp; <a href="https://github.com/wordoftiger-ux/VRCinema">GitHub</a> &nbsp; <a href="https://github.com/wordoftiger-ux/VRCinema/blob/main/LICENSE">Licencja MIT</a></p>
+</div></footer>
+</body>
+</html>

@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://wordoftiger-ux.github.io/VRCinema/sitemap.xml
