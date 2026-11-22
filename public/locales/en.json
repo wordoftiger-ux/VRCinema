@@ -431,6 +431,7 @@
   "log.countdown_failed": "The countdown could not be shown ({error}); the idle slate airs until the start time.",
   "log.countdown_unavailable": "no countdown in this setup",
   "log.encoder_test": "Graphics card test: {encoder}",
+  "log.hdr_path": "HDR films are tonemapped by: {path}",
   "log.light_profile": "No hardware H.264 encoder on this computer (ARM): the picture is converted on the processor with a faster setting, at most 720p30 and 3 Mbit/s by default. Keep the maximum output resolution at 720p or lower (Settings → Advanced).",
   "log.fake_resolver": "Warning: the fake resolver is active ({path}) — this is a test mode.",
   "log.files_add_failed": "Could not add the files: {error}",

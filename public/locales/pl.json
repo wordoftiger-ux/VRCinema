@@ -437,6 +437,7 @@
   "log.countdown_failed": "Nie udało się pokazać odliczania ({error}); do godziny startu leci plansza oczekiwania.",
   "log.countdown_unavailable": "odliczanie niedostępne w tej konfiguracji",
   "log.encoder_test": "Test karty graficznej: {encoder}",
+  "log.hdr_path": "Filmy HDR są konwertowane do SDR przez: {path}",
   "log.light_profile": "Ten komputer (ARM) nie ma sprzętowego kodera H.264: obraz jest konwertowany na procesorze w szybszym ustawieniu, domyślnie najwyżej 720p30 i 3 Mb/s. Zostaw maksymalną rozdzielczość wyjścia na 720p lub niżej (Ustawienia → Zaawansowane).",
   "log.fake_resolver": "Uwaga: aktywny fałszywy resolver ({path}) — to tryb testowy.",
   "log.files_add_failed": "Nie udało się dodać plików: {error}",

@@ -422,6 +422,7 @@
   "log.countdown_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {error} is an error message of the program (already translated).",
   "log.countdown_unavailable": "Part of a log entry (the {error} of log.countdown_failed): the program was started without the countdown (only in tests and special setups).",
   "log.encoder_test": "Log entry (Settings, Log tab; the log file on disk keeps the English text). {encoder} is a technical name (libx264, h264_nvenc, ...), keep it.",
+  "log.hdr_path": "Log entry (Settings, Log tab; the log file on disk keeps the English text), written once after the graphics card test. {path} is a technical name (vulkan, cuda+opencl, cpu), keep it. Tonemapping = converting an HDR picture to normal (SDR) colours.",
   "log.light_profile": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Also printed by the headless server at start on a Raspberry Pi. H.264, ARM, 720p30, 720p are technical names. Name the settings section as the rail does.",
   "log.fake_resolver": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Developer test mode; {path} is a file.",
   "log.files_add_failed": "Log entry (Settings, Log tab; the log file on disk keeps the English text). Files dropped on the window; {error} is the reason.",

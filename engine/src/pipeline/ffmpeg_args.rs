@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{PoisonError, RwLock};
 
 use crate::config::VideoEncoder;
@@ -55,6 +56,96 @@ pub fn vaapi_device() -> String {
         crate::config::DEFAULT_VAAPI_DEVICE.to_string()
     } else {
         device
+    }
+}
+
+/// How an HDR picture is tonemapped to SDR BT.709 (tested once per process, see
+/// `tools::encoder::detect_hdr_path`): on the graphics card through Vulkan (libplacebo), through
+/// CUDA decoding and OpenCL tonemapping, or on the processor ([`TONEMAP`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HdrPath {
+    Vulkan,
+    CudaOpencl,
+    #[default]
+    Cpu,
+}
+
+impl HdrPath {
+    pub const GPU: [HdrPath; 2] = [HdrPath::Vulkan, HdrPath::CudaOpencl];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HdrPath::Vulkan => "vulkan",
+            HdrPath::CudaOpencl => "cuda+opencl",
+            HdrPath::Cpu => "cpu",
+        }
+    }
+
+    /// The options put right before the source's `-i` (the decoder on the graphics card).
+    pub fn input_args(self) -> &'static [&'static str] {
+        match self {
+            HdrPath::Vulkan => &[
+                "-init_hw_device",
+                "vulkan=vk",
+                "-hwaccel",
+                "vulkan",
+                "-hwaccel_output_format",
+                "vulkan",
+            ],
+            HdrPath::CudaOpencl => &[
+                "-init_hw_device",
+                "opencl=ocl",
+                "-filter_hw_device",
+                "ocl",
+                "-hwaccel",
+                "cuda",
+                "-hwaccel_output_format",
+                "cuda",
+            ],
+            HdrPath::Cpu => &[],
+        }
+    }
+
+    /// The filters that tonemap the decoded HDR picture to BT.709 at TV range and scale it to
+    /// at most `max_height` lines (aspect kept), ending in software `yuv420p` frames; `None` on
+    /// the processor.
+    pub fn filter(self, max_height: u32) -> Option<String> {
+        match self {
+            HdrPath::Vulkan => Some(format!(
+                "libplacebo=w=-2:h='min({max_height},ih)':colorspace=bt709:\
+                 color_primaries=bt709:color_trc=bt709:range=tv:tonemapping=hable:\
+                 format=yuv420p,hwdownload,format=yuv420p"
+            )),
+            HdrPath::CudaOpencl => Some(format!(
+                "scale_cuda=w=-2:h='min({max_height},ih)':format=p010le,hwdownload,\
+                 format=p010le,hwupload,tonemap_opencl=tonemap=hable:desat=0:t=bt709:\
+                 m=bt709:p=bt709:r=tv:format=nv12,hwdownload,format=nv12,format=yuv420p"
+            )),
+            HdrPath::Cpu => None,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            HdrPath::Cpu => 0,
+            HdrPath::Vulkan => 1,
+            HdrPath::CudaOpencl => 2,
+        }
+    }
+}
+
+/// The HDR path of every converting ffmpeg (set once the test ran; the processor until then).
+static HDR_PATH: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_hdr_path(path: HdrPath) {
+    HDR_PATH.store(path.code(), Ordering::Relaxed);
+}
+
+pub fn hdr_path() -> HdrPath {
+    match HDR_PATH.load(Ordering::Relaxed) {
+        1 => HdrPath::Vulkan,
+        2 => HdrPath::CudaOpencl,
+        _ => HdrPath::Cpu,
     }
 }
 
@@ -378,6 +469,9 @@ pub struct ClipExtras {
     /// The first filters of a converted picture, before every other one (a capture's fit into
     /// its 16:9 box); ignored when the video is copied.
     pub pre_filter: Option<String>,
+    /// Tonemap an HDR picture on the processor even when the graphics card can (a retry of
+    /// the film: a source its decoder cannot handle still plays).
+    pub cpu_hdr: bool,
 }
 
 /// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
@@ -451,6 +545,29 @@ pub fn build_clip_args(o: &ClipArgsOptions) -> Vec<OsString> {
 
 /// [`build_clip_args`] with the advanced options of `x` (the default gives the same arguments).
 pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString> {
+    build_clip_args_hdr(o, x, hdr_path())
+}
+
+/// The HDR path a clip uses: the detected one for a plain converted HDR film (no capture box,
+/// not interlaced, not a picture made from sound, not a retry), else the processor. The CUDA
+/// path is never combined with the VA-API encoder (both want the filter device).
+fn clip_hdr_path(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -> HdrPath {
+    let plain = o.mode == VideoMode::Transcode
+        && o.info.hdr
+        && !o.info.interlaced
+        && !x.cpu_hdr
+        && x.pre_filter.is_none()
+        && x.audio_visual.is_none();
+    match detected {
+        HdrPath::CudaOpencl if o.encoder == VideoEncoder::H264Vaapi => HdrPath::Cpu,
+        path if plain => path,
+        _ => HdrPath::Cpu,
+    }
+}
+
+/// [`build_clip_args_ext`] with the given detected HDR path.
+fn build_clip_args_hdr(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -> Vec<OsString> {
+    let hdr = clip_hdr_path(o, x, detected);
     let mut args = Vec::new();
     push_all(
         &mut args,
@@ -496,6 +613,9 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
         if let Some(extra) = x.input_args.get(index) {
             args.extend(extra.iter().map(OsString::from));
         }
+        if index == 0 {
+            push_all(&mut args, hdr.input_args());
+        }
         args.push("-i".into());
         args.push((&input.url).into());
     }
@@ -535,13 +655,18 @@ pub fn build_clip_args_ext(o: &ClipArgsOptions, x: &ClipExtras) -> Vec<OsString>
             if o.info.interlaced {
                 filters.push(DEINTERLACE.to_string());
             }
-            if o.info.hdr {
-                filters.push(TONEMAP.to_string());
-            }
             let max_height = x.max_height.unwrap_or(MAX_HEIGHT);
-            filters.push(format!(
-                "scale=-2:'min({max_height},ih)':out_color_matrix=bt709:out_range=tv"
-            ));
+            if let Some(gpu) = hdr.filter(max_height) {
+                // Tonemapped and scaled on the graphics card, back as BT.709 TV-range frames.
+                filters.push(gpu);
+            } else {
+                if o.info.hdr {
+                    filters.push(TONEMAP.to_string());
+                }
+                filters.push(format!(
+                    "scale=-2:'min({max_height},ih)':out_color_matrix=bt709:out_range=tv"
+                ));
+            }
             // A constant frame rate: a variable one is made constant, a faster one capped.
             if o.info.vfr || o.info.fps > f64::from(MAX_FPS) + 0.5 {
                 filters.push(format!("fps={}", output_fps(o.info.fps)));
@@ -1409,5 +1534,214 @@ mod tests {
             build_clip_args_ext(&o, &ClipExtras::default()),
             build_clip_args(&o)
         );
+    }
+}
+
+#[cfg(test)]
+mod hdr_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn hdr_opts() -> ClipArgsOptions {
+        ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: "film.mkv".into(),
+                headers: Vec::new(),
+            }],
+            input_format: None,
+            mode: VideoMode::Transcode,
+            info: VideoInfo {
+                codec: "hevc".into(),
+                height: 2160,
+                pix_fmt: "yuv420p10le".into(),
+                fps: 23.976,
+                has_audio: true,
+                hdr: true,
+                ..VideoInfo::default()
+            },
+            encoder: VideoEncoder::H264Nvenc,
+            segment_seconds: 4,
+            out_dir: PathBuf::from("/tmp/clip"),
+            start_at_s: 30.0,
+            readrate: Some(ReadRate::new(1.5)),
+            overlay: None,
+            duration_limit_s: None,
+        }
+    }
+
+    fn build(o: &ClipArgsOptions, x: &ClipExtras, path: HdrPath) -> Vec<String> {
+        build_clip_args_hdr(o, x, path)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn vf(args: &[String]) -> String {
+        let at = args.iter().position(|a| a == "-vf").expect("-vf");
+        args[at + 1].clone()
+    }
+
+    fn uses_gpu(args: &[String]) -> bool {
+        args.iter().any(|a| a == "-hwaccel")
+    }
+
+    #[test]
+    fn vulkan_decodes_before_the_input_and_tonemaps_with_the_height_cap() {
+        let x = ClipExtras {
+            max_height: Some(720),
+            ..ClipExtras::default()
+        };
+        let args = build(&hdr_opts(), &x, HdrPath::Vulkan);
+        let i = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(
+            args[i - 6..i],
+            [
+                "-init_hw_device",
+                "vulkan=vk",
+                "-hwaccel",
+                "vulkan",
+                "-hwaccel_output_format",
+                "vulkan"
+            ]
+        );
+        assert!(args.iter().position(|a| a == "-ss").unwrap() < i - 6);
+        let vf = vf(&args);
+        assert!(
+            vf.starts_with("libplacebo=w=-2:h='min(720,ih)':colorspace=bt709:"),
+            "{vf}"
+        );
+        assert!(vf.contains("tonemapping=hable"));
+        assert!(!vf.contains("zscale") && !vf.contains("scale=-2"), "{vf}");
+        // Back as software frames for every later filter; tagged BT.709 as before.
+        assert_eq!(
+            vf,
+            format!("{},format=yuv420p", HdrPath::Vulkan.filter(720).unwrap())
+        );
+        assert!(args.windows(2).any(|w| w == ["-color_trc", "bt709"]));
+    }
+
+    #[test]
+    fn cuda_opencl_chain() {
+        let args = build(&hdr_opts(), &ClipExtras::default(), HdrPath::CudaOpencl);
+        let i = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(args[i - 8..i - 6], ["-init_hw_device", "opencl=ocl"]);
+        assert_eq!(args[i - 2..i], ["-hwaccel_output_format", "cuda"]);
+        let vf = vf(&args);
+        assert!(
+            vf.starts_with("scale_cuda=w=-2:h='min(1080,ih)':format=p010le,"),
+            "{vf}"
+        );
+        assert!(vf.contains("tonemap_opencl=tonemap=hable:desat=0:t=bt709:m=bt709:p=bt709:r=tv"));
+        assert!(vf.contains("hwdownload,format=nv12,format=yuv420p"));
+    }
+
+    #[test]
+    fn the_processor_chain_when_the_card_cannot_or_must_not() {
+        let o = hdr_opts();
+        let cpu = |o: &ClipArgsOptions, x: &ClipExtras, path: HdrPath| {
+            let args = build(o, x, path);
+            !uses_gpu(&args) && vf(&args).contains(TONEMAP)
+        };
+        let plain = ClipExtras::default();
+        assert!(cpu(&o, &plain, HdrPath::Cpu));
+        // A retry of the film.
+        let retry = ClipExtras {
+            cpu_hdr: true,
+            ..ClipExtras::default()
+        };
+        assert!(cpu(&o, &retry, HdrPath::Vulkan));
+        // Interlaced.
+        let mut i = o.clone();
+        i.info.interlaced = true;
+        assert!(cpu(&i, &plain, HdrPath::Vulkan));
+        // A capture's box.
+        let boxed = ClipExtras {
+            pre_filter: Some("scale=1920:1080".into()),
+            ..ClipExtras::default()
+        };
+        assert!(cpu(&o, &boxed, HdrPath::Vulkan));
+        // CUDA never with the VA-API encoder (Vulkan may).
+        let mut v = o.clone();
+        v.encoder = VideoEncoder::H264Vaapi;
+        assert!(cpu(&v, &plain, HdrPath::CudaOpencl));
+        assert!(uses_gpu(&build(&v, &plain, HdrPath::Vulkan)));
+    }
+
+    #[test]
+    fn sdr_and_copied_films_are_unchanged() {
+        let x = ClipExtras::default();
+        let mut sdr = hdr_opts();
+        sdr.info.hdr = false;
+        assert_eq!(
+            build(&sdr, &x, HdrPath::Vulkan),
+            build(&sdr, &x, HdrPath::Cpu)
+        );
+        assert!(!uses_gpu(&build(&sdr, &x, HdrPath::Vulkan)));
+        let mut copy = hdr_opts();
+        copy.mode = VideoMode::Copy;
+        assert_eq!(
+            build(&copy, &x, HdrPath::Vulkan),
+            build(&copy, &x, HdrPath::Cpu)
+        );
+    }
+
+    #[test]
+    fn audio_pictures_stay_on_the_processor() {
+        let x = ClipExtras {
+            audio_visual: Some("[0:a:0]showwaves=s=8x8".into()),
+            ..ClipExtras::default()
+        };
+        assert!(!uses_gpu(&build(&hdr_opts(), &x, HdrPath::Vulkan)));
+    }
+
+    /// Runs the built picture chain of each card path on a real HDR film with the real ffmpeg
+    /// (`VRC_FFMPEG`, `VRC_HDR_SAMPLE`) into NVENC and prints the speed.
+    #[test]
+    #[ignore]
+    fn real_gpu_chains_on_a_sample() {
+        let ffmpeg = std::env::var("VRC_FFMPEG").expect("VRC_FFMPEG");
+        let sample = std::env::var("VRC_HDR_SAMPLE").expect("VRC_HDR_SAMPLE");
+        for path in HdrPath::GPU {
+            let mut o = hdr_opts();
+            o.inputs[0].url = sample.clone();
+            o.start_at_s = 0.0;
+            o.readrate = None;
+            let args = build(&o, &ClipExtras::default(), path);
+            let i = args.iter().position(|a| a == "-i").unwrap();
+            let mut cmd: Vec<String> =
+                vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+            cmd.extend(args[i - path.input_args().len()..i + 2].iter().cloned());
+            cmd.extend(["-vf".into(), vf(&args)]);
+            cmd.extend(
+                [
+                    "-an",
+                    "-t",
+                    "20",
+                    "-c:v",
+                    "h264_nvenc",
+                    "-b:v",
+                    "6M",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+                .map(String::from),
+            );
+            let started = std::time::Instant::now();
+            let out = std::process::Command::new(&ffmpeg)
+                .args(&cmd)
+                .output()
+                .unwrap();
+            let secs = started.elapsed().as_secs_f64();
+            assert!(
+                out.status.success(),
+                "{path:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            eprintln!(
+                "{path:?}: 20 s of film in {secs:.2} s = {:.2}x",
+                20.0 / secs
+            );
+        }
     }
 }

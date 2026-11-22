@@ -54,6 +54,8 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest wait of [`AppEngine::shutdown`] (a restart in progress, a server slow to stop);
 /// whatever still runs then ends with the process (the job object kills the children).
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
+/// The HDR test ran (or runs) in this process (see `AppCore::detect_hdr`).
+static HDR_TESTED: AtomicBool = AtomicBool::new(false);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -516,6 +518,13 @@ impl AppCore {
         // The address in effect (the tunnel's while it is enabled) is drawn on the slates.
         let (config, connecting) = self.effective_config(&settings);
         let started = if Self::tools_present(&config) {
+            // Once per process, in the background: clips started before it ends tonemap HDR
+            // on the processor.
+            if !cfg!(test) && !HDR_TESTED.swap(true, Ordering::Relaxed) {
+                let core = Arc::clone(self);
+                let ffmpeg = config.ffmpeg_path.clone();
+                tokio::spawn(async move { core.detect_hdr(&ffmpeg).await });
+            }
             match self
                 .spawn_server(&config, &settings, true, connecting)
                 .await
@@ -925,6 +934,14 @@ impl AppCore {
             .map_err(|e| OpError::Failed(self.save_failed(&e)))
     }
 
+    /// Tests how `ffmpeg` tonemaps HDR films here (graphics card or processor); the next clip
+    /// uses it.
+    async fn detect_hdr(&self, ffmpeg: &Path) {
+        let path = crate::tools::detect_hdr_path(ffmpeg).await;
+        crate::pipeline::ffmpeg_args::set_hdr_path(path);
+        self.log(Msg::new("log.hdr_path").arg("path", path.as_str()));
+    }
+
     /// Tests the hardware encoders with the installed ffmpeg and saves the result; the next
     /// clip uses it (no restart).
     pub(crate) async fn detect_encoder(self: &Arc<Self>) -> Result<VideoEncoder, OpError> {
@@ -934,6 +951,8 @@ impl AppCore {
         }
         let found = crate::tools::detect_encoder(&config.ffmpeg_path, &config.vaapi_device).await;
         self.log(Msg::new("log.encoder_test").arg("encoder", found.as_str()));
+        HDR_TESTED.store(true, Ordering::Relaxed);
+        self.detect_hdr(&config.ffmpeg_path).await;
         if crate::pipeline::ffmpeg_args::light_profile(found) {
             self.log(Msg::new("log.light_profile"));
         }

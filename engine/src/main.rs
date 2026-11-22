@@ -182,6 +182,13 @@ async fn main() -> ExitCode {
             &Msg::new("log.encoder_test").arg("encoder", config.video_encoder.as_str()),
         );
     }
+    // How HDR films are tonemapped: on the graphics card when it can, else the processor.
+    let hdr = vrcinema::tools::detect_hdr_path(&config.ffmpeg_path).await;
+    vrcinema::pipeline::ffmpeg_args::set_hdr_path(hdr);
+    log(
+        config.language,
+        &Msg::new("log.hdr_path").arg("path", hdr.as_str()),
+    );
     if vrcinema::pipeline::ffmpeg_args::light_profile(config.video_encoder) {
         log(config.language, &Msg::new("log.light_profile"));
     }

@@ -18,7 +18,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 
-pub use encoder::detect_encoder;
+pub use encoder::{detect_encoder, detect_hdr_path};
 pub use platform::Platform;
 
 use crate::i18n::{Msg, MsgContext, error_msg, msg_error};

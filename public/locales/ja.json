@@ -428,6 +428,7 @@
   "log.countdown_failed": "カウントダウンを表示できませんでした（{error}）。開始時刻まで待機画面を放送します。",
   "log.countdown_unavailable": "この構成ではカウントダウンを使えません",
   "log.encoder_test": "グラフィックボードのテスト：{encoder}",
+  "log.hdr_path": "HDR映像のSDR変換：{path}",
   "log.light_profile": "このPC（ARM）にはH.264のハードウェアエンコーダーがありません。映像はCPUで高速な設定により変換され、既定では最大720p30、3 Mbit/sです。最大出力解像度は720p以下のままにしてください（設定 → 詳細設定）。",
   "log.fake_resolver": "警告：テスト用の偽リゾルバーが有効です（{path}）。これはテストモードです。",
   "log.files_add_failed": "ファイルを追加できませんでした：{error}",

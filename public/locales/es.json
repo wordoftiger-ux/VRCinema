@@ -434,6 +434,7 @@
   "log.countdown_failed": "No se pudo mostrar la cuenta atrás ({error}); hasta la hora de inicio se emite la pantalla de espera.",
   "log.countdown_unavailable": "cuenta atrás no disponible en esta configuración",
   "log.encoder_test": "Prueba de la tarjeta gráfica: {encoder}",
+  "log.hdr_path": "Las películas HDR se convierten a SDR con: {path}",
   "log.light_profile": "Este equipo (ARM) no tiene un codificador H.264 por hardware: la imagen se convierte en el procesador con un ajuste más rápido, como máximo 720p30 y 3 Mbit/s de forma predeterminada. Mantenga la resolución máxima de salida en 720p o menos (Configuración → Avanzado).",
   "log.fake_resolver": "Advertencia: el resolvedor falso está activo ({path}); este es un modo de prueba.",
   "log.files_add_failed": "No se pudieron agregar los archivos: {error}",

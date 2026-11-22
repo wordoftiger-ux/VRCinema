@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::config::VideoEncoder;
-use crate::pipeline::ffmpeg_args::VAAPI_UPLOAD;
+use crate::pipeline::ffmpeg_args::{HdrPath, MAX_HEIGHT, VAAPI_UPLOAD};
 use crate::process::run_process;
 
 /// Hardware encoders in order of preference; VA-API (Linux only) last.
@@ -77,6 +77,92 @@ pub async fn detect_encoder(ffmpeg: &Path, vaapi_device: &str) -> VideoEncoder {
         vaapi_device,
     )
     .await
+}
+
+/// The ffmpeg arguments that write the HDR test film to `sample`: one second of a 320×180
+/// test pattern, 10-bit HEVC tagged BT.2020 PQ (libx265).
+fn hdr_sample_args(sample: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=24:duration=1",
+        "-pix_fmt",
+        "yuv420p10le",
+        "-c:v",
+        "libx265",
+        "-x265-params",
+        "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:log-level=error",
+        "-f",
+        "matroska",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    args.push(sample.into());
+    args
+}
+
+/// The test of one HDR path: the test film decoded and tonemapped like a real clip, to `-f null`.
+fn hdr_test_args(path: HdrPath, sample: &Path) -> Vec<OsString> {
+    let mut args: Vec<OsString> = ["-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .chain(path.input_args().iter().copied())
+        .chain(["-i"])
+        .map(OsString::from)
+        .collect();
+    args.push(sample.into());
+    for a in [
+        "-vf",
+        &path.filter(MAX_HEIGHT).unwrap_or_default(),
+        "-f",
+        "null",
+        "-",
+    ] {
+        args.push(a.into());
+    }
+    args
+}
+
+/// Core of the HDR test with an injectable runner (like [`detect_encoder_with`]): writes the
+/// test film to `sample`, then tries Vulkan and CUDA + OpenCL in turn; the first that exits with
+/// 0 wins. No test film (no libx265) or no working path: the processor.
+pub async fn detect_hdr_path_with<F, Fut>(run: F, sample: &Path) -> HdrPath
+where
+    F: Fn(Vec<OsString>) -> Fut,
+    Fut: Future<Output = Option<i32>>,
+{
+    if run(hdr_sample_args(sample)).await != Some(0) {
+        return HdrPath::Cpu;
+    }
+    for path in HdrPath::GPU {
+        if run(hdr_test_args(path, sample)).await == Some(0) {
+            return path;
+        }
+    }
+    HdrPath::Cpu
+}
+
+/// How the given ffmpeg tonemaps HDR films on this computer (the test film lives in the
+/// temporary folder while the test runs).
+pub async fn detect_hdr_path(ffmpeg: &Path) -> HdrPath {
+    let sample = std::env::temp_dir().join(format!("vrcinema-hdr-test-{}.mkv", std::process::id()));
+    let found = detect_hdr_path_with(
+        |args| async move {
+            run_process(ffmpeg, &args, TEST_TIMEOUT)
+                .await
+                .ok()
+                .and_then(|out| out.code)
+        },
+        &sample,
+    )
+    .await;
+    let _ = std::fs::remove_file(&sample);
+    found
 }
 
 #[cfg(test)]
@@ -197,6 +283,91 @@ mod tests {
              -i testsrc2=size=1280x720:rate=30:duration=1 -vf format=nv12,hwupload \
              -c:v h264_vaapi -f null -"
         );
+    }
+
+    /// Fake HDR runner: exit codes of the sample write and of each path (by a filter name in
+    /// the arguments); records what was tried.
+    async fn hdr_with(
+        sample: Option<i32>,
+        vulkan: Option<i32>,
+        cuda: Option<i32>,
+    ) -> (HdrPath, Vec<String>) {
+        let tried = Mutex::new(Vec::new());
+        let found = detect_hdr_path_with(
+            |args| {
+                let line = args
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let (name, code) = if line.contains("libx265") {
+                    ("sample", sample)
+                } else if line.contains("libplacebo") {
+                    ("vulkan", vulkan)
+                } else {
+                    assert!(line.contains("tonemap_opencl"), "{line}");
+                    ("cuda", cuda)
+                };
+                tried.lock().unwrap().push(name.to_string());
+                async move { code }
+            },
+            Path::new("hdr.mkv"),
+        )
+        .await;
+        (found, tried.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn hdr_paths_are_tried_vulkan_then_cuda_then_the_processor() {
+        assert_eq!(
+            hdr_with(Some(0), Some(0), Some(0)).await,
+            (HdrPath::Vulkan, vec!["sample".into(), "vulkan".into()])
+        );
+        assert_eq!(
+            hdr_with(Some(0), Some(1), Some(0)).await,
+            (
+                HdrPath::CudaOpencl,
+                vec!["sample".into(), "vulkan".into(), "cuda".into()]
+            )
+        );
+        assert_eq!(hdr_with(Some(0), None, Some(1)).await.0, HdrPath::Cpu);
+        // No test film (no libx265): nothing else is tried.
+        assert_eq!(
+            hdr_with(Some(1), Some(0), Some(0)).await,
+            (HdrPath::Cpu, vec!["sample".into()])
+        );
+    }
+
+    #[test]
+    fn the_hdr_test_decodes_on_the_card_before_its_input() {
+        let args: Vec<String> = hdr_test_args(HdrPath::Vulkan, Path::new("t.mkv"))
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let i = args.iter().position(|a| a == "-i").unwrap();
+        assert!(args[..i].contains(&"-hwaccel".to_string()));
+        assert_eq!(args[i + 1], "t.mkv");
+        assert!(args[i + 3].starts_with("libplacebo="));
+        assert_eq!(&args[args.len() - 3..], ["-f", "null", "-"]);
+    }
+
+    /// The HDR test with the real ffmpeg (`VRC_FFMPEG`); prints the path found.
+    #[tokio::test]
+    #[ignore]
+    async fn real_hdr_path() {
+        let ffmpeg = std::env::var("VRC_FFMPEG").expect("VRC_FFMPEG");
+        let started = std::time::Instant::now();
+        let path = detect_hdr_path(Path::new(&ffmpeg)).await;
+        eprintln!(
+            "HDR path: {path:?} in {:.2} s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_ffmpeg_gives_the_processor_hdr_path() {
+        let path = detect_hdr_path(Path::new("definitely-not-a-real-ffmpeg-xyz")).await;
+        assert_eq!(path, HdrPath::Cpu);
     }
 
     #[tokio::test]

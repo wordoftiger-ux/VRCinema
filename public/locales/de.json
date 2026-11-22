@@ -431,6 +431,7 @@
   "log.countdown_failed": "Der Countdown konnte nicht gezeigt werden ({error}); bis zur Startzeit läuft die Wartetafel.",
   "log.countdown_unavailable": "kein Countdown in dieser Konfiguration",
   "log.encoder_test": "Grafikkartentest: {encoder}",
+  "log.hdr_path": "HDR-Filme werden umgewandelt mit: {path}",
   "log.light_profile": "Dieser Computer (ARM) hat keinen Hardware-Encoder für H.264: Das Bild wird auf dem Prozessor mit einer schnelleren Einstellung konvertiert, standardmäßig höchstens 720p30 und 3 Mbit/s. Lassen Sie die maximale Ausgabeauflösung bei 720p oder darunter (Einstellungen → Erweitert).",
   "log.fake_resolver": "Warnung: Der Fake-Resolver ist aktiv ({path}) – das ist ein Testmodus.",
   "log.files_add_failed": "Die Dateien konnten nicht hinzugefügt werden: {error}",

@@ -434,6 +434,7 @@
   "log.countdown_failed": "Impossible d’afficher le compte à rebours ({error}) ; l’écran d’attente est diffusé jusqu’à l’heure de début.",
   "log.countdown_unavailable": "compte à rebours indisponible dans cette configuration",
   "log.encoder_test": "Test de la carte graphique : {encoder}",
+  "log.hdr_path": "Les films HDR sont convertis en SDR par : {path}",
   "log.light_profile": "Cet ordinateur (ARM) n’a pas d’encodeur H.264 matériel : l’image est convertie sur le processeur avec un réglage plus rapide, au plus 720p30 et 3 Mbit/s par défaut. Gardez la résolution de sortie maximale à 720p ou moins (Paramètres → Avancé).",
   "log.fake_resolver": "Attention : le résolveur factice est actif ({path}) ; c’est un mode de test.",
   "log.files_add_failed": "Impossible d’ajouter les fichiers : {error}",

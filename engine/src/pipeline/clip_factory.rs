@@ -1447,6 +1447,8 @@ async fn start_clip(
         max_height: Some(convert_cap),
         light,
         audio_visual: visual.as_ref().map(|v| v.graph.clone()),
+        // A retry tonemaps HDR on the processor (the card's decoder may be what failed).
+        cpu_hdr: attempt > 0,
         ..clip_extras(adv, clip_len_s, subs.clone(), start_at_s)
     };
     // Fades are drawn on a converted picture, so they force the conversion like the ticker.
