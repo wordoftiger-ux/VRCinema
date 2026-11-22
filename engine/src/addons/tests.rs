@@ -58,6 +58,54 @@ fn entry(base: &str, name: &str) -> (String, Manifest) {
     (format!("{base}/manifest.json"), catalog_manifest(name))
 }
 
+#[tokio::test]
+async fn cache_is_capped_and_search_text_clamped() {
+    let url = |q: &str| format!("https://one.example/catalog/movie/top/search={q}.json");
+    let mut http = FakeHttp::default();
+    for i in 0..300 {
+        http = http.with(&url(&format!("q{i}")), json!({"metas": []}));
+    }
+    let long = "a".repeat(100);
+    http = http.with(&url(&long), json!({"metas": []}));
+    let (c, http) = client(http);
+    let addons = vec![entry("https://one.example", "one")];
+    for i in 0..300 {
+        c.search(&addons, &format!("q{i}")).await;
+    }
+    assert_eq!(c.cache_len(), 256);
+    // Search text is cut to 100 characters.
+    c.search(&addons, &"a".repeat(500)).await;
+    assert_eq!(http.calls.load(Ordering::SeqCst), 301);
+    assert_eq!(c.cache_len(), 256);
+}
+
+#[tokio::test]
+async fn search_drops_types_other_than_movie_and_series() {
+    let http = FakeHttp::default().with(
+        &hit_url("https://one.example", "top"),
+        json!({"metas": [
+            {"id": "a", "type": "movie", "name": "A"},
+            {"id": "b", "type": "tv", "name": "B"},
+            {"id": "c", "type": "series", "name": "C"},
+        ]}),
+    );
+    let (c, _) = client(http);
+    let addons = vec![entry("https://one.example", "one")];
+    let ids: Vec<_> = c
+        .search(&addons, "the matrix")
+        .await
+        .into_iter()
+        .map(|h| h.id)
+        .collect();
+    assert_eq!(ids, ["a", "c"]);
+}
+
+#[test]
+fn manifest_tolerates_missing_newer_fields() {
+    let m: Manifest = serde_json::from_str(r#"{"id":"x","name":"X"}"#).unwrap();
+    assert!(m.resources.is_empty() && m.catalogs.is_empty());
+}
+
 #[test]
 fn normalizes_stremio_scheme_and_rejects_non_manifest() {
     assert_eq!(
@@ -70,6 +118,15 @@ fn normalizes_stremio_scheme_and_rejects_non_manifest() {
     );
     let e = normalize_manifest_url("https://a.example/x").unwrap_err();
     assert_eq!(code(&e), "addon_invalid");
+    for bad in [
+        "https://a.example/x/manifest.json?key=1",
+        "https://a.example/x/manifest.json#top",
+    ] {
+        assert_eq!(
+            code(&normalize_manifest_url(bad).unwrap_err()),
+            "addon_invalid"
+        );
+    }
     assert_eq!(
         base_url("https://a.example/x/manifest.json"),
         "https://a.example/x"

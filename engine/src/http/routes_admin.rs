@@ -281,6 +281,7 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             requester_ip: None,
             requester_key_hash: None,
         };
+    let mut item_id: Option<i64> = None;
     let added = if meta.is_playlist {
         // Only http(s) entries: `file:` (and `local:`) items are never created through HTTP,
         // whatever a playlist extractor returns.
@@ -309,22 +310,24 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
         })?;
         entries.len()
     } else {
-        state.with_db(|c| {
-            QueueRepo::new(c)
-                .add(&new_item(
-                    url.to_string(),
-                    meta.title.clone(),
-                    meta.duration_s,
-                    meta.is_live,
-                ))
-                .map(|_| ())
+        let item = state.with_db(|c| {
+            QueueRepo::new(c).add(&new_item(
+                url.to_string(),
+                meta.title.clone(),
+                meta.duration_s,
+                meta.is_live,
+            ))
         })?;
+        item_id = Some(item.id);
         1
     };
     state.send_command(Command::QueueChanged);
     Ok(json_response(
         StatusCode::CREATED,
-        &json!({ "added": added, "title": meta.title }),
+        &match item_id {
+            Some(id) => json!({ "added": added, "title": meta.title, "itemId": id }),
+            None => json!({ "added": added, "title": meta.title }),
+        },
     ))
 }
 

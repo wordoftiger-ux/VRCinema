@@ -1601,7 +1601,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       }
       if (!/^https?:\/\//.test(payload?.url ?? '')) return coded(res, 400, 'invalid_link', 'Invalid link');
       s.queue.push(queued(nextId++, 'Added from ' + new URL(payload.url).hostname));
-      return json(res, 201, { added: 1, title: s.queue.at(-1).title });
+      return json(res, 201, { added: 1, title: s.queue.at(-1).title, itemId: s.queue.at(-1).id });
     }
     if (s.playing === 'none' && ['pause', 'seek', 'restart'].includes(action)) {
       return coded(res, 409, 'nothing_playing', `Nothing is playing (${req.headers['x-vrcinema-lang']})`);

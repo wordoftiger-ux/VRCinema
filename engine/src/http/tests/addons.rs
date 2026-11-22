@@ -8,15 +8,19 @@ use crate::addons::{AddonClient, AddonError, AddonHttp};
 use crate::db::addons::CINEMETA_URL;
 
 const CATALOG_URL: &str = "https://addons.example/catalog/manifest.json";
+const MIXED_URL: &str = "https://addons.example/mixed/manifest.json";
 const STREAMS_URL: &str = "https://addons.example/streams/manifest.json";
 
 struct FakeNet {
     answers: Mutex<HashMap<String, Value>>,
+    /// Every URL asked, in order.
+    seen: Mutex<Vec<String>>,
 }
 
 #[async_trait]
 impl AddonHttp for FakeNet {
     async fn get_json(&self, url: &str, _timeout: Duration) -> Result<Value, AddonError> {
+        self.seen.lock().unwrap().push(url.to_string());
         self.answers
             .lock()
             .unwrap()
@@ -69,6 +73,7 @@ fn net(with_cinemeta: bool) -> Arc<FakeNet> {
     );
     Arc::new(FakeNet {
         answers: Mutex::new(answers),
+        seen: Mutex::new(Vec::new()),
     })
 }
 
@@ -181,13 +186,26 @@ async fn cinemeta_seeded_once_and_removal_sticks() {
 #[tokio::test]
 async fn a_failed_cinemeta_fetch_stores_nothing_and_is_retried() {
     let n = net(false);
-    let h = harness(Arc::clone(&n));
+    let client = Arc::new(AddonClient::new(Arc::clone(&n) as Arc<dyn AddonHttp>));
+    let h = Harness::with_state(config(), |s| s.with_addons(Arc::clone(&client)));
     let cookie = h.login().await;
     assert!(list(&h, &cookie).await.is_empty());
+    // The failure is remembered for a while: no second wait, no second request.
     n.answers
         .lock()
         .unwrap()
         .insert(CINEMETA_URL.to_string(), cinemeta());
+    assert!(list(&h, &cookie).await.is_empty());
+    let asked = n
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| *u == CINEMETA_URL)
+        .count();
+    assert_eq!(asked, 1);
+    // After the pause it is tried again.
+    *client.seed_gate.lock().await = Some(std::time::Instant::now() - crate::addons::SEED_RETRY);
     assert_eq!(list(&h, &cookie).await.len(), 1);
 }
 
@@ -362,6 +380,86 @@ async fn series_title_request_needs_known_episode() {
     ] {
         let r = request_title(&h, t, id).await;
         assert_eq!(r.json()["code"], "title_invalid", "{t} {id}");
+    }
+}
+
+#[tokio::test]
+async fn viewer_routes_never_reach_stream_addons() {
+    let n = net(true);
+    meta_answers(&n);
+    {
+        let mut a = n.answers.lock().unwrap();
+        a.insert(
+            MIXED_URL.to_string(),
+            manifest("mixed", "Mixed", json!(["catalog", "meta", "stream"]), true),
+        );
+        a.insert(
+            "https://addons.example/mixed/meta/movie/tt1.json".to_string(),
+            json!({"meta": {"id": "tt1", "type": "movie", "name": "From Mixed"}}),
+        );
+        a.insert(
+            "https://addons.example/mixed/catalog/movie/top/search=matrix.json".to_string(),
+            json!({"metas": [{"id": "tt9", "type": "movie", "name": "Mixed Hit"}]}),
+        );
+    }
+    let h = harness(Arc::clone(&n));
+    let cookie = h.login().await;
+    list(&h, &cookie).await;
+    let id = add(&h, &cookie, MIXED_URL).await.json()["id"]
+        .as_i64()
+        .unwrap();
+    post_id(&h, &cookie, id, json!({"move": "up"})).await;
+    n.seen.lock().unwrap().clear();
+
+    let r = h
+        .send(get("/api/channels/main/catalog/search?q=matrix").ip("4.4.4.4"))
+        .await;
+    assert_eq!(r.json(), json!([]));
+    let r = h
+        .send(get("/api/channels/main/catalog/meta/movie/tt1").ip("4.4.4.4"))
+        .await;
+    assert_eq!(r.json()["name"], "Example Film");
+    let r = request_title(&h, "movie", "tt1").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    assert_eq!(
+        h.list(ItemStatus::PendingApproval)[0].title,
+        "Example Film (1999)"
+    );
+    let asked = n.seen.lock().unwrap().clone();
+    assert!(!asked.is_empty());
+    assert!(
+        asked
+            .iter()
+            .all(|u| !u.starts_with("https://addons.example/mixed/")),
+        "{asked:?}"
+    );
+
+    // The owner's own search still uses it.
+    let r = h
+        .send(get("/api/admin/addons/search?q=matrix").cookie(&cookie))
+        .await;
+    assert_eq!(r.json()[0]["name"], "Mixed Hit");
+}
+
+#[tokio::test]
+async fn bad_types_and_ids_are_refused() {
+    let h = title_harness();
+    for path in [
+        "/api/channels/main/catalog/meta/tv/tt1",
+        "/api/channels/main/catalog/meta/movie/bad%20id",
+    ] {
+        let r = h.send(get(path).ip("5.5.5.5")).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(r.json()["code"], "title_invalid", "{path}");
+    }
+    let cookie = h.login().await;
+    for path in [
+        "/api/admin/addons/meta/..%2Fx/tt1",
+        "/api/admin/addons/meta/a.b/tt1",
+        "/api/admin/addons/streams/..%2Fx/tt1",
+    ] {
+        let r = h.send(get(path).cookie(&cookie)).await;
+        assert_eq!(r.json()["code"], "title_invalid", "{path}");
     }
 }
 

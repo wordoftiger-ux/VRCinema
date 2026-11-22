@@ -25,6 +25,12 @@ pub const STREAMS_TIMEOUT: Duration = Duration::from_secs(15);
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_SEARCH_HITS: usize = 40;
+/// Answers kept in the cache (the oldest goes first).
+const CACHE_MAX_ENTRIES: usize = 256;
+/// A failed Cinemeta seeding is not retried for this long.
+pub const SEED_RETRY: Duration = Duration::from_secs(5 * 60);
+/// Search text longer than this is cut.
+pub const MAX_QUERY_CHARS: usize = 100;
 
 // ---------- Errors ----------
 
@@ -133,6 +139,9 @@ pub fn normalize_manifest_url(input: &str) -> Result<String, AddonError> {
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err(AddonError::invalid());
     }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AddonError::invalid());
+    }
     if !parsed.path().ends_with("/manifest.json") {
         return Err(AddonError::invalid());
     }
@@ -178,12 +187,19 @@ fn encode(text: &str, keep: &str) -> String {
 pub struct Manifest {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub version: String,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub logo: Option<String>,
+    #[serde(default)]
     pub types: Vec<String>,
+    #[serde(default)]
     pub id_prefixes: Option<Vec<String>>,
+    #[serde(default)]
     pub catalogs: Vec<CatalogDef>,
+    #[serde(default)]
     pub resources: Vec<ResourceDef>,
 }
 
@@ -192,6 +208,7 @@ pub struct CatalogDef {
     pub type_: String,
     pub id: String,
     /// The catalog accepts a `search` extra.
+    #[serde(default)]
     pub search: bool,
 }
 
@@ -199,8 +216,10 @@ pub struct CatalogDef {
 pub struct ResourceDef {
     pub name: String,
     /// Object form only; falls back to the manifest's `types`.
+    #[serde(default)]
     pub types: Option<Vec<String>>,
     /// Object form only; falls back to the manifest's `id_prefixes`.
+    #[serde(default)]
     pub id_prefixes: Option<Vec<String>>,
 }
 
@@ -438,7 +457,9 @@ fn parse_streams(v: &Value) -> Result<Vec<StreamOption>, AddonError> {
 
 pub struct AddonClient {
     http: Arc<dyn AddonHttp>,
-    cache: Mutex<HashMap<String, (Instant, Value)>>,
+    cache: Mutex<HashMap<String, (Instant, Arc<Value>)>>,
+    /// Held while Cinemeta is being seeded (one attempt at a time); the time of the last failure.
+    pub seed_gate: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl AddonClient {
@@ -446,6 +467,7 @@ impl AddonClient {
         Self {
             http,
             cache: Mutex::new(HashMap::new()),
+            seed_gate: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -455,24 +477,35 @@ impl AddonClient {
     }
 
     /// GET with a 5 minute in-memory cache (successful answers only).
-    async fn cached(&self, url: &str, timeout: Duration) -> Result<Value, AddonError> {
+    async fn cached(&self, url: &str, timeout: Duration) -> Result<Arc<Value>, AddonError> {
         let now = Instant::now();
         if let Some((at, v)) = self.cache.lock().unwrap().get(url)
             && now.duration_since(*at) < CACHE_TTL
         {
-            return Ok(v.clone());
+            return Ok(Arc::clone(v));
         }
-        let value = self.http.get_json(url, timeout).await?;
+        let value = Arc::new(self.http.get_json(url, timeout).await?);
         let mut cache = self.cache.lock().unwrap();
         cache.retain(|_, (at, _)| now.duration_since(*at) < CACHE_TTL);
-        cache.insert(url.to_string(), (now, value.clone()));
+        while cache.len() >= CACHE_MAX_ENTRIES {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            cache.remove(&oldest);
+        }
+        cache.insert(url.to_string(), (now, Arc::clone(&value)));
         Ok(value)
     }
 
     /// All search-capable catalogs (the first one per type of each addon) are asked at once;
     /// failing addons are skipped. Addon order is kept, ids are unique, at most 40 hits.
     pub async fn search(&self, addons: &[(String, Manifest)], q: &str) -> Vec<CatalogHit> {
-        let q = encode(q.trim(), "");
+        let q: String = q.trim().chars().take(MAX_QUERY_CHARS).collect();
+        let q = encode(&q, "");
         let mut requests: Vec<(String, String)> = Vec::new();
         for (manifest_url, manifest) in addons {
             let mut seen_types = HashSet::new();
@@ -506,7 +539,11 @@ impl AddonClient {
                 .and_then(Value::as_array)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            for hit in metas.iter().filter_map(|m| parse_hit(m, type_)) {
+            let movies_and_series = metas
+                .iter()
+                .filter_map(|m| parse_hit(m, type_))
+                .filter(|h| matches!(h.type_.as_str(), "movie" | "series"));
+            for hit in movies_and_series {
                 if hits.len() < MAX_SEARCH_HITS && ids.insert(hit.id.clone()) {
                     hits.push(hit);
                 }
@@ -557,5 +594,12 @@ impl AddonClient {
             encode(id, ":")
         );
         parse_streams(&self.http.get_json(&url, STREAMS_TIMEOUT).await?)
+    }
+}
+
+#[cfg(test)]
+impl AddonClient {
+    fn cache_len(&self) -> usize {
+        self.cache.lock().unwrap().len()
     }
 }

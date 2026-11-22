@@ -487,11 +487,9 @@ export async function addLink(url) {
 
 /** Adds `url` to the queue and puts it first in line: resolves to `{added, title}`, throws `ApiError`. */
 export async function addLinkNext(url) {
-  const before = new Set(queue.value.map((i) => i.id));
   const added = await addLink(url);
   await refreshPanel();
-  const item = queue.value.filter((i) => !before.has(i.id)).at(-1);
-  if (item) await api('POST', `${PANEL}/play-next`, { itemId: item.id });
+  if (Number.isInteger(added?.itemId)) await api('POST', `${PANEL}/play-next`, { itemId: added.itemId });
   refreshPanel();
   return added;
 }

@@ -15,7 +15,7 @@ import { Poster } from '../components/poster.js';
 
 /** Opens the page of a film or series (`type` is `movie` or `series`; an episode id has `:season:episode`). */
 export function openTitle(type, id) {
-  location.hash = `#/search/${type}/${encodeURIComponent(id)}`;
+  location.hash = `#/search/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
 }
 
 // ---------- The search page ----------
@@ -32,7 +32,7 @@ const typeLabel = (type) => (type === 'movie' || type === 'series' ? t(`search.t
 function Card({ item }) {
   return html`
     <li class="sr-item">
-      <a class="sr-card" href=${`#/search/${item.type}/${encodeURIComponent(item.id)}`} data-type=${item.type} data-id=${item.id}>
+      <a class="sr-card" href=${`#/search/${encodeURIComponent(item.type)}/${encodeURIComponent(item.id)}`} data-type=${item.type} data-id=${item.id}>
         <${Poster} src=${item.poster} className="sr-poster" />
         <span class="sr-type">${typeLabel(item.type)}</span>
         <b class="sr-name">${item.name}</b>

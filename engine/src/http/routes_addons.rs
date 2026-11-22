@@ -98,11 +98,21 @@ fn stored(manifest: &Manifest) -> ApiResult<String> {
 
 /// Puts Cinemeta in the list the first time it can be fetched. A failed fetch stores nothing
 /// (the flag stays unset), so the next call tries again; a removal later sticks.
+/// A failed attempt is remembered for 5 minutes and one attempt runs at a time, so an
+/// unreachable Cinemeta costs one wait, not one per call.
 pub(super) async fn ensure_seeded(state: &AppState) {
     if !matches!(state.with_db(|c| AddonRepo::new(c).seeded()), Ok(false)) {
         return;
     }
+    let mut gate = state.addons.seed_gate.lock().await;
+    if gate.is_some_and(|at| at.elapsed() < crate::addons::SEED_RETRY) {
+        return;
+    }
+    if !matches!(state.with_db(|c| AddonRepo::new(c).seeded()), Ok(false)) {
+        return;
+    }
     let Ok(manifest) = state.addons.fetch_manifest(CINEMETA_URL).await else {
+        *gate = Some(std::time::Instant::now());
         return;
     };
     let Ok(json) = serde_json::to_string(&manifest) else {
@@ -120,12 +130,36 @@ pub(super) fn enabled_manifests(state: &AppState) -> ApiResult<Vec<(String, Mani
         .collect())
 }
 
-/// Catalog addons that can search, in order (what viewers may use too).
-pub(super) fn catalog_manifests(state: &AppState) -> ApiResult<Vec<(String, Manifest)>> {
+/// What viewers may reach: enabled addons that do not provide `stream`, in order. Viewer
+/// searches, details and title requests never touch a stream addon.
+pub(super) fn viewer_manifests(state: &AppState) -> ApiResult<Vec<(String, Manifest)>> {
     Ok(enabled_manifests(state)?
         .into_iter()
-        .filter(|(_, m)| m.provides_search())
+        .filter(|(_, m)| !provides(m, "stream"))
         .collect())
+}
+
+/// The search text: trimmed and cut to 100 characters; at least 2 characters or nothing.
+fn clamp_query(q: &str) -> Option<String> {
+    let q: String = q
+        .trim()
+        .chars()
+        .take(crate::addons::MAX_QUERY_CHARS)
+        .collect();
+    (q.trim().chars().count() >= 2).then_some(q)
+}
+
+/// `movie`, `series` or another short type word (letters, digits, `_`, `-`).
+fn valid_type(type_: &str) -> Result<(), ApiError> {
+    if (1..=20).contains(&type_.len())
+        && type_
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        Ok(())
+    } else {
+        Err(title_invalid())
+    }
 }
 
 async fn list(State(state): State<AppState>) -> ApiResult {
@@ -225,12 +259,14 @@ struct SearchQuery {
 
 async fn search(State(state): State<AppState>, Query(query): Query<SearchQuery>) -> ApiResult {
     ensure_seeded(&state).await;
-    let q = query.q.trim();
-    if q.chars().count() < 2 {
+    let Some(q) = clamp_query(&query.q) else {
         return Ok(json_ok(&json!([])));
-    }
-    let addons = catalog_manifests(&state)?;
-    let hits = state.addons.search(&addons, q).await;
+    };
+    let addons = enabled_manifests(&state)?
+        .into_iter()
+        .filter(|(_, m)| m.provides_search())
+        .collect::<Vec<_>>();
+    let hits = state.addons.search(&addons, &q).await;
     Ok(json_ok(&Value::Array(hits.iter().map(hit_json).collect())))
 }
 
@@ -238,6 +274,7 @@ async fn meta(
     State(state): State<AppState>,
     Path((type_, id)): Path<(String, String)>,
 ) -> ApiResult {
+    valid_type(&type_)?;
     ensure_seeded(&state).await;
     let addons = enabled_manifests(&state)?;
     let meta = state
@@ -260,6 +297,7 @@ async fn streams(
     Path((type_, id)): Path<(String, String)>,
     Query(query): Query<StreamsQuery>,
 ) -> ApiResult {
+    valid_type(&type_)?;
     let applicable: Vec<AddonRow> = state
         .with_db(|c| AddonRepo::new(c).enabled())?
         .into_iter()
@@ -327,7 +365,16 @@ async fn public_search(
     Query(query): Query<SearchQuery>,
 ) -> ApiResult {
     open_catalog(&state, &ctx).await?;
-    search(State(state), Query(query)).await
+    ensure_seeded(&state).await;
+    let Some(q) = clamp_query(&query.q) else {
+        return Ok(json_ok(&json!([])));
+    };
+    let addons = viewer_manifests(&state)?
+        .into_iter()
+        .filter(|(_, m)| m.provides_search())
+        .collect::<Vec<_>>();
+    let hits = state.addons.search(&addons, &q).await;
+    Ok(json_ok(&Value::Array(hits.iter().map(hit_json).collect())))
 }
 
 async fn public_meta(
@@ -337,7 +384,14 @@ async fn public_meta(
 ) -> ApiResult {
     open_catalog(&state, &ctx).await?;
     let (type_, id) = valid_ref(&type_, &id)?;
-    meta(State(state), Path((type_.to_string(), id.to_string()))).await
+    ensure_seeded(&state).await;
+    let addons = viewer_manifests(&state)?;
+    let meta = state
+        .addons
+        .meta(&addons, type_, id)
+        .await
+        .map_err(addon_error)?;
+    Ok(json_ok(&meta_json(&meta)))
 }
 
 fn title_invalid() -> ApiError {
@@ -380,7 +434,7 @@ fn year_text(year: &str) -> &str {
 /// episodes the addon lists.
 pub(super) async fn stored_title(state: &AppState, type_: &str, id: &str) -> ApiResult<String> {
     ensure_seeded(state).await;
-    let addons = enabled_manifests(state)?;
+    let addons = viewer_manifests(state)?;
     // The details belong to the series; an episode id is `<series>:<season>:<episode>`.
     let lookup = if type_ == "series" {
         id.split(':').next().unwrap_or(id)

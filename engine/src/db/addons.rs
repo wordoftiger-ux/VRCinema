@@ -75,12 +75,20 @@ impl<'a> AddonRepo<'a> {
         Self { conn }
     }
 
-    /// All addons in the owner's order.
+    /// All addons in the owner's order. A row whose stored manifest cannot be read is skipped.
     pub fn list(&self) -> rusqlite::Result<Vec<AddonRow>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {COLUMNS} FROM addons ORDER BY position, id"
         ))?;
-        stmt.query_map([], row_of)?.collect()
+        let rows = stmt.query_map([], |r| Ok(row_of(r).ok()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            match row? {
+                Some(a) => out.push(a),
+                None => eprintln!("addons: skipping a row with an unreadable manifest"),
+            }
+        }
+        Ok(out)
     }
 
     /// The addons that are switched on, in order.
