@@ -510,3 +510,92 @@ p.v-time {
     flex-direction: column;
   }
 }
+
+/* ---------- Find a film ---------- */
+
+.v-mode {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.v-mode .btn {
+  flex: 1;
+  justify-content: center;
+  min-height: 40px;
+}
+
+.v-mode .btn[aria-pressed="true"] {
+  border-color: var(--amber);
+  color: var(--amber);
+  background: var(--selected);
+}
+
+.v-film-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 10px;
+  color: var(--text-strong);
+}
+
+.v-film-note,
+.v-film-chosen {
+  margin: 0 0 12px;
+  color: var(--text-dim);
+}
+
+.v-film-chosen {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--selected);
+  color: var(--text-strong);
+}
+
+.v-film-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.v-film-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-control);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.v-film-row small {
+  margin-left: auto;
+  color: var(--text-faint);
+  flex: none;
+}
+
+.v-film-row.on {
+  border-color: var(--amber);
+  background: var(--selected);
+  color: var(--amber);
+}
+
+.v-film-no {
+  flex: none;
+  min-width: 1.6em;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}

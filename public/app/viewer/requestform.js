@@ -10,6 +10,7 @@ import { ApiError, api, errorText } from '../api.js';
 import { RequesterBadge } from '../components/badge.js';
 import { deviceKey, existingDeviceKey, saveBadge, saveNick, savedBadge, savedNick } from './device.js';
 import { formatLimit } from './format.js';
+import { FindFilm } from './findfilm.js';
 import { NickPin, openAdopt } from './nickpin.js';
 import { channel, refresh, showToast } from './store.js';
 
@@ -149,8 +150,13 @@ export function RequestForm() {
   const [result, setResult] = useState(null);
   const [file, setFile] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [mode, setMode] = useState('link');
+  const [title, setTitle] = useState(null);
+  const [findKey, setFindKey] = useState(0);
   const nickField = useRef(null);
   const rules = channel.value?.rules;
+  const catalog = Boolean(rules?.viewerCatalog);
+  const film = catalog && mode === 'film';
   const lists = Boolean(rules?.viewerLists);
   const uploads = rules?.uploads ?? null;
   const lines = lists ? linkLines(url) : [];
@@ -184,7 +190,8 @@ export function RequestForm() {
   const submit = async (e) => {
     e.preventDefault();
     const name = nick.trim();
-    if ((!url.trim() && !sendingFile) || busy) return;
+    if (film ? !title : (!url.trim() && !sendingFile)) return;
+    if (busy) return;
     if (sendingFile && file.size > uploads.maxMb * 1048576) {
       setError(new ApiError(t('errors.upload_too_big', { max: uploads.maxMb }), { code: 'upload_too_big', data: { max: uploads.maxMb } }));
       return;
@@ -196,7 +203,7 @@ export function RequestForm() {
     saveNick(name);
     // The key is made when a nick is first used; once it exists it goes with every request.
     const key = name ? deviceKey() : existingDeviceKey();
-    const body = lists ? { urls: lines, name } : { url: url.trim(), name };
+    const body = film ? { title, name } : lists ? { urls: lines, name } : { url: url.trim(), name };
     if (key) body.deviceKey = key;
     const keepBadge = (b) => {
       if (name && b && typeof b === 'object') {
@@ -205,6 +212,15 @@ export function RequestForm() {
       }
     };
     try {
+      if (film) {
+        const r = await api('POST', '/api/channels/main/requests', body, { timeoutMs: 60000 });
+        showToast(t('viewer.title_sent'));
+        setTitle(null);
+        setFindKey((k) => k + 1);
+        keepBadge(r.item?.requesterBadge);
+        refresh();
+        return;
+      }
       if (sendingFile) {
         setProgress(0);
         const r = await sendFile(file, { name, deviceKey: key }, setProgress);
@@ -242,6 +258,7 @@ export function RequestForm() {
     }
   };
   const busyText = () => {
+    if (film) return t('viewer.adding');
     if (sendingFile) {
       return progress !== null && progress < 1
         ? t('viewer.uploading', { percent: Math.floor(progress * 100) })
@@ -254,7 +271,17 @@ export function RequestForm() {
     <section class="v-add card2" aria-labelledby="v-add-h">
       <h2 id="v-add-h" class="v-eyebrow">${t('viewer.add_heading')}</h2>
       <form onSubmit=${submit} novalidate>
-        ${lists
+        ${catalog
+          ? html`<div class="v-mode" role="group" aria-label=${t('viewer.add_heading')}>
+              <button type="button" class="btn" data-mode="link" aria-pressed=${film ? 'false' : 'true'} disabled=${busy}
+                onClick=${() => { setMode('link'); setError(null); }}>${t('viewer.mode_link')}</button>
+              <button type="button" class="btn" data-mode="film" aria-pressed=${film ? 'true' : 'false'} disabled=${busy}
+                onClick=${() => { setMode('film'); setError(null); }}>${t('viewer.mode_film')}</button>
+            </div>`
+          : null}
+        ${film
+          ? html`<${FindFilm} key=${findKey} onPick=${(x) => { setTitle(x); setError(null); }} busy=${busy} />`
+          : lists
           ? html`<label class="v-field">
               <span>${t('viewer.links_label')}</span>
               <textarea class="txt v-links" name="urls" rows="4" autocomplete="off" spellcheck="false"
@@ -270,7 +297,7 @@ export function RequestForm() {
             aria-describedby=${error ? 'v-error' : undefined} aria-invalid=${error ? 'true' : undefined}
             onInput=${(e) => setUrl(e.currentTarget.value)} />
         </label>`}
-        ${uploads ? html`<${FileBox} uploads=${uploads} file=${file} onFile=${chooseFile} busy=${busy} />` : null}
+        ${uploads && !film ? html`<${FileBox} uploads=${uploads} file=${file} onFile=${chooseFile} busy=${busy} />` : null}
         <label class="v-field">
           <span>${t('viewer.nick_label')}</span>
           <span class="v-nick">
@@ -294,8 +321,8 @@ export function RequestForm() {
                 : null}
             </div>`
           : null}
-        <button type="submit" class="btn pri v-submit" disabled=${busy || (!url.trim() && !sendingFile)}>
-          ${busy ? busyText() : sendingFile ? t('viewer.upload_button') : t('viewer.add_button')}</button>
+        <button type="submit" class="btn pri v-submit" disabled=${busy || (film ? !title : (!url.trim() && !sendingFile))}>
+          ${busy ? busyText() : film ? t('viewer.title_button') : sendingFile ? t('viewer.upload_button') : t('viewer.add_button')}</button>
       </form>
       <${NickPin} nick=${nick} onNick=${holdNick} />
       ${result ? html`<${ListResult} result=${result} />` : null}

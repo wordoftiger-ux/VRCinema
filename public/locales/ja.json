@@ -740,7 +740,7 @@
   "queue.add_label": "リンクを追加",
   "queue.suggest_label": "一致する映画とシリーズ",
   "queue.suggest_none": "タイトルが見つかりませんでした。",
-  "queue.add_placeholder": "動画または再生リストのリンクを貼り付け…",
+  "queue.add_placeholder": "リンクを貼り付けるか、タイトルを入力して検索…",
   "queue.added_count": {
     "other": "{count}本の動画を追加しました。"
   },
@@ -1465,6 +1465,10 @@
   "viewer.limit_minutes": "{n}分",
   "viewer.link_label": "動画のリンク",
   "viewer.link_placeholder": "動画のリンクを貼り付け…",
+  "viewer.mode_link": "リンク",
+  "viewer.mode_film": "作品を探す",
+  "viewer.title_sent": "送信しました。ホストがソースを選びます。",
+  "viewer.title_button": "送信",
   "viewer.live_stream": "ライブ配信",
   "viewer.moderation": "リクエストは、チャンネルのオーナーが承認してから再生されます。",
   "viewer.nick_hint": "省略可。このニックネームで追加した動画の横に表示されます。",

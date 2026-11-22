@@ -307,6 +307,39 @@ try {
     check(JSON.stringify(put?.body) === '{"viewerCatalog":false}', 'the viewer switch -> PUT settings {viewerCatalog: false}', put);
   }
 
+  // ---------- The request page: "Find a film" ----------
+  const viewer = await ctx.newPage();
+  const verrors = [];
+  viewer.on('pageerror', (e) => verrors.push(String(e)));
+  await viewer.setViewportSize({ width: 390, height: 780 });
+  await viewer.route('https://addons.example/**', (r) => r.abort());
+  await viewer.goto(`${base}/`);
+  await viewer.waitForSelector('.v-add form');
+  await viewer.evaluate(async () => (await import('/static/app/i18n.js')).loadLang('en'));
+  check((await count(viewer, '.v-mode')) === 0, 'viewer: with the setting off there is no switch');
+  await scenario({ settingsPatch: { viewerCatalog: true } });
+  await viewer.waitForSelector('.v-mode', { timeout: 8000 });
+  check(JSON.stringify(await texts(viewer, '.v-mode .btn')) === '["Link","Find a film"]', 'viewer: with it on the switch shows', await texts(viewer, '.v-mode .btn'));
+  await viewer.click('.v-mode [data-mode="film"]');
+  check(await viewer.$eval('.v-submit', (b) => b.disabled), 'viewer: Send waits for a title');
+  await viewer.fill('input[name="title"]', 'exa');
+  await waitFor(async () => (await count(viewer, '.v-film-row')) === 2, 'viewer: results');
+  check(await viewer.evaluate(() => document.documentElement.scrollWidth <= 390), 'viewer: no sideways scroll');
+  await viewer.screenshot({ path: join(shots, 'addons-viewer-search-phone.png') });
+  await viewer.click('.v-film-row[data-type="series"]');
+  await viewer.waitForSelector('.v-film-row[data-episode="tt2:1:2"]');
+  check(await viewer.$eval('.v-submit', (b) => b.disabled), 'viewer: a series needs an episode');
+  await viewer.click('.v-film-row[data-episode="tt2:1:2"]');
+  await viewer.screenshot({ path: join(shots, 'addons-viewer-episodes-phone.png') });
+  m = await mark();
+  await viewer.click('.v-submit');
+  const vsent = await viewer.waitForFunction(() => document.querySelector('.v-toast')?.textContent === 'Sent. The host will pick a source.', null, { timeout: 5000 }).then(() => true, () => false);
+  const post2 = (await since(m)).find((r) => r.method === 'POST' && r.path === '/api/channels/main/requests');
+  check(JSON.stringify(post2?.body?.title) === '{"type":"series","id":"tt2:1:2"}', 'viewer: Send -> POST …/requests {title: {series, tt2:1:2}}', post2);
+  check(vsent, 'viewer: shows the sent message', await viewer.evaluate(() => document.body.innerText.slice(0, 300)));
+  check(verrors.length === 0, 'viewer: no page errors', verrors);
+  await viewer.close();
+
   // ---------- Polish ----------
   await page.evaluate(async () => (await import('/static/app/i18n.js')).loadLang('pl'));
   await page.waitForFunction(() => document.querySelector('.rail-search .rail-label')?.textContent === 'Szukaj');

@@ -572,7 +572,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       queue: s.queue.map(publicItem),
       channelUrl: p.channelUrl,
       requestUrl: p.requestUrl,
-      rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation, viewerLists: s.settings.viewerLists, viewerListMax: s.settings.viewerListMax,
+      rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation, viewerLists: s.settings.viewerLists, viewerListMax: s.settings.viewerListMax, viewerCatalog: s.settings.viewerCatalog,
         uploads: s.settings.viewerUploads ? { maxMb: s.settings.viewerUploadMaxMb, maxDurationS: Math.min(s.settings.maxDurationS, s.settings.viewerUploadMaxS), maxAudioS: Math.min(s.settings.maxDurationS, s.settings.viewerUploadAudioMaxS) } : null },
     };
   }
@@ -644,6 +644,16 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       const body = { error: pl ? refusal[2] : refusal[1], code: s.viewerError };
       if (s.viewerError === 'too_many_active') body.count = 5;
       return json(res, refusal[0], body);
+    }
+    // A title request: always pending (the host picks the source); the item is named after the title.
+    if (payload?.title) {
+      if (!s.settings.viewerCatalog) return fail(404, 'not_found', 'Not found.', 'Nie znaleziono.');
+      const tkey = payload.deviceKey ?? null;
+      const tnick = String(payload.name ?? '').trim();
+      const tbadge = tkey ? { hue: parseInt(tkey.slice(0, 3), 16) % 360, shape: parseInt(tkey[3], 16) % 12 } : null;
+      const titem = queued(nextId++, `Title ${payload.title.id}`, { requesterName: tnick || null, requesterBadge: tbadge });
+      s.pendingItems.push({ ...titem, status: 'pending_approval' });
+      return json(res, 201, { status: 'pending_approval', item: publicItem(titem) });
     }
     if (!/^https?:\/\//.test(payload?.url ?? '')) return fail(400, 'invalid_link', 'That does not look like a valid link (http/https).', 'To nie wygląda na poprawny link (http/https).');
     const key = payload.deviceKey ?? null;
@@ -1338,6 +1348,11 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       } finally {
         viewerInFlight -= 1;
       }
+    }
+    const pub = path.match(/^\/api\/channels\/main\/catalog\/(search|meta\/.+)$/);
+    if (pub && req.method === 'GET') {
+      if (!s.settings.viewerCatalog) return coded(res, 404, 'not_found', 'Not found.');
+      return addonRoute(res, req, `/api/admin/addons/${pub[1]}`, url, null);
     }
     if (path === '/api/channels/main/requests' && req.method === 'POST') return viewerRequest(res, req, payload);
     if (path === '/api/channels/main/request-list' && req.method === 'POST') return viewerList(res, req, payload);

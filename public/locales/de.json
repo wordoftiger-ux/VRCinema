@@ -743,7 +743,7 @@
   "queue.add_label": "Link hinzufügen",
   "queue.suggest_label": "Passende Filme und Serien",
   "queue.suggest_none": "Keine Titel gefunden.",
-  "queue.add_placeholder": "Link zu Video oder Playlist…",
+  "queue.add_placeholder": "Link einfügen oder einen Titel zum Suchen eingeben…",
   "queue.added_count": {
     "one": "{count} Video hinzugefügt.",
     "other": "{count} Videos hinzugefügt."
@@ -1478,6 +1478,10 @@
   "viewer.limit_minutes": "{n} min",
   "viewer.link_label": "Link zum Video",
   "viewer.link_placeholder": "Link zu einem Video einfügen…",
+  "viewer.mode_link": "Link",
+  "viewer.mode_film": "Film suchen",
+  "viewer.title_sent": "Gesendet. Der Host wählt eine Quelle aus.",
+  "viewer.title_button": "Senden",
   "viewer.live_stream": "Livestream",
   "viewer.moderation": "Der Betreiber des Kanals gibt Wünsche frei, bevor sie laufen.",
   "viewer.nick_hint": "Optional. Wird neben den damit hinzugefügten Videos angezeigt.",
