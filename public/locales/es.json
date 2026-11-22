@@ -744,6 +744,8 @@
   "preview.unavailable": "“En emisión” no disponible",
   "queue.add_button": "Agregar",
   "queue.add_label": "Agregar un enlace",
+  "queue.suggest_label": "Películas y series que coinciden",
+  "queue.suggest_none": "No se encontraron títulos.",
   "queue.add_placeholder": "Pegue el enlace de un video o una lista…",
   "queue.added_count": {
     "one": "Se agregó {count} video.",

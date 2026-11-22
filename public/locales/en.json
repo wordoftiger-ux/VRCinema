@@ -741,6 +741,8 @@
   "preview.unavailable": "On air unavailable",
   "queue.add_button": "Add",
   "queue.add_label": "Add a link",
+  "queue.suggest_label": "Matching films and series",
+  "queue.suggest_none": "No titles found.",
   "queue.add_placeholder": "Paste a link to a video or playlist…",
   "queue.added_count": {
     "one": "Added {count} video.",

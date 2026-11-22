@@ -741,6 +741,8 @@
   "preview.unavailable": "„Auf Sendung“ nicht verfügbar",
   "queue.add_button": "Hinzufügen",
   "queue.add_label": "Link hinzufügen",
+  "queue.suggest_label": "Passende Filme und Serien",
+  "queue.suggest_none": "Keine Titel gefunden.",
   "queue.add_placeholder": "Link zu Video oder Playlist…",
   "queue.added_count": {
     "one": "{count} Video hinzugefügt.",

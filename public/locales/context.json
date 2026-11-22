@@ -732,6 +732,8 @@
   "preview.unavailable": "New interface: message over the On air screen when the stream could not be played after several tries.",
   "queue.add_button": "New interface, Channel view: button next to the link field (the same as pressing Enter).",
   "queue.add_label": "New interface, Channel view: screen-reader label of the field where the owner pastes a link.",
+  "queue.suggest_label": "New interface, Channel view: screen-reader label of the dropdown list of titles (films and series) that appears under the link field while the owner types a title.",
+  "queue.suggest_none": "Shown in that dropdown when the typed text matches no film or series.",
   "queue.add_placeholder": "New interface, Channel view: placeholder of the link field. Keep the three dots.",
   "queue.added_count": "New interface: short message after several videos were added at once (a playlist or dropped files).",
   "queue.added_one": "New interface: short message after one link was added; {title} is the video title.",

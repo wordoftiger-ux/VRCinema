@@ -744,6 +744,8 @@
   "preview.unavailable": "« À l’antenne » indisponible",
   "queue.add_button": "Ajouter",
   "queue.add_label": "Ajouter un lien",
+  "queue.suggest_label": "Films et séries correspondants",
+  "queue.suggest_none": "Aucun titre trouvé.",
   "queue.add_placeholder": "Collez un lien vers une vidéo ou une playlist…",
   "queue.added_count": {
     "one": "{count} vidéo ajoutée.",

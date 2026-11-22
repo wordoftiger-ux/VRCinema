@@ -738,6 +738,8 @@
   "preview.unavailable": "「放送中」を表示できません",
   "queue.add_button": "追加",
   "queue.add_label": "リンクを追加",
+  "queue.suggest_label": "一致する映画とシリーズ",
+  "queue.suggest_none": "タイトルが見つかりませんでした。",
   "queue.add_placeholder": "動画または再生リストのリンクを貼り付け…",
   "queue.added_count": {
     "other": "{count}本の動画を追加しました。"

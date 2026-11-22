@@ -747,6 +747,8 @@
   "preview.unavailable": "„Na antenie” niedostępne",
   "queue.add_button": "Dodaj",
   "queue.add_label": "Dodaj link",
+  "queue.suggest_label": "Pasujące filmy i seriale",
+  "queue.suggest_none": "Nie znaleziono tytułów.",
   "queue.add_placeholder": "Wklej link do filmu lub playlisty…",
   "queue.added_count": {
     "one": "Dodano {count} film.",

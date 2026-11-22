@@ -104,12 +104,50 @@ try {
   const itemId = await page.$eval('.qi-request', (e) => e.dataset.id);
   await page.screenshot({ path: join(shots, 'addons-approvals-en.png') });
 
+  // ---------- The link field: quick title search ----------
+  let m = await mark();
+  await page.click('.addf-input');
+  await page.keyboard.type('exa');
+  await page.waitForSelector('.addf-opt');
+  await waitFor(async () => (await count(page, '.addf-opt')) === 2, 'the dropdown lists the titles');
+  check((await count(page, '.addf-opt')) <= 6, 'the dropdown shows at most 6 rows');
+  check((await since(m)).filter((r) => r.path === '/api/admin/addons/search').length === 1, 'one search request after the pause, not one per letter');
+  check((await page.getAttribute('.addf-input', 'role')) === 'combobox' && (await count(page, '[role="listbox"] [role="option"]')) === 2, 'combobox + listbox + options');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  check((await page.getAttribute('.addf-input', 'aria-activedescendant')) === 'addf-opt-1', 'aria-activedescendant follows the arrows');
+  await page.screenshot({ path: join(shots, 'addons-linkfield-en.png') });
+  await page.keyboard.press('Escape');
+  check((await count(page, '.addf-opt')) === 0, 'Esc closes the dropdown');
+  await page.fill('.addf-input', '');
+  await page.keyboard.type('zzz');
+  await page.waitForSelector('.addf-none');
+  check((await text(page, '.addf-none')) === 'No titles found.', 'text with no match says so');
+  await page.fill('.addf-input', '');
+  await page.keyboard.type('exa');
+  await page.waitForSelector('.addf-opt');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  await waitFor(async () => (await hash(page)) === '#/search/series/tt2', 'Enter on a highlighted row opens the title');
+  await page.evaluate(() => (location.hash = '#/channel'));
+  await page.waitForSelector('.addf-input');
+  check((await page.inputValue('.addf-input')) === '', 'the field was cleared');
+  await page.click('.addf-input');
+  m = await mark();
+  await page.keyboard.type('https://x');
+  await sleep(700);
+  check((await count(page, '.addf-list')) === 0, 'a link shows no dropdown');
+  check((await since(m)).filter((r) => r.path === '/api/admin/addons/search').length === 0, 'and asks no addon');
+  await page.keyboard.press('Enter');
+  await waitFor(async () => (await since(m)).some((r) => r.method === 'POST' && r.path.endsWith('/items')), 'Enter on a link still adds it');
+
   // ---------- Search ----------
   await page.click('.rail-search');
   await page.waitForSelector('.sr-input');
   check(await page.evaluate(() => document.activeElement?.classList.contains('sr-input')), 'the search field has the focus');
   check((await text(page, '.sr-hint')) === 'Type at least two letters.', 'a hint asks for two letters');
-  let m = await mark();
+  m = await mark();
   await page.keyboard.type('exa');
   await page.waitForSelector('.sr-card');
   await waitFor(async () => (await count(page, '.sr-card')) === 2, 'two results');
