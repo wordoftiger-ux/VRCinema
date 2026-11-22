@@ -14,6 +14,7 @@ mod routes_queue;
 mod routes_slates;
 mod routes_stream;
 mod routes_thumbs;
+mod routes_torrent;
 mod routes_uploads;
 mod viewer_lists;
 
@@ -160,6 +161,9 @@ pub struct AppState {
     pub(crate) thumbs: Option<Arc<routes_thumbs::ThumbCache>>,
     /// Asks the Stremio-compatible addons (the app uses the network, tests a fake).
     pub(crate) addons: Arc<crate::addons::AddonClient>,
+    /// Torrents: the settings, the lazily created manager and the stream route's token. The
+    /// channel reaches the manager through [`crate::torrent::hub::TorrentHub::manager_if_running`].
+    pub torrents: Arc<crate::torrent::hub::TorrentHub>,
 }
 
 impl AppState {
@@ -233,6 +237,9 @@ impl AppState {
             loading: Default::default(),
             thumbs: None,
             addons: Arc::new(crate::addons::AddonClient::new(Arc::new(NoAddonNetwork))),
+            torrents: crate::torrent::hub::TorrentHub::new(
+                &std::env::temp_dir().join("vrcinema-torrents-unused"),
+            ),
             air_viewers: Arc::default(),
             alarms: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
@@ -248,6 +255,15 @@ impl AppState {
             )),
             log: Arc::new(|_| {}),
         })
+    }
+
+    /// The torrent hub (it takes the stored settings: turned off by default).
+    pub fn with_torrents(mut self, torrents: Arc<crate::torrent::hub::TorrentHub>) -> Self {
+        if let Ok(s) = self.settings() {
+            torrents.set_settings(&s.torrent);
+        }
+        self.torrents = torrents;
+        self
     }
 
     /// Replaces the addon client (the app gives it the network).
@@ -1349,6 +1365,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(routes_nick_pin::router())
         .merge(routes_uploads::router())
         .merge(routes_stream::router())
+        .merge(routes_torrent::router())
         .merge(admin)
         .merge(desktop)
         .route("/static/{*path}", get(static_file))

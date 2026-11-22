@@ -194,6 +194,7 @@ fn build_resolver(
     fake: Option<&Path>,
     live: &LiveSettings,
     log: &SharedLogFn,
+    torrents: &Arc<crate::torrent::hub::TorrentHub>,
 ) -> anyhow::Result<Arc<dyn MediaResolver>> {
     if let Some(path) = fake {
         log(Msg::new("log.fake_resolver").arg("path", path.display()));
@@ -242,6 +243,9 @@ fn build_resolver(
             .with_upload(Box::new(crate::uploads::UploadResolver::new(
                 config.data_dir.join(crate::uploads::UPLOADS_DIR),
                 file_probe(ffprobe.clone()),
+            )))
+            .with_torrent(Box::new(crate::resolver::torrent::TorrentResolver::new(
+                Arc::clone(torrents),
             )))
             .with_file(Box::new(FileResolver::new(file_probe(ffprobe)))),
     ))
@@ -493,6 +497,10 @@ pub async fn run(
             shared_log(Msg::new("log.media_dir_missing").arg("path", r.path.display()));
         }
     }
+    // Torrents (off until the owner turns them on) live in the data folder; the stream route
+    // is on this listener.
+    let torrents = crate::torrent::hub::TorrentHub::new(&config.data_dir);
+    torrents.set_port(listener.local_addr()?.port());
     let resolver = build_resolver(
         &config,
         &root,
@@ -500,6 +508,7 @@ pub async fn run(
         fake_resolver.as_deref(),
         &live,
         &shared_log,
+        &torrents,
     )?;
 
     let clips_dir = config.data_dir.join("clips");
@@ -650,6 +659,7 @@ pub async fn run(
         .with_addons(Arc::new(crate::addons::AddonClient::new(Arc::new(
             crate::addons::ReqwestAddonHttp::new()?,
         ))))
+        .with_torrents(torrents)
         .with_ctl_token(&ctl_token);
         if let Some(configure) = configure_state {
             state = configure(state);

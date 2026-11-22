@@ -6,6 +6,7 @@ pub mod fake;
 pub mod file;
 pub mod local;
 pub mod pixeldrain;
+pub mod torrent;
 pub mod types;
 pub mod ytdlp;
 
@@ -127,6 +128,8 @@ pub struct CompositeResolver {
     pub file: Option<Box<dyn MediaResolver>>,
     /// Files viewers sent (`upload:`), see [`crate::uploads`].
     pub upload: Option<Box<dyn MediaResolver>>,
+    /// Magnet links (`magnet:`), see [`torrent`].
+    pub torrent: Option<Box<dyn MediaResolver>>,
 }
 
 impl CompositeResolver {
@@ -141,6 +144,7 @@ impl CompositeResolver {
             local,
             file: None,
             upload: None,
+            torrent: None,
         }
     }
 
@@ -154,6 +158,11 @@ impl CompositeResolver {
         self
     }
 
+    pub fn with_torrent(mut self, torrent: Box<dyn MediaResolver>) -> Self {
+        self.torrent = Some(torrent);
+        self
+    }
+
     fn pick(&self, url: &str) -> Result<&dyn MediaResolver, ResolveError> {
         // A live capture of this computer is no link: only the clip factory opens it.
         if crate::capture::is_capture_source(url) {
@@ -162,6 +171,12 @@ impl CompositeResolver {
         // A viewer's title request has no source until the owner chooses one.
         if crate::addons::parse_title_source(url).is_some() {
             return Err(ResolveError::coded("title_needs_source"));
+        }
+        if torrent::is_magnet(url) {
+            return self
+                .torrent
+                .as_deref()
+                .ok_or_else(|| ResolveError::coded("torrents_disabled"));
         }
         if crate::uploads::is_upload_source(url) {
             return self

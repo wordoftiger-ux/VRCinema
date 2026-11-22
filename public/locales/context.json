@@ -38,6 +38,8 @@
   "errors.torrent_no_video": "API error (panel or app window notice). The chosen torrent contains no video file (or the addon's file index is not in it).",
   "errors.torrent_failed": "API error (panel or app window notice). Generic torrent download failure; the library's technical reason follows after a colon.",
   "errors.torrent_not_active": "API error (panel or app window notice). The film's torrent is not downloading (not started yet, waiting for disk space, or removed), so it cannot be read.",
+  "errors.torrents_disabled": "API error (panel or app window notice). The owner tried to add a magnet link while torrents are turned off in Settings.",
+  "errors.torrent_bad_magnet": "API error (panel or app window notice, also when a stream from an addon is started). The magnet link is malformed (no valid info hash).",
   "errors.app_closing": "API error (panel, request page or app window notice). The app window asked for something while the app shuts down.",
   "errors.archive_lacks_file": "Error text (shown in the app window and written to the log). Tools install; {file} is a file name inside the archive.",
   "errors.autostart_failed": "API error (panel, request page or app window notice). Settings: switching \"start with Windows\" failed; {detail} is the system error.",

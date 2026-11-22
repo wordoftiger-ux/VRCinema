@@ -19,6 +19,8 @@ use tokio::time::Instant;
 use crate::i18n::Msg;
 
 pub mod backend_rqbit;
+pub mod hub;
+pub mod settings;
 
 #[cfg(test)]
 mod tests;

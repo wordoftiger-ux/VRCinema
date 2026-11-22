@@ -363,6 +363,8 @@ pub struct StreamOption {
     pub url: String,
     pub name: String,
     pub title: String,
+    /// A magnet link (a torrent stream), played by the in-process torrent client.
+    pub torrent: bool,
 }
 
 /// `releaseInfo` ("2011-2019"), else `year` (string or number).
@@ -429,7 +431,32 @@ fn parse_meta(v: &Value, type_: &str, id: &str) -> Option<MetaInfo> {
     })
 }
 
-fn parse_streams(v: &Value) -> Result<Vec<StreamOption>, AddonError> {
+/// The magnet of a stream with an `infoHash` (`None`: the hash is not a valid one).
+fn magnet_of(s: &Value, title: &str) -> Option<String> {
+    let hash = text(s, "infoHash")?;
+    let idx = number(s, &["fileIdx"]).map(|n| n as usize);
+    let name = text(s, "name").unwrap_or_default();
+    let sources: Vec<String> = s
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let label = title
+        .lines()
+        .next()
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or(&name);
+    let link = crate::torrent::magnet_from_stream(&hash, idx, label, &sources);
+    crate::torrent::parse_magnet(&link)?;
+    Some(link)
+}
+
+/// `torrents`: keep the streams with an `infoHash` as magnet links (otherwise they are dropped).
+fn parse_streams(v: &Value, torrents: bool) -> Result<Vec<StreamOption>, AddonError> {
     let list = v
         .get("streams")
         .and_then(Value::as_array)
@@ -437,17 +464,24 @@ fn parse_streams(v: &Value) -> Result<Vec<StreamOption>, AddonError> {
     Ok(list
         .iter()
         .filter_map(|s| {
+            let title = text(s, "title")
+                .or_else(|| text(s, "description"))
+                .unwrap_or_default();
+            let mut torrent = false;
             let url = match text(s, "url") {
                 Some(u) if u.starts_with("http://") || u.starts_with("https://") => u,
                 Some(_) => return None,
+                None if torrents && text(s, "infoHash").is_some() => {
+                    torrent = true;
+                    magnet_of(s, &title)?
+                }
                 None => format!("https://www.youtube.com/watch?v={}", text(s, "ytId")?),
             };
             Some(StreamOption {
                 url,
                 name: text(s, "name").unwrap_or_default(),
-                title: text(s, "title")
-                    .or_else(|| text(s, "description"))
-                    .unwrap_or_default(),
+                title,
+                torrent,
             })
         })
         .collect())
@@ -586,6 +620,7 @@ impl AddonClient {
         manifest_url: &str,
         type_: &str,
         id: &str,
+        torrents: bool,
     ) -> Result<Vec<StreamOption>, AddonError> {
         let url = format!(
             "{}/stream/{}/{}.json",
@@ -593,7 +628,7 @@ impl AddonClient {
             encode(type_, ""),
             encode(id, ":")
         );
-        parse_streams(&self.http.get_json(&url, STREAMS_TIMEOUT).await?)
+        parse_streams(&self.http.get_json(&url, STREAMS_TIMEOUT).await?, torrents)
     }
 }
 

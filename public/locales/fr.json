@@ -42,6 +42,8 @@
   "errors.torrent_no_video": "Le torrent ne contient aucun fichier vidéo à lire.",
   "errors.torrent_failed": "Le téléchargement du torrent a échoué.",
   "errors.torrent_not_active": "Ce torrent n’est pas en cours de téléchargement.",
+  "errors.torrents_disabled": "Les torrents sont désactivés. Active-les d’abord dans les Réglages.",
+  "errors.torrent_bad_magnet": "Ce n’est pas un lien magnet valide.",
   "errors.app_closing": "L’application est en cours de fermeture.",
   "errors.archive_lacks_file": "L’archive téléchargée ne contient pas {file}.",
   "errors.autostart_failed": "Impossible de modifier le démarrage avec Windows : {detail}",

@@ -239,7 +239,7 @@ async fn search_and_streams_only_use_enabled_addons() {
     let r = h.send(get(&one).cookie(&cookie)).await;
     assert_eq!(
         r.json(),
-        json!({"streams": [{"url": "https://cdn.example/a.mp4", "name": "Fast", "title": "1080p"}]})
+        json!({"streams": [{"url": "https://cdn.example/a.mp4", "name": "Fast", "title": "1080p", "torrent": false}]})
     );
     // A catalog addon has no sources to ask.
     let other = format!("/api/admin/addons/streams/movie/tt1?addon={cat}");
@@ -578,4 +578,55 @@ async fn approve_title_request_is_refused() {
     assert_eq!(r.status, StatusCode::CONFLICT);
     assert_eq!(r.json()["code"], "title_needs_source");
     assert_eq!(h.item(id).status, ItemStatus::PendingApproval);
+}
+
+#[tokio::test]
+async fn addon_streams_include_torrents_only_when_enabled() {
+    let n = net(false);
+    n.answers.lock().unwrap().insert(
+        "https://addons.example/streams/stream/movie/tt2.json".to_string(),
+        json!({"streams": [
+            {"url": "https://cdn.example/a.mp4", "name": "Web", "title": "web"},
+            {"infoHash": "0123456789abcdef0123456789abcdef01234567", "fileIdx": 2,
+             "name": "Tor", "title": "Film 1080p\nseeders 10",
+             "sources": ["tracker:udp://t.example:80", "dht:0123"]}
+        ]}),
+    );
+    let hub = crate::torrent::hub::TorrentHub::with_factory(
+        std::env::temp_dir().join("vrcinema-test-unused"),
+        Arc::new(|_, _, _| Box::pin(async { Err(Msg::error("torrent_session")) })),
+    );
+    let h = Harness::with_state(config(), {
+        let hub = Arc::clone(&hub);
+        move |s| {
+            s.with_addons(Arc::new(AddonClient::new(n)))
+                .with_torrents(hub)
+        }
+    });
+    let cookie = h.login().await;
+    let id = add(&h, &cookie, STREAMS_URL).await.json()["id"]
+        .as_i64()
+        .unwrap();
+    let url = format!("/api/admin/addons/streams/movie/tt2?addon={id}");
+
+    let off = h.send(get(&url).cookie(&cookie)).await.json();
+    assert_eq!(off["streams"].as_array().unwrap().len(), 1);
+    assert_eq!(off["streams"][0]["torrent"], false);
+
+    h.send(
+        call("PUT", "/api/admin/channels/main/settings")
+            .cookie(&cookie)
+            .json(json!({"torrentsEnabled": true})),
+    )
+    .await;
+    let on = h.send(get(&url).cookie(&cookie)).await.json();
+    let streams = on["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams[1]["torrent"], true);
+    let magnet = streams[1]["url"].as_str().unwrap();
+    let parsed = crate::torrent::parse_magnet(magnet).unwrap();
+    assert_eq!(parsed.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(parsed.file_idx, Some(2));
+    assert_eq!(parsed.trackers, vec!["udp://t.example:80"]);
+    assert_eq!(parsed.name.as_deref(), Some("Film 1080p"));
 }

@@ -185,6 +185,7 @@ fn loading_json(
     };
     let mut row = items_json(std::slice::from_ref(item), lang);
     super::routes_thumbs::add_thumbs(state, std::slice::from_ref(item), &mut row);
+    super::routes_torrent::add_torrent_status(state, std::slice::from_ref(item), &mut row);
     json!({
         "item": row.get(0).cloned().unwrap_or(Value::Null),
         "stage": stage.as_str(),
@@ -223,6 +224,7 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     let listed = |items: &[QueueItem]| {
         let mut json = items_json(items, lang);
         super::routes_thumbs::add_thumbs(&state, items, &mut json);
+        super::routes_torrent::add_torrent_status(&state, items, &mut json);
         json
     };
     body.insert(
@@ -257,15 +259,28 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     Ok(json_ok(&Value::Object(body)))
 }
 
+/// The link the owner typed: an http(s) address, or (with torrents on) a `magnet:` link, which
+/// is kept in its normal form.
+fn owner_link(state: &AppState, raw: Option<&str>) -> Result<String, ApiError> {
+    let raw = raw.map(str::trim).unwrap_or_default();
+    if crate::resolver::torrent::is_magnet(raw) {
+        if !state.torrents.enabled() {
+            return Err(ApiError::bad_request("torrents_disabled"));
+        }
+        return crate::torrent::parse_magnet(raw)
+            .map(|m| m.to_link())
+            .ok_or_else(|| ApiError::bad_request("invalid_link"));
+    }
+    parse_source_url(raw)
+        .map(String::from)
+        .ok_or_else(|| ApiError::bad_request("invalid_link"))
+}
+
 async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
-    let url = body
-        .get("url")
-        .and_then(Value::as_str)
-        .and_then(parse_source_url)
-        .ok_or_else(|| ApiError::bad_request("invalid_link"))?;
+    let url = owner_link(&state, body.get("url").and_then(Value::as_str))?;
     let meta = state
         .resolver
-        .fetch_meta(url.as_str())
+        .fetch_meta(&url)
         .await
         .map_err(|e| ApiError::bad_request("read_failed").with_msg_arg("reason", e.0))?;
     let new_item =
@@ -312,7 +327,7 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
     } else {
         let item = state.with_db(|c| {
             QueueRepo::new(c).add(&new_item(
-                url.to_string(),
+                url.clone(),
                 meta.title.clone(),
                 meta.duration_s,
                 meta.is_live,
@@ -914,6 +929,7 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
             updated.request_limit_count,
             Duration::from_secs(updated.request_limit_window_s),
         );
+    state.torrents.apply(&updated.torrent).await;
     if patch.slate_language.is_some() || !patch.slate_look.is_empty() {
         // A new slate language or look makes a new slate set at once (the app and the server
         // without a window alike).
@@ -940,14 +956,10 @@ async fn choose_source(
     {
         return Err(not_title_request());
     }
-    let url = body
-        .get("url")
-        .and_then(Value::as_str)
-        .and_then(parse_source_url)
-        .ok_or_else(|| ApiError::bad_request("invalid_link"))?;
+    let url = owner_link(&state, body.get("url").and_then(Value::as_str))?;
     let meta = state
         .resolver
-        .fetch_meta(url.as_str())
+        .fetch_meta(&url)
         .await
         .map_err(|e| ApiError::bad_request("fetch_failed").with_msg_arg("reason", e.0))?;
     if meta.is_playlist {
@@ -955,7 +967,7 @@ async fn choose_source(
     }
     // Only a row still waiting changes: it may have been rejected while the link was read.
     let changed = state.with_db(|c| {
-        QueueRepo::new(c).set_source_and_queue(id, url.as_str(), meta.duration_s, meta.is_live)
+        QueueRepo::new(c).set_source_and_queue(id, &url, meta.duration_s, meta.is_live)
     })?;
     if !changed {
         return Err(not_title_request());

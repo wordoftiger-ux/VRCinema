@@ -41,6 +41,8 @@
   "errors.torrent_no_video": "Der Torrent enthält keine Videodatei zum Abspielen.",
   "errors.torrent_failed": "Der Torrent-Download ist fehlgeschlagen.",
   "errors.torrent_not_active": "Dieser Torrent wird nicht heruntergeladen.",
+  "errors.torrents_disabled": "Torrents sind ausgeschaltet. Schalte sie zuerst in den Einstellungen ein.",
+  "errors.torrent_bad_magnet": "Das ist kein gültiger Magnet-Link.",
   "errors.app_closing": "Die App wird beendet.",
   "errors.archive_lacks_file": "Im heruntergeladenen Archiv fehlt {file}.",
   "errors.autostart_failed": "Der Start mit Windows konnte nicht geändert werden: {detail}",

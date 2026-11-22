@@ -241,7 +241,7 @@ async fn streams_keep_http_and_ytid_drop_torrent_only() {
     );
     let (c, _) = client(http);
     let s = c
-        .streams("https://s.example/manifest.json", "movie", "tt1")
+        .streams("https://s.example/manifest.json", "movie", "tt1", false)
         .await
         .unwrap();
     assert_eq!(s.len(), 2);
@@ -257,7 +257,7 @@ async fn streams_bad_addon_is_an_error_not_a_panic() {
     );
     let (c, _) = client(http);
     let e = c
-        .streams("https://s.example/manifest.json", "movie", "tt1")
+        .streams("https://s.example/manifest.json", "movie", "tt1", false)
         .await
         .unwrap_err();
     assert_eq!(code(&e), "addon_invalid");

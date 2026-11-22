@@ -42,6 +42,7 @@ mod capture;
 mod ctl;
 mod lists;
 mod nick_pin;
+mod torrent;
 mod uploads;
 
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;

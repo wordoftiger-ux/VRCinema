@@ -424,6 +424,9 @@ fn settings_serialize_with_camel_case_keys() {
         ("oscPort", json!(9000)),
         ("oscTemplate", json!("▶ {title} — {added}")),
         ("oscRepeatS", json!(0)),
+        ("torrentsEnabled", json!(false)),
+        ("torrentUploadKbps", json!(200)),
+        ("torrentDiskCapGb", json!(50)),
     ] {
         let got = rest.as_object_mut().unwrap().remove(key);
         assert_eq!(got, Some(expected), "{key}");
@@ -527,6 +530,9 @@ fn settings_serialize_with_camel_case_keys() {
             "oscPort",
             "oscTemplate",
             "oscRepeatS",
+            "torrentsEnabled",
+            "torrentUploadKbps",
+            "torrentDiskCapGb",
             "audioVisual"
         ]
     );

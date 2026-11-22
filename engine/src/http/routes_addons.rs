@@ -314,14 +314,15 @@ async fn streams(
         .iter()
         .find(|a| a.id == wanted)
         .ok_or_else(not_found)?;
+    let torrents = state.settings()?.torrent.torrents_enabled;
     let found = state
         .addons
-        .streams(&addon.manifest_url, &type_, &id)
+        .streams(&addon.manifest_url, &type_, &id, torrents)
         .await
         .map_err(addon_error)?;
     Ok(json_ok(&json!({
         "streams": found.iter().map(|s| json!({
-            "url": s.url, "name": s.name, "title": s.title,
+            "url": s.url, "name": s.name, "title": s.title, "torrent": s.torrent,
         })).collect::<Vec<_>>(),
     })))
 }

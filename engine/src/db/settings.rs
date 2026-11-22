@@ -80,6 +80,9 @@ pub struct ChannelSettings {
     /// Settings → Channel → VRChat: the film on air in the owner's chatbox (`oscEnabled`, ...).
     #[serde(flatten)]
     pub osc: crate::osc::OscSettings,
+    /// Magnet links and torrent streams from addons (`torrentsEnabled`, ...).
+    #[serde(flatten)]
+    pub torrent: crate::torrent::settings::TorrentSettings,
     /// The picture of audio-only sources (`audioVisual`).
     #[serde(flatten)]
     pub audio: AudioSettings,
@@ -114,6 +117,7 @@ impl Default for ChannelSettings {
             slate_look: SlateLookSettings::default(),
             uploads: UploadSettings::default(),
             osc: crate::osc::OscSettings::default(),
+            torrent: Default::default(),
             audio: AudioSettings::default(),
         }
     }
@@ -163,6 +167,7 @@ pub struct SettingsPatch {
     pub slate_look: SlateLookPatch,
     pub uploads: UploadPatch,
     pub osc: crate::osc::OscPatch,
+    pub torrent: crate::torrent::settings::TorrentPatch,
     pub audio: AudioPatch,
 }
 
@@ -339,6 +344,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
                 .or_else(|| crate::pipeline::advanced::sanitize_key(key, value, &mut out.advanced))
                 .or_else(|| crate::uploads::sanitize_key(key, value, &mut out.uploads))
                 .or_else(|| crate::osc::sanitize_key(key, value, &mut out.osc))
+                .or_else(|| crate::torrent::settings::sanitize_key(key, value, &mut out.torrent))
                 .or_else(|| crate::pipeline::audio_visual::sanitize_key(key, value, &mut out.audio))
             {
                 Some(result) => result?,
@@ -469,6 +475,7 @@ impl<'a> SettingsRepo<'a> {
                     if !s.slate_look.read_stored(&key, &value)
                         && !s.uploads.read_stored(&key, &value)
                         && !s.osc.read_stored(&key, &value)
+                        && !s.torrent.read_stored(&key, &value)
                         && !s.audio.read_stored(&key, &value)
                     {
                         s.advanced.read_stored(&key, &value);
@@ -575,6 +582,9 @@ impl<'a> SettingsRepo<'a> {
                 stmt.execute(params![channel_id, key, value])?;
             }
             for (key, value) in patch.uploads.entries() {
+                stmt.execute(params![channel_id, key, value])?;
+            }
+            for (key, value) in patch.torrent.entries() {
                 stmt.execute(params![channel_id, key, value])?;
             }
             for (key, value) in patch.osc.entries() {
