@@ -423,6 +423,80 @@ async fn unknown_duration_plays_only_when_complete_if_probe_fails() {
     assert!(!files.exists());
 }
 
+/// A probe that fails (ffprobe needed parts of the file that had not arrived) is tried again:
+/// once it tells the length, the film starts as soon as the estimate allows, not when complete.
+#[tokio::test(start_paused = true)]
+async fn a_failed_length_probe_is_retried_and_the_film_starts_before_its_file_is_complete() {
+    use super::gate::{HubGate, PROBE_RETRY, ProbeFn, TorrentGate};
+    use super::hub::{ManagerFactory, TorrentHub};
+    use crate::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 100 * MB)]));
+    let made = Arc::clone(&fake);
+    let factory: ManagerFactory = Arc::new(move |root, kbps, gb| {
+        let fake = Arc::clone(&made);
+        Box::pin(async move { Ok(TorrentManager::new(fake, root, kbps, gb)) })
+    });
+    let hub = TorrentHub::with_factory(dir.path().join("torrents"), factory);
+    hub.set_settings(&settings::TorrentSettings {
+        torrents_enabled: true,
+        ..Default::default()
+    });
+    let calls = Arc::new(Mutex::new(0_u32));
+    let seen = Arc::clone(&calls);
+    let probe: ProbeFn = Arc::new(move |_| {
+        let mut n = seen.lock().unwrap();
+        *n += 1;
+        let first = *n == 1;
+        Box::pin(async move { if first { None } else { Some(2645.0) } })
+    });
+    let gate = HubGate::new(Arc::clone(&hub), probe);
+    let conn = open_database(Path::new(":memory:")).unwrap();
+    let item = QueueRepo::new(&conn)
+        .add(&NewItem {
+            channel_id: MAIN_CHANNEL_ID,
+            source_url: magnet(HASH).to_link(),
+            title: "f".into(),
+            duration_s: None,
+            is_live: false,
+            status: ItemStatus::Queued,
+            added_by: AddedBy::Admin,
+            requester_name: None,
+            requester_ip: None,
+            requester_key_hash: None,
+        })
+        .unwrap();
+
+    assert!(gate.ensure_started(&item));
+    settle().await;
+    let m = hub.manager_if_running().unwrap();
+    fake.set_progress(HASH, 10 * MB, 100 * MB);
+    m.sample().await;
+    assert_eq!(
+        gate.readiness(&item, None),
+        Readiness::Unknown,
+        "first probe"
+    );
+    settle().await;
+    // 30 s of samples at 1 MB/s: the first probe failed, so the wait is until complete.
+    for s in 1..=30 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        fake.set_progress(HASH, (10 + s) * MB, 100 * MB);
+        m.sample().await;
+    }
+    assert!(PROBE_RETRY <= Duration::from_secs(30));
+    // The retry is due: it runs and tells the length.
+    assert!(matches!(gate.readiness(&item, None), Readiness::WaitS(_)));
+    settle().await;
+    assert_eq!(*calls.lock().unwrap(), 2, "probed again");
+    assert_eq!(
+        gate.readiness(&item, None),
+        Readiness::Ready,
+        "60 MB left at 1 MB/s is well within 2645 s"
+    );
+}
+
 #[tokio::test]
 async fn a_torrent_with_an_unsafe_file_path_is_refused_before_it_is_added() {
     let dir = tempfile::tempdir().unwrap();

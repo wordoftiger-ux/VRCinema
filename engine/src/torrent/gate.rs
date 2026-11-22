@@ -17,6 +17,13 @@ use crate::resolver::torrent::is_magnet;
 /// file is in.
 pub const PROBE_AFTER_BYTES: u64 = 8 * 1024 * 1024;
 
+/// A probe that could not tell the length is tried again after this long (ffprobe may need
+/// parts of the file that had not arrived yet, e.g. a Matroska file's index at its end)...
+pub const PROBE_RETRY: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// ...this many times in all; after that the film plays only once its file is complete.
+pub const PROBE_TRIES: u32 = 6;
+
 /// A failed start is tried this many times in all before the item fails.
 pub const START_ATTEMPTS: u32 = 2;
 
@@ -42,8 +49,16 @@ pub trait TorrentGate: Send + Sync {
 pub type ProbeFn = Arc<dyn Fn(String) -> BoxFuture<'static, Option<f64>> + Send + Sync>;
 
 enum Probe {
-    Running,
-    Done(Option<f64>),
+    /// The `tries`-th probe runs.
+    Running {
+        tries: u32,
+    },
+    Done(f64),
+    /// The last of `tries` probes could not tell, at `at`.
+    Failed {
+        tries: u32,
+        at: tokio::time::Instant,
+    },
 }
 
 #[derive(Default)]
@@ -94,19 +109,28 @@ impl HubGate {
         })
     }
 
-    /// The probed length: `None` while not known yet (too little downloaded, or the probe
-    /// runs), `Some(None)` when ffprobe could not tell.
+    /// The probed length: `None` while not known yet (too little downloaded, or the first probe
+    /// runs), `Some(None)` while ffprobe could not tell (a failed probe is tried again every
+    /// [`PROBE_RETRY`], [`PROBE_TRIES`] times in all).
     fn probed(&self, hash: &str, status: &TorrentStatus) -> Option<Option<f64>> {
         let mut s = lock(&self.state);
-        match s.probes.get(hash) {
-            Some(Probe::Done(d)) => return Some(*d),
-            Some(Probe::Running) => return None,
-            None => {}
-        }
-        if status.downloaded < PROBE_AFTER_BYTES.min(status.total) {
-            return None;
-        }
-        s.probes.insert(hash.to_string(), Probe::Running);
+        let tries = match s.probes.get(hash) {
+            Some(Probe::Done(d)) => return Some(Some(*d)),
+            Some(Probe::Running { tries }) => return (*tries > 1).then_some(None),
+            Some(Probe::Failed { tries, at }) => {
+                if *tries >= PROBE_TRIES || at.elapsed() < PROBE_RETRY {
+                    return Some(None);
+                }
+                *tries + 1
+            }
+            None => {
+                if status.downloaded < PROBE_AFTER_BYTES.min(status.total) {
+                    return None;
+                }
+                1
+            }
+        };
+        s.probes.insert(hash.to_string(), Probe::Running { tries });
         drop(s);
         let probe = (self.probe)(self.hub.local_url(hash));
         let state = Arc::clone(&self.state);
@@ -114,13 +138,19 @@ impl HubGate {
         let spawned = spawn(async move {
             let d = probe.await.filter(|d| d.is_finite() && *d > 0.0);
             if let Some(p) = lock(&state).probes.get_mut(&key) {
-                *p = Probe::Done(d);
+                *p = match d {
+                    Some(d) => Probe::Done(d),
+                    None => Probe::Failed {
+                        tries,
+                        at: tokio::time::Instant::now(),
+                    },
+                };
             }
         });
         if !spawned {
             lock(&self.state).probes.remove(hash);
         }
-        None
+        (tries > 1).then_some(None)
     }
 
     /// Its start failed [`START_ATTEMPTS`] times.
