@@ -2,7 +2,7 @@
 // (the panel every second, the program's info every 3 s) and the owner's controls.
 
 import { signal, computed, batch } from '/static/vendor/signals.mjs';
-import { api, apiBlob, errorText } from './api.js';
+import { api, apiBlob, errorText, titleMeta } from './api.js';
 import { chosenLang, lang, loadLang, rememberLang } from './i18n.js';
 
 const PANEL = '/api/admin/channels/main';
@@ -481,6 +481,44 @@ export async function addLink(url) {
   } finally {
     refreshPanel();
   }
+}
+
+// ---------- Titles from the addons ----------
+
+/** Adds `url` to the queue and puts it first in line: resolves to `{added, title}`, throws `ApiError`. */
+export async function addLinkNext(url) {
+  const before = new Set(queue.value.map((i) => i.id));
+  const added = await addLink(url);
+  await refreshPanel();
+  const item = queue.value.filter((i) => !before.has(i.id)).at(-1);
+  if (item) await api('POST', `${PANEL}/play-next`, { itemId: item.id });
+  refreshPanel();
+  return added;
+}
+
+/** Gives a viewer's title request (an item waiting for approval) its source: it joins the queue. */
+export async function chooseSource(itemId, url) {
+  try {
+    return await api('POST', `${PANEL}/items/${itemId}/source`, { url }, { timeoutMs: 60000 });
+  } finally {
+    refreshPanel();
+  }
+}
+
+const metas = new Map();
+/** The details of a title, read once (a series id may carry the episode: `tt2:1:2`); null when unknown. */
+export function titleDetails(type, id) {
+  const key = `${type}/${id}`;
+  if (!metas.has(key)) {
+    metas.set(
+      key,
+      titleMeta(type, String(id).split(':')[0]).catch(() => {
+        metas.delete(key);
+        return null;
+      }),
+    );
+  }
+  return metas.get(key);
 }
 
 // ---------- Live capture of this computer (the window only) ----------

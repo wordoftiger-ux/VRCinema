@@ -34,6 +34,7 @@ import { DropZone } from './components/dropzone.js';
 import { pasteLink } from './components/addlink.js';
 import { ChannelView } from './views/channel.js';
 import { HistoryView } from './views/history.js';
+import { SearchView } from './views/search.js';
 import { ShareView } from './views/share.js';
 import { SettingsView } from './views/settings.js';
 import { toggleStats } from './components/stats.js';
@@ -116,11 +117,13 @@ function GuardedView() {
 
 function View() {
   const { view, section } = route.value;
+  if (view === 'search') return html`<${SearchView} />`;
   if (view === 'history') return html`<${HistoryView} />`;
   if (view === 'share') return html`<${ShareView} />`;
   if (view === 'settings') return html`<${SettingsView} />`;
   const titleKey = {
     channel: 'nav.channel',
+    search: 'nav.search',
     history: 'nav.history',
     share: 'nav.share',
     settings: 'nav.settings',

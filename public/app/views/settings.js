@@ -8,6 +8,7 @@ import { Guard } from '../components/guard.js';
 import { General } from './settings/general.js';
 import { Internet } from './settings/internet.js';
 import { ChannelSettings } from './settings/channel.js';
+import { Addons } from './settings/addons.js';
 import { Obs } from './settings/obs.js';
 import { Tools } from './settings/tools.js';
 import { Remote } from './settings/remote.js';
@@ -19,6 +20,7 @@ const SECTIONS = {
   general: { key: 'settings.nav.general', Section: General },
   internet: { key: 'settings.nav.internet', Section: Internet },
   channel: { key: 'settings.nav.channel', Section: ChannelSettings },
+  addons: { key: 'settings.nav.addons', Section: Addons },
   obs: { key: 'settings.nav.obs', Section: Obs },
   tools: { key: 'settings.nav.tools', Section: Tools },
   remote: { key: 'settings.nav.remote', Section: Remote },

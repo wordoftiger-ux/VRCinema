@@ -4,6 +4,7 @@ import { html } from './html.js';
 
 const PATHS = {
   channel: 'M8 5.5v13l10.5-6.5z',
+  search: 'M10 3a7 7 0 0 1 5.6 11.2l5.1 5.1-1.4 1.4-5.1-5.1A7 7 0 1 1 10 3zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10z',
   history: 'M12 4a8 8 0 1 1-7.4 5h2.2A6 6 0 1 0 12 6v3L7.5 5 12 1zM11 8h2v4.6l3.2 1.9-1 1.7L11 13.7z',
   share: 'M12 2.5l5 5-1.4 1.4L13 6.3V15h-2V6.3L8.4 8.9 7 7.5zM5 13h2v6h10v-6h2v8H5z',
   settings:

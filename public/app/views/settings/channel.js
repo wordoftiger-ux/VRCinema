@@ -261,6 +261,9 @@ export function ChannelSettings() {
       <${Block} title=${t('settings.channel.moderation_block')}>
         ${toggle('moderation', t('settings.channel.moderation'), t('settings.channel.moderation_hint'), t('settings.channel.moderation_on'), t('settings.channel.moderation_off'))}
       <//>
+      <${Block} title=${t('settings.channel.viewer_catalog_block')}>
+        ${toggle('viewerCatalog', t('settings.channel.viewer_catalog'), t('settings.channel.viewer_catalog_hint'), t('settings.channel.viewer_catalog_on'), t('settings.channel.viewer_catalog_off'))}
+      <//>
       <${ViewerLists} settings=${settings} say=${say} />
       <${ViewerUploads} settings=${settings} say=${say} />
       <${Block} title=${t('settings.channel.stream')}>

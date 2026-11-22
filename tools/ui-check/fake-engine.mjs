@@ -23,6 +23,7 @@
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
 // Nick PIN: POST /api/channels/main/nick/protect and …/nick/adopt (scenario viewerPins, viewerCodes), POST /api/admin/nicks/{skeleton}/reset-pin.
 // Viewer lists: POST /api/channels/main/request-list (settings viewerLists / viewerListMax, scenario listDelayMs), the panel's pendingLists and POST /api/admin/channels/main/lists/{id}.
+// Addons (Stremio-compatible): GET/POST /api/admin/addons, POST/DELETE …/addons/{id} ({enabled, move}), GET …/addons/search?q=, …/addons/meta/{type}/{id}, …/addons/streams/{type}/{id}[?addon=] (addon 4 answers 502, addon 3 is slow), POST /api/admin/channels/main/items/{id}/source (choose the source of a title request); scenario `titleRequest: true` adds a pending `title:movie:tt1` item.
 // GET /__test/stats: {maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight}; GET /__test/hang never answers.
 // The producer's monitor (window only, 403 for a remote session or without a window; requests
 // record their query as `search`; maxMonitorInFlight counts the reads without `from`): GET
@@ -194,6 +195,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     tickerMessages: ['Welcome to the Friday show!'],
     viewerLists: false,
     viewerListMax: 10,
+    viewerCatalog: true,
     viewerUploads: false,
     viewerUploadMaxMb: 50,
     viewerUploadMaxS: 600,
@@ -226,6 +228,98 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     { name: 'deno', installed: true, version: '2.0.0', installedAt: 0 },
     { name: 'cloudflared', installed: true, version: '2025.9.0', installedAt: 0 },
   ];
+
+  const addon = (id, name, provides, extra = {}) => ({
+    id,
+    url: `https://addons.example/${id}/manifest.json`,
+    name,
+    version: '1.0.0',
+    description: `${name}: an example addon`,
+    logo: null,
+    enabled: true,
+    provides: { catalogSearch: false, meta: false, stream: false, ...provides },
+    types: ['movie', 'series'],
+    ...extra,
+  });
+  const initialAddons = () => [
+    addon(1, 'Example Catalog', { catalogSearch: true, meta: true }),
+    addon(2, 'Example Streams', { stream: true }),
+    addon(3, 'Example Streams Two', { stream: true }),
+    addon(4, 'Example Streams Broken', { stream: true }),
+  ];
+  const EXAMPLE_TITLES = {
+    tt1: { type: 'movie', id: 'tt1', name: 'Example Film', year: '2020', poster: 'https://addons.example/poster/tt1.jpg', background: null, description: 'An example film for the checks.', runtime: '1h 30min', videos: [] },
+    tt2: {
+      type: 'series', id: 'tt2', name: 'Example Show', year: '2019', poster: null, background: null, description: 'An example show.', runtime: '45min',
+      videos: [
+        { id: 'tt2:1:1', season: 1, episode: 1, title: 'Pilot', released: '2019-01-05T00:00:00.000Z' },
+        { id: 'tt2:1:2', season: 1, episode: 2, title: 'Second', released: '2019-01-12T00:00:00.000Z' },
+        { id: 'tt2:2:1', season: 2, episode: 1, title: 'Return', released: '2020-01-05T00:00:00.000Z' },
+      ],
+    },
+  };
+
+  // The addon routes of the panel (answers undefined for a path that is none of them).
+  function addonRoute(res, req, path, url, payload) {
+    const list = path.match(/^\/api\/admin\/addons(?:\/(.*))?$/);
+    if (!list) return undefined;
+    const rest = list[1];
+    const found = (id) => s.addons.find((a) => a.id === Number(id));
+    if (rest === undefined) {
+      if (req.method === 'GET') return json(res, 200, s.addons);
+      if (req.method !== 'POST') return json(res, 404, { error: 'Not Found' });
+      const u = String(payload?.url ?? '').trim().replace(/^stremio:\/\//, 'https://');
+      if (!/^https?:\/\/\S+\/manifest\.json$/.test(u)) return coded(res, 400, 'addon_invalid', 'The address is not a valid addon.');
+      if (s.addons.some((a) => a.url === u)) return coded(res, 409, 'addon_exists', 'This addon is already in the list.');
+      if (u.includes('unreachable')) return coded(res, 502, 'addon_unreachable', 'The addon did not answer.');
+      const id = Math.max(0, ...s.addons.map((a) => a.id)) + 1;
+      s.addons.push({ ...addon(id, 'Example Added', { catalogSearch: true, stream: true }), url: u });
+      return json(res, 200, s.addons.at(-1));
+    }
+    if (rest.startsWith('search') && req.method === 'GET') {
+      const q = (url.searchParams.get('q') ?? '').toLowerCase();
+      if ([...q].length < 2 || !s.addons.some((a) => a.enabled && a.provides.catalogSearch)) return json(res, 200, []);
+      return json(res, 200, Object.values(EXAMPLE_TITLES).filter((m) => m.name.toLowerCase().includes(q)).map(({ type, id, name, year, poster }) => ({ type, id, name, year, poster })));
+    }
+    const meta = rest.match(/^meta\/(movie|series)\/([^/]+)$/);
+    if (meta && req.method === 'GET') {
+      const m = EXAMPLE_TITLES[decodeURIComponent(meta[2])];
+      if (!m || m.type !== meta[1]) return coded(res, 404, 'addon_no_meta', 'No addon has details for this title.');
+      return json(res, 200, m);
+    }
+    const streams = rest.match(/^streams\/(movie|series)\/([^/]+)$/);
+    if (streams && req.method === 'GET') {
+      const id = decodeURIComponent(streams[2]);
+      const which = url.searchParams.get('addon');
+      const active = s.addons.filter((a) => a.enabled && a.provides.stream);
+      if (which === null) return json(res, 200, { addons: active.map(({ id: aid, name }) => ({ id: aid, name })) });
+      const a = active.find((x) => x.id === Number(which));
+      if (!a) return coded(res, 404, 'addon_not_found', 'That addon is not in the list.');
+      if (a.id === 4) return coded(res, 502, 'addon_unreachable', 'The addon did not answer.');
+      const reply = { streams: [{ url: `https://addons.example/s/${a.id}/${id.replace(/:/g, '-')}.m3u8`, name: `${a.name}\n1080p`, title: `${id}\nsecond line` }] };
+      if (a.id === 3) return sleep(500).then(() => json(res, 200, reply));
+      return json(res, 200, reply);
+    }
+    const one = rest.match(/^(\d+)$/);
+    if (one) {
+      const a = found(one[1]);
+      if (!a) return coded(res, 404, 'addon_not_found', 'That addon is not in the list.');
+      if (req.method === 'DELETE') {
+        s.addons = s.addons.filter((x) => x !== a);
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === 'POST') {
+        if (typeof payload?.enabled === 'boolean') a.enabled = payload.enabled;
+        if (payload?.move) {
+          const i = s.addons.indexOf(a);
+          const j = payload.move === 'up' ? i - 1 : i + 1;
+          if (j >= 0 && j < s.addons.length) [s.addons[i], s.addons[j]] = [s.addons[j], s.addons[i]];
+        }
+        return json(res, 200, a);
+      }
+    }
+    return json(res, 404, { error: 'Not Found' });
+  }
 
   function reset() {
     liveStartedAt = null;
@@ -312,6 +406,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     s.toolsJob = null;
     s.pendingItems = [];
     s.pendingLists = [];
+    s.addons = initialAddons();
     nextId = 100;
     maxPanelInFlight = 0;
     maxViewerInFlight = 0;
@@ -1212,6 +1307,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       const change = await body(req);
       Object.assign(s, change);
       if ('pending' in change) s.pendingItems = pendingList(change.pending);
+      if (change.titleRequest) {
+        s.pendingItems.push(queued(nextId++, 'Example Film (2020)', { status: 'pending_approval', requesterName: 'Bartek', requesterBadge: { hue: 300, shape: 7 }, sourceUrl: 'title:movie:tt1', durationS: null, titleRequest: { type: 'movie', id: 'tt1' } }));
+      }
       if ('settingsPatch' in change) Object.assign(s.settings, change.settingsPatch);
       if ('viewerStateDelayMs' in change) maxViewerInFlight = viewerInFlight;
       return json(res, 200, { ...s, queue: undefined, pendingItems: undefined });
@@ -1394,6 +1492,15 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (!s.blocks.some((x) => x.id === payload?.id)) return coded(res, 404, 'block_not_found', 'This device is not blocked.');
       s.blocks = s.blocks.filter((x) => x.id !== payload.id);
       for (const n of s.nicks) if (n.blockId === payload.id) Object.assign(n, { blocked: false, blockId: null });
+      return json(res, 200, { ok: true });
+    }
+    if (path.startsWith('/api/admin/addons')) return addonRoute(res, req, path, url, payload);
+    const sourceRoute = path.match(/^\/api\/admin\/channels\/main\/items\/(\d+)\/source$/);
+    if (sourceRoute && req.method === 'POST') {
+      const i = s.pendingItems.findIndex((x) => x.id === Number(sourceRoute[1]) && x.titleRequest);
+      if (i < 0) return coded(res, 409, 'not_title_request', 'This item is not a title request waiting for a source.');
+      const [moved] = s.pendingItems.splice(i, 1);
+      s.queue.push({ ...moved, status: 'queued', sourceUrl: payload.url, titleRequest: undefined });
       return json(res, 200, { ok: true });
     }
     if (path === '/api/admin/library' && req.method === 'GET') return libraryListing(res, url.searchParams);

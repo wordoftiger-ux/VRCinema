@@ -127,3 +127,30 @@ export function errorText(e) {
   }
   return e?.message ?? t('ui.no_answer');
 }
+
+// ---------- Addons (Stremio-compatible): the catalog, details and sources ----------
+
+const ADDONS = '/api/admin/addons';
+const ADDON_TIMEOUT_MS = 20000;
+
+/** The addons, in the owner's order: `[{id, url, name, version, description, logo, enabled, provides, types}]`. */
+export const listAddons = () => api('GET', ADDONS, undefined, { timeoutMs: ADDON_TIMEOUT_MS });
+
+/** Search in the catalog of the enabled addons: `[{type, id, name, year, poster}]` (under 2 letters: `[]`). */
+export const searchCatalog = (q) =>
+  api('GET', `${ADDONS}/search?q=${encodeURIComponent(q)}`, undefined, { timeoutMs: ADDON_TIMEOUT_MS });
+
+/**
+ * Details of a title: `{type, id, name, year, poster, background, description, runtime, videos}`.
+ * For a series give the series id (`tt2`), the episodes come in `videos`.
+ */
+export const titleMeta = (type, id) =>
+  api('GET', `${ADDONS}/meta/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, undefined, { timeoutMs: ADDON_TIMEOUT_MS });
+
+/** The enabled addons that have sources for this movie or episode: `{addons: [{id, name}]}`. */
+export const streamAddons = (type, id) =>
+  api('GET', `${ADDONS}/streams/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, undefined, { timeoutMs: ADDON_TIMEOUT_MS });
+
+/** What one addon offers for it: `{streams: [{url, name, title}]}`. */
+export const addonStreams = (type, id, addonId) =>
+  api('GET', `${ADDONS}/streams/${encodeURIComponent(type)}/${encodeURIComponent(id)}?addon=${addonId}`, undefined, { timeoutMs: ADDON_TIMEOUT_MS });
