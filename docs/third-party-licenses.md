@@ -64,6 +64,7 @@ Direct dependencies of `engine/`:
 | [getrandom](https://github.com/rust-random/getrandom) | 0.4.3 | MIT OR Apache-2.0 | compiled in |
 | [hmac](https://github.com/RustCrypto/MACs) | 0.13.0 | MIT OR Apache-2.0 | compiled in |
 | [image](https://github.com/image-rs/image) | 0.25.10 | MIT OR Apache-2.0 | compiled in |
+| [librqbit](https://github.com/ikatson/rqbit) | 9.1.0 | Apache-2.0 | compiled in |
 | [local-ip-address](https://github.com/LeoBorai/local-ip-address) | 0.6.13 | MIT OR Apache-2.0 | compiled in |
 | [qrcode](https://github.com/kennytm/qrcode-rust) | 0.14.1 | MIT OR Apache-2.0 | compiled in |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.13.5 | MIT OR Apache-2.0 | compiled in |
@@ -99,29 +100,30 @@ Direct dependencies of `desktop/`:
 | [tauri-build](https://github.com/tauri-apps/tauri) | 2.7.1 | Apache-2.0 OR MIT | build only |
 | [windows-sys](https://github.com/microsoft/windows-rs) | 0.61.2 | MIT OR Apache-2.0 | compiled in, `cfg(windows)` |
 
-All 347 crates the Windows program is built from (normal dependencies, procedural macros included), by licence (SPDX expression as published):
+All 434 crates the Windows program is built from (normal dependencies, procedural macros included), by licence (SPDX expression as published):
 
 | Licence | Crates |
 | --- | --- |
-| MIT OR Apache-2.0 | 167 |
-| MIT | 66 |
-| Apache-2.0 OR MIT | 31 |
+| MIT OR Apache-2.0 | 199 |
+| MIT | 90 |
+| Apache-2.0 OR MIT | 35 |
+| Apache-2.0 | 18 |
+| MIT/Apache-2.0 | 18 |
 | Unicode-3.0 | 18 |
-| MIT/Apache-2.0 | 11 |
 | Unlicense OR MIT | 9 |
 | MPL-2.0 | 5: cssparser, cssparser-macros, dtoa-short, option-ext, selectors |
+| Zlib | 5: assert_cfg, const_panic, foldhash, typewit, zlib-rs |
 | MIT OR Apache-2.0 OR Zlib | 4: lru-slab, raw-window-handle, zune-core, zune-jpeg |
-| Apache-2.0 | 3: sync_wrapper, tao, zopfli |
 | BSD-3-Clause | 3: alloc-no-stdlib, alloc-stdlib, subtle |
+| ISC | 3: rustls-webpki, untrusted |
 | Apache-2.0 OR ISC OR MIT | 2: hyper-rustls, rustls |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 2: zerocopy, zerocopy-derive |
 | BSD-3-Clause OR Apache-2.0 | 2: moxcms, pxfm |
 | BSL-1.0 | 2: clipboard-win, error-code |
-| ISC | 2: rustls-webpki, untrusted |
 | MIT OR Zlib OR Apache-2.0 | 2: miniz_oxide |
 | Unlicense/MIT | 2: same-file, walkdir |
-| Zlib | 2: foldhash, zlib-rs |
 | Zlib OR Apache-2.0 OR MIT | 2: bytemuck, tinyvec |
+| (Apache-2.0 OR MIT) AND BSD-3-Clause | 1: encoding_rs |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 1: unicode-ident |
 | 0BSD OR MIT OR Apache-2.0 | 1: adler2 |
 | Apache-2.0 / MIT | 1: fnv |

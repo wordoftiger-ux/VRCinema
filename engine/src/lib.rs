@@ -31,6 +31,7 @@ pub mod server;
 pub mod setup;
 pub mod stats;
 pub mod tools;
+pub mod torrent;
 pub mod tunnel;
 pub mod updater;
 pub mod uploads;
