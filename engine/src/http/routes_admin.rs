@@ -898,7 +898,15 @@ async fn get_settings(State(state): State<AppState>) -> ApiResult {
     let mut body = json!(state.settings()?);
     // What the "add popular sites" button of the settings puts in a list.
     body["popularDomains"] = json!(crate::rules::POPULAR_DOMAINS);
+    add_torrent_dir_info(&state, &mut body);
     Ok(json_ok(&body))
+}
+
+/// The torrents' default folder and the free space on the drive of the folder in use
+/// (`null`: not known), shown with the download folder field.
+fn add_torrent_dir_info(state: &AppState, body: &mut serde_json::Value) {
+    body["torrentDirDefault"] = json!(state.torrents.default_root().to_string_lossy());
+    body["torrentDriveFreeBytes"] = json!(state.torrents.drive_free());
 }
 
 async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
@@ -935,7 +943,9 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
         // without a window alike).
         super::routes_slates::refresh_slates(&state);
     }
-    Ok(json_ok(&json!(updated)))
+    let mut body = json!(updated);
+    add_torrent_dir_info(&state, &mut body);
+    Ok(json_ok(&body))
 }
 
 /// The owner chose a source for a viewer's title request: the item (still waiting, with a title

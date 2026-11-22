@@ -363,6 +363,23 @@ try {
   await page.click('.tr-limits button[type="submit"]');
   await page.waitForSelector('.torrent-settings .set-note.err');
   check(true, 'torrents: a cap of 0 is refused with a message');
+  // The download folder: empty shows the default as its placeholder, with the drive's free space.
+  check((await page.inputValue('.torrent-settings [name="torrentDir"]')) === '', 'torrents: the download folder is empty by default');
+  check((await page.getAttribute('.torrent-settings [name="torrentDir"]', 'placeholder')).endsWith('VRCinema\\data\\torrents'), 'torrents: the folder placeholder shows the default folder');
+  check((await text(page, '.tr-drive-free')) === 'Free space on its drive: 15.6 GB', 'torrents: the drive\u2019s free space is shown', await text(page, '.tr-drive-free'));
+  check((await text(page, '.tr-dir-hint')).includes('VRCinema-torrents'), 'torrents: the hint names the VRCinema-torrents subfolder');
+  await page.fill('.torrent-settings [name="torrentDir"]', 'relative\\dir');
+  await page.click('.tr-dir button[type="submit"]');
+  await waitFor(async () => (await texts(page, '.torrent-settings .set-note.err')).some((s) => s.includes('full path')), 'torrents: a relative folder is refused with a message');
+  check(true, 'torrents: a relative folder is refused with a message');
+  await page.fill('.torrent-settings [name="torrentDir"]', ' D:\\Films ');
+  m = await mark();
+  await page.click('.tr-dir button[type="submit"]');
+  await page.waitForSelector('.torrent-settings .set-note.ok');
+  const put3 = (await since(m)).find((r) => r.method === 'PUT' && r.path === '/api/admin/channels/main/settings');
+  check(JSON.stringify(put3?.body) === '{"torrentDir":"D:\\\\Films"}', 'torrents: Save -> PUT {torrentDir: "D:\\\\Films"} (trimmed)', put3);
+  check((await text(page, '.torrent-settings .set-note.ok')) === 'Download folder saved.', 'torrents: the folder save is confirmed');
+  check((await page.inputValue('.torrent-settings [name="torrentDir"]')) === 'D:\\Films', 'torrents: the saved folder stays in the field');
   await page.screenshot({ path: join(shots, 'torrents-settings-en.png') });
 
   // ---------- The torrent chip on a source ----------
@@ -381,6 +398,9 @@ try {
   check(true, 'torrents: the queue item shows "Downloading 42 % · 3.1 MB/s · ready in ~4 min"');
   await page.$eval('.qi-torrent', (e) => e.scrollIntoView({ block: 'center' }));
   await page.screenshot({ path: join(shots, 'torrents-queue-en.png') });
+  await scenario({ torrentItem: { state: 'waitingForDisk', progress: 0, rateBps: 0, etaS: null, ready: false, diskFreeBytes: 15 * 1024 ** 3, needBytes: 20.5 * 1024 ** 3 } });
+  await waitFor(async () => (await texts(page, '.qi-torrent')).includes('Not enough free space on the drive (15.0 GB free, needs 20.5 GB)'), 'torrents: the drive-space line');
+  check(true, 'torrents: a download waiting for the drive says how much is free and needed');
 
   // ---------- A magnet link: no title search; refused while torrents are off ----------
   await scenario({ settingsPatch: { torrentsEnabled: false } });

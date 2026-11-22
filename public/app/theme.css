@@ -1954,9 +1954,21 @@ kbd {
   color: var(--amber);
 }
 
-.tr-limits {
+.tr-limits,
+.tr-dir {
   align-items: flex-end;
   gap: 12px;
+}
+
+/* The download folder: a wide path field (the label is a column, so no flex height). */
+.tr-dir .limit {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.inline.wide.tr-dir .limit .txt {
+  flex: none;
+  width: 100%;
 }
 
 .rbadge {

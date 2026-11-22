@@ -120,6 +120,7 @@ The program can show the video on air in **your own VRChat chatbox** (the bubble
 - **Off by default.** Switch them on in **Settings** → **Addons** → **Torrent sources**. Then addon sources marked **torrent** and `magnet:` links in the link field work.
 - A torrent starts downloading about 5 minutes before its turn. When the download estimate says it will finish in time, the film plays as soon as it can; otherwise the channel waits on a countdown slate (you can press **Skip**).
 - Upload is capped (200 KB/s by default; 0 means unlimited) and there is no seeding after the download. The files are deleted after the film has played. All torrent files together are held to a disk cap (50 GB by default).
+- **Free space:** a 4K film can be 20 GB or more, and its drive needs as much free space as the file is big (plus 2 GB). The files go to `%LOCALAPPDATA%\VRCinema\data\torrents` unless you choose a **Download folder** on a drive with room (in the same block; the files then go into a `VRCinema-torrents` folder inside it). If the drive is short, the download waits and the queue says how much is free and needed; if it fills up while downloading, the film fails with that reason instead of ending early.
 - Seeking (or resuming) into a part of the film that has not downloaded yet may pause the picture until that part arrives.
 - **Warning:** while a film downloads, your public IP address is visible to other peers. A VPN is advised. You are responsible for what you play.
 - Only you (the owner) can add torrents; viewers cannot send `magnet:` links.

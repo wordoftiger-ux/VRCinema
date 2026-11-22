@@ -72,6 +72,7 @@ function Torrents() {
   const [note, say] = useNote();
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ up: '200', cap: '50' });
+  const [dir, setDir] = useState('');
   useEffect(() => {
     loadChannelSettings();
   }, []);
@@ -79,6 +80,9 @@ function Torrents() {
   useEffect(() => {
     if (settings) setForm({ up: String(settings.torrentUploadKbps), cap: String(settings.torrentDiskCapGb) });
   }, [key]);
+  useEffect(() => {
+    if (settings) setDir(settings.torrentDir ?? '');
+  }, [settings?.torrentDir]);
   if (!settings) return null;
   const save = async (patch, okText) => {
     setBusy(true);
@@ -94,7 +98,12 @@ function Torrents() {
     }
     save({ torrentUploadKbps: up, torrentDiskCapGb: cap }, t('settings.torrents.saved'));
   };
+  const submitDir = (e) => {
+    e.preventDefault();
+    save({ torrentDir: dir.trim() }, t('settings.torrents.dir_saved'));
+  };
   const on = settings.torrentsEnabled === true;
+  const free = settings.torrentDriveFreeBytes;
   return html`
     <${Block} title=${t('settings.torrents.block')}>
       <div class="torrent-settings" data-torrents=${on ? 'on' : 'off'}>
@@ -112,6 +121,15 @@ function Torrents() {
           <button type="submit" class="btn" disabled=${busy}>${t('settings.torrents.save')}</button>
         </form>
         <p class="set-sub">${t('settings.torrents.upload_hint')}</p>
+        <form class="inline wide tr-dir" onSubmit=${submitDir} noValidate>
+          <label class="limit"><span>${t('settings.torrents.dir')}</span>
+            <input type="text" class="txt" name="torrentDir" autocomplete="off" spellcheck="false"
+              placeholder=${settings.torrentDirDefault ?? ''} value=${dir}
+              onInput=${(e) => setDir(e.currentTarget.value)} /></label>
+          <button type="submit" class="btn" disabled=${busy}>${t('settings.torrents.save')}</button>
+        </form>
+        <p class="set-sub tr-dir-hint">${t('settings.torrents.dir_hint')}</p>
+        ${Number.isFinite(free) && html`<p class="set-sub tr-drive-free">${t('settings.torrents.drive_free', { free: (free / 1024 ** 3).toFixed(1) })}</p>`}
         <${Note} note=${note} />
       </div>
     <//>`;

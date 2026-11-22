@@ -51,6 +51,10 @@ export function torrentLine(torrent) {
   if (!torrent) return '';
   const { state, progress, rateBps, etaS, ready } = torrent;
   if (state === 'failed') return t('queue.torrent_failed');
+  if (state === 'waitingForDisk' && Number.isFinite(torrent.diskFreeBytes)) {
+    const gb = (b) => (b / 1024 ** 3).toFixed(1);
+    return t('queue.torrent_disk_drive', { free: gb(torrent.diskFreeBytes), need: gb(torrent.needBytes) });
+  }
   if (state === 'waitingForDisk') return t('queue.torrent_disk');
   if (state === 'starting') return t('queue.torrent_starting');
   if (state === 'complete' || ready) return t('queue.torrent_ready');

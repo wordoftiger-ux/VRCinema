@@ -48,6 +48,11 @@ pub trait TorrentGate: Send + Sync {
     fn downloading(&self, _item: &QueueItem) -> bool {
         false
     }
+    /// Why the item's download stopped now (a full drive, an error of the library): the
+    /// reason of a film that ended before its end. `None`: it did not stop.
+    fn download_error(&self, _item: &QueueItem) -> Option<Msg> {
+        None
+    }
 }
 
 /// ffprobe of a film's length at an address (`None`: could not tell).
@@ -300,6 +305,18 @@ impl TorrentGate for HubGate {
             .is_some_and(|s| s.state == TorrentState::Downloading)
     }
 
+    fn download_error(&self, item: &QueueItem) -> Option<Msg> {
+        let hash = hash_of(item)?;
+        let status = self.hub.manager_if_running()?.status(&hash)?;
+        match status.state {
+            TorrentState::Failed(e) => Some(e),
+            TorrentState::WaitingForDisk => status
+                .drive_short
+                .map(|(free, need)| super::disk_full_msg(free, need)),
+            _ => None,
+        }
+    }
+
     fn cleanup(&self, keep: &[QueueItem]) {
         let keep: Vec<String> = keep.iter().filter_map(hash_of).collect();
         let hub = Arc::clone(&self.hub);
@@ -309,7 +326,8 @@ impl TorrentGate for HubGate {
                 return;
             }
             // No session (yet): files of an earlier run go straight from the disk.
-            let Ok(mut entries) = tokio::fs::read_dir(hub.root()).await else {
+            let root = hub.root();
+            let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
                 return;
             };
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -317,7 +335,7 @@ impl TorrentGate for HubGate {
                 if keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
                     continue;
                 }
-                super::remove_inside(hub.root(), &entry.path()).await;
+                super::remove_inside(&root, &entry.path()).await;
             }
         });
     }

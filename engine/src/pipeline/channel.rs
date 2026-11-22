@@ -391,6 +391,10 @@ const START_TIMEOUT_ERROR: &str = "item_errors.start_timeout";
 const SKIPPED: &str = "item_errors.skipped";
 const FFMPEG_STOPPED: &str = "item_errors.ffmpeg_stopped";
 const UNKNOWN_ERROR: &str = "item_errors.unknown";
+const ENDED_EARLY: &str = "item_errors.ended_early";
+/// A torrent film whose process ends with more than this many seconds of its known length
+/// left ended early (see `Channel::clip_ended`).
+const EARLY_END_S: f64 = 60.0;
 
 /// A film being started or aired.
 struct ActiveClip {
@@ -1831,7 +1835,7 @@ impl Channel {
             }
         }
         let result = if done {
-            self.finish_current(ItemStatus::Played, None)
+            self.clip_ended()
         } else if let Some(error) = failure {
             self.handle_failure(error)
         } else {
@@ -2108,7 +2112,7 @@ impl Channel {
             let now = (self.now)();
             match c.handle.as_ref().map(|h| (h.state(), h.error())) {
                 Some((SegmenterState::Done, _)) => {
-                    self.finish_current(ItemStatus::Played, None)?;
+                    self.clip_ended()?;
                     continue;
                 }
                 Some((SegmenterState::Failed | SegmenterState::Killed, error)) => {
@@ -3071,6 +3075,29 @@ impl Channel {
             return Ok(());
         }
         self.finish(c, ItemStatus::Failed, Some(&error))
+    }
+
+    /// The process of the film on air ended by itself. A torrent film that ends more than
+    /// [`EARLY_END_S`] before its known end did not play to the end (its download stopped:
+    /// a full drive, an error): it goes the failure way (one retry from where it stopped)
+    /// instead of counting as played. Other sources keep their end as it is.
+    fn clip_ended(&mut self) -> anyhow::Result<()> {
+        let early = self.current.as_ref().and_then(|c| {
+            let early = is_magnet(&c.item)
+                && !c.item.is_live
+                && c.remaining_s().is_some_and(|r| r > EARLY_END_S);
+            early.then(|| {
+                self.o
+                    .torrents
+                    .as_ref()
+                    .and_then(|g| g.download_error(&c.item))
+                    .unwrap_or_else(|| Msg::new(ENDED_EARLY))
+            })
+        });
+        match early {
+            Some(error) => self.handle_failure(error),
+            None => self.finish_current(ItemStatus::Played, None),
+        }
     }
 
     fn finish_current(&mut self, status: ItemStatus, error: Option<&Msg>) -> anyhow::Result<()> {
@@ -6675,6 +6702,7 @@ mod tests {
         readiness: HashMap<i64, Readiness>,
         failures: HashMap<i64, Msg>,
         downloading: bool,
+        download_errors: HashMap<i64, Msg>,
     }
 
     #[derive(Clone, Default)]
@@ -6721,6 +6749,56 @@ mod tests {
         fn downloading(&self, _item: &QueueItem) -> bool {
             self.lock().downloading
         }
+        fn download_error(&self, item: &QueueItem) -> Option<Msg> {
+            self.lock().download_errors.get(&item.id).cloned()
+        }
+    }
+
+    /// A torrent film whose process ends long before its known length (its download stopped:
+    /// the drive filled up) is not counted as played: it is retried from where it stopped,
+    /// then fails with the download's reason.
+    #[tokio::test]
+    async fn a_torrent_film_ending_early_is_not_played() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(1000.0));
+        let h = e.air(&b, 2).await;
+        h.set_state(SegmenterState::Done);
+        e.key();
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing, "retried");
+        e.flush().await;
+        let last = e.factory.lock().handles.len() - 1;
+        let retry = e.factory.handle(last);
+        assert_eq!(retry.item_id(), b.id);
+        assert!(gate.released().is_empty());
+        gate.lock()
+            .download_errors
+            .insert(b.id, crate::torrent::disk_full_msg(100 << 20, 10 << 30));
+        retry.set_state(SegmenterState::Done);
+        e.key();
+        e.flush().await;
+        e.key();
+        let fresh = e.get(b.id);
+        assert_eq!(fresh.status, ItemStatus::Failed);
+        assert!(
+            fresh
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("torrent_disk_full"),
+            "{:?}",
+            fresh.error
+        );
+    }
+
+    /// The same early end of a film from another source keeps counting as played.
+    #[tokio::test]
+    async fn a_non_torrent_film_ending_early_is_played_as_before() {
+        let (mut e, _gate) = setup_torrents();
+        let a = e.add("a", Some(1000.0), false);
+        let h = e.air(&a, 2).await;
+        h.set_state(SegmenterState::Done);
+        e.key();
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
     }
 
     /// A torrent film on air that waits for data still downloading (a seek past the downloaded
@@ -6897,7 +6975,8 @@ mod tests {
     #[tokio::test]
     async fn played_torrent_files_are_deleted() {
         let (mut e, gate) = setup_torrents();
-        let b = e.add_magnet("b", Some(100.0));
+        // Short enough that ending after its first segment is no early end.
+        let b = e.add_magnet("b", Some(30.0));
         let c = e.add_magnet("c", Some(100.0));
         gate.set(c.id, Readiness::WaitS(100));
         let h = e.air(&b, 1).await;
@@ -6961,7 +7040,7 @@ mod tests {
     async fn a_download_shared_by_two_items_stays_while_one_is_left() {
         let (mut e, gate) = setup_torrents();
         let hash = "cd".repeat(20);
-        let b = e.add_magnet_of("b", Some(100.0), &hash);
+        let b = e.add_magnet_of("b", Some(30.0), &hash);
         let dup = e.add_magnet_of("dup", Some(100.0), &hash);
         let h = e.air(&b, 1).await;
         // The queued copy is tracked too once it is the head.

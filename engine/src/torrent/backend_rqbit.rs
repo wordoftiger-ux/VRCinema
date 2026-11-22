@@ -162,11 +162,18 @@ impl TorrentBackend for RqbitBackend {
     ) -> Result<(), Msg> {
         if let Some(handle) = self.handle(&m.info_hash) {
             let only: HashSet<usize> = [file_idx].into_iter().collect();
-            return self
-                .session
+            self.session
                 .update_only_files(&handle, &only)
                 .await
-                .map_err(|e| fail(format!("{e:#}")));
+                .map_err(|e| fail(format!("{e:#}")))?;
+            // Stopped after a failure (a full drive): it goes on from what is on the disk.
+            if handle.is_paused() || handle.stats().error.is_some() {
+                self.session
+                    .unpause(&handle)
+                    .await
+                    .map_err(|e| fail(format!("{e:#}")))?;
+            }
+            return Ok(());
         }
         // The session-wide limit (changeable live); a per-torrent one would stay fixed.
         self.set_upload_limit(upload_bps);
@@ -218,6 +225,7 @@ impl TorrentBackend for RqbitBackend {
             file_total: total,
             peers,
             complete: total > 0 && have >= total,
+            error: stats.error.clone(),
         })
     }
 

@@ -23,7 +23,7 @@
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
 // Nick PIN: POST /api/channels/main/nick/protect and …/nick/adopt (scenario viewerPins, viewerCodes), POST /api/admin/nicks/{skeleton}/reset-pin.
 // Viewer lists: POST /api/channels/main/request-list (settings viewerLists / viewerListMax, scenario listDelayMs), the panel's pendingLists and POST /api/admin/channels/main/lists/{id}.
-// Addons (Stremio-compatible): GET/POST /api/admin/addons, POST/DELETE …/addons/{id} ({enabled, move}), GET …/addons/search?q=, …/addons/meta/{type}/{id}, …/addons/streams/{type}/{id}[?addon=] (addon 4 answers 502, addon 3 is slow), POST /api/admin/channels/main/items/{id}/source (choose the source of a title request); scenario `titleRequest: true` adds a pending `title:movie:tt1` item. Torrents: settings torrentsEnabled/torrentUploadKbps/torrentDiskCapGb; scenario `torrentItem: {state, progress, rateBps, etaS, ready}` adds a queued magnet item; with torrents on, the first active addon offers a `torrent: true` source; adding a `magnet:` link while off answers torrents_disabled.
+// Addons (Stremio-compatible): GET/POST /api/admin/addons, POST/DELETE …/addons/{id} ({enabled, move}), GET …/addons/search?q=, …/addons/meta/{type}/{id}, …/addons/streams/{type}/{id}[?addon=] (addon 4 answers 502, addon 3 is slow), POST /api/admin/channels/main/items/{id}/source (choose the source of a title request); scenario `titleRequest: true` adds a pending `title:movie:tt1` item. Torrents: settings torrentsEnabled/torrentUploadKbps/torrentDiskCapGb/torrentDir (validated: absolute, a path with "missing" does not exist; GET/PUT add torrentDirDefault and torrentDriveFreeBytes); scenario `torrentItem: {state, progress, rateBps, etaS, ready}` adds a queued magnet item; with torrents on, the first active addon offers a `torrent: true` source; adding a `magnet:` link while off answers torrents_disabled.
 // GET /__test/stats: {maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight}; GET /__test/hang never answers.
 // The producer's monitor (window only, 403 for a remote session or without a window; requests
 // record their query as `search`; maxMonitorInFlight counts the reads without `from`): GET
@@ -199,6 +199,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     torrentsEnabled: false,
     torrentUploadKbps: 200,
     torrentDiskCapGb: 50,
+    torrentDir: '',
     viewerUploads: false,
     viewerUploadMaxMb: 50,
     viewerUploadMaxS: 600,
@@ -1173,7 +1174,9 @@ torrent`, torrent: true });
 
   const INTERVALS = [60, 120, 300, 600];
   function settingsRoute(res, req, patch) {
-    if (req.method === 'GET') return json(res, 200, { ...s.settings, popularDomains: POPULAR });
+    // The engine adds the torrents' default folder and the free space of its drive.
+    const dirInfo = { torrentDirDefault: 'C:\\Users\\owner\\AppData\\Local\\VRCinema\\data\\torrents', torrentDriveFreeBytes: 16750372454 };
+    if (req.method === 'GET') return json(res, 200, { ...s.settings, ...dirInfo, popularDomains: POPULAR });
     if (req.method !== 'PUT') return json(res, 404, { error: 'Not Found' });
     const fail = (code, message) => coded(res, 400, code, message);
     const next = { ...s.settings };
@@ -1194,12 +1197,18 @@ torrent`, torrent: true });
       } else if (key === 'oscRepeatS') {
         if (!Number.isInteger(value) || (value !== 0 && (value < 5 || value > 600))) return fail('osc_repeat_invalid', `${key}: expected 0 (off) or a number from 5 to 600`);
         next[key] = value;
+      } else if (key === 'torrentDir') {
+        // Like the engine: empty (the default folder) or a full path (D:\… or /…); the folder D:\Missing does not exist.
+        const d = String(value).trim();
+        if (d && !/^([A-Za-z]:[\\/]|\/)/.test(d)) return fail('torrent_dir_not_absolute', d + ': enter the full path of a folder (for example D:\\Torrents).');
+        if (/missing/i.test(d)) return fail('torrent_dir_missing', 'The folder ' + d + ' does not exist.');
+        next[key] = d;
       } else if (key === 'allowedDomains' || key === 'blockedDomains') {
         next[key] = value.map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]).filter(Boolean);
       } else next[key] = value;
     }
     s.settings = next;
-    return json(res, 200, next);
+    return json(res, 200, { ...next, ...dirInfo });
   }
 
   const ENCODER_RESULT = 'h264_nvenc';

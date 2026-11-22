@@ -43,6 +43,28 @@ pub const VIDEO_EXTENSIONS: [&str; 9] = [
 ];
 pub const DEFAULT_UPLOAD_KBPS: u64 = 200;
 pub const DEFAULT_DISK_CAP_GB: u64 = 50;
+/// A start needs this much free space on the drive beyond what is still to be downloaded.
+pub const FREE_SPACE_MARGIN: u64 = 2 * 1024 * 1024 * 1024;
+/// A download whose drive has less free space than this fails (it could not go on writing).
+pub const MIN_FREE_WHILE_DOWNLOADING: u64 = 512 * 1024 * 1024;
+
+/// Free bytes on the drive holding a folder (`None`: not known). Tests give a fake.
+pub type FreeSpaceFn = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
+
+/// Free bytes on the drive holding `path`, or its nearest existing parent folder.
+pub fn free_space_at(path: &Path) -> Option<u64> {
+    path.ancestors()
+        .find(|p| p.is_dir())
+        .and_then(crate::preview_source::free_space)
+}
+
+/// The "not enough free space on the drive" error of a download (`free`, `need` in GB).
+pub fn disk_full_msg(free: u64, need: u64) -> Msg {
+    let gb = |b: u64| format!("{:.1}", b as f64 / (1024.0 * 1024.0 * 1024.0));
+    Msg::error("torrent_disk_full")
+        .arg("free", gb(free))
+        .arg("need", gb(need))
+}
 
 /// KB/s of the setting → bytes/s of the backend (`0` = unlimited).
 pub fn upload_bps(kbps: u64) -> Option<u64> {
@@ -343,6 +365,8 @@ pub struct RawProgress {
     pub file_total: u64,
     pub peers: u32,
     pub complete: bool,
+    /// The library stopped the torrent with this error (a write failed, ...).
+    pub error: Option<String>,
 }
 
 /// The torrent library. `hash` is always the 40-hex info hash.
@@ -389,6 +413,9 @@ pub struct TorrentStatus {
     pub peers: u32,
     /// Path of the selected file inside the torrent (empty until known).
     pub file_name: String,
+    /// `WaitingForDisk` because the drive is short of free space: `(free, needed)` bytes
+    /// (`None`: waiting for the disk cap of the setting, or not waiting).
+    pub drive_short: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +461,8 @@ struct Item {
     /// The estimate once said it will make it: from then on it may be played (also again,
     /// for a retry or a seek, when the rate has dropped since).
     cleared: bool,
+    /// Why it waits for disk space: the drive's `(free, needed)` bytes.
+    drive_short: Option<(u64, u64)>,
 }
 
 impl Item {
@@ -448,6 +477,7 @@ impl Item {
             peers: 0,
             samples: VecDeque::new(),
             cleared: false,
+            drive_short: None,
         }
     }
 
@@ -496,6 +526,7 @@ pub struct TorrentManager {
     /// Set when torrents are switched off: nothing starts any more, a start in flight takes
     /// its torrent away again.
     closed: AtomicBool,
+    free_space: Mutex<FreeSpaceFn>,
 }
 
 impl TorrentManager {
@@ -515,7 +546,24 @@ impl TorrentManager {
             disk_cap: AtomicU64::new(disk_cap_bytes(disk_cap_gb)),
             items: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            // Tests do not depend on the free space of the machine they run on.
+            free_space: Mutex::new(if cfg!(test) {
+                Arc::new(|_: &Path| None)
+            } else {
+                Arc::new(free_space_at)
+            }),
         })
+    }
+
+    /// Tests: the drive's free space comes from `f`.
+    pub fn set_free_space(&self, f: FreeSpaceFn) {
+        *self.free_space.lock().unwrap() = f;
+    }
+
+    /// Free bytes on the drive of the root (`None`: not known, then nothing is held back).
+    pub fn drive_free(&self) -> Option<u64> {
+        let f = Arc::clone(&*self.free_space.lock().unwrap());
+        f(&self.root)
     }
 
     /// Torrents were switched off: no start goes on (see [`TorrentManager::start`]).
@@ -614,12 +662,19 @@ impl TorrentManager {
         let total = files.files[idx].1;
         // Walks the folder: not while holding the lock the channel's checks wait for.
         let on_disk = self.disk_used();
+        let free = self.drive_free();
         let needs_wait = {
             let mut items = self.items.lock().unwrap();
             let reserved: u64 = items
                 .iter()
                 .filter(|(h, i)| *h != hash && i.holds_disk())
                 .map(|(_, i)| i.total)
+                .sum();
+            // The drive must hold the rest of this file and of the others still coming in.
+            let others_left: u64 = items
+                .iter()
+                .filter(|(h, i)| *h != hash && i.holds_disk() && i.state != TorrentState::Complete)
+                .map(|(_, i)| i.total.saturating_sub(i.downloaded))
                 .sum();
             let used = on_disk.max(reserved);
             let cap = self.disk_cap.load(Ordering::Relaxed);
@@ -630,7 +685,12 @@ impl TorrentManager {
             item.files = Some(files);
             item.file_idx = Some(idx);
             item.total = total;
-            let wait = used.saturating_add(total) > cap;
+            let need = total
+                .saturating_sub(item.downloaded)
+                .saturating_add(others_left)
+                .saturating_add(FREE_SPACE_MARGIN);
+            item.drive_short = free.filter(|f| *f < need).map(|f| (f, need));
+            let wait = used.saturating_add(total) > cap || item.drive_short.is_some();
             if wait {
                 item.state = TorrentState::WaitingForDisk;
             }
@@ -687,12 +747,19 @@ impl TorrentManager {
             .filter(|(_, i)| i.state == TorrentState::Downloading)
             .map(|(h, _)| h.clone())
             .collect();
+        // A full drive: the library cannot write any more (the film would end where the
+        // written part ends).
+        let free = if active.is_empty() {
+            None
+        } else {
+            self.drive_free()
+        };
         for hash in active {
             let Some(p) = self.backend.progress(&hash).await else {
                 continue;
             };
             let now = Instant::now();
-            let completed = {
+            let (completed, failed) = {
                 let mut items = self.items.lock().unwrap();
                 let Some(item) = items.get_mut(&hash) else {
                     continue;
@@ -705,26 +772,50 @@ impl TorrentManager {
                     item.total = p.file_total;
                 }
                 item.peers = p.peers;
-                item.samples.push_back((now, p.file_downloaded));
-                while item
-                    .samples
-                    .front()
-                    .is_some_and(|(t, _)| now.duration_since(*t) > RATE_WINDOW)
-                {
-                    item.samples.pop_front();
-                }
-                let done = p.complete || (item.total > 0 && item.downloaded >= item.total);
-                if done {
-                    item.state = TorrentState::Complete;
-                    item.downloaded = item.total;
+                let incomplete = !(p.complete || (item.total > 0 && item.downloaded >= item.total));
+                let failure = match p.error.as_deref() {
+                    Some(error) if incomplete => Some(Msg::chain(vec![
+                        Msg::error("torrent_failed"),
+                        Msg::text(error),
+                    ])),
+                    _ => free
+                        .filter(|f| incomplete && *f < MIN_FREE_WHILE_DOWNLOADING)
+                        .map(|f| disk_full_msg(f, item.total.saturating_sub(item.downloaded))),
+                };
+                if let Some(e) = failure {
+                    item.state = TorrentState::Failed(e);
                     item.peers = 0;
+                    item.samples.clear();
+                    (false, true)
+                } else {
+                    (Self::push_sample(item, now, &p), false)
                 }
-                done
             };
-            if completed {
+            if completed || failed {
+                // Complete: no seeding. Failed: no more writing; a later start goes on from
+                // what is on the disk.
                 self.backend.stop(&hash).await;
             }
         }
+    }
+
+    /// One progress sample of a downloading item; `true`: its file is complete now.
+    fn push_sample(item: &mut Item, now: Instant, p: &RawProgress) -> bool {
+        item.samples.push_back((now, p.file_downloaded));
+        while item
+            .samples
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > RATE_WINDOW)
+        {
+            item.samples.pop_front();
+        }
+        let done = p.complete || (item.total > 0 && item.downloaded >= item.total);
+        if done {
+            item.state = TorrentState::Complete;
+            item.downloaded = item.total;
+            item.peers = 0;
+        }
+        done
     }
 
     pub fn status(&self, hash: &str) -> Option<TorrentStatus> {
@@ -741,6 +832,9 @@ impl TorrentManager {
             },
             peers: item.peers,
             file_name: item.file_name(),
+            drive_short: item
+                .drive_short
+                .filter(|_| item.state == TorrentState::WaitingForDisk),
         })
     }
 
@@ -783,6 +877,11 @@ impl TorrentManager {
                 state: TorrentState::Failed(e),
                 ..
             }) => Err(e.clone()),
+            Some(Item {
+                state: TorrentState::WaitingForDisk,
+                drive_short: Some((free, need)),
+                ..
+            }) => Err(disk_full_msg(*free, *need)),
             _ => Err(Msg::error("torrent_not_active")),
         }
     }

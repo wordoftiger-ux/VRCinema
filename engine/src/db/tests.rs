@@ -427,6 +427,7 @@ fn settings_serialize_with_camel_case_keys() {
         ("torrentsEnabled", json!(false)),
         ("torrentUploadKbps", json!(200)),
         ("torrentDiskCapGb", json!(50)),
+        ("torrentDir", json!("")),
     ] {
         let got = rest.as_object_mut().unwrap().remove(key);
         assert_eq!(got, Some(expected), "{key}");
@@ -533,6 +534,7 @@ fn settings_serialize_with_camel_case_keys() {
             "torrentsEnabled",
             "torrentUploadKbps",
             "torrentDiskCapGb",
+            "torrentDir",
             "audioVisual"
         ]
     );

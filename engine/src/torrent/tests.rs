@@ -40,6 +40,7 @@ impl Fake {
                 file_total: total,
                 peers: 3,
                 complete: downloaded >= total,
+                error: None,
             },
         );
     }
@@ -275,6 +276,138 @@ async fn disk_cap_makes_it_wait_not_fail() {
     m.start(&magnet(HASH)).await.unwrap();
     assert_eq!(m.status(HASH).unwrap().state, TorrentState::Downloading);
     assert_eq!(fake.added.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn too_little_free_space_on_the_drive_makes_it_wait_with_the_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 18 * GB)]));
+    let m = manager(fake.clone(), dir.path(), 50);
+    let free = Arc::new(Mutex::new(15 * GB));
+    let f = Arc::clone(&free);
+    m.set_free_space(Arc::new(move |_: &Path| Some(*f.lock().unwrap())));
+    m.start(&magnet(HASH)).await.unwrap();
+    let st = m.status(HASH).unwrap();
+    assert_eq!(st.state, TorrentState::WaitingForDisk);
+    assert_eq!(st.drive_short, Some((15 * GB, 18 * GB + FREE_SPACE_MARGIN)));
+    assert!(fake.added.lock().unwrap().is_empty());
+    let err = m.playable(HASH).unwrap_err();
+    assert_eq!(err.code(), Some("torrent_disk_full"));
+
+    // the rest of the file plus the margin is free now
+    *free.lock().unwrap() = 18 * GB + FREE_SPACE_MARGIN;
+    m.start(&magnet(HASH)).await.unwrap();
+    let st = m.status(HASH).unwrap();
+    assert_eq!(st.state, TorrentState::Downloading);
+    assert_eq!(st.drive_short, None);
+}
+
+#[tokio::test]
+async fn a_drive_filling_up_while_downloading_fails_the_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 18 * GB)]));
+    let m = manager(fake.clone(), dir.path(), 50);
+    let free = Arc::new(Mutex::new(30 * GB));
+    let f = Arc::clone(&free);
+    m.set_free_space(Arc::new(move |_: &Path| Some(*f.lock().unwrap())));
+    m.start(&magnet(HASH)).await.unwrap();
+    fake.set_progress(HASH, 5 * GB, 18 * GB);
+    m.sample().await;
+    assert_eq!(m.status(HASH).unwrap().state, TorrentState::Downloading);
+
+    *free.lock().unwrap() = 100 * MB;
+    fake.set_progress(HASH, 6 * GB, 18 * GB);
+    m.sample().await;
+    let TorrentState::Failed(e) = m.status(HASH).unwrap().state else {
+        panic!("not failed");
+    };
+    assert_eq!(e.code(), Some("torrent_disk_full"));
+    assert_eq!(*fake.stopped.lock().unwrap(), vec![HASH.to_string()]);
+    assert_eq!(
+        m.playable(HASH).unwrap_err().code(),
+        Some("torrent_disk_full")
+    );
+}
+
+#[tokio::test]
+async fn a_library_error_while_downloading_fails_the_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 100)]));
+    let m = manager(fake.clone(), dir.path(), 50);
+    m.start(&magnet(HASH)).await.unwrap();
+    fake.set_progress(HASH, 40, 100);
+    fake.progress.lock().unwrap().get_mut(HASH).unwrap().error = Some("write failed".into());
+    m.sample().await;
+    let TorrentState::Failed(e) = m.status(HASH).unwrap().state else {
+        panic!("not failed");
+    };
+    assert!(e.to_stored().contains("torrent_failed"));
+}
+
+#[tokio::test]
+async fn a_chosen_download_folder_gets_its_own_subfolder() {
+    use super::hub::{ManagerFactory, TorrentHub};
+
+    let data = tempfile::tempdir().unwrap();
+    let chosen = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 100)]));
+    let roots = Arc::new(Mutex::new(Vec::<std::path::PathBuf>::new()));
+    let (made, seen) = (Arc::clone(&fake), Arc::clone(&roots));
+    let factory: ManagerFactory = Arc::new(move |root, kbps, gb| {
+        seen.lock().unwrap().push(root.clone());
+        let fake = Arc::clone(&made);
+        Box::pin(async move { Ok(TorrentManager::new(fake, root, kbps, gb)) })
+    });
+    let hub = TorrentHub::with_factory(data.path().join("torrents"), factory);
+    let on = settings::TorrentSettings {
+        torrents_enabled: true,
+        ..Default::default()
+    };
+    hub.set_settings(&on);
+    assert_eq!(hub.root(), data.path().join("torrents"));
+    let first = hub.manager().await.unwrap();
+
+    // a stray file of the owner's in the chosen folder is never touched
+    let theirs = chosen.path().join("mine.txt");
+    std::fs::write(&theirs, b"x").unwrap();
+    let dir_text = chosen.path().to_string_lossy().into_owned();
+    settings::check_dir(&dir_text).unwrap();
+    let ours = chosen.path().join(settings::DIR_NAME);
+    assert!(ours.is_dir());
+    let moved = settings::TorrentSettings {
+        torrent_dir: dir_text,
+        ..on.clone()
+    };
+    hub.apply(&moved).await;
+    assert!(
+        hub.manager_if_running().is_none(),
+        "the old manager is stopped"
+    );
+    let second = hub.manager().await.unwrap();
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(second.root(), ours.as_path());
+    assert_eq!(
+        *roots.lock().unwrap(),
+        vec![data.path().join("torrents"), ours.clone()]
+    );
+    second.start(&magnet(HASH)).await.unwrap();
+    assert!(ours.join(HASH).join("part").is_file());
+    second.cleanup_leftovers(&[]).await;
+    assert!(!ours.join(HASH).exists());
+    assert!(theirs.is_file());
+
+    // checks of the folder
+    assert_eq!(
+        settings::check_dir("relative/dir").unwrap_err().code(),
+        Some("torrent_dir_not_absolute")
+    );
+    let gone = chosen.path().join("gone");
+    assert_eq!(
+        settings::check_dir(&gone.to_string_lossy())
+            .unwrap_err()
+            .code(),
+        Some("torrent_dir_missing")
+    );
 }
 
 #[tokio::test]
@@ -780,7 +913,9 @@ async fn a_failed_start_is_retried_once_then_the_gate_reports_failed() {
 async fn live_stream_survives_completion() {
     use tokio::io::AsyncReadExt;
     let dir = tempfile::tempdir().unwrap();
-    let m = TorrentManager::create(dir.path().join("t"), 0, 50).await.unwrap();
+    let m = TorrentManager::create(dir.path().join("t"), 0, 50)
+        .await
+        .unwrap();
     // Big Buck Bunny (CC BY), the WebTorrent test torrent.
     let link = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.webtorrent.dev";
     let mr = parse_magnet(link).unwrap();
@@ -794,22 +929,35 @@ async fn live_stream_survives_completion() {
     let mut saw_complete_at = None;
     let start = std::time::Instant::now();
     loop {
-        let n = match tokio::time::timeout(std::time::Duration::from_secs(120), s.read(&mut buf)).await {
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(120), s.read(&mut buf))
+            .await
+        {
             Ok(Ok(n)) => n,
             Ok(Err(e)) => panic!("read error at {read}: {e}"),
             Err(_) => panic!("read timed out at {read}"),
         };
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         read += n as u64;
         let st = m.status(&hash).unwrap();
         if saw_complete_at.is_none() && st.state == TorrentState::Complete {
             saw_complete_at = Some(read);
-            eprintln!("complete (stopped) while the stream was at {read} of {total}, {:?}", start.elapsed());
+            eprintln!(
+                "complete (stopped) while the stream was at {read} of {total}, {:?}",
+                start.elapsed()
+            );
         }
         // Read slower than the download so completion happens mid-stream.
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
-    eprintln!("stream ended at {read} of {total}, complete seen at {saw_complete_at:?}, {:?}", start.elapsed());
-    assert!(saw_complete_at.is_some_and(|at| at < total), "completion must happen mid-stream for the experiment");
+    eprintln!(
+        "stream ended at {read} of {total}, complete seen at {saw_complete_at:?}, {:?}",
+        start.elapsed()
+    );
+    assert!(
+        saw_complete_at.is_some_and(|at| at < total),
+        "completion must happen mid-stream for the experiment"
+    );
     assert_eq!(read, total, "the stream ended early");
 }

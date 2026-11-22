@@ -27,7 +27,8 @@ pub type ManagerFactory = Arc<
 >;
 
 pub struct TorrentHub {
-    root: PathBuf,
+    /// `<data dir>/torrents`: the folder while `torrentDir` is empty.
+    default_root: PathBuf,
     token: String,
     port: AtomicU16,
     settings: Mutex<TorrentSettings>,
@@ -68,7 +69,7 @@ impl TorrentHub {
         getrandom::fill(&mut raw).expect("system random number generator");
         let token = raw.iter().map(|b| format!("{b:02x}")).collect();
         Arc::new(Self {
-            root,
+            default_root: root,
             token,
             port: AtomicU16::new(0),
             settings: Mutex::new(TorrentSettings::default()),
@@ -80,9 +81,23 @@ impl TorrentHub {
         })
     }
 
-    /// The folder of the torrents' files.
-    pub fn root(&self) -> &Path {
-        &self.root
+    /// The folder of the torrents' files: `<data dir>/torrents`, or the `VRCinema-torrents`
+    /// subfolder of the owner's download folder.
+    pub fn root(&self) -> PathBuf {
+        super::settings::root_of(&self.settings().torrent_dir, &self.default_root)
+    }
+
+    /// The folder used while no download folder is chosen.
+    pub fn default_root(&self) -> &Path {
+        &self.default_root
+    }
+
+    /// Free bytes on the drive of the torrents' folder (`None`: not known).
+    pub fn drive_free(&self) -> Option<u64> {
+        match self.manager_if_running() {
+            Some(m) => m.drive_free(),
+            None => super::free_space_at(&self.root()),
+        }
     }
 
     /// The random token of this run: part of every stream address.
@@ -168,12 +183,18 @@ impl TorrentHub {
             return Ok(m);
         }
         let s = self.settings();
-        let m = (self.factory)(
-            self.root.clone(),
-            s.torrent_upload_kbps,
-            s.torrent_disk_cap_gb,
-        )
-        .await?;
+        let root = self.root();
+        if !s.torrent_dir.is_empty() {
+            // Only our own subfolder is made, never the chosen folder itself (a drive that
+            // is gone stays an error).
+            if !Path::new(&s.torrent_dir).is_dir() {
+                return Err(Msg::error("torrent_dir_missing").arg("path", &s.torrent_dir));
+            }
+            if tokio::fs::create_dir_all(&root).await.is_err() {
+                return Err(Msg::error("torrent_dir_not_writable").arg("path", &s.torrent_dir));
+            }
+        }
+        let m = (self.factory)(root, s.torrent_upload_kbps, s.torrent_disk_cap_gb).await?;
         // Switched off while it was being made: do not keep it.
         if !self.enabled() {
             return Err(Msg::error("torrents_disabled"));
@@ -185,8 +206,14 @@ impl TorrentHub {
     /// New settings: the limits apply to a running manager at once; switching off stops every
     /// torrent and drops the manager (and with it the session).
     pub async fn apply(&self, new: &TorrentSettings) {
-        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = new.clone();
-        if !new.torrents_enabled {
+        let old = std::mem::replace(
+            &mut *self.settings.lock().unwrap_or_else(PoisonError::into_inner),
+            new.clone(),
+        );
+        // A new download folder: the running torrents stop and their files (in our folder)
+        // go; the next need makes the manager in the new folder.
+        let moved = old.torrent_dir != new.torrent_dir;
+        if !new.torrents_enabled || moved {
             let taken = self
                 .manager
                 .write()

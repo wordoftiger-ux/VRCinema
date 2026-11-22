@@ -230,13 +230,19 @@ pub(crate) fn torrent_json(state: &AppState, item: &QueueItem) -> Value {
     };
     let eta = (s.state == TorrentState::Downloading && s.rate_bps > 0.0 && s.total > 0)
         .then(|| (s.total.saturating_sub(s.downloaded) as f64 / s.rate_bps).ceil() as u64);
-    json!({
+    let mut out = json!({
         "state": name,
         "progress": super::num_json((progress * 10_000.0).round() / 10_000.0),
         "rateBps": s.rate_bps.round() as u64,
         "etaS": eta,
         "ready": matches!(ready, crate::torrent::Readiness::Ready),
-    })
+    });
+    // Waiting because the drive is short of free space (not the disk cap of the setting).
+    if let Some((free, need)) = s.drive_short {
+        out["diskFreeBytes"] = json!(free);
+        out["needBytes"] = json!(need);
+    }
+    out
 }
 
 /// Adds `torrent` to the rows of the magnet items of `items` (as listed, same order).

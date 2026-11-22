@@ -42,6 +42,7 @@ impl TorrentBackend for FakeBackend {
             file_total: 100,
             peers: 1,
             complete: true,
+            error: None,
         })
     }
     async fn open_file(&self, _hash: &str, _idx: usize) -> Result<Box<dyn FileStream>, Msg> {
@@ -124,6 +125,52 @@ async fn no_manager_created_while_disabled() {
     assert!(hub.manager_if_running().is_some());
     put_enabled(&h, &cookie, false).await;
     assert!(hub.manager_if_running().is_none());
+}
+
+#[tokio::test]
+async fn settings_take_a_checked_torrent_download_folder() {
+    let hub = hub(Arc::default());
+    let h = harness(&hub);
+    let cookie = h.login().await;
+    let put = |v: Value| {
+        h.send(
+            call("PUT", "/api/admin/channels/main/settings")
+                .cookie(&cookie)
+                .json(json!({ "torrentDir": v })),
+        )
+    };
+    let r = put(json!("relative/dir")).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["code"], "torrent_dir_not_absolute");
+    let chosen = tempfile::tempdir().unwrap();
+    let gone = chosen.path().join("gone");
+    let r = put(json!(gone.to_string_lossy())).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["code"], "torrent_dir_missing");
+    let r = put(json!(7)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+
+    let dir = chosen.path().to_string_lossy().into_owned();
+    let r = put(json!(format!("  {dir} "))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let body = r.json();
+    assert_eq!(body["torrentDir"], dir.as_str());
+    assert!(body["torrentDirDefault"].is_string());
+    assert!(chosen.path().join("VRCinema-torrents").is_dir());
+    assert_eq!(
+        hub.root(),
+        chosen.path().join("VRCinema-torrents"),
+        "the hub uses the subfolder"
+    );
+    let got = h
+        .send(call("GET", "/api/admin/channels/main/settings").cookie(&cookie))
+        .await
+        .json();
+    assert_eq!(got["torrentDir"], dir.as_str());
+    // Empty: the default folder again.
+    let r = put(json!("")).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(hub.root(), hub.default_root());
 }
 
 #[tokio::test]
