@@ -337,3 +337,87 @@ async fn real_session_is_created_and_dropped_offline() {
     drop(backend);
     assert!(root.is_dir());
 }
+
+/// Lets spawned tasks run.
+async fn settle() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn unknown_duration_plays_only_when_complete_if_probe_fails() {
+    use super::gate::{HubGate, ProbeFn, TorrentGate};
+    use super::hub::{ManagerFactory, TorrentHub};
+    use crate::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 100 * MB)]));
+    let made = Arc::clone(&fake);
+    let factory: ManagerFactory = Arc::new(move |root, kbps, gb| {
+        let fake = Arc::clone(&made);
+        Box::pin(async move { Ok(TorrentManager::new(fake, root, kbps, gb)) })
+    });
+    let hub = TorrentHub::with_factory(dir.path().join("torrents"), factory);
+    hub.set_settings(&settings::TorrentSettings {
+        torrents_enabled: true,
+        ..Default::default()
+    });
+    let probes = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&probes);
+    let probe: ProbeFn = Arc::new(move |url| {
+        seen.lock().unwrap().push(url);
+        Box::pin(async { None })
+    });
+    let gate = HubGate::new(Arc::clone(&hub), probe);
+    let conn = open_database(Path::new(":memory:")).unwrap();
+    let item = QueueRepo::new(&conn)
+        .add(&NewItem {
+            channel_id: MAIN_CHANNEL_ID,
+            source_url: magnet(HASH).to_link(),
+            title: "f".into(),
+            duration_s: None,
+            is_live: false,
+            status: ItemStatus::Queued,
+            added_by: AddedBy::Admin,
+            requester_name: None,
+            requester_ip: None,
+            requester_key_hash: None,
+        })
+        .unwrap();
+
+    assert!(gate.ensure_started(&item));
+    settle().await;
+    let m = hub.manager_if_running().unwrap();
+    assert_eq!(gate.readiness(&item, None), Readiness::Unknown);
+    fake.set_progress(HASH, 10 * MB, 100 * MB);
+    m.sample().await;
+    assert_eq!(gate.readiness(&item, None), Readiness::Unknown, "probing");
+    settle().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    fake.set_progress(HASH, 20 * MB, 100 * MB);
+    m.sample().await;
+    // ffprobe could not tell: only the complete file plays (80 MB left at 1 MB/s).
+    assert_eq!(gate.readiness(&item, None), Readiness::WaitS(80));
+    assert_eq!(gate.readiness(&item, None), Readiness::WaitS(80));
+    assert_eq!(probes.lock().unwrap().len(), 1, "probed once");
+    assert!(probes.lock().unwrap()[0].ends_with(HASH));
+    fake.set_progress(HASH, 100 * MB, 100 * MB);
+    m.sample().await;
+    assert_eq!(gate.readiness(&item, None), Readiness::Ready);
+
+    // Released: the download goes with its files.
+    gate.release(&item);
+    settle().await;
+    assert!(m.status(HASH).is_none());
+    let files = dir.path().join("torrents").join(HASH);
+    for _ in 0..200 {
+        if !files.exists() {
+            break;
+        }
+        // Deleting runs on a blocking thread.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle().await;
+    }
+    assert!(!files.exists());
+}

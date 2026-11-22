@@ -19,6 +19,7 @@ use tokio::time::Instant;
 use crate::i18n::Msg;
 
 pub mod backend_rqbit;
+pub mod gate;
 pub mod hub;
 pub mod settings;
 

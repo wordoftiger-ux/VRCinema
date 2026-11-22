@@ -334,6 +334,7 @@ async fn start_channel_loop(
     obs: Option<crate::obs::ObsHub>,
     capture: &Arc<crate::capture::CaptureRegistry>,
     loading: &crate::pipeline::loading::LoadStages,
+    torrents: &Arc<crate::torrent::hub::TorrentHub>,
 ) -> anyhow::Result<(EngineHandle, EngineTask, Arc<SlateSwapper>)> {
     shared_log(Msg::new("log.generating_slates"));
     remove_swapped_slate_sets(&config.data_dir.join("slates"));
@@ -379,6 +380,7 @@ async fn start_channel_loop(
         let obs_priority = live.obs_priority.clone();
         let capture = Arc::clone(capture);
         let loading = loading.clone();
+        let torrents = Arc::clone(torrents);
         move || {
             let boxed_log = || -> LogFn {
                 let l = Arc::clone(&shared_log);
@@ -423,6 +425,16 @@ async fn start_channel_loop(
                     hub: hub.clone(),
                     priority: obs_priority.clone(),
                 });
+            // Torrent items: their length (when unknown) is probed on the loopback stream.
+            let ffprobe = config.ffprobe_path.clone();
+            let probe: crate::torrent::gate::ProbeFn = Arc::new(move |url| {
+                let ffprobe = ffprobe.clone();
+                Box::pin(async move { probe_duration(&ffprobe, &url, &[]).await })
+            });
+            options.torrents = Some(crate::torrent::gate::HubGate::new(
+                Arc::clone(&torrents),
+                probe,
+            ));
             let tags_db = Arc::clone(&db);
             let broadcaster = Broadcaster::new(
                 BroadcasterOptions {
@@ -501,6 +513,12 @@ pub async fn run(
     // is on this listener.
     let torrents = crate::torrent::hub::TorrentHub::new(&config.data_dir);
     torrents.set_port(listener.local_addr()?.port());
+    // The stored settings count from the start (the channel may air a torrent item at once).
+    if let Ok(s) =
+        SettingsRepo::new(&db.lock().unwrap_or_else(PoisonError::into_inner)).get(MAIN_CHANNEL_ID)
+    {
+        torrents.set_settings(&s.torrent);
+    }
     let resolver = build_resolver(
         &config,
         &root,
@@ -579,6 +597,7 @@ pub async fn run(
             obs_hub.clone(),
             &capture,
             &loading,
+            &torrents,
         )
         .await?;
         slates = Some(swapper);

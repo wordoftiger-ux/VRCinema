@@ -60,6 +60,11 @@ impl TorrentHub {
         })
     }
 
+    /// The folder of the torrents' files.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The random token of this run: part of every stream address.
     pub fn token(&self) -> &str {
         &self.token

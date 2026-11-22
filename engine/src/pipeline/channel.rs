@@ -25,6 +25,8 @@ use crate::pipeline::slates::{SlateKind, Slates, request_url};
 use crate::stats::{
     ChannelStats, ClipStats, FfmpegInfo, LoadingInfo, NextInfo, NextState, OnAirInfo,
 };
+use crate::torrent::Readiness;
+use crate::torrent::gate::TorrentGate;
 
 /// A boxed, sendable future (like `futures::future::BoxFuture`).
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -172,6 +174,11 @@ fn is_obs(c: &ActiveClip) -> bool {
     c.item.id == OBS_ITEM_ID
 }
 
+/// A torrent item (a `magnet:` source).
+fn is_magnet(item: &QueueItem) -> bool {
+    crate::resolver::torrent::is_magnet(&item.source_url)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelStatus {
     Idle,
@@ -309,6 +316,9 @@ pub struct ChannelOptions {
     pub wall_now: Option<ClockFn>,
     /// The OBS input; `None`: none.
     pub obs: Option<ObsOptions>,
+    /// Torrent items (`magnet:` sources): started ahead, aired once their download will make it;
+    /// `None`: they start like any film.
+    pub torrents: Option<Arc<dyn TorrentGate>>,
 }
 
 impl ChannelOptions {
@@ -334,6 +344,7 @@ impl ChannelOptions {
             monitor: None,
             wall_now: None,
             obs: None,
+            torrents: None,
         }
     }
 }
@@ -363,6 +374,12 @@ const START_SLACK_MS: i64 = 1000;
 /// A start time closer than this gets no countdown: the film just waits.
 const MIN_COUNTDOWN_S: f64 = 3.0;
 const COUNTDOWN_UNAVAILABLE: &str = "log.countdown_unavailable";
+/// The next torrent item starts downloading once the film on air has this long left.
+const TORRENT_LEAD_S: f64 = 300.0;
+/// How often torrent items are checked (start ahead, readiness, items gone).
+const TORRENT_CHECK_MS: u64 = 5_000;
+/// A torrent item's countdown is made again when the estimate moved more than this.
+const TORRENT_COUNTDOWN_MOVE_MS: i64 = 30_000;
 
 // Why a film ended without playing to the end (kept with it in the history as a message, shown
 // in the reader's language).
@@ -694,6 +711,12 @@ pub struct Channel {
     frame_rx: mpsc::UnboundedReceiver<(u64, Result<Vec<SegmentInfo>, Msg>)>,
     /// Folders of frame slates taken off the air, and when (removed [FRAME_SLATE_KEEP_MS] later).
     old_frame_slates: VecDeque<(PathBuf, u64)>,
+    /// The latest readiness of a torrent item at the head: the item, when it was asked, what.
+    torrent_check: Option<(i64, u64, Readiness)>,
+    /// Torrent items whose download the channel started (released once they leave).
+    torrent_items: HashMap<i64, QueueItem>,
+    /// When torrent items are checked next ([`TORRENT_CHECK_MS`]).
+    torrent_due: u64,
 }
 
 /// A film segment kept (hard-linked) for its last frame.
@@ -745,6 +768,8 @@ struct Countdown {
     n: u64,
     /// Its failure was logged.
     failure_logged: bool,
+    /// It airs while a torrent item downloads (`start_at`: when the estimate says it will play).
+    torrent: bool,
 }
 
 fn system_wall_clock() -> ClockFn {
@@ -801,13 +826,28 @@ impl Channel {
             frame_tx,
             frame_rx,
             old_frame_slates: VecDeque::new(),
+            torrent_check: None,
+            torrent_items: HashMap::new(),
+            torrent_due: 0,
         }
     }
 
     /// A film left "playing" by a restart goes back to the front of the queue.
+    /// Torrent files of items no longer queued go too.
     pub fn start(&mut self) -> anyhow::Result<()> {
         let channel_id = self.o.channel_id;
-        self.queue(|q| q.reset_playing(channel_id))
+        self.queue(|q| q.reset_playing(channel_id))?;
+        if let Some(gate) = self.o.torrents.clone() {
+            let keep: Vec<QueueItem> = self
+                .queue(|q| {
+                    q.list_by_status(channel_id, &[ItemStatus::Queued, ItemStatus::Playing])
+                })?
+                .into_iter()
+                .filter(is_magnet)
+                .collect();
+            gate.cleanup(&keep);
+        }
+        Ok(())
     }
 
     pub fn stop(&mut self) {
@@ -838,9 +878,23 @@ impl Channel {
         let skipped = Msg::new(SKIPPED);
         if let Some(p) = self.parked.take() {
             // Paused film: its clip is already gone. The channel stays paused for the next one.
-            return self
+            let result = self
                 .queue(|q| q.finish(p.item.id, ItemStatus::Played, Some(&skipped.to_stored())))
                 .map(|_| ());
+            self.torrent_sweep();
+            return result;
+        }
+        if self.current.is_none()
+            && let Some(head) = self.torrent_waiting_head()
+        {
+            // A torrent item waiting for its download: skipped like a film on air.
+            self.drop_countdown();
+            self.torrent_check = None;
+            let result = self
+                .queue(|q| q.finish(head.id, ItemStatus::Played, Some(&skipped.to_stored())))
+                .map(|_| ());
+            self.torrent_sweep();
+            return result;
         }
         self.finish_current(ItemStatus::Played, Some(&skipped))
     }
@@ -896,6 +950,7 @@ impl Channel {
                 self.drop_prefetched();
             }
         }
+        self.torrent_sweep();
         Ok(())
     }
 
@@ -1351,6 +1406,7 @@ impl Channel {
         }
         self.warn_if_too_slow();
         self.refresh_monitor();
+        self.torrent_tick();
     }
 
     /// The monitor follows the clip being cut: while the window watches it, the clip's fresh
@@ -2337,6 +2393,10 @@ impl Channel {
             if self.waits_for_start(&head) {
                 return Ok(());
             }
+            // A torrent item waits until its download will make it (a countdown airs).
+            if self.prefetched.is_none() && self.torrent_holds(&head) {
+                return Ok(());
+            }
             self.drop_countdown();
             let mut clip = match self.prefetched.take() {
                 Some(clip) => clip,
@@ -2411,10 +2471,16 @@ impl Channel {
     /// head prepared during its last minute), else the idle slate.
     fn countdown_or_idle(&mut self) -> anyhow::Result<SourceSegment> {
         let channel_id = self.o.channel_id;
-        let head = self
-            .queue(|q| q.next_queued(channel_id))?
-            .filter(|h| self.ms_to_start(h).is_some_and(|ms| ms > START_SLACK_MS));
-        let Some(head) = head else {
+        let head = self.queue(|q| q.next_queued(channel_id))?;
+        let start_ahead =
+            |c: &Self, h: &QueueItem| c.ms_to_start(h).is_some_and(|ms| ms > START_SLACK_MS);
+        if let Some(h) = head
+            .as_ref()
+            .filter(|h| !start_ahead(self, h) && self.torrent_waits(h))
+        {
+            return self.torrent_countdown(h.clone());
+        }
+        let Some(head) = head.filter(|h| start_ahead(self, h)) else {
             self.drop_countdown();
             return self.slate(SlateKind::Idle);
         };
@@ -2423,52 +2489,66 @@ impl Channel {
         let stale = self
             .countdown
             .as_ref()
-            .is_some_and(|cd| cd.clip.item.id != head.id || cd.start_at != start_at);
+            .is_some_and(|cd| cd.torrent || cd.clip.item.id != head.id || cd.start_at != start_at);
         if stale {
             self.drop_countdown();
         }
         let seconds = ms as f64 / 1000.0;
         if self.countdown.is_none() && seconds >= MIN_COUNTDOWN_S {
-            self.countdowns += 1;
-            let n = self.countdowns;
             self.log(
                 Msg::new("log.countdown")
                     .arg("id", head.id)
                     .arg("title", &head.title)
                     .arg("seconds", format!("{seconds:.0}")),
             );
-            // Over the last frame of the film that just ended, else the owner's background.
-            let frame = self.frame.as_ref().map(|f| (f.path.clone(), f.duration));
-            let backdrop = self
-                .o
-                .slates
-                .backdrop
-                .as_ref()
-                .map(|spec| spec.countdown(frame))
-                .unwrap_or_default();
-            let start = self
-                .o
-                .factory
-                .create_countdown_on(head.clone(), seconds, backdrop);
-            let clip = self.launch_with(head.clone(), 0.0, 0, start);
-            self.countdown = Some(Countdown {
-                clip,
-                start_at,
-                n,
-                failure_logged: false,
-            });
+            self.start_countdown(&head, seconds, start_at, false);
         }
         // The film is prepared during the countdown's last minute.
         if self.prefetched.is_none()
             && !head.is_live
             && seconds <= self.o.prefetch_s.unwrap_or(DEFAULT_PREFETCH_S)
+            && !self.torrent_holds(&head)
         {
             self.prefetched = Some(self.launch_ahead(head.clone()));
         }
+        match self.countdown_segment(&head) {
+            Some(seg) => Ok(seg),
+            None => self.slate(SlateKind::Idle),
+        }
+    }
+
+    /// Makes the countdown of `seconds` before `head` (airing from its first segment).
+    fn start_countdown(&mut self, head: &QueueItem, seconds: f64, start_at: i64, torrent: bool) {
+        self.countdowns += 1;
+        let n = self.countdowns;
+        // Over the last frame of the film that just ended, else the owner's background.
+        let frame = self.frame.as_ref().map(|f| (f.path.clone(), f.duration));
+        let backdrop = self
+            .o
+            .slates
+            .backdrop
+            .as_ref()
+            .map(|spec| spec.countdown(frame))
+            .unwrap_or_default();
+        let start = self
+            .o
+            .factory
+            .create_countdown_on(head.clone(), seconds, backdrop);
+        let clip = self.launch_with(head.clone(), 0.0, 0, start);
+        self.countdown = Some(Countdown {
+            clip,
+            start_at,
+            n,
+            failure_logged: false,
+            torrent,
+        });
+    }
+
+    /// The countdown's next segment; `None`: none ready, or no countdown (a failure is logged
+    /// once).
+    fn countdown_segment(&mut self, head: &QueueItem) -> Option<SourceSegment> {
         let failure = {
-            let Some(cd) = self.countdown.as_mut() else {
-                return self.slate(SlateKind::Idle);
-            };
+            let cd = self.countdown.as_mut()?;
             if let Some(handle) = cd.clip.handle.as_mut() {
                 let fresh = handle.poll();
                 cd.clip.ready.extend(fresh);
@@ -2486,12 +2566,12 @@ impl Channel {
                     seg.path,
                     SegmentMeta {
                         kind: MetaKind::Countdown,
-                        item: Some(head),
+                        item: Some(head.clone()),
                         position_s: 0.0,
                         monitor_seq: None,
                     },
                 );
-                return Ok(out);
+                return Some(out);
             }
             match (cd.clip.failure(), cd.failure_logged) {
                 (Some(error), false) => {
@@ -2504,7 +2584,180 @@ impl Channel {
         if let Some(error) = failure {
             self.log(Msg::new("log.countdown_failed").arg_msg("error", error));
         }
-        self.slate(SlateKind::Idle)
+        None
+    }
+
+    // ---------- Torrent items ----------
+
+    /// Every [`TORRENT_CHECK_MS`]: items gone from the queue release their downloads, and the
+    /// next queued torrent item starts downloading once the film on air has
+    /// [`TORRENT_LEAD_S`] left (at once when nothing airs).
+    fn torrent_tick(&mut self) {
+        if self.o.torrents.is_none() {
+            return;
+        }
+        let now = (self.now)();
+        if now < self.torrent_due {
+            return;
+        }
+        self.torrent_due = now.saturating_add(TORRENT_CHECK_MS);
+        self.torrent_sweep();
+        let remaining = match (&self.current, &self.parked) {
+            (Some(c), _) if is_obs(c) => None,
+            (Some(c), _) => c.remaining_s(),
+            (None, Some(p)) => p
+                .item
+                .end_s(p.probed.duration_s)
+                .map(|end| end - p.position_s),
+            (None, None) => Some(0.0),
+        };
+        if remaining.is_none_or(|r| r > TORRENT_LEAD_S) {
+            return;
+        }
+        let channel_id = self.o.channel_id;
+        match self.queue(|q| q.next_queued(channel_id)) {
+            Ok(Some(head)) if is_magnet(&head) => self.torrent_start(&head),
+            Ok(_) => {}
+            Err(e) => self.log_error("log.queue_error_prefetch", &e),
+        }
+    }
+
+    /// Starts (or keeps) the download of torrent item `item`.
+    fn torrent_start(&mut self, item: &QueueItem) {
+        let Some(gate) = self.o.torrents.clone() else {
+            return;
+        };
+        if gate.ensure_started(item) && !self.torrent_items.contains_key(&item.id) {
+            self.log(
+                Msg::new("log.torrent_start_ahead")
+                    .arg("id", item.id)
+                    .arg("title", &item.title),
+            );
+            self.torrent_items.insert(item.id, item.clone());
+        }
+    }
+
+    /// The torrent item `head` cannot start yet (its download would not make it). Asked anew
+    /// every [`TORRENT_CHECK_MS`]; `false` for any other item.
+    fn torrent_holds(&mut self, head: &QueueItem) -> bool {
+        let Some(gate) = self.o.torrents.clone() else {
+            return false;
+        };
+        if !is_magnet(head) {
+            return false;
+        }
+        let now = (self.now)();
+        let last = self.torrent_check.filter(|c| c.0 == head.id);
+        if let Some((_, at, r)) = last
+            && now.saturating_sub(at) < TORRENT_CHECK_MS
+        {
+            return r != Readiness::Ready;
+        }
+        // Also tries a download waiting for disk space again.
+        self.torrent_start(head);
+        let duration = head.duration_s.filter(|_| !head.is_live);
+        let r = gate.readiness(head, duration);
+        if r == Readiness::Unknown && last.is_none_or(|c| c.2 != Readiness::Unknown) {
+            self.log(
+                Msg::new("log.torrent_wait_unknown")
+                    .arg("id", head.id)
+                    .arg("title", &head.title),
+            );
+        }
+        self.torrent_check = Some((head.id, now, r));
+        r != Readiness::Ready
+    }
+
+    /// The last check said `head` (a torrent item) has to wait.
+    fn torrent_waits(&self, head: &QueueItem) -> bool {
+        self.torrent_check
+            .is_some_and(|(id, _, r)| id == head.id && r != Readiness::Ready)
+    }
+
+    /// The queue head while it waits for its download.
+    fn torrent_waiting_head(&self) -> Option<QueueItem> {
+        let channel_id = self.o.channel_id;
+        self.queue(|q| q.next_queued(channel_id))
+            .ok()
+            .flatten()
+            .filter(|h| self.torrent_waits(h))
+    }
+
+    /// While the torrent item `head` downloads: the countdown to when the estimate says it
+    /// will play (made again when the estimate moves by more than [`TORRENT_COUNTDOWN_MOVE_MS`]
+    /// or it ran out); the loading slate without an estimate.
+    fn torrent_countdown(&mut self, head: QueueItem) -> anyhow::Result<SourceSegment> {
+        let wait_s = match self.torrent_check {
+            Some((_, _, Readiness::WaitS(s))) => Some(s),
+            _ => None,
+        };
+        match wait_s {
+            Some(s) => {
+                let wall = i64::try_from((self.wall_now)()).unwrap_or(i64::MAX);
+                let target =
+                    wall.saturating_add(i64::try_from(s.saturating_mul(1000)).unwrap_or(i64::MAX));
+                let stale = self.countdown.as_ref().is_some_and(|cd| {
+                    let ran_out = cd.clip.ready.is_empty()
+                        && cd
+                            .clip
+                            .handle
+                            .as_ref()
+                            .is_some_and(|h| h.state() == SegmenterState::Done);
+                    !cd.torrent
+                        || cd.clip.item.id != head.id
+                        || cd.start_at.abs_diff(target) > TORRENT_COUNTDOWN_MOVE_MS.unsigned_abs()
+                        || ran_out
+                });
+                if stale {
+                    self.drop_countdown();
+                }
+                let seconds = s as f64;
+                if self.countdown.is_none() && seconds >= MIN_COUNTDOWN_S {
+                    self.log(
+                        Msg::new("log.torrent_wait")
+                            .arg("id", head.id)
+                            .arg("title", &head.title)
+                            .arg("seconds", s),
+                    );
+                    self.start_countdown(&head, seconds, target, true);
+                }
+            }
+            None => self.drop_countdown(),
+        }
+        match self.countdown_segment(&head) {
+            Some(seg) => Ok(seg),
+            None => self.slate(SlateKind::Buffering),
+        }
+    }
+
+    /// Torrent items that left the channel (played, failed, removed, skipped) release their
+    /// downloads and files.
+    fn torrent_sweep(&mut self) {
+        let Some(gate) = self.o.torrents.clone() else {
+            return;
+        };
+        let ids: Vec<i64> = self.torrent_items.keys().copied().collect();
+        for id in ids {
+            let active = match self.queue(|q| q.get(id)) {
+                Ok(item) => item
+                    .is_some_and(|i| matches!(i.status, ItemStatus::Queued | ItemStatus::Playing)),
+                Err(_) => continue,
+            };
+            if active {
+                continue;
+            }
+            if let Some(item) = self.torrent_items.remove(&id) {
+                gate.release(&item);
+                self.log(
+                    Msg::new("log.torrent_released")
+                        .arg("id", item.id)
+                        .arg("title", &item.title),
+                );
+            }
+            if self.torrent_check.is_some_and(|c| c.0 == id) {
+                self.torrent_check = None;
+            }
+        }
     }
 
     /// Once the film on air has aired a little, the queue head (not live, starting within
@@ -2536,7 +2789,8 @@ impl Channel {
         let far = self
             .ms_to_start(&head)
             .is_some_and(|ms| ms > PREPARE_AHEAD_MAX_MS);
-        if done || far || head.is_live {
+        // A torrent item starts downloading only shortly before its turn ([`TORRENT_LEAD_S`]).
+        if done || far || head.is_live || is_magnet(&head) {
             return;
         }
         self.preparing = Some(Preparing {
@@ -2634,7 +2888,12 @@ impl Channel {
             })
         });
         match head {
-            Ok(Some(head)) => self.prefetched = Some(self.launch_ahead(head)),
+            // A torrent item is prepared only once its download will make it.
+            Ok(Some(head)) => {
+                if !self.torrent_holds(&head) {
+                    self.prefetched = Some(self.launch_ahead(head));
+                }
+            }
             Ok(None) => {}
             Err(e) => self.log_error("log.queue_error_prefetch", &e),
         }
@@ -2763,6 +3022,7 @@ impl Channel {
         let result = self.queue(|q| q.finish(c.item.id, status, stored.as_deref()));
         c.dispose();
         self.forget_seek_of(c.item.id);
+        self.torrent_sweep();
         result.map(|_| ())
     }
 
@@ -6328,5 +6588,234 @@ mod tests {
         e.channel.forget_frame();
         assert!(e.channel.frame.is_none());
         assert_eq!(e.key(), "pause");
+    }
+
+    // ---------- Torrent items ----------
+
+    #[derive(Default)]
+    struct GateLog {
+        started: Vec<i64>,
+        released: Vec<i64>,
+        kept: Option<Vec<i64>>,
+        readiness: HashMap<i64, Readiness>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeGate(Arc<Mutex<GateLog>>);
+
+    impl FakeGate {
+        fn lock(&self) -> std::sync::MutexGuard<'_, GateLog> {
+            self.0.lock().unwrap()
+        }
+        fn set(&self, id: i64, r: Readiness) {
+            self.lock().readiness.insert(id, r);
+        }
+        fn started(&self) -> Vec<i64> {
+            let mut ids = self.lock().started.clone();
+            ids.dedup();
+            ids
+        }
+        fn released(&self) -> Vec<i64> {
+            self.lock().released.clone()
+        }
+    }
+
+    impl TorrentGate for FakeGate {
+        fn ensure_started(&self, item: &QueueItem) -> bool {
+            self.lock().started.push(item.id);
+            true
+        }
+        fn readiness(&self, item: &QueueItem, _duration_s: Option<f64>) -> Readiness {
+            let s = self.lock();
+            s.readiness
+                .get(&item.id)
+                .copied()
+                .unwrap_or(Readiness::Ready)
+        }
+        fn release(&self, item: &QueueItem) {
+            self.lock().released.push(item.id);
+        }
+        fn cleanup(&self, keep: &[QueueItem]) {
+            self.lock().kept = Some(keep.iter().map(|i| i.id).collect());
+        }
+    }
+
+    fn setup_torrents() -> (Env, FakeGate) {
+        let mut e = setup();
+        let gate = FakeGate::default();
+        e.channel.o.torrents = Some(Arc::new(gate.clone()));
+        (e, gate)
+    }
+
+    impl Env {
+        fn add_magnet(&self, title: &str, duration_s: Option<f64>) -> QueueItem {
+            let conn = self.db.lock().unwrap();
+            QueueRepo::new(&conn)
+                .add(&NewItem {
+                    channel_id: MAIN_CHANNEL_ID,
+                    source_url: format!("magnet:?xt=urn:btih:{}&dn={title}", "ab".repeat(20)),
+                    title: title.into(),
+                    duration_s,
+                    is_live: false,
+                    status: ItemStatus::Queued,
+                    added_by: AddedBy::Admin,
+                    requester_name: None,
+                    requester_ip: None,
+                    requester_key_hash: None,
+                })
+                .unwrap()
+        }
+    }
+
+    fn countdown_key(item: &QueueItem, n: u64) -> String {
+        format!("countdown-{}-{n}", item.id)
+    }
+
+    #[tokio::test]
+    async fn torrent_starts_300s_before_the_end() {
+        let (mut e, gate) = setup_torrents();
+        let a = e.add("a", Some(320.0), false);
+        let b = e.add_magnet("b", Some(100.0));
+        e.channel.start().unwrap();
+        assert_eq!(
+            gate.lock().kept,
+            Some(vec![b.id]),
+            "its files stay at start"
+        );
+        let h = e.air(&a, 4).await; // 16 s aired, 304 s left
+        e.tick();
+        assert!(gate.started().is_empty());
+        h.produce(1);
+        e.key(); // 300 s left
+        e.tick();
+        assert!(gate.started().is_empty(), "checked every 5 s");
+        e.advance(TORRENT_CHECK_MS);
+        e.tick();
+        assert_eq!(gate.started(), vec![b.id]);
+        assert_eq!(e.starts(), 1, "no clip of it yet");
+        assert!(
+            e.factory.lock().prepared.is_empty(),
+            "not resolved ahead either"
+        );
+    }
+
+    #[tokio::test]
+    async fn torrent_waits_on_countdown_until_estimate_ready() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(100.0));
+        gate.set(b.id, Readiness::WaitS(120));
+        assert_eq!(e.key(), "buffering", "the countdown is being made");
+        assert_eq!(
+            gate.started(),
+            vec![b.id],
+            "nothing airs: it starts at once"
+        );
+        e.flush().await;
+        assert_eq!(e.factory.lock().countdowns, vec![(b.id, 120.0)]);
+        assert_eq!(e.starts(), 0, "the film waits");
+        let countdown = e.factory.handle(0);
+        countdown.produce(30);
+        assert_eq!(e.publish().source_key, countdown_key(&b, 1));
+        e.publish();
+        e.publish();
+        assert_eq!(e.channel.state().status, ChannelStatus::Countdown);
+        gate.set(b.id, Readiness::Ready);
+        e.advance(4_000);
+        assert_eq!(e.key(), countdown_key(&b, 1), "asked again every 5 s");
+        e.advance(1_000);
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), clip_key(&b, 0));
+        assert!(countdown.disposed());
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing);
+    }
+
+    #[tokio::test]
+    async fn countdown_refreshed_when_estimate_moves() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(100.0));
+        gate.set(b.id, Readiness::WaitS(120));
+        e.key();
+        e.flush().await;
+        // 5 s later it says 140 s: 20 s later than the countdown shows.
+        gate.set(b.id, Readiness::WaitS(140));
+        e.advance(5_000);
+        e.key();
+        e.flush().await;
+        assert_eq!(e.factory.lock().countdowns.len(), 1);
+        // Then 200 s: 90 s later.
+        gate.set(b.id, Readiness::WaitS(200));
+        e.advance(5_000);
+        e.key();
+        e.flush().await;
+        assert_eq!(
+            e.factory.lock().countdowns,
+            vec![(b.id, 120.0), (b.id, 200.0)]
+        );
+        assert!(e.factory.handle(0).disposed());
+        e.factory.handle(1).produce(1);
+        assert_eq!(e.key(), countdown_key(&b, 2));
+        assert_eq!(e.starts(), 0);
+    }
+
+    #[tokio::test]
+    async fn skip_during_wait_drops_download() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(100.0));
+        let c = e.add_item("c");
+        gate.set(b.id, Readiness::WaitS(120));
+        e.key();
+        e.flush().await;
+        e.channel.skip().unwrap();
+        let fresh = e.get(b.id);
+        assert_eq!(fresh.status, ItemStatus::Played);
+        assert!(
+            fresh
+                .error_text(Lang::En)
+                .unwrap()
+                .to_lowercase()
+                .contains("skipped")
+        );
+        assert_eq!(gate.released(), vec![b.id]);
+        assert!(e.factory.handle(0).disposed(), "its countdown goes");
+        assert_eq!(e.key(), "buffering");
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), c.id);
+    }
+
+    #[tokio::test]
+    async fn played_torrent_files_are_deleted() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(100.0));
+        let c = e.add_magnet("c", Some(100.0));
+        gate.set(c.id, Readiness::WaitS(100));
+        let h = e.air(&b, 1).await;
+        assert!(gate.released().is_empty());
+        h.set_state(SegmenterState::Done);
+        e.key();
+        assert_eq!(e.get(b.id).status, ItemStatus::Played);
+        assert_eq!(gate.released(), vec![b.id]);
+        // One removed from the queue while it downloads goes too.
+        assert_eq!(gate.started(), vec![b.id, c.id]);
+        e.set_status(c.id, ItemStatus::Removed);
+        e.channel.on_queue_changed().unwrap();
+        assert_eq!(gate.released(), vec![b.id, c.id]);
+    }
+
+    #[tokio::test]
+    async fn a_torrent_item_is_not_prefetched_before_it_will_make_it() {
+        let (mut e, gate) = setup_torrents();
+        let a = e.add("a", Some(80.0), false);
+        let b = e.add_magnet("b", Some(100.0));
+        gate.set(b.id, Readiness::WaitS(100));
+        let h = e.air(&a, 5).await; // 60 s left
+        e.flush().await;
+        assert_eq!(e.channel.prefetched_item_id(), None);
+        gate.set(b.id, Readiness::Ready);
+        e.advance(TORRENT_CHECK_MS);
+        h.produce(1);
+        e.key();
+        assert_eq!(e.channel.prefetched_item_id(), Some(b.id));
     }
 }
