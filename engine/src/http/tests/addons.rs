@@ -463,3 +463,21 @@ async fn choose_source_on_rejected_item_conflicts() {
     let r = choose(&h, &cookie, plain.id, "https://youtu.be/a").await;
     assert_eq!(r.json()["code"], "not_title_request");
 }
+
+#[tokio::test]
+async fn approve_title_request_is_refused() {
+    let h = title_harness();
+    request_title(&h, "movie", "tt1").await;
+    let id = h.list(ItemStatus::PendingApproval)[0].id;
+    let cookie = h.login().await;
+    let r = h
+        .send(
+            call("PATCH", &format!("/api/admin/items/{id}"))
+                .cookie(&cookie)
+                .json(json!({"action": "approve"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.json()["code"], "title_needs_source");
+    assert_eq!(h.item(id).status, ItemStatus::PendingApproval);
+}

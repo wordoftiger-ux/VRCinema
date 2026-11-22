@@ -359,6 +359,15 @@ async fn patch_item(
         };
         match (action, position) {
             (Some(action @ ("approve" | "reject")), _) => {
+                if action == "approve"
+                    && crate::addons::parse_title_source(&item.source_url).is_some()
+                {
+                    return Ok(Err(ApiError::coded(
+                        StatusCode::CONFLICT,
+                        "title_needs_source",
+                        &[],
+                    )));
+                }
                 if item.status != ItemStatus::PendingApproval {
                     return Ok(Err(ApiError::coded(
                         StatusCode::CONFLICT,
@@ -942,8 +951,9 @@ async fn choose_source(
         return Err(ApiError::bad_request("invalid_link"));
     }
     // Only a row still waiting changes: it may have been rejected while the link was read.
-    let changed = state
-        .with_db(|c| QueueRepo::new(c).set_source_and_queue(id, url.as_str(), meta.duration_s))?;
+    let changed = state.with_db(|c| {
+        QueueRepo::new(c).set_source_and_queue(id, url.as_str(), meta.duration_s, meta.is_live)
+    })?;
     if !changed {
         return Err(not_title_request());
     }

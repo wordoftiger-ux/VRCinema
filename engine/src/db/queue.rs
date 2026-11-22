@@ -372,11 +372,12 @@ impl<'a> QueueRepo<'a> {
         id: i64,
         url: &str,
         duration_s: Option<f64>,
+        is_live: bool,
     ) -> rusqlite::Result<bool> {
         let changed = self.conn.execute(
-            "UPDATE queue_items SET source_url = ?, duration_s = ?, status = 'queued'
+            "UPDATE queue_items SET source_url = ?, duration_s = ?, is_live = ?, status = 'queued'
              WHERE id = ? AND status = 'pending_approval'",
-            params![url, duration_s, id],
+            params![url, duration_s, is_live, id],
         )?;
         Ok(changed > 0)
     }
