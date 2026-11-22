@@ -218,7 +218,14 @@ pub fn is_safe_tracker(tracker: &str) -> bool {
                 return crate::rules::is_public_ip(ip);
             }
             let name = name.trim_end_matches('.').to_ascii_lowercase();
-            name != "localhost" && !name.ends_with(".localhost")
+            // A host that looks numeric but is no canonical IP (`2130706433`, `0x7f.1`, `127.1`)
+            // may still be read as an address by the system resolver: refused.
+            let numeric_looking = name.contains(':')
+                || name.split('.').next_back().is_some_and(|last| {
+                    !last.is_empty()
+                        && (last.bytes().all(|b| b.is_ascii_digit()) || last.starts_with("0x"))
+                });
+            !numeric_looking && name != "localhost" && !name.ends_with(".localhost")
         }
         None => false,
     }

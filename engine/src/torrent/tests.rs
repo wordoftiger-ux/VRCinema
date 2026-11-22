@@ -537,6 +537,10 @@ fn only_public_http_and_udp_trackers_are_kept() {
         "udp://[::1]:80",
         "udp://192.168.1.1:6969",
         "udp://169.254.1.1:1",
+        "udp://2130706433:80",
+        "udp://0x7f.1:80",
+        "udp://127.1:80",
+        "http://2130706433/announce",
     ] {
         assert!(!is_safe_tracker(dropped), "{dropped}");
     }
