@@ -159,6 +159,10 @@ impl CompositeResolver {
         if crate::capture::is_capture_source(url) {
             return Err(ResolveError::coded("capture_not_a_link"));
         }
+        // A viewer's title request has no source until the owner chooses one.
+        if crate::addons::parse_title_source(url).is_some() {
+            return Err(ResolveError::coded("title_needs_source"));
+        }
         if crate::uploads::is_upload_source(url) {
             return self
                 .upload
@@ -339,6 +343,14 @@ mod tests {
             assert_eq!(e.0.key(), "errors.capture_not_a_link", "{url}");
             assert!(c.resolve(url).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn title_source_never_resolves() {
+        let c = CompositeResolver::new(tag("pd"), tag("yt"), None);
+        let e = c.resolve("title:movie:tt1").await.unwrap_err();
+        assert_eq!(e.0.key(), "errors.title_needs_source");
+        assert!(c.fetch_meta("title:movie:tt1").await.is_err());
     }
 
     #[tokio::test]

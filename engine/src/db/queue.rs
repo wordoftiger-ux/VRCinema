@@ -364,6 +364,23 @@ impl<'a> QueueRepo<'a> {
         Ok(())
     }
 
+    /// The owner chose a source for a viewer's title request: `pending_approval` → `queued`
+    /// with the address and length. Returns `false` (nothing changed) when the item is no
+    /// longer pending (rejected or removed meanwhile).
+    pub fn set_source_and_queue(
+        &self,
+        id: i64,
+        url: &str,
+        duration_s: Option<f64>,
+    ) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE queue_items SET source_url = ?, duration_s = ?, status = 'queued'
+             WHERE id = ? AND status = 'pending_approval'",
+            params![url, duration_s, id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// The channel starts airing `id`: `queued` → `playing` only. Returns `false` (nothing
     /// changed) when the item is no longer queued, e.g. removed after it was read as the head.
     pub fn start_playing(&self, id: i64) -> rusqlite::Result<bool> {

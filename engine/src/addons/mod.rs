@@ -139,6 +139,17 @@ pub fn normalize_manifest_url(input: &str) -> Result<String, AddonError> {
     Ok(url)
 }
 
+/// The source address of a viewer's title request: no link yet, the owner chooses one.
+pub fn title_source(type_: &str, id: &str) -> String {
+    format!("title:{type_}:{id}")
+}
+
+/// `(type, id)` of a [`title_source`] address.
+pub fn parse_title_source(s: &str) -> Option<(&str, &str)> {
+    let (type_, id) = s.strip_prefix("title:")?.split_once(':')?;
+    (!type_.is_empty() && !id.is_empty()).then_some((type_, id))
+}
+
 /// The manifest URL without the trailing `/manifest.json`.
 pub fn base_url(manifest_url: &str) -> &str {
     manifest_url

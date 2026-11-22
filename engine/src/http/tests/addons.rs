@@ -284,3 +284,182 @@ async fn viewer_catalog_defaults_true_and_patches() {
     let state = h.send(get("/api/channels/main/state")).await.json();
     assert_eq!(state["rules"]["viewerCatalog"], false);
 }
+
+fn meta_answers(n: &FakeNet) {
+    let base = crate::addons::base_url(CINEMETA_URL).to_string();
+    let mut a = n.answers.lock().unwrap();
+    a.insert(
+        format!("{base}/meta/movie/tt1.json"),
+        json!({"meta": {"id": "tt1", "type": "movie", "name": "Example Film", "releaseInfo": "1999"}}),
+    );
+    a.insert(
+        format!("{base}/meta/series/tt2.json"),
+        json!({"meta": {"id": "tt2", "type": "series", "name": "Example Show", "videos": [
+            {"id": "tt2:1:1", "season": 1, "episode": 1, "title": "First"},
+            {"id": "tt2:1:2", "season": 1, "episode": 2, "title": "Second"},
+        ]}}),
+    );
+}
+
+fn title_harness() -> Harness {
+    let n = net(true);
+    meta_answers(&n);
+    harness(n)
+}
+
+async fn request_title(h: &Harness, type_: &str, id: &str) -> Resp {
+    h.send(
+        call("POST", "/api/channels/main/requests")
+            .ip("1.1.1.1")
+            .json(json!({"title": {"type": type_, "id": id}})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn viewer_title_request_is_always_pending() {
+    let h = title_harness();
+    h.update_settings(SettingsPatch {
+        moderation: Some(false),
+        ..Default::default()
+    });
+    let r = request_title(&h, "movie", "tt1").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    assert_eq!(r.json()["status"], "pending_approval");
+    let pending = h.list(ItemStatus::PendingApproval);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].title, "Example Film (1999)");
+    assert_eq!(pending[0].source_url, "title:movie:tt1");
+    assert_eq!(pending[0].duration_s, None);
+    assert_eq!(pending[0].added_by, AddedBy::Public);
+    let cookie = h.login().await;
+    let panel = h
+        .send(get("/api/admin/channels/main").cookie(&cookie))
+        .await
+        .json();
+    assert_eq!(
+        panel["pending"][0]["titleRequest"],
+        json!({"type": "movie", "id": "tt1"})
+    );
+}
+
+#[tokio::test]
+async fn series_title_request_needs_known_episode() {
+    let h = title_harness();
+    let r = request_title(&h, "series", "tt2").await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.json()["code"], "title_invalid");
+    let r = request_title(&h, "series", "tt2:1:2").await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    assert_eq!(
+        h.list(ItemStatus::PendingApproval)[0].title,
+        "Example Show S01E02 \u{2013} Second"
+    );
+    for (t, id) in [
+        ("movie", "bad id"),
+        ("tv", "tt1"),
+        ("movie", &"a".repeat(81)),
+    ] {
+        let r = request_title(&h, t, id).await;
+        assert_eq!(r.json()["code"], "title_invalid", "{t} {id}");
+    }
+}
+
+#[tokio::test]
+async fn catalog_routes_404_when_disabled_and_rate_limited() {
+    let h = title_harness();
+    h.update_settings(SettingsPatch {
+        viewer_catalog: Some(false),
+        ..Default::default()
+    });
+    let search = || h.send(get("/api/channels/main/catalog/search?q=matrix").ip("2.2.2.2"));
+    assert_eq!(search().await.status, StatusCode::NOT_FOUND);
+    let r = h
+        .send(get("/api/channels/main/catalog/meta/movie/tt1").ip("2.2.2.2"))
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        request_title(&h, "movie", "tt1").await.status,
+        StatusCode::NOT_FOUND
+    );
+    h.update_settings(SettingsPatch {
+        viewer_catalog: Some(true),
+        ..Default::default()
+    });
+    let r = h
+        .send(get("/api/channels/main/catalog/meta/movie/tt1").ip("2.2.2.2"))
+        .await;
+    assert_eq!(r.json()["name"], "Example Film");
+    // 1 meta call above + 29 searches fill the 30 of the minute.
+    for _ in 0..29 {
+        assert_eq!(search().await.status, StatusCode::OK);
+    }
+    let r = search().await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(r.json()["code"], "too_many_requests");
+    // Another address has its own count.
+    let r = h
+        .send(get("/api/channels/main/catalog/search?q=matrix").ip("3.3.3.3"))
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+}
+
+async fn choose(h: &Harness, cookie: &str, id: i64, url: &str) -> Resp {
+    h.send(
+        call(
+            "POST",
+            &format!("/api/admin/channels/main/items/{id}/source"),
+        )
+        .cookie(cookie)
+        .json(json!({ "url": url })),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn choose_source_queues_the_request() {
+    let mut h = title_harness();
+    request_title(&h, "movie", "tt1").await;
+    let id = h.list(ItemStatus::PendingApproval)[0].id;
+    let cookie = h.login().await;
+    h.commands();
+    let r = choose(&h, &cookie, id, "https://youtu.be/a").await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let item = h.item(id);
+    assert_eq!(item.status, ItemStatus::Queued);
+    assert_eq!(item.source_url, "https://youtu.be/a");
+    assert_eq!(item.duration_s, Some(100.0));
+    assert_eq!(item.title, "Example Film (1999)");
+    assert!(
+        h.commands()
+            .iter()
+            .any(|c| matches!(c, Command::QueueChanged))
+    );
+    // It is queued now: choosing again conflicts.
+    let r = choose(&h, &cookie, id, "https://youtu.be/b").await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn choose_source_on_rejected_item_conflicts() {
+    let h = title_harness();
+    request_title(&h, "movie", "tt1").await;
+    let id = h.list(ItemStatus::PendingApproval)[0].id;
+    let cookie = h.login().await;
+    let r = h
+        .send(
+            call("PATCH", &format!("/api/admin/items/{id}"))
+                .cookie(&cookie)
+                .json(json!({"action": "reject"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let r = choose(&h, &cookie, id, "https://youtu.be/a").await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.json()["code"], "not_title_request");
+    assert_eq!(h.item(id).status, ItemStatus::Rejected);
+    // An ordinary pending item is no title request either.
+    let plain = h.add("Plain", ItemStatus::PendingApproval);
+    let r = choose(&h, &cookie, plain.id, "https://youtu.be/a").await;
+    assert_eq!(r.json()["code"], "not_title_request");
+}

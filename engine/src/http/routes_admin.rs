@@ -34,6 +34,10 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/channels/main", get(panel))
         .route("/api/admin/channels/main/items", post(add_item))
         .route(
+            "/api/admin/channels/main/items/{id}/source",
+            post(choose_source),
+        )
+        .route(
             "/api/admin/items/{id}",
             patch(patch_item).delete(delete_item),
         )
@@ -904,4 +908,45 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
         super::routes_slates::refresh_slates(&state);
     }
     Ok(json_ok(&json!(updated)))
+}
+
+/// The owner chose a source for a viewer's title request: the item (still waiting, with a title
+/// address instead of a link) gets the link and its length and joins the queue.
+async fn choose_source(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    JsonBody(body): JsonBody,
+) -> ApiResult {
+    let id = parse_id(&id).ok_or_else(no_such_item)?;
+    let not_title_request = || ApiError::coded(StatusCode::CONFLICT, "not_title_request", &[]);
+    let item = state
+        .with_db(|c| QueueRepo::new(c).get(id))?
+        .filter(|i| i.channel_id == state.channel_id)
+        .ok_or_else(no_such_item)?;
+    if item.status != ItemStatus::PendingApproval
+        || crate::addons::parse_title_source(&item.source_url).is_none()
+    {
+        return Err(not_title_request());
+    }
+    let url = body
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(parse_source_url)
+        .ok_or_else(|| ApiError::bad_request("invalid_link"))?;
+    let meta = state
+        .resolver
+        .fetch_meta(url.as_str())
+        .await
+        .map_err(|e| ApiError::bad_request("fetch_failed").with_msg_arg("reason", e.0))?;
+    if meta.is_playlist {
+        return Err(ApiError::bad_request("invalid_link"));
+    }
+    // Only a row still waiting changes: it may have been rejected while the link was read.
+    let changed = state
+        .with_db(|c| QueueRepo::new(c).set_source_and_queue(id, url.as_str(), meta.duration_s))?;
+    if !changed {
+        return Err(not_title_request());
+    }
+    state.send_command(Command::QueueChanged);
+    Ok(ok())
 }

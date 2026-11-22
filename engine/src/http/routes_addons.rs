@@ -9,7 +9,9 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, AppState, JsonBody, json_ok};
+use std::sync::PoisonError;
+
+use super::{ApiError, ApiResult, AppState, Ctx, JsonBody, json_ok};
 use crate::addons::{AddonError, CatalogHit, Manifest, MetaInfo, normalize_manifest_url};
 use crate::db::addons::CINEMETA_URL;
 use crate::db::{AddError, AddonRepo, AddonRow};
@@ -284,4 +286,129 @@ async fn streams(
             "url": s.url, "name": s.name, "title": s.title,
         })).collect::<Vec<_>>(),
     })))
+}
+
+// ---------- Viewers: the catalog and title requests ----------
+
+/// The routes viewers use (no session): searching the catalog and a title's details. Off with
+/// the owner's `viewer_catalog` setting (404) and limited per address.
+pub(super) fn public_router() -> Router<AppState> {
+    Router::new()
+        .route("/api/channels/main/catalog/search", get(public_search))
+        .route(
+            "/api/channels/main/catalog/meta/{type}/{id}",
+            get(public_meta),
+        )
+}
+
+async fn open_catalog(state: &AppState, ctx: &Ctx) -> Result<(), ApiError> {
+    if !state.settings()?.viewer_catalog {
+        return Err(ApiError::coded(StatusCode::NOT_FOUND, "not_found", &[]));
+    }
+    let allowed = state
+        .catalog_limiter
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .hit(&ctx.ip);
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiError::coded(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            &[],
+        ))
+    }
+}
+
+async fn public_search(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    Query(query): Query<SearchQuery>,
+) -> ApiResult {
+    open_catalog(&state, &ctx).await?;
+    search(State(state), Query(query)).await
+}
+
+async fn public_meta(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    Path((type_, id)): Path<(String, String)>,
+) -> ApiResult {
+    open_catalog(&state, &ctx).await?;
+    let (type_, id) = valid_ref(&type_, &id)?;
+    meta(State(state), Path((type_.to_string(), id.to_string()))).await
+}
+
+fn title_invalid() -> ApiError {
+    ApiError::bad_request("title_invalid")
+}
+
+/// `movie` or `series` with an id of letters, digits and `:_.-` (at most 80).
+fn valid_ref<'a>(type_: &'a str, id: &'a str) -> Result<(&'a str, &'a str), ApiError> {
+    let id_ok = (1..=80).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-'));
+    if matches!(type_, "movie" | "series") && id_ok {
+        Ok((type_, id))
+    } else {
+        Err(title_invalid())
+    }
+}
+
+/// `(type, id)` of a request's `title` object.
+pub(super) fn title_ref(title: &Value) -> Result<(&str, &str), ApiError> {
+    let field = |k| title.get(k).and_then(Value::as_str);
+    match (field("type"), field("id")) {
+        (Some(type_), Some(id)) => valid_ref(type_, id),
+        _ => Err(title_invalid()),
+    }
+}
+
+/// The year as the film's name carries it: the first four digits of "1999" / "2011-2019".
+fn year_text(year: &str) -> &str {
+    let year = year.trim();
+    match year.get(..4) {
+        Some(y) if y.bytes().all(|b| b.is_ascii_digit()) => y,
+        _ => year,
+    }
+}
+
+/// The title stored for a viewer's request, built from the addons' details: a film as
+/// `Name (Year)`, an episode as `Name S01E02 – Episode title`. A series id must be one of the
+/// episodes the addon lists.
+pub(super) async fn stored_title(state: &AppState, type_: &str, id: &str) -> ApiResult<String> {
+    ensure_seeded(state).await;
+    let addons = enabled_manifests(state)?;
+    // The details belong to the series; an episode id is `<series>:<season>:<episode>`.
+    let lookup = if type_ == "series" {
+        id.split(':').next().unwrap_or(id)
+    } else {
+        id
+    };
+    let meta = state
+        .addons
+        .meta(&addons, type_, lookup)
+        .await
+        .map_err(addon_error)?;
+    let name = meta.name.trim();
+    if type_ == "series" {
+        let ep = meta
+            .videos
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or_else(title_invalid)?;
+        let code = format!("{name} S{:02}E{:02}", ep.season, ep.episode);
+        let title = ep.title.trim();
+        return Ok(if title.is_empty() {
+            code
+        } else {
+            format!("{code} \u{2013} {title}")
+        });
+    }
+    Ok(match meta.year.as_deref().map(year_text) {
+        Some(year) if !year.is_empty() => format!("{name} ({year})"),
+        _ => name.to_string(),
+    })
 }

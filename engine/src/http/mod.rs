@@ -91,6 +91,9 @@ impl crate::addons::AddonHttp for NoAddonNetwork {
     }
 }
 
+/// Catalog searches and detail lookups a viewer's address may make per minute.
+const CATALOG_LIMIT: u32 = 30;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<HttpConfig>,
@@ -102,6 +105,8 @@ pub struct AppState {
     pub engine: EngineHandle,
     pub library: Option<Arc<MediaLibrary>>,
     pub request_limiter: Arc<Mutex<RateLimiter>>,
+    /// The viewers' catalog search and details (per address).
+    pub(crate) catalog_limiter: Arc<Mutex<RateLimiter>>,
     pub login_limiter: Arc<tokio::sync::Mutex<RateLimiter>>,
     /// Guessing limits of nick PINs and recovery codes (per address and per nick).
     pub(crate) pin_guard: Arc<Mutex<crate::nick_pin::PinGuard>>,
@@ -231,6 +236,11 @@ impl AppState {
             air_viewers: Arc::default(),
             alarms: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
+            catalog_limiter: Arc::new(Mutex::new(RateLimiter::new(
+                CATALOG_LIMIT,
+                Duration::from_secs(60),
+                system_clock(),
+            ))),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
             pin_guard: Arc::new(Mutex::new(crate::nick_pin::PinGuard::system())),
             pin_work: Arc::new(tokio::sync::Semaphore::new(
@@ -1162,6 +1172,9 @@ pub(crate) fn admin_item(i: &QueueItem, lang: Lang) -> Value {
         map.insert("inS".into(), opt_num_json(i.in_s));
         map.insert("outS".into(), opt_num_json(i.out_s));
         map.insert("startAt".into(), json!(i.start_at));
+        if let Some((type_, id)) = crate::addons::parse_title_source(&i.source_url) {
+            map.insert("titleRequest".into(), json!({ "type": type_, "id": id }));
+        }
     }
     item
 }

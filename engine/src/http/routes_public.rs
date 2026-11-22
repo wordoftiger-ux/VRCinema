@@ -17,7 +17,7 @@ use super::auth::{
 };
 use super::{
     ApiError, ApiResult, AppState, Ctx, JsonBody, asset_response, json_ok, json_response, num_json,
-    public_item, state_map,
+    public_item, routes_addons, state_map,
 };
 use crate::db::{AddedBy, ItemStatus, LinkMode, NewItem, QueueRepo};
 use crate::i18n::Msg;
@@ -40,6 +40,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/admin/login", post(login))
         .route("/api/admin/logout", post(logout))
         .merge(super::viewer_lists::public_router())
+        .merge(super::routes_addons::public_router())
 }
 
 fn page(file: &str) -> Response {
@@ -235,17 +236,17 @@ fn link_error(e: LinkError, settings: &crate::db::ChannelSettings) -> ApiError {
     }
 }
 
-async fn post_request(
-    State(state): State<AppState>,
-    ctx: Ctx,
-    JsonBody(body): JsonBody,
-) -> ApiResult {
-    let settings = state.settings()?;
-    let url = viewer_link(body.get("url").and_then(Value::as_str))?;
-    check_viewer_link_offline(&url, &settings).map_err(|e| link_error(e, &settings))?;
-    let viewer = check_viewer(&state, &body)?;
-    let ip = ctx.ip;
-    let active = state.with_db(|c| QueueRepo::new(c).count_active_by_ip(state.channel_id, &ip))?;
+/// What every viewer request must pass before anything is fetched: the nick and device checks,
+/// the active-requests limit and the request limiter. Nothing is reserved yet (see
+/// [`claim_viewer`]).
+fn admit_viewer_request(
+    state: &AppState,
+    settings: &crate::db::ChannelSettings,
+    body: &Value,
+    ip: &str,
+) -> Result<Viewer, ApiError> {
+    let viewer = check_viewer(state, body)?;
+    let active = state.with_db(|c| QueueRepo::new(c).count_active_by_ip(state.channel_id, ip))?;
     if active >= i64::from(settings.max_active_per_requester) {
         return Err(
             ApiError::coded(StatusCode::TOO_MANY_REQUESTS, "too_many_active", &[])
@@ -261,7 +262,7 @@ async fn post_request(
             settings.request_limit_count,
             Duration::from_secs(settings.request_limit_window_s),
         );
-        limiter.hit(&ip)
+        limiter.hit(ip)
     };
     if !allowed {
         return Err(ApiError::coded(
@@ -270,6 +271,60 @@ async fn post_request(
             &[],
         ));
     }
+    Ok(viewer)
+}
+
+/// A request for a title from the addons' catalog: `{ title: { type, id } }`. It has no link,
+/// so it always waits for the owner (who chooses a source), moderation or not.
+async fn post_title_request(state: AppState, ctx: Ctx, body: Value) -> ApiResult {
+    let settings = state.settings()?;
+    if !settings.viewer_catalog {
+        return Err(ApiError::coded(StatusCode::NOT_FOUND, "not_found", &[]));
+    }
+    let (type_, id) = routes_addons::title_ref(body.get("title").unwrap_or(&Value::Null))?;
+    let viewer = admit_viewer_request(&state, &settings, &body, &ctx.ip)?;
+    let stored = routes_addons::stored_title(&state, type_, id).await?;
+    claim_viewer(&state, &viewer)?;
+    let ip = ctx.ip;
+    let item = state.with_db(|c| {
+        QueueRepo::new(c).add(&NewItem {
+            channel_id: state.channel_id,
+            source_url: crate::addons::title_source(type_, id),
+            title: stored,
+            duration_s: None,
+            is_live: false,
+            status: ItemStatus::PendingApproval,
+            added_by: AddedBy::Public,
+            requester_name: viewer.nick.clone(),
+            requester_ip: Some(ip.clone()),
+            requester_key_hash: viewer.key_hash.clone(),
+        })
+    })?;
+    (state.log)(
+        Msg::new("log.request_received")
+            .arg("viewer", state.viewer_tag(&ip))
+            .arg("title", &item.title)
+            .arg_msg("status", item.status.msg()),
+    );
+    Ok(json_response(
+        StatusCode::CREATED,
+        &json!({ "status": item.status.as_str(), "item": public_item(&item) }),
+    ))
+}
+
+async fn post_request(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    JsonBody(body): JsonBody,
+) -> ApiResult {
+    if body.get("title").is_some_and(|t| !t.is_null()) {
+        return post_title_request(state, ctx, body).await;
+    }
+    let settings = state.settings()?;
+    let url = viewer_link(body.get("url").and_then(Value::as_str))?;
+    check_viewer_link_offline(&url, &settings).map_err(|e| link_error(e, &settings))?;
+    let ip = ctx.ip;
+    let viewer = admit_viewer_request(&state, &settings, &body, &ip)?;
     // The name lookup comes after the limiter and before the resolver touches the address.
     check_host_resolves_public(&url, state.host_resolver.as_ref())
         .await
