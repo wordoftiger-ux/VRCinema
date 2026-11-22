@@ -62,6 +62,8 @@ pub struct ChannelSettings {
     pub viewer_lists: bool,
     /// Most videos one viewer list adds (also the entries read from a playlist).
     pub viewer_list_max: u32,
+    /// Viewers may ask for a film by title (the request page's "Find a film").
+    pub viewer_catalog: bool,
     /// The owner's upload speed in Mbit/s (0: not given): viewers × the stream's bitrate is
     /// compared with it and the panel warns (nothing is ever refused).
     #[serde(serialize_with = "serialize_number")]
@@ -102,6 +104,7 @@ impl Default for ChannelSettings {
             moderation: false,
             viewer_lists: false,
             viewer_list_max: 10,
+            viewer_catalog: true,
             upload_mbps: 0.0,
             force_transcode: false,
             discontinuity_tags: true,
@@ -142,6 +145,7 @@ pub struct SettingsPatch {
     pub moderation: Option<bool>,
     pub viewer_lists: Option<bool>,
     pub viewer_list_max: Option<u32>,
+    pub viewer_catalog: Option<bool>,
     pub upload_mbps: Option<f64>,
     pub force_transcode: Option<bool>,
     pub discontinuity_tags: Option<bool>,
@@ -306,6 +310,7 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
             "viewerListMax" => {
                 out.viewer_list_max = Some(list_max(expect_number(key, value)?));
             }
+            "viewerCatalog" => out.viewer_catalog = Some(expect_bool(key, value)?),
             "uploadMbps" => {
                 // Up to 100 Gbit/s, to a tenth.
                 let mbps = expect_number(key, value)?.min(100_000.0);
@@ -418,6 +423,7 @@ impl<'a> SettingsRepo<'a> {
                 "moderation" => s.moderation = value.as_bool().unwrap_or(s.moderation),
                 "viewerLists" => s.viewer_lists = value.as_bool().unwrap_or(s.viewer_lists),
                 "viewerListMax" => s.viewer_list_max = num.map_or(s.viewer_list_max, list_max),
+                "viewerCatalog" => s.viewer_catalog = value.as_bool().unwrap_or(s.viewer_catalog),
                 "uploadMbps" => s.upload_mbps = num.unwrap_or(s.upload_mbps),
                 "forceTranscode" => {
                     s.force_transcode = value.as_bool().unwrap_or(s.force_transcode)
@@ -480,7 +486,7 @@ impl<'a> SettingsRepo<'a> {
         patch: &SettingsPatch,
     ) -> rusqlite::Result<ChannelSettings> {
         let quoted = |name: &str| format!("\"{name}\"");
-        let entries: [(&str, Option<String>); 23] = [
+        let entries: [(&str, Option<String>); 24] = [
             ("linkMode", patch.link_mode.map(|m| quoted(m.as_str()))),
             (
                 "allowedDomains",
@@ -509,6 +515,7 @@ impl<'a> SettingsRepo<'a> {
                 "viewerListMax",
                 patch.viewer_list_max.map(|n| n.to_string()),
             ),
+            ("viewerCatalog", patch.viewer_catalog.map(|b| b.to_string())),
             ("uploadMbps", patch.upload_mbps.map(number_json)),
             (
                 "forceTranscode",

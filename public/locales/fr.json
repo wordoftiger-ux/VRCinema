@@ -34,6 +34,8 @@
   "errors.addon_unreachable": "Le module complémentaire ne répond pas. Vérifiez son adresse et votre connexion.",
   "errors.addon_invalid": "Cette adresse n’est pas un module valide (elle doit se terminer par /manifest.json et renvoyer la description du module).",
   "errors.addon_no_meta": "Aucun module n’a d’informations sur ce titre.",
+  "errors.addon_exists": "Ce module est dÃ©jÃ  dans la liste.",
+  "errors.addon_not_found": "Ce module nâest pas dans la liste.",
   "errors.app_closing": "L’application est en cours de fermeture.",
   "errors.archive_lacks_file": "L’archive téléchargée ne contient pas {file}.",
   "errors.autostart_failed": "Impossible de modifier le démarrage avec Windows : {detail}",

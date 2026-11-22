@@ -4,6 +4,7 @@
 //! TypeScript version (`src/db/database.ts`), so a database file created by
 //! either implementation can be opened by the other.
 
+pub mod addons;
 pub mod journal;
 pub mod lists;
 pub mod queue;
@@ -14,6 +15,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use addons::{AddError, AddonRepo, AddonRow};
 pub use lists::{ListRepo, PendingList};
 pub use queue::{ACTIVE_STATUSES, AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo, Requester};
 pub use settings::{
@@ -85,6 +87,7 @@ CREATE INDEX IF NOT EXISTS nick_keys_skeleton ON nick_keys(skeleton);
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(MIGRATIONS)?;
     conn.execute_batch(lists::SCHEMA)?;
+    conn.execute_batch(addons::SCHEMA)?;
     conn.execute_batch(journal::SCHEMA)?;
     conn.execute_batch(thumbs::SCHEMA)?;
     add_column_if_missing(conn, "queue_items", "requester_key_hash", "TEXT")?;

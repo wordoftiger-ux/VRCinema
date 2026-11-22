@@ -32,6 +32,8 @@
   "errors.addon_unreachable": "アドオンが応答しません。アドレスと接続を確認してください。",
   "errors.addon_invalid": "このアドレスは有効なアドオンではありません（/manifest.json で終わり、アドオンの説明を返す必要があります）。",
   "errors.addon_no_meta": "このタイトルの情報を持つアドオンはありません。",
+  "errors.addon_exists": "ãã®ã¢ããªã³ã¯ãã§ã«ãªã¹ãã«ããã¾ãã",
+  "errors.addon_not_found": "ãã®ã¢ããªã³ã¯ãªã¹ãã«ããã¾ããã",
   "errors.app_closing": "アプリを終了しています。",
   "errors.archive_lacks_file": "ダウンロードしたアーカイブに{file}がありません。",
   "errors.autostart_failed": "自動起動の設定を変更できませんでした：{detail}",

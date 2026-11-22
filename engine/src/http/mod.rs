@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod client_ip;
+mod routes_addons;
 mod routes_admin;
 mod routes_audio;
 mod routes_capture;
@@ -76,6 +77,20 @@ impl From<&crate::config::AppConfig> for HttpConfig {
     }
 }
 
+/// The addon network of a state that was given none: every call fails as unreachable.
+struct NoAddonNetwork;
+
+#[async_trait::async_trait]
+impl crate::addons::AddonHttp for NoAddonNetwork {
+    async fn get_json(
+        &self,
+        _url: &str,
+        _timeout: Duration,
+    ) -> Result<Value, crate::addons::AddonError> {
+        Err(crate::addons::AddonError::unreachable())
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<HttpConfig>,
@@ -138,6 +153,8 @@ pub struct AppState {
     /// The frames made for the films of the owner's disk and viewers' files (`None`: none,
     /// e.g. in tests).
     pub(crate) thumbs: Option<Arc<routes_thumbs::ThumbCache>>,
+    /// Asks the Stremio-compatible addons (the app uses the network, tests a fake).
+    pub(crate) addons: Arc<crate::addons::AddonClient>,
 }
 
 impl AppState {
@@ -210,6 +227,7 @@ impl AppState {
             preview: None,
             loading: Default::default(),
             thumbs: None,
+            addons: Arc::new(crate::addons::AddonClient::new(Arc::new(NoAddonNetwork))),
             air_viewers: Arc::default(),
             alarms: Arc::default(),
             request_limiter: Arc::new(Mutex::new(request_limiter)),
@@ -220,6 +238,12 @@ impl AppState {
             )),
             log: Arc::new(|_| {}),
         })
+    }
+
+    /// Replaces the addon client (the app gives it the network).
+    pub fn with_addons(mut self, addons: Arc<crate::addons::AddonClient>) -> Self {
+        self.addons = addons;
+        self
     }
 
     /// Replaces the system's name lookup (tests use a table).
@@ -1294,6 +1318,7 @@ pub fn build_router(state: AppState) -> Router {
     .merge(routes_slates::router())
     .merge(routes_thumbs::router())
     .merge(viewer_lists::admin_router())
+    .merge(routes_addons::router())
     .route_layer(middleware::from_fn_with_state(
         state.clone(),
         routes_admin::require_admin,

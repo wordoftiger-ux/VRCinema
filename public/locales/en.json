@@ -33,6 +33,8 @@
   "errors.addon_unreachable": "The addon did not answer. Check its address and your connection.",
   "errors.addon_invalid": "The address is not a valid addon (it must end with /manifest.json and return an addon description).",
   "errors.addon_no_meta": "No addon has details for this title.",
+  "errors.addon_exists": "This addon is already in the list.",
+  "errors.addon_not_found": "That addon is not in the list.",
   "errors.app_closing": "The app is closing.",
   "errors.archive_lacks_file": "The downloaded archive has no {file}.",
   "errors.autostart_failed": "Could not change starting with Windows: {detail}",

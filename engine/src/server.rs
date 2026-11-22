@@ -647,6 +647,9 @@ pub async fn run(
         .with_capture(Arc::clone(&capture))
         .with_loading(loading.clone())
         .with_thumbs(config.data_dir.join("thumbs"), config.ffmpeg_path.clone())
+        .with_addons(Arc::new(crate::addons::AddonClient::new(Arc::new(
+            crate::addons::ReqwestAddonHttp::new()?,
+        ))))
         .with_ctl_token(&ctl_token);
         if let Some(configure) = configure_state {
             state = configure(state);

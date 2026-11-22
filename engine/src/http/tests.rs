@@ -37,6 +37,7 @@ use crate::pipeline::channel::{
 use crate::pipeline::monitor::{MonitorFeed, MonitorRow};
 use crate::resolver::{MediaMeta, MediaResolver, PlaylistEntry, ResolveError, ResolvedStream};
 
+mod addons;
 mod capture;
 mod ctl;
 mod lists;
@@ -944,6 +945,7 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
             "moderation": false,
             "viewerLists": false,
             "viewerListMax": 10,
+            "viewerCatalog": true,
             "uploads": null
         })
     );

@@ -33,6 +33,8 @@
   "errors.addon_unreachable": "Das Addon antwortet nicht. Prüfen Sie die Adresse und Ihre Verbindung.",
   "errors.addon_invalid": "Diese Adresse ist kein gültiges Addon (sie muss auf /manifest.json enden und eine Addon-Beschreibung liefern).",
   "errors.addon_no_meta": "Kein Addon hat Angaben zu diesem Titel.",
+  "errors.addon_exists": "Dieses Addon ist schon in der Liste.",
+  "errors.addon_not_found": "Dieses Addon ist nicht in der Liste.",
   "errors.app_closing": "Die App wird beendet.",
   "errors.archive_lacks_file": "Im heruntergeladenen Archiv fehlt {file}.",
   "errors.autostart_failed": "Der Start mit Windows konnte nicht geändert werden: {detail}",

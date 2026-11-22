@@ -30,6 +30,8 @@
   "errors.addon_unreachable": "API error (panel or app window notice). Adding or using a Stremio-compatible addon that did not answer in time or failed.",
   "errors.addon_invalid": "API error (panel or app window notice). The address given as an addon is not a valid addon manifest URL (must end with /manifest.json); /manifest.json is a URL part — keep it.",
   "errors.addon_no_meta": "API error (panel or app window notice). No enabled addon could give details (meta) for the chosen film or series.",
+  "errors.addon_exists": "API error (panel or app window notice). The owner tried to add an addon whose address is already in the addon list.",
+  "errors.addon_not_found": "API error (panel or app window notice). The addon the request names is not in the owner's addon list (removed meanwhile, or switched off).",
   "errors.app_closing": "API error (panel, request page or app window notice). The app window asked for something while the app shuts down.",
   "errors.archive_lacks_file": "Error text (shown in the app window and written to the log). Tools install; {file} is a file name inside the archive.",
   "errors.autostart_failed": "API error (panel, request page or app window notice). Settings: switching \"start with Windows\" failed; {detail} is the system error.",
