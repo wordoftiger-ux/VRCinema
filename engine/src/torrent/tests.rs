@@ -771,3 +771,45 @@ async fn a_failed_start_is_retried_once_then_the_gate_reports_failed() {
     assert_eq!(err.code(), Some("torrent_metadata"));
     assert!(fake.added.lock().unwrap().is_empty());
 }
+
+/// Live experiment (network): a stream opened while the torrent downloads keeps reading to the
+/// end after the download completes and the torrent is stopped.
+/// `cargo test --lib live_stream_survives_completion -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn live_stream_survives_completion() {
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let m = TorrentManager::create(dir.path().join("t"), 0, 50).await.unwrap();
+    // Big Buck Bunny (CC BY), the WebTorrent test torrent.
+    let link = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.webtorrent.dev";
+    let mr = parse_magnet(link).unwrap();
+    m.start(&mr).await.unwrap();
+    let hash = mr.info_hash.clone();
+    let mut s = m.open(&hash).await.unwrap();
+    let total = m.status(&hash).unwrap().total;
+    eprintln!("file total {total}");
+    let mut read: u64 = 0;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut saw_complete_at = None;
+    let start = std::time::Instant::now();
+    loop {
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(120), s.read(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => panic!("read error at {read}: {e}"),
+            Err(_) => panic!("read timed out at {read}"),
+        };
+        if n == 0 { break; }
+        read += n as u64;
+        let st = m.status(&hash).unwrap();
+        if saw_complete_at.is_none() && st.state == TorrentState::Complete {
+            saw_complete_at = Some(read);
+            eprintln!("complete (stopped) while the stream was at {read} of {total}, {:?}", start.elapsed());
+        }
+        // Read slower than the download so completion happens mid-stream.
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    eprintln!("stream ended at {read} of {total}, complete seen at {saw_complete_at:?}, {:?}", start.elapsed());
+    assert!(saw_complete_at.is_some_and(|at| at < total), "completion must happen mid-stream for the experiment");
+    assert_eq!(read, total, "the stream ended early");
+}

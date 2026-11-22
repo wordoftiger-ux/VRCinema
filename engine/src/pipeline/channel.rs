@@ -376,6 +376,9 @@ const MIN_COUNTDOWN_S: f64 = 3.0;
 const COUNTDOWN_UNAVAILABLE: &str = "log.countdown_unavailable";
 /// The next torrent item starts downloading once the film on air has this long left.
 const TORRENT_LEAD_S: f64 = 300.0;
+/// How long a torrent film on air may wait for data that is still downloading before it
+/// counts as stalled.
+const TORRENT_STALL_TIMEOUT_S: u64 = 300;
 /// How often torrent items are checked (start ahead, readiness, items gone).
 const TORRENT_CHECK_MS: u64 = 5_000;
 /// A torrent item's countdown is made again when the estimate moved more than this.
@@ -2123,6 +2126,19 @@ impl Channel {
                 }
             }
             let stalled_since = *c.stalled_since.get_or_insert(now);
+            // A torrent film whose file is still coming in (a seek past the downloaded part)
+            // waits for its data longer than a stuck source would.
+            let stall_timeout_ms = if is_magnet(&c.item)
+                && self
+                    .o
+                    .torrents
+                    .as_ref()
+                    .is_some_and(|g| g.downloading(&c.item))
+            {
+                stall_timeout_ms.max(TORRENT_STALL_TIMEOUT_S * 1000)
+            } else {
+                stall_timeout_ms
+            };
             if now.saturating_sub(stalled_since) > stall_timeout_ms {
                 if let Some(handle) = c.handle.as_mut() {
                     handle.kill();
@@ -6658,6 +6674,7 @@ mod tests {
         kept: Option<Vec<i64>>,
         readiness: HashMap<i64, Readiness>,
         failures: HashMap<i64, Msg>,
+        downloading: bool,
     }
 
     #[derive(Clone, Default)]
@@ -6701,6 +6718,30 @@ mod tests {
         fn cleanup(&self, keep: &[QueueItem]) {
             self.lock().kept = Some(keep.iter().map(|i| i.id).collect());
         }
+        fn downloading(&self, _item: &QueueItem) -> bool {
+            self.lock().downloading
+        }
+    }
+
+    /// A torrent film on air that waits for data still downloading (a seek past the downloaded
+    /// part) is not failed after the usual 30 s; once the download is not running, it is.
+    #[tokio::test]
+    async fn a_torrent_film_waiting_for_its_download_is_not_failed_after_30_s() {
+        let (mut e, gate) = setup_torrents();
+        gate.lock().downloading = true;
+        let b = e.add_magnet("b", Some(1000.0));
+        let _h = e.air(&b, 2).await;
+        // No new segment for two minutes: the loading slate, still playing.
+        for _ in 0..24 {
+            e.advance(5_000);
+            assert_eq!(e.key(), "buffering");
+        }
+        assert_eq!(e.get(b.id).status, ItemStatus::Playing);
+        // The download stops running: the usual stall rule applies (already past 30 s).
+        gate.lock().downloading = false;
+        e.advance(1_000);
+        e.key();
+        assert_eq!(e.get(b.id).status, ItemStatus::Failed);
     }
 
     fn setup_torrents() -> (Env, FakeGate) {

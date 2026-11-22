@@ -43,6 +43,11 @@ pub trait TorrentGate: Send + Sync {
     fn release(&self, item: &QueueItem);
     /// At channel start: deletes every torrent and file not belonging to `keep`.
     fn cleanup(&self, keep: &[QueueItem]);
+    /// The item's file is still being downloaded: a film on air that waits for data (a seek
+    /// past the downloaded part) may wait longer before it counts as stalled.
+    fn downloading(&self, _item: &QueueItem) -> bool {
+        false
+    }
 }
 
 /// ffprobe of a film's length at an address (`None`: could not tell).
@@ -283,6 +288,16 @@ impl TorrentGate for HubGate {
                 m.drop_item(&hash).await;
             }
         });
+    }
+
+    fn downloading(&self, item: &QueueItem) -> bool {
+        let Some(hash) = hash_of(item) else {
+            return false;
+        };
+        self.hub
+            .manager_if_running()
+            .and_then(|m| m.status(&hash))
+            .is_some_and(|s| s.state == TorrentState::Downloading)
     }
 
     fn cleanup(&self, keep: &[QueueItem]) {
