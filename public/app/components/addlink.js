@@ -15,7 +15,7 @@ const SUGGEST_DEBOUNCE_MS = 300;
 const SUGGEST_MAX = 6;
 
 /** Text that may be a title: at least two letters and not a link. */
-const isTitleText = (text) => [...text.trim()].length >= 2 && !/^http/i.test(text.trim());
+const isTitleText = (text) => [...text.trim()].length >= 2 && !/^(http|magnet:)/i.test(text.trim());
 
 const typeLabel = (type) => (type === 'movie' || type === 'series' ? t(`search.type_${type}`) : type);
 
@@ -38,7 +38,7 @@ async function add(url) {
 /** Ctrl+V: the text on the clipboard is a link to add (anything else is said not to be). */
 export async function pasteLink(text) {
   const url = String(text ?? '').trim().split(/\s+/)[0] ?? '';
-  if (!/^https?:\/\/\S+$/i.test(url)) {
+  if (!/^(https?:\/\/|magnet:)\S+$/i.test(url)) {
     showToast(t('queue.paste_not_link'));
     return;
   }

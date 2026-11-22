@@ -119,6 +119,7 @@ function Source({ stream, forItem }) {
     <li class="src-row">
       <div class="src-text">
         ${stream.name ? html`<b class="src-name">${stream.name}</b>` : null}
+        ${stream.torrent ? html`<span class="chip-tag src-torrent">${t('search.torrent_chip')}</span>` : null}
         ${stream.title ? html`<span class="src-title">${stream.title}</span>` : null}
       </div>
       <span class="src-actions">

@@ -113,7 +113,15 @@ The program can show the video on air in **your own VRChat chatbox** (the bubble
 - **VRCinema does not provide any addons. You are responsible for what the addons you add offer.**
 - The **Search** tab finds a film or series by title; for a series, pick a season and an episode. Every addon with sources is asked on its own, so a slow one does not hold up the others. **Add to queue** or **Play next** uses the chosen source. You can also type a title (instead of a link) in the link field of the Channel view and pick from the quick results.
 - **Settings** → **Channel** → **Film requests**: with it on, the request page has a **Find a film** switch, and viewers can send a title. Such a request always waits for your approval, and in the approvals list you press **Choose source** to pick where the film comes from.
-- Links from some services expire after a few hours, so add such videos shortly before they air. Torrent sources are not supported (only links the channel can open).
+- Links from some services expire after a few hours, so add such videos shortly before they air.
+
+#### Torrent sources
+
+- **Off by default.** Switch them on in **Settings** → **Addons** → **Torrent sources**. Then addon sources marked **torrent** and `magnet:` links in the link field work.
+- A torrent starts downloading about 5 minutes before its turn. When the download estimate says it will finish in time, the film plays as soon as it can; otherwise the channel waits on a countdown slate (you can press **Skip**).
+- Upload is capped (200 KB/s by default; 0 means unlimited) and there is no seeding after the download. The files are deleted after the film has played. All torrent files together are held to a disk cap (50 GB by default).
+- **Warning:** while a film downloads, your public IP address is visible to other peers. A VPN is advised. You are responsible for what you play.
+- Only you (the owner) can add torrents; viewers cannot send `magnet:` links.
 
 ### Viewer nicks
 

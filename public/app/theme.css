@@ -1935,6 +1935,30 @@ kbd {
   text-overflow: ellipsis;
 }
 
+.qi-torrent {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qi-torrent.failed,
+.qi-torrent.waitingForDisk {
+  color: var(--amber);
+}
+
+.src-torrent {
+  align-self: flex-start;
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.tr-limits {
+  align-items: flex-end;
+  gap: 12px;
+}
+
 .rbadge {
   flex: none;
 }

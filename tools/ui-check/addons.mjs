@@ -340,6 +340,60 @@ try {
   check(verrors.length === 0, 'viewer: no page errors', verrors);
   await viewer.close();
 
+  // ---------- Torrent sources: the settings block ----------
+  await page.evaluate(() => (location.hash = '#/settings/addons'));
+  await page.waitForSelector('.torrent-settings');
+  check((await page.getAttribute('.torrent-settings', 'data-torrents')) === 'off', 'torrents: off by default');
+  check((await text(page, '.torrent-settings .row2-text small')).includes('public IP address'), 'torrents: the warning mentions the public IP');
+  check((await page.inputValue('.torrent-settings [name="torrentUploadKbps"]')) === '200' && (await page.inputValue('.torrent-settings [name="torrentDiskCapGb"]')) === '50', 'torrents: defaults 200 KB/s and 50 GB');
+  m = await mark();
+  await page.click('.torrent-settings [role="switch"]');
+  await waitFor(async () => (await page.getAttribute('.torrent-settings', 'data-torrents')) === 'on', 'torrents: the switch turns on');
+  const put1 = (await since(m)).find((r) => r.method === 'PUT' && r.path === '/api/admin/channels/main/settings');
+  check(JSON.stringify(put1?.body) === '{"torrentsEnabled":true}', 'torrents: switch -> PUT {torrentsEnabled: true}', put1);
+  await page.fill('.torrent-settings [name="torrentUploadKbps"]', '0');
+  await page.fill('.torrent-settings [name="torrentDiskCapGb"]', '20');
+  m = await mark();
+  await page.click('.tr-limits button[type="submit"]');
+  await page.waitForSelector('.torrent-settings .set-note.ok');
+  const put2 = (await since(m)).find((r) => r.method === 'PUT' && r.path === '/api/admin/channels/main/settings');
+  check(JSON.stringify(put2?.body) === '{"torrentUploadKbps":0,"torrentDiskCapGb":20}', 'torrents: limits -> PUT {upload 0, cap 20}', put2);
+  await page.fill('.torrent-settings [name="torrentDiskCapGb"]', '0');
+  await page.click('.tr-limits button[type="submit"]');
+  await page.waitForSelector('.torrent-settings .set-note.err');
+  check(true, 'torrents: a cap of 0 is refused with a message');
+  await page.screenshot({ path: join(shots, 'torrents-settings-en.png') });
+
+  // ---------- The torrent chip on a source ----------
+  await page.evaluate(() => (location.hash = '#/search'));
+  await page.fill('.sr-input', 'exa');
+  await waitFor(async () => (await count(page, '.sr-card')) === 2, 'torrents: results');
+  await page.click('.sr-card[data-type="movie"]');
+  await waitFor(async () => (await count(page, '.src-addon[data-state="loading"]')) === 0 && (await count(page, '.src-addon')) > 0, 'torrents: sources');
+  check((await count(page, '.src-torrent')) === 1 && (await text(page, '.src-torrent')) === 'torrent', 'torrents: a torrent source has the "torrent" chip, the others do not');
+
+  // ---------- The queue item ----------
+  await scenario({ torrentItem: { state: 'downloading', progress: 0.42, rateBps: 3100000, etaS: 240, ready: false } });
+  await page.evaluate(() => (location.hash = '#/channel'));
+  await page.waitForSelector('.qi-torrent');
+  await waitFor(async () => (await text(page, '.qi-torrent')) === 'Downloading 42 % · 3.1 MB/s · ready in ~4 min', 'torrents: the progress line', await texts(page, '.qi-torrent'));
+  check(true, 'torrents: the queue item shows "Downloading 42 % · 3.1 MB/s · ready in ~4 min"');
+  await page.$eval('.qi-torrent', (e) => e.scrollIntoView({ block: 'center' }));
+  await page.screenshot({ path: join(shots, 'torrents-queue-en.png') });
+
+  // ---------- A magnet link: no title search; refused while torrents are off ----------
+  await scenario({ settingsPatch: { torrentsEnabled: false } });
+  m = await mark();
+  await page.fill('.addf-input', '');
+  await page.click('.addf-input');
+  await page.keyboard.type('magnet:?xt=urn:btih:' + 'c'.repeat(40));
+  await sleep(700);
+  check((await since(m)).filter((r) => r.path === '/api/admin/addons/search').length === 0 && (await count(page, '.addf-list')) === 0, 'torrents: a magnet link does not open the title dropdown');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('.addf-error');
+  check((await text(page, '.addf-error')).includes('Turn them on in Settings'), 'torrents: a magnet link with torrents off shows the message', await text(page, '.addf-error'));
+  await page.fill('.addf-input', '');
+
   // ---------- Polish ----------
   await page.evaluate(async () => (await import('/static/app/i18n.js')).loadLang('pl'));
   await page.waitForFunction(() => document.querySelector('.rail-search .rail-label')?.textContent === 'Szukaj');

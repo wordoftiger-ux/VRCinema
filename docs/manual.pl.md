@@ -113,7 +113,15 @@ Program może pokazywać film na antenie w **Twoim własnym chatboxie VRChat** (
 - **VRCinema nie dostarcza żadnych dodatków. Odpowiadasz za to, co oferują dodane przez Ciebie dodatki.**
 - Zakładka **Szukaj** znajduje film lub serial po tytule; w serialu wybierz sezon i odcinek. Każdy dodatek ze źródłami jest pytany osobno, więc wolny nie wstrzymuje pozostałych. **Dodaj do kolejki** albo **Zagraj jako następny** używa wybranego źródła. Tytuł (zamiast linku) możesz też wpisać w polu linku w widoku Kanał i wybrać z szybkich wyników.
 - **Ustawienia** → **Kanał** → **Prośby o filmy**: po włączeniu strona zgłoszeń ma przełącznik **Znajdź film** i widzowie mogą wysłać tytuł. Taka prośba zawsze czeka na Twoje zatwierdzenie, a na liście zatwierdzeń naciskasz **Wybierz źródło**, żeby wskazać, skąd ma być film.
-- Linki z niektórych serwisów wygasają po kilku godzinach, więc takie filmy dodawaj krótko przed emisją. Źródła torrent nie są obsługiwane (tylko linki, które kanał potrafi otworzyć).
+- Linki z niektórych serwisów wygasają po kilku godzinach, więc takie filmy dodawaj krótko przed emisją.
+
+#### Źródła torrent
+
+- **Domyślnie wyłączone.** Włącz je w **Ustawienia** → **Dodatki** → **Źródła torrent**. Wtedy działają źródła dodatków oznaczone **torrent** oraz linki `magnet:` w polu linku.
+- Torrent zaczyna się pobierać mniej więcej 5 minut przed swoją kolejką. Gdy z szacunku wynika, że pobieranie zdąży, film rusza, gdy tylko może; w przeciwnym razie kanał czeka na planszy z odliczaniem (możesz nacisnąć **Pomiń**).
+- Wysyłanie jest ograniczone (domyślnie 200 KB/s; 0 oznacza bez limitu), a po pobraniu nie ma udostępniania. Pliki są usuwane po odtworzeniu filmu. Wszystkie pliki torrent razem mieszczą się w limicie miejsca na dysku (domyślnie 50 GB).
+- **Ostrzeżenie:** podczas pobierania filmu Twój publiczny adres IP jest widoczny dla innych uczestników. Zaleca się VPN. Odpowiadasz za to, co odtwarzasz.
+- Torrenty może dodawać tylko Ty (właściciel); widzowie nie mogą wysyłać linków `magnet:`.
 
 ### Nicki widzów
 

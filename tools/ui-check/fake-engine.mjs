@@ -23,7 +23,7 @@
 // Request page (task 16): GET / serves public/index.html; GET /api/channels/main/state and POST /api/channels/main/requests (scenario viewerError, viewerNickTaken, viewerKnown; settings linkMode / allowedDomains / moderation).
 // Nick PIN: POST /api/channels/main/nick/protect and …/nick/adopt (scenario viewerPins, viewerCodes), POST /api/admin/nicks/{skeleton}/reset-pin.
 // Viewer lists: POST /api/channels/main/request-list (settings viewerLists / viewerListMax, scenario listDelayMs), the panel's pendingLists and POST /api/admin/channels/main/lists/{id}.
-// Addons (Stremio-compatible): GET/POST /api/admin/addons, POST/DELETE …/addons/{id} ({enabled, move}), GET …/addons/search?q=, …/addons/meta/{type}/{id}, …/addons/streams/{type}/{id}[?addon=] (addon 4 answers 502, addon 3 is slow), POST /api/admin/channels/main/items/{id}/source (choose the source of a title request); scenario `titleRequest: true` adds a pending `title:movie:tt1` item.
+// Addons (Stremio-compatible): GET/POST /api/admin/addons, POST/DELETE …/addons/{id} ({enabled, move}), GET …/addons/search?q=, …/addons/meta/{type}/{id}, …/addons/streams/{type}/{id}[?addon=] (addon 4 answers 502, addon 3 is slow), POST /api/admin/channels/main/items/{id}/source (choose the source of a title request); scenario `titleRequest: true` adds a pending `title:movie:tt1` item. Torrents: settings torrentsEnabled/torrentUploadKbps/torrentDiskCapGb; scenario `torrentItem: {state, progress, rateBps, etaS, ready}` adds a queued magnet item; with torrents on, the first active addon offers a `torrent: true` source; adding a `magnet:` link while off answers torrents_disabled.
 // GET /__test/stats: {maxPanelInFlight, maxViewerInFlight, maxMonitorInFlight}; GET /__test/hang never answers.
 // The producer's monitor (window only, 403 for a remote session or without a window; requests
 // record their query as `search`; maxMonitorInFlight counts the reads without `from`): GET
@@ -196,6 +196,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     viewerLists: false,
     viewerListMax: 10,
     viewerCatalog: true,
+    torrentsEnabled: false,
+    torrentUploadKbps: 200,
+    torrentDiskCapGb: 50,
     viewerUploads: false,
     viewerUploadMaxMb: 50,
     viewerUploadMaxS: 600,
@@ -297,6 +300,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (!a) return coded(res, 404, 'addon_not_found', 'That addon is not in the list.');
       if (a.id === 4) return coded(res, 502, 'addon_unreachable', 'The addon did not answer.');
       const reply = { streams: [{ url: `https://addons.example/s/${a.id}/${id.replace(/:/g, '-')}.m3u8`, name: `${a.name}\n1080p`, title: `${id}\nsecond line` }] };
+      if (a === active[0] && s.settings.torrentsEnabled) reply.streams.push({ url: `magnet:?xt=urn:btih:${'a'.repeat(40)}`, name: `${a.name}
+4K`, title: `${id}
+torrent`, torrent: true });
       if (a.id === 3) return sleep(500).then(() => json(res, 200, reply));
       return json(res, 200, reply);
     }
@@ -1320,6 +1326,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (change.titleRequest) {
         s.pendingItems.push(queued(nextId++, 'Example Film (2020)', { status: 'pending_approval', requesterName: 'Bartek', requesterBadge: { hue: 300, shape: 7 }, sourceUrl: 'title:movie:tt1', durationS: null, titleRequest: { type: 'movie', id: 'tt1' } }));
       }
+      if (change.torrentItem) {
+        s.queue.push(queued(nextId++, 'Torrent Film (2021)', { sourceUrl: `magnet:?xt=urn:btih:${'b'.repeat(40)}`, torrent: change.torrentItem }));
+      }
       if ('settingsPatch' in change) Object.assign(s.settings, change.settingsPatch);
       if ('viewerStateDelayMs' in change) maxViewerInFlight = viewerInFlight;
       return json(res, 200, { ...s, queue: undefined, pendingItems: undefined });
@@ -1599,7 +1608,12 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
           : `Refused: ${s.addError}`;
         return coded(res, 400, s.addError, message);
       }
-      if (!/^https?:\/\//.test(payload?.url ?? '')) return coded(res, 400, 'invalid_link', 'Invalid link');
+      if (/^magnet:/i.test(payload?.url ?? '') && !s.settings.torrentsEnabled) return coded(res, 400, 'torrents_disabled', 'Torrents are turned off. Turn them on in Settings first.');
+      if (!/^(https?:\/\/|magnet:)/.test(payload?.url ?? '')) return coded(res, 400, 'invalid_link', 'Invalid link');
+      if (payload.url.startsWith('magnet:')) {
+        s.queue.push(queued(nextId++, 'Magnet film'));
+        return json(res, 201, { added: 1, title: 'Magnet film', itemId: s.queue.at(-1).id });
+      }
       s.queue.push(queued(nextId++, 'Added from ' + new URL(payload.url).hostname));
       return json(res, 201, { added: 1, title: s.queue.at(-1).title, itemId: s.queue.at(-1).id });
     }

@@ -46,6 +46,21 @@ export function itemDetails(item) {
   return parts.filter(Boolean).join(' · ');
 }
 
+/** The state of a torrent item: `Downloading 42 % · 3.1 MB/s · ready in ~4 min`, `Ready`, ...; '' when it has none to show. */
+export function torrentLine(torrent) {
+  if (!torrent) return '';
+  const { state, progress, rateBps, etaS, ready } = torrent;
+  if (state === 'failed') return t('queue.torrent_failed');
+  if (state === 'waitingForDisk') return t('queue.torrent_disk');
+  if (state === 'starting') return t('queue.torrent_starting');
+  if (state === 'complete' || ready) return t('queue.torrent_ready');
+  if (state !== 'downloading') return '';
+  const parts = [t('queue.torrent_downloading', { percent: Math.round((progress ?? 0) * 100) })];
+  if (rateBps > 0) parts.push(t('queue.torrent_rate', { rate: (rateBps / 1e6).toFixed(1) }));
+  if (Number.isFinite(etaS)) parts.push(t('queue.torrent_eta', { minutes: Math.max(1, Math.ceil(etaS / 60)) }));
+  return parts.join(' · ');
+}
+
 /** Title and details; `sub` replaces the details. */
 export function ItemText({ item, sub }) {
   const title = videoTitle(item.title);
@@ -56,5 +71,6 @@ export function ItemText({ item, sub }) {
         ${item.isLive ? html`<span class="live">${t('player.live')}</span>` : null}
       </b>
       <small class="qi-sub"><${RequesterBadge} badge=${item.requesterBadge} />${sub ?? itemDetails(item)}</small>
+      ${torrentLine(item.torrent) ? html`<small class=${`qi-torrent ${item.torrent.state}`}>${torrentLine(item.torrent)}</small>` : null}
     </div>`;
 }

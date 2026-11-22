@@ -8,7 +8,7 @@ import { t } from '../../i18n.js';
 import { Icon } from '../../icons.js';
 import { api, errorText, listAddons } from '../../api.js';
 import { openDialog } from '../../components/dialog.js';
-import { Block, Note, Switch, useNote } from './common.js';
+import { Block, Note, Row, Switch, channelSettings, loadChannelSettings, saveChannelWith, useNote } from './common.js';
 
 const ADDONS = '/api/admin/addons';
 
@@ -66,6 +66,57 @@ function AddonRow({ addon, first, last, busy, run }) {
     </li>`;
 }
 
+/** Torrent sources: off until the owner switches them on (the warning says what that means), the upload limit and the disk cap. */
+function Torrents() {
+  const settings = channelSettings.value;
+  const [note, say] = useNote();
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ up: '200', cap: '50' });
+  useEffect(() => {
+    loadChannelSettings();
+  }, []);
+  const key = JSON.stringify([settings?.torrentUploadKbps, settings?.torrentDiskCapGb]);
+  useEffect(() => {
+    if (settings) setForm({ up: String(settings.torrentUploadKbps), cap: String(settings.torrentDiskCapGb) });
+  }, [key]);
+  if (!settings) return null;
+  const save = async (patch, okText) => {
+    setBusy(true);
+    await saveChannelWith(say, patch, okText);
+    setBusy(false);
+  };
+  const submit = (e) => {
+    e.preventDefault();
+    const up = Number(form.up);
+    const cap = Number(form.cap);
+    if (!Number.isInteger(up) || up < 0 || up > 1000000 || !Number.isInteger(cap) || cap < 1 || cap > 100000) {
+      return say('err', t('settings.torrents.invalid'));
+    }
+    save({ torrentUploadKbps: up, torrentDiskCapGb: cap }, t('settings.torrents.saved'));
+  };
+  const on = settings.torrentsEnabled === true;
+  return html`
+    <${Block} title=${t('settings.torrents.block')}>
+      <div class="torrent-settings" data-torrents=${on ? 'on' : 'off'}>
+        <${Row} title=${t('settings.torrents.enable')} hint=${t('settings.torrents.warning')}>
+          <${Switch} label=${t('settings.torrents.enable')} checked=${on} disabled=${busy}
+            onChange=${(v) => save({ torrentsEnabled: v }, t(v ? 'settings.torrents.on' : 'settings.torrents.off'))} />
+        <//>
+        <form class="inline wide tr-limits" onSubmit=${submit} noValidate>
+          <label class="limit"><span>${t('settings.torrents.upload')}</span>
+            <input type="number" class="num" name="torrentUploadKbps" min="0" step="1" value=${form.up}
+              onInput=${(e) => setForm({ ...form, up: e.currentTarget.value })} /></label>
+          <label class="limit"><span>${t('settings.torrents.cap')}</span>
+            <input type="number" class="num" name="torrentDiskCapGb" min="1" step="1" value=${form.cap}
+              onInput=${(e) => setForm({ ...form, cap: e.currentTarget.value })} /></label>
+          <button type="submit" class="btn" disabled=${busy}>${t('settings.torrents.save')}</button>
+        </form>
+        <p class="set-sub">${t('settings.torrents.upload_hint')}</p>
+        <${Note} note=${note} />
+      </div>
+    <//>`;
+}
+
 export function Addons() {
   const [addons, setAddons] = useState(null);
   const [url, setUrl] = useState('');
@@ -115,6 +166,7 @@ export function Addons() {
     <div class="set-rows addons-settings">
       <p class="set-sub addons-note" data-note="responsibility">${t('settings.addons.note')}</p>
       <p class="set-sub addons-note" data-note="expiry">${t('settings.addons.expiry_hint')}</p>
+      <${Torrents} />
       <${Block} title=${t('settings.addons.add_block')}>
         <form class="inline wide ad-add" onSubmit=${add}>
           <input type="text" class="txt" name="addonUrl" inputmode="url" autocomplete="off" spellcheck="false"
