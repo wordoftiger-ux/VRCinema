@@ -29,6 +29,9 @@
     "other": "{count}件のファイルは追加されませんでした（動画ではないか、読み込めないファイルです）。"
   },
   "errors.action_or_position": "action（approve/reject）またはpositionを指定してください。",
+  "errors.addon_unreachable": "アドオンが応答しません。アドレスと接続を確認してください。",
+  "errors.addon_invalid": "このアドレスは有効なアドオンではありません（/manifest.json で終わり、アドオンの説明を返す必要があります）。",
+  "errors.addon_no_meta": "このタイトルの情報を持つアドオンはありません。",
   "errors.app_closing": "アプリを終了しています。",
   "errors.archive_lacks_file": "ダウンロードしたアーカイブに{file}がありません。",
   "errors.autostart_failed": "自動起動の設定を変更できませんでした：{detail}",

@@ -32,6 +32,9 @@
     "other": "Pominięto {count} pliku (to nie film albo nie da się go odczytać)."
   },
   "errors.action_or_position": "Podaj action (approve/reject) albo position.",
+  "errors.addon_unreachable": "Dodatek nie odpowiada. Sprawdź jego adres i połączenie.",
+  "errors.addon_invalid": "Ten adres nie jest poprawnym dodatkiem (musi kończyć się na /manifest.json i zwracać opis dodatku).",
+  "errors.addon_no_meta": "Żaden dodatek nie ma informacji o tym tytule.",
   "errors.app_closing": "Aplikacja jest zamykana.",
   "errors.archive_lacks_file": "W pobranym archiwum brak pliku {file}.",
   "errors.autostart_failed": "Nie udało się zmienić autostartu: {detail}",

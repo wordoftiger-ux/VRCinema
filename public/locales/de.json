@@ -30,6 +30,9 @@
     "other": "{count} Dateien übersprungen (keine Videos oder nicht lesbar)."
   },
   "errors.action_or_position": "Geben Sie action (approve/reject) oder position an.",
+  "errors.addon_unreachable": "Das Addon antwortet nicht. Prüfen Sie die Adresse und Ihre Verbindung.",
+  "errors.addon_invalid": "Diese Adresse ist kein gültiges Addon (sie muss auf /manifest.json enden und eine Addon-Beschreibung liefern).",
+  "errors.addon_no_meta": "Kein Addon hat Angaben zu diesem Titel.",
   "errors.app_closing": "Die App wird beendet.",
   "errors.archive_lacks_file": "Im heruntergeladenen Archiv fehlt {file}.",
   "errors.autostart_failed": "Der Start mit Windows konnte nicht geändert werden: {detail}",

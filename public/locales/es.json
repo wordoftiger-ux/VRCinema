@@ -31,6 +31,9 @@
     "other": "Se omitieron {count} archivos (no son videos o no se pueden leer)."
   },
   "errors.action_or_position": "Indique action (approve/reject) o position.",
+  "errors.addon_unreachable": "El complemento no respondió. Compruebe su dirección y su conexión.",
+  "errors.addon_invalid": "La dirección no es un complemento válido (debe terminar en /manifest.json y devolver la descripción del complemento).",
+  "errors.addon_no_meta": "Ningún complemento tiene datos de este título.",
   "errors.app_closing": "La aplicación se está cerrando.",
   "errors.archive_lacks_file": "El archivo comprimido descargado no contiene {file}.",
   "errors.autostart_failed": "No se pudo cambiar el inicio con Windows: {detail}",

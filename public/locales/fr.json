@@ -31,6 +31,9 @@
     "other": "{count} fichiers ignorés (ce ne sont pas des vidéos ou ils sont illisibles)."
   },
   "errors.action_or_position": "Indiquez action (approve/reject) ou position.",
+  "errors.addon_unreachable": "Le module complémentaire ne répond pas. Vérifiez son adresse et votre connexion.",
+  "errors.addon_invalid": "Cette adresse n’est pas un module valide (elle doit se terminer par /manifest.json et renvoyer la description du module).",
+  "errors.addon_no_meta": "Aucun module n’a d’informations sur ce titre.",
   "errors.app_closing": "L’application est en cours de fermeture.",
   "errors.archive_lacks_file": "L’archive téléchargée ne contient pas {file}.",
   "errors.autostart_failed": "Impossible de modifier le démarrage avec Windows : {detail}",

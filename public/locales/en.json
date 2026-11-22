@@ -30,6 +30,9 @@
     "other": "Skipped {count} files (they are not videos or cannot be read)."
   },
   "errors.action_or_position": "Give action (approve/reject) or position.",
+  "errors.addon_unreachable": "The addon did not answer. Check its address and your connection.",
+  "errors.addon_invalid": "The address is not a valid addon (it must end with /manifest.json and return an addon description).",
+  "errors.addon_no_meta": "No addon has details for this title.",
   "errors.app_closing": "The app is closing.",
   "errors.archive_lacks_file": "The downloaded archive has no {file}.",
   "errors.autostart_failed": "Could not change starting with Windows: {detail}",
