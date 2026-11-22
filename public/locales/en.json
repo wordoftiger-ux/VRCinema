@@ -335,6 +335,11 @@
   "search.sources": "Sources",
   "search.addon_loading": "Asking {name}…",
   "search.addon_empty": "{name} has no sources for this title.",
+  "search.torrents_hidden": {
+    "one": "{count} torrent source is hidden because torrent sources are off.",
+    "other": "{count} torrent sources are hidden because torrent sources are off."
+  },
+  "search.torrents_enable": "Turn them on in Settings → Addons",
   "search.no_stream_addons": "No addon with sources is switched on. Add one in Settings → Addons.",
   "search.add_to_queue": "Add to queue",
   "search.play_next": "Play next",

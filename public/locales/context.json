@@ -329,6 +329,8 @@
   "search.sources": "Heading of the list of video sources (streams offered by the addons) for a film or episode.",
   "search.addon_loading": "Spinner line under an addon name while its sources are loading; {name} is the addon.",
   "search.addon_empty": "Muted line when an addon answered with no sources; {name} is the addon.",
+  "search.torrents_hidden": "Search, sources of one addon: torrent sources this addon offered that are hidden because the \"Torrent sources\" setting is off; {count} is how many.",
+  "search.torrents_enable": "Link after search.torrents_hidden that opens Settings → Addons, where torrent sources are switched on.",
   "search.no_stream_addons": "Shown instead of sources when no addon with video sources is enabled. \"Settings → Addons\" names a Settings section; keep the arrow and use the same words as the Settings navigation.",
   "search.add_to_queue": "Button on a source: puts the video at the end of the queue.",
   "search.play_next": "Button on a source: puts the video first in the queue.",

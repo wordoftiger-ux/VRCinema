@@ -303,6 +303,7 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
       if (a === active[0] && s.settings.torrentsEnabled) reply.streams.push({ url: `magnet:?xt=urn:btih:${'a'.repeat(40)}`, name: `${a.name}
 4K`, title: `${id}
 torrent`, torrent: true });
+      if (a === active[0] && !s.settings.torrentsEnabled) reply.hiddenTorrents = 1;
       if (a.id === 3) return sleep(500).then(() => json(res, 200, reply));
       return json(res, 200, reply);
     }

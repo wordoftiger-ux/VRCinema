@@ -333,6 +333,10 @@
   "search.sources": "ソース",
   "search.addon_loading": "{name} に問い合わせ中…",
   "search.addon_empty": "{name} にはこのタイトルのソースがありません。",
+  "search.torrents_hidden": {
+    "other": "トレントソースがオフのため、{count}件のトレントソースを非表示にしています。"
+  },
+  "search.torrents_enable": "設定 → アドオンでオンにする",
   "search.no_stream_addons": "ソースを提供するアドオンがオンになっていません。設定 → アドオン で追加してください。",
   "search.add_to_queue": "キューに追加",
   "search.play_next": "次に再生",

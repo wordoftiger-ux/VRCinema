@@ -612,6 +612,10 @@ async fn addon_streams_include_torrents_only_when_enabled() {
     let off = h.send(get(&url).cookie(&cookie)).await.json();
     assert_eq!(off["streams"].as_array().unwrap().len(), 1);
     assert_eq!(off["streams"][0]["torrent"], false);
+    assert_eq!(
+        off["hiddenTorrents"], 1,
+        "the window says how many the setting hides"
+    );
 
     h.send(
         call("PUT", "/api/admin/channels/main/settings")
@@ -622,6 +626,7 @@ async fn addon_streams_include_torrents_only_when_enabled() {
     let on = h.send(get(&url).cookie(&cookie)).await.json();
     let streams = on["streams"].as_array().unwrap();
     assert_eq!(streams.len(), 2);
+    assert_eq!(on["hiddenTorrents"], 0);
     assert_eq!(streams[1]["torrent"], true);
     let magnet = streams[1]["url"].as_str().unwrap();
     let parsed = crate::torrent::parse_magnet(magnet).unwrap();

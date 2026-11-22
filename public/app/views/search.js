@@ -6,7 +6,7 @@
 import { signal } from '/static/vendor/signals.mjs';
 import { useEffect, useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../html.js';
-import { t } from '../i18n.js';
+import { t, tn } from '../i18n.js';
 import { Icon } from '../icons.js';
 import { addonStreams, errorText, searchCatalog, streamAddons, titleMeta } from '../api.js';
 import { addLink, addLinkNext, channel, chooseSource, showToast } from '../store.js';
@@ -150,7 +150,7 @@ function Sources({ type, id, forItem }) {
         setAddons(list.map((a) => ({ ...a, state: 'loading', streams: [] })));
         for (const a of list) {
           addonStreams(type, id, a.id).then(
-            (r) => update(a.id, { state: 'ok', streams: r.streams ?? [] }),
+            (r) => update(a.id, { state: 'ok', streams: r.streams ?? [], hidden: r.hiddenTorrents ?? 0 }),
             () => update(a.id, { state: 'error' }),
           );
         }
@@ -179,7 +179,13 @@ function Sources({ type, id, forItem }) {
                 ? html`<p class="src-fail">${t('addons.no_answer', { name: a.name })}</p>`
                 : a.streams.length
                   ? html`<ul class="src-list">${a.streams.map((s, i) => html`<${Source} key=${`${i}-${s.url}`} stream=${s} forItem=${forItem} />`)}</ul>`
-                  : html`<p class="src-fail">${t('search.addon_empty', { name: a.name })}</p>`}
+                  : a.hidden
+                    ? null
+                    : html`<p class="src-fail">${t('search.addon_empty', { name: a.name })}</p>`}
+            ${a.state === 'ok' && a.hidden
+              ? html`<p class="src-hidden">${tn('search.torrents_hidden', a.hidden)}
+                  <a href="#/settings/addons">${t('search.torrents_enable')}</a></p>`
+              : null}
           </div>`,
       )}
     </section>`;

@@ -337,6 +337,12 @@
   "search.sources": "Fuentes",
   "search.addon_loading": "Consultando {name}…",
   "search.addon_empty": "{name} no tiene fuentes para este título.",
+  "search.torrents_hidden": {
+    "one": "{count} fuente torrent está oculta porque las fuentes torrent están desactivadas.",
+    "many": "{count} fuentes torrent están ocultas porque las fuentes torrent están desactivadas.",
+    "other": "{count} fuentes torrent están ocultas porque las fuentes torrent están desactivadas."
+  },
+  "search.torrents_enable": "Actívalas en Ajustes → Complementos",
   "search.no_stream_addons": "No hay ningún complemento con fuentes activado. Añade uno en Ajustes → Complementos.",
   "search.add_to_queue": "Añadir a la cola",
   "search.play_next": "Reproducir a continuación",

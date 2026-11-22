@@ -337,6 +337,12 @@
   "search.sources": "Sources",
   "search.addon_loading": "Interrogation de {name}…",
   "search.addon_empty": "{name} n’a aucune source pour ce titre.",
+  "search.torrents_hidden": {
+    "one": "{count} source torrent est masquée, car les sources torrent sont désactivées.",
+    "many": "{count} sources torrent sont masquées, car les sources torrent sont désactivées.",
+    "other": "{count} sources torrent sont masquées, car les sources torrent sont désactivées."
+  },
+  "search.torrents_enable": "Les activer dans Réglages → Addons",
   "search.no_stream_addons": "Aucun addon avec des sources n’est activé. Ajoutez-en un dans Réglages → Addons.",
   "search.add_to_queue": "Ajouter à la file",
   "search.play_next": "Lire ensuite",

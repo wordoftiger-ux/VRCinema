@@ -339,6 +339,13 @@
   "search.sources": "Źródła",
   "search.addon_loading": "Pytanie dodatku {name}…",
   "search.addon_empty": "Dodatek {name} nie ma źródeł dla tego tytułu.",
+  "search.torrents_hidden": {
+    "one": "{count} źródło torrent jest ukryte, bo źródła torrent są wyłączone.",
+    "few": "{count} źródła torrent są ukryte, bo źródła torrent są wyłączone.",
+    "many": "{count} źródeł torrent jest ukrytych, bo źródła torrent są wyłączone.",
+    "other": "{count} źródła torrent jest ukryte, bo źródła torrent są wyłączone."
+  },
+  "search.torrents_enable": "Włącz je w Ustawienia → Dodatki",
   "search.no_stream_addons": "Żaden dodatek ze źródłami nie jest włączony. Dodaj go w Ustawienia → Dodatki.",
   "search.add_to_queue": "Dodaj do kolejki",
   "search.play_next": "Odtwórz jako następny",

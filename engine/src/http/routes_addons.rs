@@ -315,15 +315,19 @@ async fn streams(
         .find(|a| a.id == wanted)
         .ok_or_else(not_found)?;
     let torrents = state.settings()?.torrent.torrents_enabled;
-    let found = state
+    // Torrent sources are read either way, so the window can say how many the setting hides.
+    let (found, hidden): (Vec<_>, Vec<_>) = state
         .addons
-        .streams(&addon.manifest_url, &type_, &id, torrents)
+        .streams(&addon.manifest_url, &type_, &id, true)
         .await
-        .map_err(addon_error)?;
+        .map_err(addon_error)?
+        .into_iter()
+        .partition(|s| torrents || !s.torrent);
     Ok(json_ok(&json!({
         "streams": found.iter().map(|s| json!({
             "url": s.url, "name": s.name, "title": s.title, "torrent": s.torrent,
         })).collect::<Vec<_>>(),
+        "hiddenTorrents": hidden.len(),
     })))
 }
 

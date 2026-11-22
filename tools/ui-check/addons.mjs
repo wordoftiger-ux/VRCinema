@@ -180,6 +180,7 @@ try {
   await waitFor(async () => (await count(page, '.src-addon[data-state="loading"]')) === 0, 'all addons answered');
   check((await count(page, '.src-row')) === 2, 'two addons answered with a source each');
   check((await texts(page, '.src-fail')).join('|') === 'Example Streams Broken did not answer.', 'one muted failure line names the addon', await texts(page, '.src-fail'));
+  check((await count(page, '.src-hidden')) === 1 && (await page.$eval('.src-hidden a', (a) => a.getAttribute('href'))) === '#/settings/addons', 'torrents off: one line says how many torrent sources are hidden, with a link to the setting', await texts(page, '.src-hidden'));
   const asked = (await since(m)).filter((r) => r.path === '/api/admin/addons/streams/series/tt2%3A1%3A2' || r.path.startsWith('/api/admin/addons/streams/series/tt2'));
   check(asked.filter((r) => r.search).length === 3 || asked.length >= 4, 'each addon was asked on its own request', asked.map((r) => r.path + r.search));
   check((await page.$eval('.src-addon[data-addon="2"] .src-name', (e) => getComputedStyle(e).whiteSpace)) === 'pre-line', 'multi-line names are kept as they are');

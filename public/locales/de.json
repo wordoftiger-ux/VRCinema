@@ -335,6 +335,11 @@
   "search.sources": "Quellen",
   "search.addon_loading": "{name} wird gefragt…",
   "search.addon_empty": "{name} hat keine Quellen für diesen Titel.",
+  "search.torrents_hidden": {
+    "one": "{count} Torrent-Quelle ist ausgeblendet, weil Torrent-Quellen aus sind.",
+    "other": "{count} Torrent-Quellen sind ausgeblendet, weil Torrent-Quellen aus sind."
+  },
+  "search.torrents_enable": "In Einstellungen → Add-ons einschalten",
   "search.no_stream_addons": "Kein Add-on mit Quellen ist eingeschaltet. Füge eines unter Einstellungen → Add-ons hinzu.",
   "search.add_to_queue": "Zur Warteschlange",
   "search.play_next": "Als Nächstes",
