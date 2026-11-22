@@ -43,6 +43,7 @@
   "errors.torrent_not_active": "Dieser Torrent wird nicht heruntergeladen.",
   "errors.torrents_disabled": "Torrents sind ausgeschaltet. Schalte sie zuerst in den Einstellungen ein.",
   "errors.torrent_bad_magnet": "Das ist kein gültiger Magnet-Link.",
+  "errors.torrent_bad_files": "Der Torrent hat einen Dateinamen, der auf diesem Computer nicht sicher ist (ein Laufwerk, ein Gerätename oder ein Pfad aus seinem Ordner heraus). Er wurde nicht heruntergeladen.",
   "errors.app_closing": "Die App wird beendet.",
   "errors.archive_lacks_file": "Im heruntergeladenen Archiv fehlt {file}.",
   "errors.autostart_failed": "Der Start mit Windows konnte nicht geändert werden: {detail}",

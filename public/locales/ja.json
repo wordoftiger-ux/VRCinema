@@ -42,6 +42,7 @@
   "errors.torrent_not_active": "このトレントはダウンロード中ではありません。",
   "errors.torrents_disabled": "トレントはオフになっています。先に設定でオンにしてください。",
   "errors.torrent_bad_magnet": "有効なマグネットリンクではありません。",
+  "errors.torrent_bad_files": "このトレントには、このコンピューターでは安全でないファイル名（ドライブ、デバイス名、フォルダーの外を指すパス）が含まれています。ダウンロードしませんでした。",
   "errors.app_closing": "アプリを終了しています。",
   "errors.archive_lacks_file": "ダウンロードしたアーカイブに{file}がありません。",
   "errors.autostart_failed": "自動起動の設定を変更できませんでした：{detail}",

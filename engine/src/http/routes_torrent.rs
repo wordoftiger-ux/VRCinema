@@ -11,7 +11,7 @@ use std::io::SeekFrom;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path as UrlPath, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
 use axum::routing::get;
 use serde_json::{Value, json};
@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::{ApiError, AppState};
 use crate::db::QueueItem;
+use crate::torrent::hub::StreamSlot;
 use crate::torrent::{FileStream, TorrentState, parse_magnet};
 
 const CHUNK: usize = 64 * 1024;
@@ -60,8 +61,9 @@ fn content_type(name: &str) -> &'static str {
     }
 }
 
-/// `bytes=a-b`, `bytes=a-` or `bytes=-n` against a file of `len` bytes: `Ok(None)`: no (usable)
-/// range, send everything; `Err`: not satisfiable.
+/// `bytes=a-b`, `bytes=a-` or `bytes=-n` against a file of `len` bytes: `Ok(None)`: no range or
+/// one that is not valid syntax (ignored, RFC 9110: everything is sent); `Err`: valid but not
+/// satisfiable.
 fn parse_range(value: &str, len: u64) -> Result<Option<(u64, u64)>, ()> {
     let Some(spec) = value.trim().strip_prefix("bytes=") else {
         return Ok(None);
@@ -73,45 +75,68 @@ fn parse_range(value: &str, len: u64) -> Result<Option<(u64, u64)>, ()> {
         return Ok(None);
     };
     let (a, b) = (a.trim(), b.trim());
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
     let (start, end) = if a.is_empty() {
-        let n: u64 = b.parse().map_err(|_| ())?;
+        let Some(n) = Some(b)
+            .filter(|b| digits(b))
+            .and_then(|b| b.parse::<u64>().ok())
+        else {
+            return Ok(None);
+        };
         if n == 0 {
             return Err(());
         }
         (len.saturating_sub(n), len.saturating_sub(1))
     } else {
-        let start: u64 = a.parse().map_err(|_| ())?;
+        let Some(start) = Some(a)
+            .filter(|a| digits(a))
+            .and_then(|a| a.parse::<u64>().ok())
+        else {
+            return Ok(None);
+        };
         let end = if b.is_empty() {
             len.saturating_sub(1)
         } else {
-            b.parse::<u64>().map_err(|_| ())?.min(len.saturating_sub(1))
+            match Some(b)
+                .filter(|b| digits(b))
+                .and_then(|b| b.parse::<u64>().ok())
+            {
+                Some(end) if end >= start => end.min(len.saturating_sub(1)),
+                // `bytes=5-3` or junk: not a valid range.
+                _ => return Ok(None),
+            }
         };
         (start, end)
     };
-    if len == 0 || start >= len || start > end {
+    if len == 0 || start >= len {
         return Err(());
     }
     Ok(Some((start, end)))
 }
 
-fn body_of(file: Box<dyn FileStream>, remaining: u64) -> Body {
-    let stream = futures_util::stream::unfold((file, remaining), |(mut file, left)| async move {
-        if left == 0 {
-            return None;
-        }
-        let mut buf = vec![0u8; CHUNK.min(usize::try_from(left).unwrap_or(CHUNK))];
-        match file.read(&mut buf).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buf.truncate(n);
-                Some((
-                    Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)),
-                    (file, left - n as u64),
-                ))
+/// The bytes of `file` (positioned already), `remaining` of them. `slot` is held until the
+/// body goes (sent, or the client left).
+fn body_of(file: Box<dyn FileStream>, remaining: u64, slot: StreamSlot) -> Body {
+    let stream = futures_util::stream::unfold(
+        (file, remaining, slot),
+        |(mut file, left, slot)| async move {
+            if left == 0 {
+                return None;
             }
-            Err(e) => Some((Err(e), (file, 0))),
-        }
-    });
+            let mut buf = vec![0u8; CHUNK.min(usize::try_from(left).unwrap_or(CHUNK))];
+            match file.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => {
+                    buf.truncate(n);
+                    Some((
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)),
+                        (file, left - n as u64, slot),
+                    ))
+                }
+                Err(e) => Some((Err(e), (file, 0, slot))),
+            }
+        },
+    );
     Body::from_stream(stream)
 }
 
@@ -119,27 +144,29 @@ async fn stream(
     State(state): State<AppState>,
     UrlPath((token, hash)): UrlPath<(String, String)>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let from_here = peer.ip().to_canonical().is_loopback()
+    let from_here = state.torrents.is_this_computer(peer.ip())
         && !FORWARDED.iter().any(|h| headers.contains_key(*h));
     if !from_here || !super::auth::safe_equal(&token, state.torrents.token()) {
         return Err(not_found());
     }
     let hash = hash.to_ascii_lowercase();
     let manager = state.torrents.manager_if_running().ok_or_else(not_found)?;
-    let name = manager
+    // The length and the range are worked out before a stream is opened: each open stream
+    // holds one of the library's few blocking slots.
+    let status = manager
         .status(&hash)
-        .map(|s| s.file_name)
-        .unwrap_or_default();
-    let mut file = manager.open(&hash).await.map_err(|_| not_found())?;
-    let len = file.seek(SeekFrom::End(0)).await.map_err(|_| not_found())?;
+        .filter(|s| matches!(s.state, TorrentState::Downloading | TorrentState::Complete))
+        .ok_or_else(not_found)?;
+    let len = status.total;
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
         .map(|v| parse_range(v, len));
     let mut res = Response::builder()
-        .header(header::CONTENT_TYPE, content_type(&name))
+        .header(header::CONTENT_TYPE, content_type(&status.file_name))
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, "no-store");
     let (status, start, count) = match range {
@@ -156,13 +183,20 @@ async fn stream(
         }
         _ => (StatusCode::OK, 0, len),
     };
+    let res = res
+        .status(status)
+        .header(header::CONTENT_LENGTH, HeaderValue::from(count));
+    if method == Method::HEAD {
+        return Ok(res.body(Body::empty()).expect("valid response"));
+    }
+    let busy = || ApiError::coded(StatusCode::SERVICE_UNAVAILABLE, "too_many_requests", &[]);
+    let slot = state.torrents.stream_slot().ok_or_else(busy)?;
+    let mut file = manager.open(&hash).await.map_err(|_| not_found())?;
     file.seek(SeekFrom::Start(start))
         .await
         .map_err(|_| not_found())?;
     Ok(res
-        .status(status)
-        .header(header::CONTENT_LENGTH, HeaderValue::from(count))
-        .body(body_of(file, count))
+        .body(body_of(file, count, slot))
         .expect("valid response"))
 }
 

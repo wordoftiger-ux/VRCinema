@@ -43,6 +43,7 @@
   "errors.torrent_not_active": "This torrent is not downloading.",
   "errors.torrents_disabled": "Torrents are turned off. Turn them on in Settings first.",
   "errors.torrent_bad_magnet": "That is not a valid magnet link.",
+  "errors.torrent_bad_files": "The torrent has a file name that is not safe on this computer (a drive, a device name or a path out of its folder). It was not downloaded.",
   "errors.app_closing": "The app is closing.",
   "errors.archive_lacks_file": "The downloaded archive has no {file}.",
   "errors.autostart_failed": "Could not change starting with Windows: {detail}",

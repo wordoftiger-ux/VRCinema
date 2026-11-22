@@ -5,9 +5,10 @@
 //! need while `torrentsEnabled` is on; turning the setting off stops every torrent and drops it.
 
 use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use super::settings::TorrentSettings;
@@ -34,6 +35,23 @@ pub struct TorrentHub {
     /// Serialises creation; the sync view below is what readers use.
     create: tokio::sync::Mutex<()>,
     manager: RwLock<Option<Arc<TorrentManager>>>,
+    /// The bound address when it is not the unspecified one.
+    bound_ip: RwLock<Option<IpAddr>>,
+    /// File streams the route has open now.
+    open_streams: AtomicUsize,
+}
+
+/// At most this many file streams of the route are open at once (each holds one of the torrent
+/// library's blocking slots while it waits for pieces).
+pub const MAX_STREAMS: usize = 6;
+
+/// One open stream of the route; frees its slot when dropped.
+pub struct StreamSlot(Arc<TorrentHub>);
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        self.0.open_streams.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl TorrentHub {
@@ -57,6 +75,8 @@ impl TorrentHub {
             factory,
             create: tokio::sync::Mutex::new(()),
             manager: RwLock::new(None),
+            bound_ip: RwLock::new(None),
+            open_streams: AtomicUsize::new(0),
         })
     }
 
@@ -70,18 +90,45 @@ impl TorrentHub {
         &self.token
     }
 
-    /// The port the server listens on (set once it is bound).
-    pub fn set_port(&self, port: u16) {
-        self.port.store(port, Ordering::Relaxed);
+    /// The address the server listens on (set once it is bound).
+    pub fn set_bound(&self, addr: SocketAddr) {
+        self.port.store(addr.port(), Ordering::Relaxed);
+        *self
+            .bound_ip
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) =
+            Some(addr.ip()).filter(|ip| !ip.is_unspecified());
     }
 
-    /// The loopback address ffmpeg reads a torrent's file from.
+    /// The address ffmpeg reads a torrent's file from: loopback, or the bound address when the
+    /// server listens on one address only (it cannot be reached on loopback then).
     pub fn local_url(&self, hash: &str) -> String {
-        format!(
-            "http://127.0.0.1:{}/internal/torrent/{}/{hash}",
-            self.port.load(Ordering::Relaxed),
-            self.token
-        )
+        let ip = self
+            .bound_ip()
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        let addr = SocketAddr::new(ip, self.port.load(Ordering::Relaxed));
+        format!("http://{addr}/internal/torrent/{}/{hash}", self.token)
+    }
+
+    /// The one address the server listens on (`None`: all of them).
+    pub fn bound_ip(&self) -> Option<IpAddr> {
+        *self.bound_ip.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Is a request from `peer` one of this computer: loopback, or the bound address itself.
+    pub fn is_this_computer(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        peer.is_loopback() || self.bound_ip().is_some_and(|ip| ip.to_canonical() == peer)
+    }
+
+    /// A slot for one open file stream of the route; `None` while [`MAX_STREAMS`] are open.
+    pub fn stream_slot(self: &Arc<Self>) -> Option<StreamSlot> {
+        let taken = self
+            .open_streams
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_STREAMS).then_some(n + 1)
+            });
+        taken.ok().map(|_| StreamSlot(Arc::clone(self)))
     }
 
     /// Takes the stored settings at start (nothing is created or stopped).
@@ -146,12 +193,28 @@ impl TorrentHub {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take();
             if let Some(m) = taken {
+                // A start still in flight holds the manager: it must not go on downloading.
+                m.close();
                 m.cleanup_leftovers(&[]).await;
             }
         } else if let Some(m) = self.manager_if_running() {
             m.set_upload_kbps(new.torrent_upload_kbps);
             m.set_disk_cap_gb(new.torrent_disk_cap_gb);
         }
+    }
+
+    /// The info hash of `magnet` when its download may be played now (see
+    /// [`TorrentManager::playable`]). Never starts or restarts a download.
+    pub fn playable(&self, magnet: &str) -> Result<String, Msg> {
+        let m = parse_magnet(magnet).ok_or_else(|| Msg::error("torrent_bad_magnet"))?;
+        if !self.enabled() {
+            return Err(Msg::error("torrents_disabled"));
+        }
+        let manager = self
+            .manager_if_running()
+            .ok_or_else(|| Msg::error("torrent_not_active"))?;
+        manager.playable(&m.info_hash)?;
+        Ok(m.info_hash)
     }
 
     /// Starts the torrent of `magnet` (waits for its file list: may take minutes).

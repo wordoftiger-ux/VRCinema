@@ -512,7 +512,7 @@ pub async fn run(
     // Torrents (off until the owner turns them on) live in the data folder; the stream route
     // is on this listener.
     let torrents = crate::torrent::hub::TorrentHub::new(&config.data_dir);
-    torrents.set_port(listener.local_addr()?.port());
+    torrents.set_bound(listener.local_addr()?);
     // The stored settings count from the start (the channel may air a torrent item at once).
     if let Ok(s) =
         SettingsRepo::new(&db.lock().unwrap_or_else(PoisonError::into_inner)).get(MAIN_CHANNEL_ID)

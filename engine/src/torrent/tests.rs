@@ -290,7 +290,8 @@ async fn drop_item_removes_files() {
     assert!(m.status(HASH).is_none());
     assert_eq!(
         *fake.removed.lock().unwrap(),
-        vec![(HASH.to_string(), true)]
+        vec![(HASH.to_string(), false)],
+        "the files are deleted here, inside the root"
     );
     assert_eq!(m.disk_used(), 0);
 }
@@ -420,4 +421,275 @@ async fn unknown_duration_plays_only_when_complete_if_probe_fails() {
         settle().await;
     }
     assert!(!files.exists());
+}
+
+#[tokio::test]
+async fn a_torrent_with_an_unsafe_file_path_is_refused_before_it_is_added() {
+    let dir = tempfile::tempdir().unwrap();
+    // Paths as the backend gives them: the torrent's components joined by `/` (`["C:",
+    // "x.mkv"]` is `C:/x.mkv`).
+    for bad in [
+        "C:/x.mkv",
+        "C:evil.mkv",
+        "..",
+        "../x.mkv",
+        "a/../../x.mkv",
+        "NUL.txt",
+        "dir/com1.mkv",
+        "lpt9",
+        "film.mkv.",
+        "film.mkv ",
+        "a//b.mkv",
+        "",
+        "a:b/c.mkv",
+        "/abs.mkv",
+        r"x\..\..\y.mkv",
+        r"C:\Users\x\thesis.docx",
+    ] {
+        let fake = Arc::new(Fake::default().with_files(HASH, &[("film.mkv", GB), (bad, 10)]));
+        let m = manager(fake.clone(), dir.path(), 50);
+        let err = m.start(&magnet(HASH)).await.unwrap_err();
+        assert_eq!(err.code(), Some("torrent_bad_files"), "{bad:?}");
+        assert!(
+            fake.added.lock().unwrap().is_empty(),
+            "{bad:?}: never added"
+        );
+        assert!(matches!(
+            m.status(HASH).unwrap().state,
+            TorrentState::Failed(_)
+        ));
+    }
+    // Plain names (with folders, dots inside, a name that only starts like a device) are fine.
+    let fake = Arc::new(Fake::default().with_files(
+        HASH,
+        &[
+            ("Film (2001)/Film.2001.mkv", GB),
+            ("Film (2001)/console.txt", 1),
+            ("COM10.nfo", 1),
+        ],
+    ));
+    let m = manager(fake.clone(), dir.path(), 50);
+    m.start(&magnet(HASH)).await.unwrap();
+    assert_eq!(fake.added.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn removing_never_deletes_outside_the_root() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("torrents");
+    let outside = base.path().join("outside.txt");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(&outside, b"keep").unwrap();
+    remove_inside(&root, &outside).await;
+    remove_inside(&root, &root.join("..").join("outside.txt")).await;
+    remove_inside(&root, &root).await;
+    assert!(outside.exists());
+    assert!(root.exists());
+    let inside = root.join(HASH);
+    std::fs::create_dir_all(inside.join("sub")).unwrap();
+    remove_inside(&root, &inside).await;
+    assert!(!inside.exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_first_burst_gives_no_estimate_until_20_s_of_samples() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 1000 * MB)]));
+    let m = manager(fake.clone(), dir.path(), 50);
+    m.start(&magnet(HASH)).await.unwrap();
+    fake.set_progress(HASH, 0, 1000 * MB);
+    m.sample().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    // 40 MB in one second would say "ready" for a two-hour film.
+    fake.set_progress(HASH, 40 * MB, 1000 * MB);
+    m.sample().await;
+    assert_eq!(m.will_make_it(HASH, Some(7200.0)), Readiness::Unknown);
+    assert!(m.playable(HASH).is_err(), "not cleared");
+    for s in 2..=20 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        fake.set_progress(HASH, 40 * MB + s * MB, 1000 * MB);
+        m.sample().await;
+    }
+    assert_eq!(m.will_make_it(HASH, Some(7200.0)), Readiness::Ready);
+    assert!(m.playable(HASH).is_ok(), "cleared once ready");
+}
+
+#[test]
+fn only_public_http_and_udp_trackers_are_kept() {
+    let m = parse_magnet(&format!(
+        "magnet:?xt=urn:btih:{HASH}&tr=udp://tracker.example.org:80&tr=http://127.0.0.1:8080/a\
+         &tr=http://192.168.1.1/a&tr=udp://[::1]:80&tr=http://169.254.169.254/latest\
+         &tr=http://localhost/a&tr=ws://t.example.org/a&tr=file:///etc&tr=https://t.example.org/a\
+         &tr=http://8.8.8.8/a"
+    ))
+    .unwrap();
+    assert_eq!(
+        m.trackers,
+        vec![
+            "udp://tracker.example.org:80",
+            "https://t.example.org/a",
+            "http://8.8.8.8/a"
+        ]
+    );
+    // `udp:` hosts are opaque text to the URL parser: an IP address there is checked too.
+    for dropped in [
+        "udp://127.0.0.1:80/announce",
+        "udp://[::1]:80",
+        "udp://192.168.1.1:6969",
+        "udp://169.254.1.1:1",
+    ] {
+        assert!(!is_safe_tracker(dropped), "{dropped}");
+    }
+    assert!(is_safe_tracker("udp://tracker.example:1337/announce"));
+    assert!(is_safe_tracker("udp://8.8.8.8:1337/announce"));
+    let many: String = (0..80)
+        .map(|i| format!("&tr=udp://t{i}.example.org:80"))
+        .collect();
+    let m = parse_magnet(&format!("magnet:?xt=urn:btih:{HASH}{many}")).unwrap();
+    assert_eq!(m.trackers.len(), MAX_TRACKERS);
+    let link = magnet_from_stream(
+        HASH,
+        None,
+        "x",
+        &[
+            "tracker:http://10.0.0.1/a".into(),
+            "tracker:udp://t.example.org:1".into(),
+        ],
+    );
+    assert_eq!(
+        parse_magnet(&link).unwrap().trackers,
+        vec!["udp://t.example.org:1"]
+    );
+}
+
+#[tokio::test]
+async fn a_closed_manager_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake::default().with_files(HASH, &[("f.mkv", 100)]));
+    let m = manager(fake.clone(), dir.path(), 50);
+    m.close();
+    let err = m.start(&magnet(HASH)).await.unwrap_err();
+    assert_eq!(err.code(), Some("torrents_disabled"));
+    assert!(fake.added.lock().unwrap().is_empty());
+}
+
+/// Switched off while `add` runs: the torrent is taken away again.
+#[tokio::test]
+async fn switching_off_during_a_start_removes_the_added_torrent() {
+    struct Closing {
+        inner: Fake,
+        manager: Mutex<Option<Weak<TorrentManager>>>,
+    }
+    #[async_trait]
+    impl TorrentBackend for Closing {
+        async fn resolve(&self, m: &MagnetRef) -> Result<TorrentFiles, Msg> {
+            self.inner.resolve(m).await
+        }
+        async fn add(
+            &self,
+            m: &MagnetRef,
+            idx: usize,
+            dir: &Path,
+            bps: Option<u64>,
+        ) -> Result<(), Msg> {
+            let r = self.inner.add(m, idx, dir, bps).await;
+            let weak = self.manager.lock().unwrap().clone();
+            if let Some(mgr) = weak.and_then(|w| w.upgrade()) {
+                mgr.close();
+            }
+            r
+        }
+        async fn progress(&self, hash: &str) -> Option<RawProgress> {
+            self.inner.progress(hash).await
+        }
+        async fn open_file(&self, hash: &str, idx: usize) -> Result<Box<dyn FileStream>, Msg> {
+            self.inner.open_file(hash, idx).await
+        }
+        async fn stop(&self, hash: &str) {
+            self.inner.stop(hash).await
+        }
+        async fn remove(&self, hash: &str, delete_files: bool) {
+            self.inner.remove(hash, delete_files).await
+        }
+        fn set_upload_limit(&self, bps: Option<u64>) {
+            self.inner.set_upload_limit(bps)
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Closing {
+        inner: Fake::default().with_files(HASH, &[("f.mkv", 100)]),
+        manager: Mutex::new(None),
+    });
+    let m = TorrentManager::new(backend.clone(), dir.path().to_path_buf(), 200, 50);
+    *backend.manager.lock().unwrap() = Some(Arc::downgrade(&m));
+    let err = m.start(&magnet(HASH)).await.unwrap_err();
+    assert_eq!(err.code(), Some("torrents_disabled"));
+    assert_eq!(
+        *backend.inner.removed.lock().unwrap(),
+        vec![(HASH.to_string(), false)]
+    );
+    assert!(!dir.path().join(HASH).exists());
+    assert!(m.status(HASH).is_none());
+}
+
+/// A start that fails is tried once more; after the second failure the gate says `Failed`
+/// (never `Ready`), with the reason.
+#[tokio::test]
+async fn a_failed_start_is_retried_once_then_the_gate_reports_failed() {
+    use super::gate::{HubGate, ProbeFn, TorrentGate};
+    use super::hub::{ManagerFactory, TorrentHub};
+    use crate::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
+
+    let dir = tempfile::tempdir().unwrap();
+    // No file list for it: every start fails with `torrent_metadata`.
+    let fake = Arc::new(Fake::default());
+    let made = Arc::clone(&fake);
+    let factory: ManagerFactory = Arc::new(move |root, kbps, gb| {
+        let fake = Arc::clone(&made);
+        Box::pin(async move { Ok(TorrentManager::new(fake, root, kbps, gb)) })
+    });
+    let hub = TorrentHub::with_factory(dir.path().join("torrents"), factory);
+    hub.set_settings(&settings::TorrentSettings {
+        torrents_enabled: true,
+        ..Default::default()
+    });
+    let probe: ProbeFn = Arc::new(|_| Box::pin(async { None }));
+    let gate = HubGate::new(Arc::clone(&hub), probe);
+    let conn = open_database(Path::new(":memory:")).unwrap();
+    let item = QueueRepo::new(&conn)
+        .add(&NewItem {
+            channel_id: MAIN_CHANNEL_ID,
+            source_url: magnet(HASH).to_link(),
+            title: "f".into(),
+            duration_s: Some(100.0),
+            is_live: false,
+            status: ItemStatus::Queued,
+            added_by: AddedBy::Admin,
+            requester_name: None,
+            requester_ip: None,
+            requester_key_hash: None,
+        })
+        .unwrap();
+
+    // Never started: wait, not ready.
+    assert_eq!(gate.readiness(&item, Some(100.0)), Readiness::Unknown);
+    assert!(gate.ensure_started(&item));
+    settle().await;
+    // The first failure: still waiting (the next check retries).
+    assert_eq!(gate.readiness(&item, Some(100.0)), Readiness::Unknown);
+    assert!(gate.failure(&item).is_none());
+    assert!(gate.ensure_started(&item));
+    settle().await;
+    assert_eq!(gate.readiness(&item, Some(100.0)), Readiness::Failed);
+    assert_eq!(
+        gate.failure(&item).unwrap().code(),
+        Some("torrent_metadata")
+    );
+    // No third try, and playback does not start it either.
+    assert!(gate.ensure_started(&item));
+    settle().await;
+    assert_eq!(gate.readiness(&item, Some(100.0)), Readiness::Failed);
+    let err = hub.playable(&item.source_url).unwrap_err();
+    assert_eq!(err.code(), Some("torrent_metadata"));
+    assert!(fake.added.lock().unwrap().is_empty());
 }

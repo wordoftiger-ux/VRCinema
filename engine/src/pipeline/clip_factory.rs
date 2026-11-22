@@ -40,6 +40,7 @@ use crate::pipeline::ticker::{
     TEXT_FILE, TickerContent, TickerMode, TickerQr, TickerWriter, compose_text, overlay_filter,
     prepare_after_s, window_budget_px,
 };
+use crate::resolver::torrent::{is_magnet, is_stream_route_url};
 use crate::resolver::ytdlp::{FALLBACK_YOUTUBE_CLIENT, youtube_client};
 use crate::resolver::{MediaResolver, ResolvedStream, StreamInput};
 use crate::rules::{HostResolver, check_media_url, check_media_urls};
@@ -561,10 +562,13 @@ impl RealClipFactory {
 /// (its name may have started to point into the owner's network since the request).
 async fn checked_source(d: &ClipFactoryDeps, item: &QueueItem) -> Result<(String, bool), Msg> {
     // A file a viewer sent has no address to look up: it was checked when it arrived and its
-    // resolver only opens files of the uploads folder.
+    // resolver only opens files of the uploads folder. A magnet link is always the owner's
+    // choice (viewers cannot send one; the owner picks it as the source of a title request):
+    // its only input is this app's stream route (see `checked_inputs`).
     let viewer = item.added_by == AddedBy::Public
         && d.check_viewer_media
-        && !crate::uploads::is_upload_source(&item.source_url);
+        && !crate::uploads::is_upload_source(&item.source_url)
+        && !is_magnet(&item.source_url);
     let source = if viewer {
         check_media_url(&item.source_url, d.host_resolver.as_ref())
             .await
@@ -642,11 +646,27 @@ impl RealClipFactory {
 /// A viewer's link: what it led to must not be the owner's network, and the programs get exactly
 /// the address that was checked (not the text the extractor wrote, which they could read
 /// differently), before ffprobe or ffmpeg touch it.
+///
+/// A magnet source plays only from this app's own stream route (its addresses are not a
+/// viewer's: nothing else is accepted for it).
 async fn checked_inputs(
     d: &ClipFactoryDeps,
     viewer: bool,
+    source: &str,
     mut stream: ResolvedStream,
 ) -> Result<ResolvedStream, Msg> {
+    if is_magnet(source) {
+        let ours = !stream.inputs.is_empty()
+            && stream
+                .inputs
+                .iter()
+                .all(|i| is_stream_route_url(&i.url) && i.headers.is_empty());
+        return if ours {
+            Ok(stream)
+        } else {
+            Err(Msg::error("torrent_failed"))
+        };
+    }
     if viewer {
         let raw: Vec<&str> = stream.inputs.iter().map(|i| i.url.as_str()).collect();
         let checked = check_media_urls(&raw, d.host_resolver.as_ref())
@@ -715,7 +735,7 @@ async fn probe_or_fallback(
             .arg("client", client)
             .arg("fallback", FALLBACK_YOUTUBE_CLIENT));
     }
-    let again = checked_inputs(d, viewer, again.map_err(|e| e.0)?).await?;
+    let again = checked_inputs(d, viewer, source, again.map_err(|e| e.0)?).await?;
     if let Some(client) = stream_youtube_client(&again) {
         log_youtube_client(d, item, &client, source);
     }
@@ -761,7 +781,7 @@ async fn resolve_and_probe(
 ) -> Result<Probed, Msg> {
     let stream = d.resolver.resolve(source).await.map_err(|e| e.0)?;
     remember_thumbnail(d, item, &stream);
-    let stream = checked_inputs(d, viewer, stream).await?;
+    let stream = checked_inputs(d, viewer, source, stream).await?;
     let live = item.is_live || stream.is_live;
     let duration_s = stream.duration_s;
     let downloading = || {
@@ -1337,9 +1357,11 @@ async fn start_clip(
         (Some(film), _) => probe_download(&d, prober.as_ref(), film, item.duration_s).await?,
         // Resolved ahead of its turn: the media addresses of a viewer's film are checked
         // again now, as a fresh resolution would be.
-        (None, Some((stream, info, lease))) => {
-            (checked_inputs(&d, viewer, stream).await?, info, lease)
-        }
+        (None, Some((stream, info, lease))) => (
+            checked_inputs(&d, viewer, &source, stream).await?,
+            info,
+            lease,
+        ),
         (None, None) => {
             resolve_and_probe(
                 &d,
@@ -2552,6 +2574,47 @@ mod tests {
         )
         .await;
         assert_eq!(err.render(Lang::En), "program not found", "{err:?}");
+    }
+
+    /// The owner chose a magnet as the source of a viewer's title request (the row stays the
+    /// viewer's): it is the owner's choice, played from this app's stream route only.
+    #[tokio::test]
+    async fn a_magnet_chosen_for_a_viewers_request_plays_from_the_stream_route_only() {
+        let route: &'static str = Box::leak(
+            format!(
+                "http://127.0.0.1:8080/internal/torrent/{}/{}",
+                "ab".repeat(24),
+                "cd".repeat(20)
+            )
+            .into_boxed_str(),
+        );
+        let magnet = format!("magnet:?xt=urn:btih:{}&dn=Film", "cd".repeat(20));
+        let chosen = QueueItem {
+            added_by: AddedBy::Public,
+            source_url: magnet.clone(),
+            ..item(1, "Test")
+        };
+        // Past the checks (fails later, on the missing ffprobe).
+        let err = start_error_of(&factory_for_media(vec![route]), chosen.clone()).await;
+        assert_eq!(err.render(Lang::En), "program not found", "{err:?}");
+        // Any other input of a magnet source is refused, for the owner's film too.
+        for other in [
+            "http://192.168.0.5/v.mp4",
+            "https://cdn.example/v.mp4",
+            "http://127.0.0.1:8080/internal/torrent/x/y",
+        ] {
+            for added_by in [AddedBy::Public, AddedBy::Admin] {
+                let err = start_error_of(
+                    &factory_for_media(vec![other]),
+                    QueueItem {
+                        added_by,
+                        ..chosen.clone()
+                    },
+                )
+                .await;
+                assert_eq!(err.code(), Some("torrent_failed"), "{other}: {err:?}");
+            }
+        }
     }
 
     // ---- YouTube refusing an address: the fallback client ----

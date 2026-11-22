@@ -14,6 +14,25 @@ pub fn is_magnet(url: &str) -> bool {
         .is_some_and(|p| p.eq_ignore_ascii_case("magnet:"))
 }
 
+/// An address of this app's stream route as [`TorrentHub::local_url`] makes it (`http`, an IP
+/// address, `/internal/torrent/{token}/{info hash}`, nothing else): the only input a magnet
+/// source may have.
+pub fn is_stream_route_url(url: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else {
+        return false;
+    };
+    let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let parts: Vec<&str> = u.path().split('/').collect();
+    u.scheme() == "http"
+        && matches!(u.host(), Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)))
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.query().is_none()
+        && u.fragment().is_none()
+        && matches!(parts.as_slice(), ["", "internal", "torrent", token, hash]
+            if hex(token, 48) && hex(hash, 40))
+}
+
 pub struct TorrentResolver {
     hub: Arc<TorrentHub>,
 }
@@ -37,9 +56,11 @@ impl MediaResolver for TorrentResolver {
         })
     }
 
-    /// Starts the torrent (waits for its file list) and returns the loopback address.
+    /// The loopback address of a download the channel's gate let through (complete, or said to
+    /// make it). It never starts or restarts one: playing a download that is not ready (or
+    /// failed) would air a film that cannot keep up.
     async fn resolve(&self, url: &str) -> Result<ResolvedStream, ResolveError> {
-        let hash = self.hub.start(url).await?;
+        let hash = self.hub.playable(url)?;
         let m = parse_magnet(url).ok_or_else(|| ResolveError::coded("torrent_bad_magnet"))?;
         Ok(ResolvedStream {
             inputs: vec![StreamInput {

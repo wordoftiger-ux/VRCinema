@@ -153,15 +153,27 @@ async fn owner_adds_magnet_when_enabled_and_panel_shows_progress() {
         .json();
     assert_eq!(panel["queue"][0]["torrent"]["state"], "idle");
     assert_eq!(panel["queue"][0]["torrent"]["ready"], false);
-    // Resolving starts it and gives the loopback address.
+    // Playing never starts a download: it is refused until the download may play.
     let resolver = TorrentResolver::new(Arc::clone(&hub));
+    let err = resolver.resolve(MAGNET).await.unwrap_err();
+    assert_eq!(err.0.code(), Some("torrent_not_active"));
+    assert!(
+        hub.manager_if_running()
+            .is_none_or(|m| m.status(HASH).is_none()),
+        "nothing started"
+    );
+    hub.start(MAGNET).await.unwrap();
+    hub.manager_if_running().unwrap().sample().await;
+    // Complete now: resolving gives the loopback address.
     let stream = resolver.resolve(MAGNET).await.unwrap();
     assert!(
         stream.inputs[0]
             .url
             .ends_with(&format!("/internal/torrent/{}/{HASH}", hub.token()))
     );
-    hub.manager_if_running().unwrap().sample().await;
+    assert!(crate::resolver::torrent::is_stream_route_url(
+        &stream.inputs[0].url
+    ));
     let panel = h
         .send(get("/api/admin/channels/main").cookie(&cookie))
         .await
@@ -217,6 +229,64 @@ async fn stream_route_serves_range_from_fake_backend() {
     assert_eq!(r.body.len(), 100);
     assert_eq!(r.header("content-length"), "100");
     assert_eq!(r.header("accept-ranges"), "bytes");
+
+    // A range that is not valid syntax is ignored (RFC 9110): everything, 200.
+    for bad in ["bytes=abc-", "bytes=5-3", "bytes=-x", "bytes=1-2x"] {
+        let r = h.send(get(&url).header("range", bad)).await;
+        assert_eq!(r.status, StatusCode::OK, "{bad}");
+        assert_eq!(r.body.len(), 100, "{bad}");
+    }
+    // HEAD: the headers only.
+    let r = h
+        .send(call("HEAD", &url).header("range", "bytes=10-19"))
+        .await;
+    assert_eq!(r.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(r.header("content-length"), "10");
+    assert!(r.body.is_empty());
+}
+
+#[tokio::test]
+async fn stream_route_caps_open_streams() {
+    let (hub, h) = started().await;
+    let slots: Vec<_> = (0..crate::torrent::hub::MAX_STREAMS)
+        .map(|_| hub.stream_slot().unwrap())
+        .collect();
+    let url = stream_url(&hub);
+    assert_eq!(
+        h.send(get(&url)).await.status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    // Answered without a stream: not counted.
+    let r = h.send(get(&url).header("range", "bytes=500-")).await;
+    assert_eq!(r.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    drop(slots);
+    assert_eq!(h.send(get(&url)).await.status, StatusCode::OK);
+    assert!(
+        hub.stream_slot().is_some(),
+        "a finished body frees its slot"
+    );
+}
+
+#[tokio::test]
+async fn local_url_uses_the_bound_address_unless_unspecified() {
+    let hub = hub(Arc::default());
+    hub.set_bound("0.0.0.0:8080".parse().unwrap());
+    assert!(
+        hub.local_url(HASH)
+            .starts_with("http://127.0.0.1:8080/internal/torrent/")
+    );
+    assert!(!hub.is_this_computer("192.168.1.5".parse().unwrap()));
+    hub.set_bound("192.168.1.5:8080".parse().unwrap());
+    assert!(
+        hub.local_url(HASH)
+            .starts_with("http://192.168.1.5:8080/internal/torrent/")
+    );
+    assert!(crate::resolver::torrent::is_stream_route_url(
+        &hub.local_url(HASH)
+    ));
+    assert!(hub.is_this_computer("192.168.1.5".parse().unwrap()));
+    assert!(hub.is_this_computer("127.0.0.1".parse().unwrap()));
+    assert!(!hub.is_this_computer("192.168.1.6".parse().unwrap()));
 }
 
 #[tokio::test]

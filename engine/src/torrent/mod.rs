@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -28,6 +28,11 @@ mod tests;
 
 /// The window of the download-rate average.
 pub const RATE_WINDOW: Duration = Duration::from_secs(30);
+/// The rate is trusted only once its samples cover this long (the first burst from peers is
+/// no measure of the rate that follows).
+pub const MIN_RATE_SPAN: Duration = Duration::from_secs(20);
+/// At most this many trackers of a magnet are used.
+pub const MAX_TRACKERS: usize = 50;
 /// How often the sampler reads the progress of active torrents.
 pub const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 /// Play when `remaining / rate ≤ duration / MARGIN`.
@@ -150,7 +155,10 @@ pub fn parse_magnet(s: &str) -> Option<MagnetRef> {
             }
             "dn" if name.is_none() => name = Some(value.into_owned()).filter(|n| !n.is_empty()),
             "tr" => {
-                if !value.is_empty() && !trackers.contains(&value.to_string()) {
+                if trackers.len() < MAX_TRACKERS
+                    && is_safe_tracker(&value)
+                    && !trackers.contains(&value.to_string())
+                {
                     trackers.push(value.into_owned());
                 }
             }
@@ -186,8 +194,100 @@ pub fn magnet_from_stream(
         sources
             .iter()
             .filter_map(|s| s.strip_prefix("tracker:"))
-            .filter(|t| !t.is_empty()),
+            .filter(|t| is_safe_tracker(t))
+            .take(MAX_TRACKERS),
     )
+}
+
+/// A tracker the client may announce to: `http`, `https` or `udp`; a literal IP address must be
+/// public (not loopback, private or link-local), a name must not be `localhost`. Addon data is
+/// not trusted to point the client at the owner's network.
+pub fn is_safe_tracker(tracker: &str) -> bool {
+    let Ok(url) = url::Url::parse(tracker.trim()) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https" | "udp") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => crate::rules::is_public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => crate::rules::is_public_ip(ip.into()),
+        Some(url::Host::Domain(name)) => {
+            // `udp:` is not a special scheme: its host stays opaque text, also an IP address.
+            if let Ok(ip) = name.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+                return crate::rules::is_public_ip(ip);
+            }
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name != "localhost" && !name.ends_with(".localhost")
+        }
+        None => false,
+    }
+}
+
+/// Windows device names (with any extension): such a "file" is the device.
+fn is_reserved_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        s => {
+            (s.starts_with("COM") || s.starts_with("LPT"))
+                && s.len() == 4
+                && matches!(s.as_bytes()[3], b'1'..=b'9')
+        }
+    }
+}
+
+/// One path component of a torrent file that stays a plain name inside the download folder.
+fn is_safe_component(c: &str) -> bool {
+    let mut parts = Path::new(c).components();
+    let plain =
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    plain
+        && c != "."
+        && c != ".."
+        && !c.ends_with('.')
+        && !c.ends_with(' ')
+        && !c.contains([':', '/', '\\', '\0'])
+        && !is_reserved_name(c)
+}
+
+/// Every file of the torrent stays inside its download folder: each path (its components
+/// joined by `/`) has only plain names, none with `:` (a drive or a stream on Windows), no
+/// device name, no trailing dot or space, nothing empty. The torrent library opens every file
+/// of the torrent (not only the selected one), so one bad path refuses the whole torrent.
+pub fn files_are_safe(files: &TorrentFiles) -> bool {
+    !files.files.is_empty()
+        && files
+            .files
+            .iter()
+            .all(|(path, _)| path.split(['/', '\\']).all(is_safe_component))
+}
+
+/// Deletes `path` (a file or a folder) only when it is really inside `root`: both are made
+/// canonical first, so a link or a drive-relative name cannot lead the deletion elsewhere.
+pub async fn remove_inside(root: &Path, path: &Path) {
+    let (Ok(root), Ok(target)) = (
+        tokio::fs::canonicalize(root).await,
+        tokio::fs::canonicalize(path).await,
+    ) else {
+        return;
+    };
+    if target == root || !target.starts_with(&root) {
+        return;
+    }
+    let is_dir = tokio::fs::symlink_metadata(&target)
+        .await
+        .is_ok_and(|m| m.is_dir());
+    let _ = if is_dir {
+        tokio::fs::remove_dir_all(&target).await
+    } else {
+        tokio::fs::remove_file(&target).await
+    };
 }
 
 /// Is `path` a video by its extension.
@@ -291,6 +391,8 @@ pub enum Readiness {
     WaitS(u64),
     /// No estimate (no rate yet, unknown duration, not downloading).
     Unknown,
+    /// The download failed for good (its retry too): the item fails instead of airing.
+    Failed,
 }
 
 /// `Ready` when `remaining / rate ≤ duration / 1.15`, else the wait until it would be.
@@ -322,6 +424,9 @@ struct Item {
     total: u64,
     peers: u32,
     samples: VecDeque<(Instant, u64)>,
+    /// The estimate once said it will make it: from then on it may be played (also again,
+    /// for a retry or a seek, when the rate has dropped since).
+    cleared: bool,
 }
 
 impl Item {
@@ -335,6 +440,15 @@ impl Item {
             total: 0,
             peers: 0,
             samples: VecDeque::new(),
+            cleared: false,
+        }
+    }
+
+    /// How long the rate samples cover.
+    fn rate_span(&self) -> Duration {
+        match (self.samples.front(), self.samples.back()) {
+            (Some(first), Some(last)) => last.0.duration_since(first.0),
+            _ => Duration::ZERO,
         }
     }
 
@@ -372,6 +486,9 @@ pub struct TorrentManager {
     upload_kbps: AtomicU64,
     disk_cap: AtomicU64,
     items: Mutex<HashMap<String, Item>>,
+    /// Set when torrents are switched off: nothing starts any more, a start in flight takes
+    /// its torrent away again.
+    closed: AtomicBool,
 }
 
 impl TorrentManager {
@@ -390,7 +507,17 @@ impl TorrentManager {
             upload_kbps: AtomicU64::new(upload_kbps),
             disk_cap: AtomicU64::new(disk_cap_bytes(disk_cap_gb)),
             items: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
         })
+    }
+
+    /// Torrents were switched off: no start goes on (see [`TorrentManager::start`]).
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// The real manager: a librqbit session rooted in `root`, with the 1 s sampler running.
@@ -439,6 +566,9 @@ impl TorrentManager {
     /// Starts (or retries a waiting/failed) torrent. Waits for the file list; returns `Ok` also
     /// when it is left `WaitingForDisk` (calling again retries). Errors are kept as `Failed`.
     pub async fn start(&self, m: &MagnetRef) -> Result<(), Msg> {
+        if self.is_closed() {
+            return Err(Msg::error("torrents_disabled"));
+        }
         let hash = m.info_hash.clone();
         let files = {
             let mut items = self.items.lock().unwrap();
@@ -469,8 +599,14 @@ impl TorrentManager {
             Some(f) => f,
             None => self.backend.resolve(m).await?,
         };
+        // Before the torrent is added: the library creates and opens every file of it.
+        if !files_are_safe(&files) {
+            return Err(Msg::error("torrent_bad_files"));
+        }
         let idx = pick_file(&files, m.file_idx)?;
         let total = files.files[idx].1;
+        // Walks the folder: not while holding the lock the channel's checks wait for.
+        let on_disk = self.disk_used();
         let needs_wait = {
             let mut items = self.items.lock().unwrap();
             let reserved: u64 = items
@@ -478,7 +614,7 @@ impl TorrentManager {
                 .filter(|(h, i)| *h != hash && i.holds_disk())
                 .map(|(_, i)| i.total)
                 .sum();
-            let used = self.disk_used().max(reserved);
+            let used = on_disk.max(reserved);
             let cap = self.disk_cap.load(Ordering::Relaxed);
             let Some(item) = items.get_mut(hash) else {
                 // Dropped while resolving.
@@ -497,8 +633,18 @@ impl TorrentManager {
             return Ok(());
         }
         let dir = self.dir_of(hash);
+        if self.is_closed() {
+            return Err(Msg::error("torrents_disabled"));
+        }
         let bps = upload_bps(self.upload_kbps.load(Ordering::Relaxed));
         self.backend.add(m, idx, &dir, bps).await?;
+        // Switched off while it was being added: it must not keep downloading.
+        if self.is_closed() {
+            self.items.lock().unwrap().remove(hash);
+            self.backend.remove(hash, false).await;
+            remove_inside(&self.root, &dir).await;
+            return Err(Msg::error("torrents_disabled"));
+        }
         let dropped = {
             let mut items = self.items.lock().unwrap();
             match items.get_mut(hash) {
@@ -512,8 +658,8 @@ impl TorrentManager {
             }
         };
         if dropped {
-            self.backend.remove(hash, true).await;
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+            self.backend.remove(hash, false).await;
+            remove_inside(&self.root, &dir).await;
         }
         Ok(())
     }
@@ -592,19 +738,45 @@ impl TorrentManager {
     }
 
     /// Can the item start playing now (see [`estimate`]); a complete file is always ready.
+    /// While the rate samples cover less than [`MIN_RATE_SPAN`] there is no estimate yet.
+    /// A `Ready` answer clears the item for playing (see [`TorrentManager::playable`]).
     pub fn will_make_it(&self, hash: &str, duration_s: Option<f64>) -> Readiness {
-        let items = self.items.lock().unwrap();
-        let Some(item) = items.get(hash) else {
+        let mut items = self.items.lock().unwrap();
+        let Some(item) = items.get_mut(hash) else {
             return Readiness::Unknown;
         };
-        match item.state {
+        let r = match item.state {
             TorrentState::Complete => Readiness::Ready,
-            TorrentState::Downloading if item.total > 0 => estimate(
-                item.total.saturating_sub(item.downloaded),
-                item.rate(),
-                duration_s,
-            ),
+            TorrentState::Downloading if item.total > 0 && item.downloaded >= item.total => {
+                Readiness::Ready
+            }
+            TorrentState::Downloading if item.total > 0 && item.rate_span() >= MIN_RATE_SPAN => {
+                estimate(
+                    item.total.saturating_sub(item.downloaded),
+                    item.rate(),
+                    duration_s,
+                )
+            }
             _ => Readiness::Unknown,
+        };
+        if r == Readiness::Ready {
+            item.cleared = true;
+        }
+        r
+    }
+
+    /// May the item be played now: complete, or downloading and once said to make it. Never
+    /// starts anything; the error is the stored failure, else `torrent_not_active`.
+    pub fn playable(&self, hash: &str) -> Result<(), Msg> {
+        let items = self.items.lock().unwrap();
+        match items.get(hash) {
+            Some(i) if i.state == TorrentState::Complete => Ok(()),
+            Some(i) if i.state == TorrentState::Downloading && i.cleared => Ok(()),
+            Some(Item {
+                state: TorrentState::Failed(e),
+                ..
+            }) => Err(e.clone()),
+            _ => Err(Msg::error("torrent_not_active")),
         }
     }
 
@@ -634,11 +806,12 @@ impl TorrentManager {
     pub async fn drop_item(&self, hash: &str) {
         let known = self.items.lock().unwrap().remove(hash).is_some();
         if known {
-            self.backend.remove(hash, true).await;
+            // The library would delete the files by the torrent's own paths: this folder is
+            // deleted here instead, only inside the root.
+            self.backend.remove(hash, false).await;
         }
-        let dir = self.dir_of(hash);
-        if dir.starts_with(&self.root) && hash.len() == 40 {
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+        if hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            remove_inside(&self.root, &self.dir_of(hash)).await;
         }
     }
 
@@ -663,13 +836,7 @@ impl TorrentManager {
             if keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
                 continue;
             }
-            let path = entry.path();
-            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            let _ = if is_dir {
-                tokio::fs::remove_dir_all(&path).await
-            } else {
-                tokio::fs::remove_file(&path).await
-            };
+            remove_inside(&self.root, &entry.path()).await;
         }
     }
 

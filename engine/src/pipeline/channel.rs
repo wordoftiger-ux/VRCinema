@@ -2611,15 +2611,19 @@ impl Channel {
                 .map(|end| end - p.position_s),
             (None, None) => Some(0.0),
         };
-        if remaining.is_none_or(|r| r > TORRENT_LEAD_S) {
+        let channel_id = self.o.channel_id;
+        let head = match self.queue(|q| q.next_queued(channel_id)) {
+            Ok(Some(head)) if is_magnet(&head) => head,
+            Ok(_) => return,
+            Err(e) => return self.log_error("log.queue_error_prefetch", &e),
+        };
+        // A head with a start time later than that: its turn is then (not downloaded hours
+        // ahead).
+        let to_start = self.ms_to_start(&head).unwrap_or(0).max(0) as f64 / 1000.0;
+        if remaining.is_none_or(|r| r.max(to_start) > TORRENT_LEAD_S) {
             return;
         }
-        let channel_id = self.o.channel_id;
-        match self.queue(|q| q.next_queued(channel_id)) {
-            Ok(Some(head)) if is_magnet(&head) => self.torrent_start(&head),
-            Ok(_) => {}
-            Err(e) => self.log_error("log.queue_error_prefetch", &e),
-        }
+        self.torrent_start(&head);
     }
 
     /// Starts (or keeps) the download of torrent item `item`.
@@ -2657,6 +2661,25 @@ impl Channel {
         self.torrent_start(head);
         let duration = head.duration_s.filter(|_| !head.is_live);
         let r = gate.readiness(head, duration);
+        if r == Readiness::Failed {
+            // Its download failed twice: the item fails (never aired from nothing).
+            let error = gate
+                .failure(head)
+                .unwrap_or_else(|| Msg::error("torrent_failed"));
+            self.log(
+                Msg::new("log.clip_failed")
+                    .arg("id", head.id)
+                    .arg("title", &head.title)
+                    .arg_msg("error", error.clone()),
+            );
+            let stored = error.to_stored();
+            if let Err(e) = self.queue(|q| q.finish(head.id, ItemStatus::Failed, Some(&stored))) {
+                self.log_error("log.queue_error_prefetch", &e);
+            }
+            self.torrent_check = None;
+            self.torrent_sweep();
+            return true;
+        }
         if r == Readiness::Unknown && last.is_none_or(|c| c.2 != Readiness::Unknown) {
             self.log(
                 Msg::new("log.torrent_wait_unknown")
@@ -2747,17 +2770,53 @@ impl Channel {
                 continue;
             }
             if let Some(item) = self.torrent_items.remove(&id) {
-                gate.release(&item);
-                self.log(
-                    Msg::new("log.torrent_released")
-                        .arg("id", item.id)
-                        .arg("title", &item.title),
-                );
+                // Two items of the same magnet share one download: it stays while another is
+                // still queued or on air (which then releases it). When the queue cannot be
+                // read it stays as well: deleting a film on air is worse.
+                match self.torrent_sharers(&item) {
+                    Some(others) if others.is_empty() => {
+                        gate.release(&item);
+                        self.log(
+                            Msg::new("log.torrent_released")
+                                .arg("id", item.id)
+                                .arg("title", &item.title),
+                        );
+                    }
+                    Some(others) => {
+                        for other in others {
+                            self.torrent_items.entry(other.id).or_insert(other);
+                        }
+                    }
+                    // Asked again with the next sweep.
+                    None => {
+                        self.torrent_items.insert(item.id, item);
+                    }
+                }
             }
             if self.torrent_check.is_some_and(|c| c.0 == id) {
                 self.torrent_check = None;
             }
         }
+    }
+
+    /// The other queued or playing items of this channel with the info hash of `item` (they
+    /// share its download). `None`: the queue could not be read.
+    fn torrent_sharers(&self, item: &QueueItem) -> Option<Vec<QueueItem>> {
+        let hash_of =
+            |i: &QueueItem| crate::torrent::parse_magnet(&i.source_url).map(|m| m.info_hash);
+        let Some(hash) = hash_of(item) else {
+            return Some(Vec::new());
+        };
+        let channel_id = self.o.channel_id;
+        let items = self
+            .queue(|q| q.list_by_status(channel_id, &[ItemStatus::Queued, ItemStatus::Playing]))
+            .ok()?;
+        Some(
+            items
+                .into_iter()
+                .filter(|i| i.id != item.id && is_magnet(i) && hash_of(i).as_ref() == Some(&hash))
+                .collect(),
+        )
     }
 
     /// Once the film on air has aired a little, the queue head (not live, starting within
@@ -6598,6 +6657,7 @@ mod tests {
         released: Vec<i64>,
         kept: Option<Vec<i64>>,
         readiness: HashMap<i64, Readiness>,
+        failures: HashMap<i64, Msg>,
     }
 
     #[derive(Clone, Default)]
@@ -6632,6 +6692,9 @@ mod tests {
                 .copied()
                 .unwrap_or(Readiness::Ready)
         }
+        fn failure(&self, item: &QueueItem) -> Option<Msg> {
+            self.lock().failures.get(&item.id).cloned()
+        }
         fn release(&self, item: &QueueItem) {
             self.lock().released.push(item.id);
         }
@@ -6648,12 +6711,18 @@ mod tests {
     }
 
     impl Env {
+        /// A magnet item; its info hash comes from its title (each title its own torrent).
         fn add_magnet(&self, title: &str, duration_s: Option<f64>) -> QueueItem {
+            let hash: String = title.bytes().map(|b| format!("{b:02x}")).collect();
+            self.add_magnet_of(title, duration_s, &format!("{hash:0<40}"))
+        }
+
+        fn add_magnet_of(&self, title: &str, duration_s: Option<f64>, hash: &str) -> QueueItem {
             let conn = self.db.lock().unwrap();
             QueueRepo::new(&conn)
                 .add(&NewItem {
                     channel_id: MAIN_CHANNEL_ID,
-                    source_url: format!("magnet:?xt=urn:btih:{}&dn={title}", "ab".repeat(20)),
+                    source_url: format!("magnet:?xt=urn:btih:{hash}&dn={title}"),
                     title: title.into(),
                     duration_s,
                     is_live: false,
@@ -6817,5 +6886,70 @@ mod tests {
         h.produce(1);
         e.key();
         assert_eq!(e.channel.prefetched_item_id(), Some(b.id));
+    }
+
+    #[tokio::test]
+    async fn a_torrent_whose_download_failed_fails_without_airing() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(100.0));
+        let c = e.add_item("c");
+        gate.set(b.id, Readiness::Failed);
+        gate.lock()
+            .failures
+            .insert(b.id, Msg::error("torrent_metadata"));
+        e.key();
+        e.flush().await;
+        let fresh = e.get(b.id);
+        assert_eq!(fresh.status, ItemStatus::Failed);
+        assert_eq!(
+            fresh.error_text(Lang::En).unwrap(),
+            Msg::error("torrent_metadata").render(Lang::En)
+        );
+        assert!(
+            e.factory.calls().iter().all(|c| c.item_id != b.id),
+            "its clip is never launched"
+        );
+        assert_eq!(gate.released(), vec![b.id]);
+        // The next film goes on.
+        e.key();
+        e.flush().await;
+        assert_eq!(e.factory.last_call_item(), c.id);
+    }
+
+    #[tokio::test]
+    async fn a_download_shared_by_two_items_stays_while_one_is_left() {
+        let (mut e, gate) = setup_torrents();
+        let hash = "cd".repeat(20);
+        let b = e.add_magnet_of("b", Some(100.0), &hash);
+        let dup = e.add_magnet_of("dup", Some(100.0), &hash);
+        let h = e.air(&b, 1).await;
+        // The queued copy is tracked too once it is the head.
+        e.advance(TORRENT_CHECK_MS);
+        e.tick();
+        assert_eq!(gate.started(), vec![b.id, dup.id]);
+        // Removing the queued copy keeps the download of the one on air.
+        e.set_status(dup.id, ItemStatus::Removed);
+        e.channel.on_queue_changed().unwrap();
+        assert!(gate.released().is_empty(), "the film on air keeps its file");
+        // Once that one has played, the download goes.
+        h.set_state(SegmenterState::Done);
+        e.key();
+        assert_eq!(e.get(b.id).status, ItemStatus::Played);
+        assert_eq!(gate.released(), vec![b.id]);
+    }
+
+    #[tokio::test]
+    async fn a_torrent_with_a_start_time_starts_downloading_only_shortly_before_it() {
+        let (mut e, gate) = setup_torrents();
+        let b = e.add_magnet("b", Some(100.0));
+        schedule(&e, b.id, 3_600_000);
+        e.key();
+        e.advance(TORRENT_CHECK_MS);
+        e.tick();
+        assert!(gate.started().is_empty(), "an hour ahead: not yet");
+        // 300 s before its time.
+        e.advance(3_300_000 - TORRENT_CHECK_MS);
+        e.tick();
+        assert_eq!(gate.started(), vec![b.id]);
     }
 }

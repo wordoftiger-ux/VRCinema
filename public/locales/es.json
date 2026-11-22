@@ -44,6 +44,7 @@
   "errors.torrent_not_active": "Este torrent no se está descargando.",
   "errors.torrents_disabled": "Los torrents están desactivados. Actívalos primero en Ajustes.",
   "errors.torrent_bad_magnet": "Ese no es un enlace magnet válido.",
+  "errors.torrent_bad_files": "El torrent tiene un nombre de archivo que no es seguro en este equipo (una unidad, un nombre de dispositivo o una ruta fuera de su carpeta). No se ha descargado.",
   "errors.app_closing": "La aplicación se está cerrando.",
   "errors.archive_lacks_file": "El archivo comprimido descargado no contiene {file}.",
   "errors.autostart_failed": "No se pudo cambiar el inicio con Windows: {detail}",

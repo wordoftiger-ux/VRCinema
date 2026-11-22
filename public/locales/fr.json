@@ -44,6 +44,7 @@
   "errors.torrent_not_active": "Ce torrent n’est pas en cours de téléchargement.",
   "errors.torrents_disabled": "Les torrents sont désactivés. Active-les d’abord dans les Réglages.",
   "errors.torrent_bad_magnet": "Ce n’est pas un lien magnet valide.",
+  "errors.torrent_bad_files": "Le torrent contient un nom de fichier dangereux sur cet ordinateur (un lecteur, un nom de périphérique ou un chemin hors de son dossier). Il n’a pas été téléchargé.",
   "errors.app_closing": "L’application est en cours de fermeture.",
   "errors.archive_lacks_file": "L’archive téléchargée ne contient pas {file}.",
   "errors.autostart_failed": "Impossible de modifier le démarrage avec Windows : {detail}",

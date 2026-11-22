@@ -45,6 +45,7 @@
   "errors.torrent_not_active": "Ten torrent nie jest pobierany.",
   "errors.torrents_disabled": "Torrenty są wyłączone. Najpierw włącz je w Ustawieniach.",
   "errors.torrent_bad_magnet": "To nie jest poprawny link magnet.",
+  "errors.torrent_bad_files": "Torrent ma nazwę pliku niebezpieczną na tym komputerze (dysk, nazwa urządzenia lub ścieżka poza jego folderem). Nie został pobrany.",
   "errors.app_closing": "Aplikacja jest zamykana.",
   "errors.archive_lacks_file": "W pobranym archiwum brak pliku {file}.",
   "errors.autostart_failed": "Nie udało się zmienić autostartu: {detail}",

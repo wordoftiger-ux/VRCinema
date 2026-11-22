@@ -29,6 +29,8 @@ use super::{FileStream, MagnetRef, RawProgress, TorrentBackend, TorrentFiles};
 
 /// Getting a magnet's file list from peers gives up after this long.
 pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Blocking slots of the session (the route opens at most `hub::MAX_STREAMS` streams).
+pub const BLOCKING_THREADS: usize = 32;
 
 fn fail(e: impl std::fmt::Display) -> Msg {
     Msg::chain(vec![Msg::error("torrent_failed"), Msg::text(e)])
@@ -64,6 +66,9 @@ impl RqbitBackend {
             persistence: None,
             listen: None,
             disable_local_service_discovery: true,
+            // File streams (one per open request of the stream route) and disk writes share
+            // these slots (8 by default): streams waiting for pieces must not starve writes.
+            runtime_worker_threads: Some(BLOCKING_THREADS),
             ..Default::default()
         };
         opts.ratelimits.upload_bps = bps_limit(upload_bps);
@@ -136,12 +141,7 @@ impl TorrentBackend for RqbitBackend {
         let files = list
             .info
             .iter_file_details()
-            .map(|fd| {
-                (
-                    fd.filename.to_pathbuf().to_string_lossy().into_owned(),
-                    fd.len,
-                )
-            })
+            .map(|fd| (fd.filename.to_vec().join("/"), fd.len))
             .collect();
         self.resolved.lock().unwrap().insert(
             m.info_hash.clone(),

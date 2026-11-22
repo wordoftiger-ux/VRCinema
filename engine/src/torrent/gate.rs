@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use super::hub::TorrentHub;
 use super::{Readiness, TorrentState, TorrentStatus, parse_magnet};
 use crate::db::QueueItem;
+use crate::i18n::Msg;
 use crate::pipeline::channel::BoxFuture;
 use crate::resolver::torrent::is_magnet;
 
@@ -16,14 +17,21 @@ use crate::resolver::torrent::is_magnet;
 /// file is in.
 pub const PROBE_AFTER_BYTES: u64 = 8 * 1024 * 1024;
 
+/// A failed start is tried this many times in all before the item fails.
+pub const START_ATTEMPTS: u32 = 2;
+
 /// The channel's view of torrent items (real: [`HubGate`]; in tests: a fake).
 pub trait TorrentGate: Send + Sync {
     /// Starts the item's download unless it runs (or is starting) already; a download waiting
-    /// for disk space is tried again. `false`: torrents are off (nothing started).
+    /// for disk space, or one whose first start failed, is tried again. `false`: torrents are
+    /// off (nothing started).
     fn ensure_started(&self, item: &QueueItem) -> bool;
-    /// Can the item start now. `duration_s`: the film's length when known. `Ready` also when
-    /// waiting would not help (torrents off, the download failed): its start then fails as any.
+    /// Can the item start now. `duration_s`: the film's length when known. `Ready` only when
+    /// its download will make it (or torrents are off: its start then fails as any); `Failed`
+    /// once the download failed twice (see [`TorrentGate::failure`]).
     fn readiness(&self, item: &QueueItem, duration_s: Option<f64>) -> Readiness;
+    /// Why the item's download failed for good (`None` while it has not).
+    fn failure(&self, item: &QueueItem) -> Option<Msg>;
     /// The item left the channel: its download stops and its files are deleted.
     fn release(&self, item: &QueueItem);
     /// At channel start: deletes every torrent and file not belonging to `keep`.
@@ -44,6 +52,8 @@ struct GateState {
     starting: HashSet<String>,
     /// Lengths probed for films of unknown duration.
     probes: HashMap<String, Probe>,
+    /// Failed starts of an info hash: how many, the last error.
+    failures: HashMap<String, (u32, Msg)>,
 }
 
 /// [`TorrentGate`] over the app's [`TorrentHub`].
@@ -112,6 +122,14 @@ impl HubGate {
         }
         None
     }
+
+    /// Its start failed [`START_ATTEMPTS`] times.
+    fn gave_up(&self, hash: &str) -> bool {
+        lock(&self.state)
+            .failures
+            .get(hash)
+            .is_some_and(|(n, _)| *n >= START_ATTEMPTS)
+    }
 }
 
 impl TorrentGate for HubGate {
@@ -122,12 +140,18 @@ impl TorrentGate for HubGate {
         let Some(hash) = hash_of(item) else {
             return false;
         };
+        if self.gave_up(&hash) {
+            return true;
+        }
         let state = self
             .hub
             .manager_if_running()
             .and_then(|m| m.status(&hash))
             .map(|s| s.state);
-        let needed = matches!(state, None | Some(TorrentState::WaitingForDisk));
+        let needed = matches!(
+            state,
+            None | Some(TorrentState::WaitingForDisk | TorrentState::Failed(_))
+        );
         if !needed || !lock(&self.state).starting.insert(hash.clone()) {
             return true;
         }
@@ -136,8 +160,23 @@ impl TorrentGate for HubGate {
         let link = item.source_url.clone();
         let key = hash.clone();
         let spawned = spawn(async move {
-            let _ = hub.start(&link).await;
-            let released = !lock(&shared).starting.remove(&key);
+            let result = hub.start(&link).await;
+            let released = {
+                let mut s = lock(&shared);
+                let released = !s.starting.remove(&key);
+                if !released {
+                    match result {
+                        Ok(_) => {
+                            s.failures.remove(&key);
+                        }
+                        Err(e) => {
+                            let n = s.failures.get(&key).map_or(0, |f| f.0);
+                            s.failures.insert(key.clone(), (n + 1, e));
+                        }
+                    }
+                }
+                released
+            };
             // Released while its file list was still coming: it must not stay.
             if released && let Some(m) = hub.manager_if_running() {
                 m.drop_item(&key).await;
@@ -156,18 +195,23 @@ impl TorrentGate for HubGate {
         if !self.hub.enabled() {
             return Readiness::Ready;
         }
+        if lock(&self.state).starting.contains(&hash) {
+            return Readiness::Unknown;
+        }
+        if self.gave_up(&hash) {
+            return Readiness::Failed;
+        }
         let manager = self.hub.manager_if_running();
         let Some((m, status)) = manager.and_then(|m| m.status(&hash).map(|s| (m, s))) else {
-            // Still starting: wait; never started (or no session): its own start says why.
-            return if lock(&self.state).starting.contains(&hash) {
-                Readiness::Unknown
-            } else {
-                Readiness::Ready
-            };
+            // Not started (or its start left nothing): the next check starts it again.
+            return Readiness::Unknown;
         };
         match status.state {
-            TorrentState::Complete | TorrentState::Failed(_) => return Readiness::Ready,
-            TorrentState::Starting | TorrentState::WaitingForDisk => return Readiness::Unknown,
+            TorrentState::Complete => return m.will_make_it(&hash, None),
+            // A failed start is tried again with the next check; never aired from nothing.
+            TorrentState::Failed(_) | TorrentState::Starting | TorrentState::WaitingForDisk => {
+                return Readiness::Unknown;
+            }
             TorrentState::Downloading => {}
         }
         if let Some(d) = duration_s.filter(|d| d.is_finite() && *d > 0.0) {
@@ -184,6 +228,15 @@ impl TorrentGate for HubGate {
         }
     }
 
+    fn failure(&self, item: &QueueItem) -> Option<Msg> {
+        let hash = hash_of(item)?;
+        lock(&self.state)
+            .failures
+            .get(&hash)
+            .filter(|(n, _)| *n >= START_ATTEMPTS)
+            .map(|(_, e)| e.clone())
+    }
+
     fn release(&self, item: &QueueItem) {
         let Some(hash) = hash_of(item) else {
             return;
@@ -192,6 +245,7 @@ impl TorrentGate for HubGate {
             let mut s = lock(&self.state);
             s.probes.remove(&hash);
             s.starting.remove(&hash);
+            s.failures.remove(&hash);
         }
         let hub = Arc::clone(&self.hub);
         spawn(async move {
@@ -218,12 +272,7 @@ impl TorrentGate for HubGate {
                 if keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
                     continue;
                 }
-                let path = entry.path();
-                let _ = if entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                    tokio::fs::remove_dir_all(&path).await
-                } else {
-                    tokio::fs::remove_file(&path).await
-                };
+                super::remove_inside(hub.root(), &entry.path()).await;
             }
         });
     }
