@@ -150,7 +150,12 @@ where
 /// How the given ffmpeg tonemaps HDR films on this computer (the test film lives in the
 /// temporary folder while the test runs).
 pub async fn detect_hdr_path(ffmpeg: &Path) -> HdrPath {
-    let sample = std::env::temp_dir().join(format!("vrcinema-hdr-test-{}.mkv", std::process::id()));
+    // A private folder with a random name (created anew, never an existing one or a link
+    // planted in a shared temporary folder), removed with the film afterwards.
+    let Some(dir) = private_temp_dir() else {
+        return HdrPath::Cpu;
+    };
+    let sample = dir.join("hdr-test.mkv");
     let found = detect_hdr_path_with(
         |args| async move {
             run_process(ffmpeg, &args, TEST_TIMEOUT)
@@ -161,8 +166,18 @@ pub async fn detect_hdr_path(ffmpeg: &Path) -> HdrPath {
         &sample,
     )
     .await;
-    let _ = std::fs::remove_file(&sample);
+    let _ = std::fs::remove_dir_all(&dir);
     found
+}
+
+/// A new folder with a random name in the temporary folder (`None`: it could not be made).
+fn private_temp_dir() -> Option<std::path::PathBuf> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = std::env::temp_dir().join(format!("vrcinema-hdr-{name}"));
+    std::fs::create_dir(&dir).ok()?;
+    Some(dir)
 }
 
 #[cfg(test)]
