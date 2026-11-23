@@ -42,6 +42,7 @@ mod capture;
 mod ctl;
 mod lists;
 mod nick_pin;
+mod skip_vote;
 mod torrent;
 mod uploads;
 
@@ -961,6 +962,7 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
             "queue",
             "channelUrl",
             "requestUrl",
+            "skipVote",
             "rules"
         ]
     );

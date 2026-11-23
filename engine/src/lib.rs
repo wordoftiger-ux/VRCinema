@@ -1,3 +1,4 @@
+#![cfg_attr(test, recursion_limit = "256")]
 pub mod addons;
 pub mod app;
 pub mod app_settings;

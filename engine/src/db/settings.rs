@@ -37,6 +37,33 @@ impl LinkMode {
     }
 }
 
+/// How viewers' skip votes end a film.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkipVoteMode {
+    /// No voting.
+    Off,
+    /// A share of the viewers watching.
+    Percent,
+    /// A fixed number of votes.
+    Count,
+    /// Votes are only shown to the owner; nothing is skipped automatically.
+    Signal,
+}
+
+impl SkipVoteMode {
+    pub const ALL: [SkipVoteMode; 4] = [Self::Off, Self::Percent, Self::Count, Self::Signal];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Percent => "percent",
+            Self::Count => "count",
+            Self::Signal => "signal",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSettings {
@@ -64,6 +91,10 @@ pub struct ChannelSettings {
     pub viewer_list_max: u32,
     /// Viewers may ask for a film by title (the request page's "Find a film").
     pub viewer_catalog: bool,
+    /// Skip voting by viewers (`skipVoteMode`, `skipVotePercent` 1-100, `skipVoteCount` 1-100).
+    pub skip_vote_mode: SkipVoteMode,
+    pub skip_vote_percent: u32,
+    pub skip_vote_count: u32,
     /// The owner's upload speed in Mbit/s (0: not given): viewers × the stream's bitrate is
     /// compared with it and the panel warns (nothing is ever refused).
     #[serde(serialize_with = "serialize_number")]
@@ -108,6 +139,9 @@ impl Default for ChannelSettings {
             viewer_lists: false,
             viewer_list_max: 10,
             viewer_catalog: true,
+            skip_vote_mode: SkipVoteMode::Percent,
+            skip_vote_percent: 50,
+            skip_vote_count: 3,
             upload_mbps: 0.0,
             force_transcode: false,
             discontinuity_tags: true,
@@ -150,6 +184,9 @@ pub struct SettingsPatch {
     pub viewer_lists: Option<bool>,
     pub viewer_list_max: Option<u32>,
     pub viewer_catalog: Option<bool>,
+    pub skip_vote_mode: Option<SkipVoteMode>,
+    pub skip_vote_percent: Option<u32>,
+    pub skip_vote_count: Option<u32>,
     pub upload_mbps: Option<f64>,
     pub force_transcode: Option<bool>,
     pub discontinuity_tags: Option<bool>,
@@ -316,6 +353,20 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
                 out.viewer_list_max = Some(list_max(expect_number(key, value)?));
             }
             "viewerCatalog" => out.viewer_catalog = Some(expect_bool(key, value)?),
+            "skipVoteMode" => {
+                out.skip_vote_mode = Some(one_of(
+                    key,
+                    value,
+                    &SkipVoteMode::ALL,
+                    SkipVoteMode::as_str,
+                )?);
+            }
+            "skipVotePercent" => {
+                out.skip_vote_percent = Some(vote_threshold(expect_number(key, value)?));
+            }
+            "skipVoteCount" => {
+                out.skip_vote_count = Some(vote_threshold(expect_number(key, value)?));
+            }
             "uploadMbps" => {
                 // Up to 100 Gbit/s, to a tenth.
                 let mbps = expect_number(key, value)?.min(100_000.0);
@@ -357,6 +408,11 @@ pub fn sanitize_settings_patch(patch: &Value) -> Result<SettingsPatch, Msg> {
 
 /// The largest [`ChannelSettings::viewer_list_max`] the owner can set.
 pub const VIEWER_LIST_MAX: u32 = 50;
+
+/// A skip vote threshold (a percentage or a count) within 1..=100 (a fraction truncated).
+fn vote_threshold(n: f64) -> u32 {
+    (n as u32).clamp(1, 100)
+}
 
 /// A list size within 1..=[`VIEWER_LIST_MAX`] (a fraction truncated).
 fn list_max(n: f64) -> u32 {
@@ -430,6 +486,18 @@ impl<'a> SettingsRepo<'a> {
                 "viewerLists" => s.viewer_lists = value.as_bool().unwrap_or(s.viewer_lists),
                 "viewerListMax" => s.viewer_list_max = num.map_or(s.viewer_list_max, list_max),
                 "viewerCatalog" => s.viewer_catalog = value.as_bool().unwrap_or(s.viewer_catalog),
+                "skipVoteMode" => {
+                    s.skip_vote_mode = value
+                        .as_str()
+                        .and_then(|v| SkipVoteMode::ALL.into_iter().find(|m| m.as_str() == v))
+                        .unwrap_or(s.skip_vote_mode);
+                }
+                "skipVotePercent" => {
+                    s.skip_vote_percent = num.map_or(s.skip_vote_percent, vote_threshold);
+                }
+                "skipVoteCount" => {
+                    s.skip_vote_count = num.map_or(s.skip_vote_count, vote_threshold);
+                }
                 "uploadMbps" => s.upload_mbps = num.unwrap_or(s.upload_mbps),
                 "forceTranscode" => {
                     s.force_transcode = value.as_bool().unwrap_or(s.force_transcode)
@@ -493,7 +561,7 @@ impl<'a> SettingsRepo<'a> {
         patch: &SettingsPatch,
     ) -> rusqlite::Result<ChannelSettings> {
         let quoted = |name: &str| format!("\"{name}\"");
-        let entries: [(&str, Option<String>); 24] = [
+        let entries: [(&str, Option<String>); 27] = [
             ("linkMode", patch.link_mode.map(|m| quoted(m.as_str()))),
             (
                 "allowedDomains",
@@ -523,6 +591,18 @@ impl<'a> SettingsRepo<'a> {
                 patch.viewer_list_max.map(|n| n.to_string()),
             ),
             ("viewerCatalog", patch.viewer_catalog.map(|b| b.to_string())),
+            (
+                "skipVoteMode",
+                patch.skip_vote_mode.map(|m| quoted(m.as_str())),
+            ),
+            (
+                "skipVotePercent",
+                patch.skip_vote_percent.map(|n| n.to_string()),
+            ),
+            (
+                "skipVoteCount",
+                patch.skip_vote_count.map(|n| n.to_string()),
+            ),
             ("uploadMbps", patch.upload_mbps.map(number_json)),
             (
                 "forceTranscode",

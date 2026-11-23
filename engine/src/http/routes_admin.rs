@@ -248,6 +248,12 @@ async fn panel(
     );
     body.insert("history".into(), listed(&history));
     body.insert("settings".into(), json!(settings));
+    if let Some(mut vote) = super::routes_skip_vote::skip_vote_json(&state, &settings, None) {
+        if let Some(m) = vote.as_object_mut() {
+            m.remove("mine");
+        }
+        body.insert("skipVote".into(), vote);
+    }
     body.insert("control".into(), control_json(&snapshot.state));
     body.insert("air".into(), super::air_json(&state, &snapshot));
     // The OBS stream: `off`, `waiting`, `live` or `brb` (never its key or address).

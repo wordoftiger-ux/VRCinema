@@ -19,7 +19,7 @@ pub use addons::{AddError, AddonRepo, AddonRow};
 pub use lists::{ListRepo, PendingList};
 pub use queue::{ACTIVE_STATUSES, AddedBy, ItemStatus, NewItem, QueueItem, QueueRepo, Requester};
 pub use settings::{
-    ChannelSettings, LinkMode, SettingsPatch, SettingsRepo, sanitize_settings_patch,
+    ChannelSettings, LinkMode, SettingsPatch, SettingsRepo, SkipVoteMode, sanitize_settings_patch,
 };
 pub use thumbs::{is_public_thumbnail, set_thumbnail, thumbnails, youtube_thumbnail};
 

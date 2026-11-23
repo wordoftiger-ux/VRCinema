@@ -11,6 +11,7 @@ mod routes_monitor;
 mod routes_nick_pin;
 mod routes_public;
 mod routes_queue;
+mod routes_skip_vote;
 mod routes_slates;
 mod routes_stream;
 mod routes_thumbs;
@@ -108,6 +109,9 @@ pub struct AppState {
     pub request_limiter: Arc<Mutex<RateLimiter>>,
     /// The viewers' catalog search and details (per address).
     pub(crate) catalog_limiter: Arc<Mutex<RateLimiter>>,
+    /// Skip votes of the film on air, and their limit (per address).
+    pub(crate) skip_votes: Arc<Mutex<routes_skip_vote::SkipVotes>>,
+    pub(crate) skip_limiter: Arc<Mutex<RateLimiter>>,
     pub login_limiter: Arc<tokio::sync::Mutex<RateLimiter>>,
     /// Guessing limits of nick PINs and recovery codes (per address and per nick).
     pub(crate) pin_guard: Arc<Mutex<crate::nick_pin::PinGuard>>,
@@ -249,6 +253,8 @@ impl AppState {
                 system_clock(),
             ))),
             login_limiter: Arc::new(tokio::sync::Mutex::new(login_limiter)),
+            skip_votes: Arc::default(),
+            skip_limiter: Arc::new(Mutex::new(routes_skip_vote::new_limiter())),
             pin_guard: Arc::new(Mutex::new(crate::nick_pin::PinGuard::system())),
             pin_work: Arc::new(tokio::sync::Semaphore::new(
                 crate::nick_pin::ARGON2_PARALLEL,
@@ -1409,6 +1415,7 @@ pub fn build_router(state: AppState) -> Router {
     };
     Router::new()
         .merge(routes_public::router())
+        .merge(routes_skip_vote::router())
         .merge(routes_nick_pin::router())
         .merge(routes_uploads::router())
         .merge(routes_stream::router())
