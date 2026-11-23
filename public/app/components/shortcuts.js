@@ -19,7 +19,6 @@ export function openShortcuts() {
     [plus(t('shortcuts.key_home')), 'shortcuts.restart'],
     [plus('N'), 'shortcuts.next'],
     [plus('I'), 'shortcuts.stats'],
-    [plus('S'), 'shortcuts.sync'],
     [plus(t('shortcuts.key_ctrl'), 'V'), 'shortcuts.paste'],
     [plus('?'), 'shortcuts.help'],
   ];

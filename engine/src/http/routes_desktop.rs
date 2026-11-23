@@ -215,6 +215,13 @@ async fn info(
         "port": core.port(),
         "publicUrl": s.public_url,
         "lanAccess": s.lan_access,
+        // The home network's addresses of this computer, where the panel can be reached (only
+        // when the page is open to the home network).
+        "lanAddresses": if s.lan_access {
+            crate::server::lan_addresses().iter().map(|ip| ip.to_string()).collect()
+        } else {
+            Vec::<String>::new()
+        },
         "remoteAdmin": s.remote_admin,
         "firstRunCompleted": s.first_run_completed,
         "toolsOk": missing.is_empty(),

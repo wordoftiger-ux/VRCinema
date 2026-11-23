@@ -62,7 +62,7 @@ export function steadyBehind(shown, raw) {
  * Plays the Preview's film in `video`. `onMode(mode)`: `file`, `interim` (the segments until
  * the file is ready), `fallback` or `none`.
  * Returns the Preview interface of store.js plus `playNow(itemId)`, `playNowAnswered(ok)`,
- * `sync()` and `stop()`.
+ * and `stop()`.
  */
 export function sourcePlayer(video, { onMode, onState }) {
   let stopped = false;
@@ -350,14 +350,6 @@ export function sourcePlayer(video, { onMode, onState }) {
       if (ok) return;
       pendingItem = null;
       reconcile(control.peek());
-    },
-    /** S: the Preview to the channel's position (nothing is sent to the engine). */
-    sync() {
-      const c = control.peek();
-      if (!ready() || !c || c.isLive || c.itemId !== item || frozen) return false;
-      video.currentTime = Number(c.positionS) || 0;
-      ownUntil = performance.now() + OWN_ACTION_MS;
-      return true;
     },
     stop() {
       stopped = true;

@@ -4,9 +4,46 @@
 import { useRef, useState } from '/static/vendor/hooks.mjs';
 import { html } from '../../html.js';
 import { t } from '../../i18n.js';
+import { errorText } from '../../api.js';
+import { copyText } from '../../components/playerbar.js';
+import { info, publicAddress, showToast } from '../../store.js';
 import { Note, Row, Switch, WindowNote, saveWith, useAccess, useConfig, useNote } from './common.js';
 
 const MIN_PASSWORD = 8;
+
+/** One address of the panel with its Copy button. */
+function Address({ label, url }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await copyText(url);
+    } catch (e) {
+      return showToast(errorText(e));
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return html`
+    <div class="remote-address" data-address=${label}>
+      <span class="remote-address-label">${t(`settings.remote.address_${label}`)}</span>
+      <div class="field"><code class="field-value">${url}</code>
+        <button type="button" class="btn" onClick=${copy}><span aria-live="polite">${copied ? t('share.copied') : t('share.copy')}</span></button></div>
+    </div>`;
+}
+
+/** Where the panel can be opened from: the public address and the home network's. */
+function Addresses() {
+  const base = publicAddress.value;
+  const i = info.value;
+  const home = i ? (i.lanAddresses ?? []).map((ip) => `http://${ip}:${i.port}/admin`) : [];
+  const rows = [];
+  if (base) rows.push(['public', `${String(base).replace(/\/+$/, '')}/admin`]);
+  for (const url of home) rows.push(['home', url]);
+  return html`
+    <${Row} title=${t('settings.remote.address')} hint=${rows.length ? t('settings.remote.address_hint') : t('settings.remote.address_none')} block>
+      <div class="remote-addresses">${rows.map(([label, url]) => html`<${Address} key=${url} label=${label} url=${url} />`)}</div>
+    <//>`;
+}
 
 export function Remote() {
   const { windowed } = useAccess();
@@ -48,6 +85,7 @@ export function Remote() {
       <${Row} title=${t('settings.remote.enable')} hint=${t('settings.remote.enable_hint')}>
         <${Switch} label=${t('settings.remote.enable')} checked=${Boolean(cfg?.remoteAdmin)} disabled=${off} onChange=${toggle} />
       <//>
+      ${cfg?.remoteAdmin ? html`<${Addresses} />` : null}
       <p class="set-sub" data-password-state=${cfg?.hasPassword ? 'set' : 'unset'}>${cfg?.hasPassword ? t('settings.remote.has_password') : t('settings.remote.no_password')}</p>
       <${Row} title=${cfg?.hasPassword ? t('settings.remote.change_password') : t('settings.remote.set_password')} hint=${t('settings.remote.password_hint', { min: MIN_PASSWORD })}>
         <form class="inline" onSubmit=${submit}>

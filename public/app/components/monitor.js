@@ -7,7 +7,7 @@
 // segments the engine has (/api/desktop/monitor.m3u8, the window only), played with hls.js in
 // real time, muted by default. After a seek, "play now", "from the beginning" or a skip the
 // picture changes as soon as ffmpeg wrote the first segment of the new clip (1–2 s), not after
-// the viewers' delay. "Sync with on-air" (key S) shows what the viewers see now.
+// the viewers' delay.
 //
 // The list is read here once a second, one read at a time; a new clip in it starts the player
 // again at that clip's first segment (`?from=<row>`: the engine puts EXT-X-START there). Rows
@@ -32,7 +32,7 @@ import Hls from '/static/vendor/hls.mjs';
 import { html } from '../html.js';
 import { lang, t } from '../i18n.js';
 import { Icon } from '../icons.js';
-import { access, attachPreview, control, obsState, showToast } from '../store.js';
+import { access, attachPreview, control, obsState } from '../store.js';
 import { airBehindS, sourcePlayer, sourceReason, sourceState } from './sourceplayer.js';
 import { monitorMuted, monitorVolume, nudgeMonitorVolume } from './volume.js';
 import { Meter, setListening } from './meters.js';
@@ -64,14 +64,9 @@ export const previewMode = signal('none');
 
 let current = null;
 
-/** The monitor runs (the window's Channel view on a wide screen): the S key syncs it. */
+/** The monitor runs (the window's Channel view on a wide screen). */
 export function monitorRunning() {
   return current !== null;
-}
-
-/** "Sync with on-air": the monitor plays from the segment the viewers see now. */
-export function syncMonitor() {
-  return current?.sync() ?? false;
 }
 
 /** The film position of the frame the Preview shows now (playing or frozen); null: not known. */
@@ -145,7 +140,7 @@ function freshStart(feed) {
   return feed.rows.find((r) => r.clip === clip).seq;
 }
 
-/** Plays the monitor in `video`. Returns `{stop, retry, sync}`. */
+/** Plays the monitor in `video`. Returns `{stop, retry}`. */
 function watch(video) {
   let stopped = false;
   let hls = null;
@@ -465,17 +460,6 @@ function watch(video) {
       clearTimeout(retryTimer);
       retryTimer = setTimeout(read, 0);
     },
-    sync() {
-      // Only a playing monitor syncs (not idle, paused, failed or for a live stream).
-      if (control.peek()?.isLive || monitorState.peek() !== 'playing') return false;
-      const antenna = feed?.rows.find((r) => r.seq === feed.antenna);
-      if (!antenna) {
-        showToast(t('monitor.sync_unavailable'), 'info');
-        return false;
-      }
-      startAt(antenna.seq);
-      return true;
-    },
     position,
     expect,
     expectAnswered,
@@ -552,7 +536,6 @@ function preview(fileVideo, hlsVideo) {
     // A film from the queue: the file player looks it up (it falls back by itself).
     playNow: (itemId) => src.playNow(itemId),
     playNowAnswered: (ok) => src.playNowAnswered(ok),
-    sync: () => active().sync(),
     retry: () => segments?.retry(),
     stop() {
       segments?.stop();
@@ -633,7 +616,6 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
   };
 
   const supported = Hls.isSupported();
-  const canSync = inWindow && !live && state === 'playing';
   const muteLabel = muted ? t('monitor.unmute') : t('monitor.mute');
   const ahead = mode === 'file' ? airBehindS.value : monitorAheadS.value;
   const fallbackNote = inWindow && mode === 'fallback' && !live && sourceReason.value !== 'live';
@@ -665,13 +647,5 @@ export function MonitorScreen({ role = 'side', tools = null, onActivate = null }
           : null}
         ${tools}
       </div>
-      ${pip
-        ? null
-        : html`<div class="screen-actions">
-            <button type="button" class="btn monitor-sync" disabled=${!canSync} aria-keyshortcuts="S"
-              title=${live ? t('monitor.sync_live') : mode === 'file' ? t('preview.sync_hint') : undefined} onClick=${syncMonitor}>
-              <${Icon} name="sync" size=${16} /><span>${mode === 'file' ? t('preview.sync') : t('monitor.sync')}</span>
-            </button>
-          </div>`}
     </div>`;
 }

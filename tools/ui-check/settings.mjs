@@ -108,7 +108,7 @@ const seg = (label, value) => `[role=radiogroup][aria-label="${label}"] button[d
 const putSettings = (a) => a.filter((r) => r.method === 'PUT' && r.path === '/api/admin/channels/main/settings');
 const putConfigs = (a) => a.filter((r) => r.method === 'PUT' && r.path === '/api/desktop/config');
 
-const SECTIONS = ['general', 'internet', 'channel', 'obs', 'tools', 'remote', 'advanced', 'log', 'about'];
+const SECTIONS = ['general', 'internet', 'channel', 'addons', 'obs', 'tools', 'remote', 'advanced', 'log', 'about'];
 
 try {
   await reset();
@@ -118,7 +118,7 @@ try {
   // ---------- Navigation ----------
   const links = await page.$$eval('.snav a', (as) => as.map((a) => [a.dataset.section, a.textContent.trim()]));
   check(JSON.stringify(links.map((l) => l[0])) === JSON.stringify(SECTIONS), 'the list has the nine sections (OBS since 2026-11-06)', links);
-  check(links.map((l) => l[1]).join('|') === 'General|Internet|Channel|OBS|Tools|Remote panel|Advanced|Log|About', 'their names', links);
+  check(links.map((l) => l[1]).join('|') === 'General|Internet|Channel|Addons|OBS|Tools|Remote panel|Advanced|Log|About', 'their names', links);
   check((await text(page, '.sform h1')) === 'General', 'the heading names the section');
 
   // ---------- General ----------
@@ -558,6 +558,21 @@ try {
   check(JSON.stringify(putConfigs(a)[0].body) === '{"password":"longenough1","remoteAdmin":true}', 'the password goes with the pending {remoteAdmin: true}', putConfigs(a)[0].body);
   await page.waitForFunction(() => document.querySelector('[data-password-state]')?.dataset.passwordState === 'set');
   check((await page.$eval('input[aria-label="New password"]', (i) => i.value)) === '' && (await isOn(page, 'Allow logging in to the panel with a password from other devices (for example through the public address)')), 'the field is cleared and the panel is on');
+  // The panel's addresses, each with Copy: the public one and the home network's.
+  await scenario({ tunnel: 'online' });
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).saveConfig({ lanAccess: false }));
+  await waitFor(async () => (await page.$('[data-address="public"] .field-value')) !== null, 'the public address of the panel is shown');
+  const publicPanel = await text(page, '[data-address="public"] .field-value');
+  check(publicPanel.startsWith("https://") && publicPanel.endsWith(".trycloudflare.com/admin"), "it is <public address>/admin", publicPanel);
+  await page.click('[data-address="public"] button');
+  check((await page.evaluate(() => navigator.clipboard.readText())) === publicPanel, 'Copy puts the public address of the panel on the clipboard');
+  await waitFor(async () => (await page.$('[data-address="home"]')) === null, 'no home network address while the page is not open to the home network');
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).saveConfig({ lanAccess: true }));
+  await waitFor(async () => (await page.$('[data-address="home"] .field-value')) !== null, 'the home network address is shown');
+  check((await text(page, '[data-address="home"] .field-value')) === `http://192.168.1.20:${port}/admin`, 'it is http://<ip>:<port>/admin', await text(page, '[data-address="home"] .field-value'));
+  await page.click('[data-address="home"] button');
+  check((await page.evaluate(() => navigator.clipboard.readText())) === `http://192.168.1.20:${port}/admin`, 'Copy puts the home network address on the clipboard');
+  await page.evaluate(async () => (await import('/static/app/views/settings/common.js')).saveConfig({ lanAccess: false }));
   m = await mark();
   await page.click(remoteSwitch);
   a = await actions(m, 'remote off request');

@@ -221,47 +221,15 @@ try {
   reads1 = await monitorReads();
   check(reads1 - reads0 >= 1 && reads1 - reads0 <= 5, 'otherwise about one read a second', reads1 - reads0);
 
-  // ---------- Sync with on-air ----------
-  const segsSync = (await monitorSegments()).length;
-  await page.click('.monitor-sync');
-  await waitFor(async () => (await monitorSegments()).slice(segsSync).includes('clip-7-0/3.ts'), 'sync loads the segment on air (row 103)');
-  await waitFor(async () => {
-    const p = await pixel(page);
-    return p && !isRed(p);
-  }, 'after the sync the monitor shows the old clip (what the viewers see)', 6000);
-  await waitFor(async () => (await text(page, '.monitor-caption')) === 'Preview · in sync with on-air', 'the caption says in sync');
-  check(true, 'Sync with on-air: the monitor shows the antenna\'s segment and says so');
-  // The key S; nothing there to sync to: a message.
-  await scenario({ monitorFeed: { clips: [clipA, clipB], firstSeq: 100, antenna: null, aired: 106 } });
-  await sleep(1300);
-  await page.click('.stage-caption');
-  await page.keyboard.press('s');
-  await waitFor(() => page.$('.toast'), 'a message when on-air is no longer in the list');
-  check((await text(page, '.toast span')) === 'What is on air now is no longer in the preview.', 'the message says why', await text(page, '.toast span'));
-  await page.click('.toast .icon-button');
+  // ---------- No "Sync with on-air": neither a button nor the key S ----------
   await scenario({ monitorFeed: { clips: [clipA, clipB], firstSeq: 100, antenna: 104, aired: 106 } });
   await sleep(1300);
+  check((await page.$('.monitor-sync, .screen-actions')) === null, 'the Preview has no sync button');
+  await page.click('.stage-caption');
   const segsKey = (await monitorSegments()).length;
-  await page.keyboard.press('S');
-  await waitFor(async () => (await monitorSegments()).slice(segsKey).includes('clip-7-0/4.ts'), 'the key S syncs like the button');
-  check(true, 'key S syncs with on-air');
-  await page.focus('.addf-input');
-  const segsTyping = (await monitorSegments()).length;
   await page.keyboard.press('s');
   await sleep(1500);
-  const typed = (await monitorSegments()).slice(segsTyping);
-  check((await page.$eval('.addf-input', (e) => e.value)) === 's' && !typed.includes('clip-7-0/4.ts'), 'S typed in the link field only types (no new sync)', typed);
-  await page.$eval('.addf-input', (e) => {
-    e.value = '';
-    e.blur();
-  });
-
-  // A live stream: nothing to sync.
-  await scenario({ playing: 'live' });
-  await waitFor(() => page.$eval('.monitor-sync', (b) => b.disabled), 'the sync button is off for a live stream');
-  check((await page.getAttribute('.monitor-sync', 'title')) === 'Not needed for a live stream', 'its tooltip says why');
-  await scenario({ playing: 'film' });
-  await waitFor(() => page.$eval('.monitor-sync', (b) => !b.disabled), 'on again for a film');
+  check((await monitorSegments()).slice(segsKey).every((x) => !x.startsWith('clip-7-0/4.ts')) && (await page.$('.toast')) === null, 'the key S does nothing');
 
   // ---------- Pause from the Preview: its picture stops at once, the engine gets its position ----------
   const clipC = { ...clipA, key: 'clip-7-0-r5', baseS: 60 };
@@ -361,14 +329,10 @@ try {
   await waitFor(async () => isRed(await pixel(page)), 'the still picture is the paused clip (row of 36 s)', 6000);
   check(await page.$eval('.monitor-box video.pv-hls', (v) => v.paused), 'the video is paused');
   check((await text(page, '.monitor-badge')) === 'Paused — the video resumes from here', 'with a label');
-  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'paused: nothing to sync');
   const stillAt = await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime);
   const loadsPaused = (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length;
-  await page.click('.stage-caption');
-  await page.keyboard.press('s');
   await sleep(1500);
-  check((await page.$('.toast')) === null, 'paused: the key S shows no message');
-  check((await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length === loadsPaused, 'paused: the key S starts no player (no blip)');
+  check((await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length === loadsPaused, 'paused: no player is started (no blip)');
   check((await page.$eval('.monitor-box video.pv-hls', (v) => v.currentTime)) === stillAt, 'it does not move while paused');
   await scenario({ paused: false, pauseReasons: [] });
   await sleep(1500);
@@ -399,7 +363,6 @@ try {
   await scenario({ monitorPlayerFail: true, monitorFeed: { clips: [clipA, clipB, { ...clipA, key: 'clip-7-0-r3', baseS: 50 }], firstSeq: 100, antenna: 104, aired: 106 } });
   await waitFor(async () => (await stateOf(page)) === 'failed', 'the monitor gives up after a few tries', 90000);
   check((await text(page, '.monitor-box .preview-unavailable span')) === 'Preview unavailable', 'failed: "Preview unavailable" in the left screen');
-  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'failed: nothing to sync');
   const playerLoads = async () => (await requests()).filter((r) => r.path === '/api/desktop/monitor.m3u8' && r.search).length;
   const failedAt = await playerLoads();
   await sleep(4000);
@@ -425,10 +388,6 @@ try {
   await scenario({ monitorFeed: null });
   await waitFor(async () => (await stateOf(page)) === 'none', 'an empty list: no preview');
   check((await text(page, '.monitor-note')) === 'No preview', '"No preview" in the left screen');
-  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'nothing to sync');
-  await page.keyboard.press('s');
-  await sleep(300);
-  check((await page.$('.toast')) === null, 'nothing on air: the key S shows no message');
   const segsNone = (await monitorSegments()).length;
   await sleep(2000);
   check((await monitorSegments()).length === segsNone, 'no segments are fetched without a list');
@@ -454,27 +413,21 @@ try {
   const away = (await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length;
   await sleep(2500);
   check((await requests()).filter((r) => r.path.startsWith('/api/desktop/monitor')).length > away, 'it keeps reading its list there');
-  await page.keyboard.press('s');
-  check((await page.$('.toast')) === null, 'S does nothing outside the Channel view');
   await page.click('.rail-channel');
   await waitFor(async () => (await stateOf(page)) === 'playing', 'back in the Channel view the monitor plays');
   check(true, 'coming back it still plays');
 
-  // The shortcuts dialog names S.
+  // The shortcuts dialog no longer lists S.
   await page.keyboard.press('?');
   await page.waitForSelector('.shortcuts');
   const rows = await page.$$eval('.shortcuts dt', (d) => d.map((e) => e.textContent.trim()));
-  const sAt = rows.indexOf('S');
-  check(sAt >= 0 && (await page.$$eval('.shortcuts dd', (d) => d.map((e) => e.textContent.trim())))[sAt] === 'Sync Preview with on-air', 'the shortcuts list has S', rows);
+  check(!rows.includes('S'), 'the shortcuts list has no S', rows);
   await page.keyboard.press('Escape');
 
   // ---------- German, live switch ----------
   await page.evaluate(async () => (await import('/static/app/store.js')).setLanguage('de'));
-  await waitFor(async () => (await text(page, '.monitor-sync span')) === 'Mit der Sendung synchronisieren', 'the button follows the language');
   await waitFor(async () => /^Vorschau · etwa \d+ s vor der Sendung$/.test(await text(page, '.monitor-caption')), 'the caption is German');
   check(/^Auf Sendung( · etwa \d+ s hinter dem Server)?$/.test(await text(page, '.screen-air .stage-caption')), 'and the On air caption', await text(page, '.screen-air .stage-caption'));
-  const fits = await page.$eval('.monitor-sync span', (s) => s.scrollWidth <= s.clientWidth + 1);
-  check(fits, 'the German button label is not cut at 1100 px');
   const raw = await page.$eval('.stage', (e) => e.textContent.match(/\bmonitor\.[a-z_]+/g));
   check(raw === null, 'no untranslated keys', raw);
   await page.screenshot({ path: join(shots, 'monitor-de-1100x680.png') });
@@ -486,14 +439,9 @@ try {
   check(lay.monitor.left < lay.air.left && Math.abs(lay.monitor.top - lay.air.top) < 1, '960x600: still side by side', lay);
   check(lay.monitor.width >= 300 && lay.air.width >= 300, '960x600: each screen at least 300 px wide', lay);
   check(lay.pageOverflow <= 0 && lay.viewOverflow <= 0, '960x600: no horizontal overflow', lay);
-  const bottoms = await page.evaluate(() => ({
-    sync: document.querySelector('.monitor-sync').getBoundingClientRect().bottom,
-    player: document.querySelector('.player').getBoundingClientRect().top,
-  }));
-  check(bottoms.sync <= bottoms.player, '960x600: the sync button is above the player bar', bottoms);
   await page.screenshot({ path: join(shots, 'monitor-de-960x600.png') });
   await page.evaluate(async () => (await import('/static/app/store.js')).setLanguage('en'));
-  await waitFor(async () => (await text(page, '.monitor-sync span')) === 'Sync with on-air', 'back to English');
+  await waitFor(async () => /^Preview/.test(await text(page, '.monitor-caption')), 'back to English');
   await page.screenshot({ path: join(shots, 'monitor-en-960x600.png') });
   check(page.__errors.length === 0, 'no errors in the console', page.__errors);
   await page.close();
@@ -519,7 +467,6 @@ try {
   await waitFor(() => page.$('.screen-monitor.is-off'), 'remote: the monitor is off');
   await sleep(2000);
   check((await text(page, '.monitor-note')) === 'Available in the program on the computer', 'remote: a note says where it works');
-  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'remote: the sync button is off');
   check((await page.$('.monitor-mute')) === null, 'remote: no sound button');
   await page.click('.player .play');
   const remotePause = await waitFor(async () => (await requests()).find((r) => r.path.endsWith('/pause')), 'remote: the pause is sent');
@@ -547,7 +494,6 @@ try {
   await page.waitForSelector('.screen-monitor');
   await waitFor(async () => (await page.$('.monitor-note')) !== null, 'a note in the left screen');
   check((await text(page, '.monitor-note')) === 'This window cannot play the preview.', 'no MSE: the left screen says it cannot play');
-  check(await page.$eval('.monitor-sync', (b) => b.disabled), 'no MSE: nothing to sync');
   await sleep(1500);
   check((await monitorReads()) === 0, 'no MSE: the list is not read');
   await page.close();

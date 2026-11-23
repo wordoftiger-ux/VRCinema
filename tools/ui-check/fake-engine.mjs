@@ -987,6 +987,7 @@ torrent`, torrent: true });
       version: '0.2.0',
       port,
       publicUrl: '',
+      lanAddresses: s.config.lanAccess ? ['192.168.1.20'] : [],
       language: s.language,
       firstRunCompleted: !s.firstRun,
       tunnelEnabled: s.tunnel !== 'off',

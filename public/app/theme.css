@@ -79,6 +79,20 @@ body {
   overflow: hidden;
 }
 
+/* Nothing is selectable (it looks unfinished next to a window without the browser's menu);
+   text fields, editable content and the copyable fields (user-select: all) stay as they are. */
+html {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable]:not([contenteditable='false']) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 #root,
 .app {
   height: 100%;
@@ -1141,24 +1155,6 @@ kbd {
   opacity: 0.55;
 }
 
-.screen-actions {
-  display: flex;
-  margin-top: 8px;
-}
-
-.monitor-sync {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-}
-
-.monitor-sync span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Narrow windows down to the minimum (960 px): less padding and, below 1040 px, a narrower
    queue, so each screen stays at least 300 px wide. */
 @media (min-width: 700px) and (max-width: 1180px) {
@@ -1221,8 +1217,7 @@ kbd {
   cursor: pointer;
 }
 
-.stage.screens .screen.role-pip .monitor-mute,
-.stage.screens .screen.role-pip .screen-actions {
+.stage.screens .screen.role-pip .monitor-mute {
   display: none;
 }
 
@@ -2146,6 +2141,20 @@ kbd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.remote-addresses {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.remote-address-label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-mute);
+  font-size: 12px;
 }
 
 .qr-card {
@@ -3751,7 +3760,6 @@ kbd {
 
 .mini-player .screen-cap,
 .mini-player .stage-caption,
-.mini-player .screen-actions,
 .mini-player .screen-tools,
 .mini-player .stats,
 .mini-player .seek-bubble,
