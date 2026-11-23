@@ -80,6 +80,13 @@ pub fn check_dir(dir: &str) -> Result<(), Msg> {
     Ok(())
 }
 
+/// A network share or a device path (`\\server\share`, `\\?\…`, `\\.\…`, also with `/`): only
+/// a folder of a local drive is taken.
+pub fn is_network_or_device(dir: &str) -> bool {
+    let b = dir.as_bytes();
+    b.len() >= 2 && matches!(b[0], b'\\' | b'/') && matches!(b[1], b'\\' | b'/')
+}
+
 /// The text form of `torrentDir`: trimmed, empty allowed (the default folder).
 fn dir_text(key: &str, value: &Value) -> Result<String, Msg> {
     let s = value
@@ -88,6 +95,9 @@ fn dir_text(key: &str, value: &Value) -> Result<String, Msg> {
         .trim();
     if s.chars().count() > MAX_DIR_LEN || s.contains('\0') {
         return Err(Msg::error("torrent_dir_not_absolute").arg("path", s));
+    }
+    if is_network_or_device(s) {
+        return Err(Msg::error("torrent_dir_not_local").arg("path", s));
     }
     Ok(s.to_string())
 }

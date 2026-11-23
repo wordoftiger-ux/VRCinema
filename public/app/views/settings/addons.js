@@ -8,7 +8,7 @@ import { t } from '../../i18n.js';
 import { Icon } from '../../icons.js';
 import { api, errorText, listAddons } from '../../api.js';
 import { openDialog } from '../../components/dialog.js';
-import { Block, Note, Row, Switch, channelSettings, loadChannelSettings, saveChannelWith, useNote } from './common.js';
+import { Block, Note, Row, Switch, channelSettings, loadChannelSettings, saveChannelWith, useAccess, useNote } from './common.js';
 
 const ADDONS = '/api/admin/addons';
 
@@ -69,6 +69,8 @@ function AddonRow({ addon, first, last, busy, run }) {
 /** Torrent sources: off until the owner switches them on (the warning says what that means), the upload limit and the disk cap. */
 function Torrents() {
   const settings = channelSettings.value;
+  // The download folder is a path on the window's computer: set and shown in the window only.
+  const { windowed, known } = useAccess();
   const [note, say] = useNote();
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ up: '200', cap: '50' });
@@ -121,15 +123,17 @@ function Torrents() {
           <button type="submit" class="btn" disabled=${busy}>${t('settings.torrents.save')}</button>
         </form>
         <p class="set-sub">${t('settings.torrents.upload_hint')}</p>
-        <form class="inline wide tr-dir" onSubmit=${submitDir} noValidate>
-          <label class="limit"><span>${t('settings.torrents.dir')}</span>
-            <input type="text" class="txt" name="torrentDir" autocomplete="off" spellcheck="false"
-              placeholder=${settings.torrentDirDefault ?? ''} value=${dir}
-              onInput=${(e) => setDir(e.currentTarget.value)} /></label>
-          <button type="submit" class="btn" disabled=${busy}>${t('settings.torrents.save')}</button>
-        </form>
-        <p class="set-sub tr-dir-hint">${t('settings.torrents.dir_hint')}</p>
-        ${Number.isFinite(free) && html`<p class="set-sub tr-drive-free">${t('settings.torrents.drive_free', { free: (free / 1024 ** 3).toFixed(1) })}</p>`}
+        ${windowed
+          ? html`<form class="inline wide tr-dir" onSubmit=${submitDir} noValidate>
+                <label class="limit"><span>${t('settings.torrents.dir')}</span>
+                  <input type="text" class="txt" name="torrentDir" autocomplete="off" spellcheck="false"
+                    placeholder=${settings.torrentDirDefault ?? ''} value=${dir}
+                    onInput=${(e) => setDir(e.currentTarget.value)} /></label>
+                <button type="submit" class="btn" disabled=${busy}>${t('settings.torrents.save')}</button>
+              </form>
+              <p class="set-sub tr-dir-hint">${t('settings.torrents.dir_hint')}</p>
+              ${Number.isFinite(free) && html`<p class="set-sub tr-drive-free">${t('settings.torrents.drive_free', { free: (free / 1024 ** 3).toFixed(1) })}</p>`}`
+          : known && html`<p class="set-sub tr-dir-remote"><b>${t('settings.torrents.dir')}</b> · <span class="window-only-hint">${t('ui.window_only')}</span></p>`}
         <${Note} note=${note} />
       </div>
     <//>`;

@@ -45,6 +45,7 @@
   "errors.torrent_dir_not_absolute": "API error (Settings → Addons, torrent download folder field): the text is not a full folder path; {path} is what was entered. Keep the example path as is.",
   "errors.torrent_dir_missing": "API error (Settings → Addons, torrent download folder field): the chosen folder does not exist (or its drive is not connected); {path} is the folder.",
   "errors.torrent_dir_not_writable": "API error (Settings → Addons, torrent download folder field): the program cannot create or write files in the chosen folder; {path} is the folder.",
+  "errors.torrent_dir_not_local": "API error (Settings → Addons, torrent download folder field): the path is a network share (\\\\server\\share) or a Windows device path (\\\\?\\…, \\\\.\\…); only a folder on a local drive is accepted. {path} is what was entered.",
   "errors.app_closing": "API error (panel, request page or app window notice). The app window asked for something while the app shuts down.",
   "errors.archive_lacks_file": "Error text (shown in the app window and written to the log). Tools install; {file} is a file name inside the archive.",
   "errors.autostart_failed": "API error (panel, request page or app window notice). Settings: switching \"start with Windows\" failed; {detail} is the system error.",

@@ -688,6 +688,13 @@ impl AppState {
         }
     }
 
+    /// The request comes from the program's window (its session): what is the window's own
+    /// (a folder path on this computer) is shown and changed only there; a remote panel and the
+    /// control token are not the window.
+    pub(crate) fn is_window(&self, headers: &HeaderMap) -> bool {
+        self.session(headers) == Some(SessionKind::Desktop)
+    }
+
     fn is_admin(&self, headers: &HeaderMap) -> bool {
         self.session(headers).is_some()
     }

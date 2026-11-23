@@ -130,19 +130,56 @@ async fn no_manager_created_while_disabled() {
 #[tokio::test]
 async fn settings_take_a_checked_torrent_download_folder() {
     let hub = hub(Arc::default());
-    let h = harness(&hub);
-    let cookie = h.login().await;
-    let put = |v: Value| {
+    // The app with a window: a window session and a remote one.
+    let (desktop_key, first) = DesktopKey::generate();
+    let mut cfg = config();
+    cfg.session_secret = SECRET.to_string();
+    let torrents = Arc::clone(&hub);
+    let h = Harness::with_state(cfg, move |mut s| {
+        s.resolver = Arc::new(TorrentResolver::new(Arc::clone(&torrents)));
+        s.with_torrents(torrents)
+            .with_admin_auth(remote_on("sekret"))
+            .with_desktop_key(Arc::new(desktop_key))
+    });
+    let res = h.send(get(&format!("/desktop-login?key={first}"))).await;
+    assert_eq!(res.status, StatusCode::FOUND);
+    let cookie = cookie_of(&res);
+    let remote = cookie_of(
+        &h.send(call("POST", "/api/admin/login").json(json!({ "password": "sekret" })))
+            .await,
+    );
+    let put_as = |cookie: &str, v: Value| {
         h.send(
             call("PUT", "/api/admin/channels/main/settings")
-                .cookie(&cookie)
+                .cookie(cookie)
                 .json(json!({ "torrentDir": v })),
         )
     };
+    let put = |v: Value| put_as(&cookie, v);
+
+    // A remote panel can neither set the folder nor see it or the drive's free space.
+    let chosen = tempfile::tempdir().unwrap();
+    let dir = chosen.path().to_string_lossy().into_owned();
+    let r = put_as(&remote, json!(dir)).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.json()["code"], "window_only");
+    assert!(!chosen.path().join("VRCinema-torrents").exists());
+
+    // Network shares and device paths are refused.
+    for unc in [
+        r"\\server\share",
+        r"\\?\C:\Films",
+        r"\\.\PhysicalDrive0",
+        "//server/share",
+    ] {
+        let r = put(json!(unc)).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{unc}");
+        assert_eq!(r.json()["code"], "torrent_dir_not_local", "{unc}");
+    }
+
     let r = put(json!("relative/dir")).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert_eq!(r.json()["code"], "torrent_dir_not_absolute");
-    let chosen = tempfile::tempdir().unwrap();
     let gone = chosen.path().join("gone");
     let r = put(json!(gone.to_string_lossy())).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
@@ -150,7 +187,6 @@ async fn settings_take_a_checked_torrent_download_folder() {
     let r = put(json!(7)).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
 
-    let dir = chosen.path().to_string_lossy().into_owned();
     let r = put(json!(format!("  {dir} "))).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.text());
     let body = r.json();
@@ -167,6 +203,25 @@ async fn settings_take_a_checked_torrent_download_folder() {
         .await
         .json();
     assert_eq!(got["torrentDir"], dir.as_str());
+    let seen = h
+        .send(call("GET", "/api/admin/channels/main/settings").cookie(&remote))
+        .await;
+    assert_eq!(seen.status, StatusCode::OK);
+    let seen = seen.json();
+    for key in ["torrentDir", "torrentDirDefault", "torrentDriveFreeBytes"] {
+        assert!(seen.get(key).is_none(), "remote JSON has no {key}");
+    }
+    assert!(!seen.to_string().contains(&*dir.replace('\\', "\\\\")));
+    // A remote change of other settings still answers without the folder.
+    let r = h
+        .send(
+            call("PUT", "/api/admin/channels/main/settings")
+                .cookie(&remote)
+                .json(json!({ "torrentUploadKbps": 100 })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert!(r.json().get("torrentDir").is_none());
     // Empty: the default folder again.
     let r = put(json!("")).await;
     assert_eq!(r.status, StatusCode::OK);

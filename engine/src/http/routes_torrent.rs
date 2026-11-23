@@ -202,7 +202,7 @@ async fn stream(
 
 /// What the panel shows of a magnet item: `{state, progress, rateBps, etaS, ready}`; `idle`:
 /// not started yet (or torrents are off).
-pub(crate) fn torrent_json(state: &AppState, item: &QueueItem) -> Value {
+pub(crate) fn torrent_json(state: &AppState, item: &QueueItem, window: bool) -> Value {
     let status = parse_magnet(&item.source_url).and_then(|m| {
         let manager = state.torrents.manager_if_running()?;
         let s = manager.status(&m.info_hash)?;
@@ -238,7 +238,8 @@ pub(crate) fn torrent_json(state: &AppState, item: &QueueItem) -> Value {
         "ready": matches!(ready, crate::torrent::Readiness::Ready),
     });
     // Waiting because the drive is short of free space (not the disk cap of the setting).
-    if let Some((free, need)) = s.drive_short {
+    // The drive's free space for the window only.
+    if let Some((free, need)) = s.drive_short.filter(|_| window) {
         out["diskFreeBytes"] = json!(free);
         out["needBytes"] = json!(need);
     }
@@ -246,13 +247,18 @@ pub(crate) fn torrent_json(state: &AppState, item: &QueueItem) -> Value {
 }
 
 /// Adds `torrent` to the rows of the magnet items of `items` (as listed, same order).
-pub(crate) fn add_torrent_status(state: &AppState, items: &[QueueItem], json: &mut Value) {
+pub(crate) fn add_torrent_status(
+    state: &AppState,
+    items: &[QueueItem],
+    json: &mut Value,
+    window: bool,
+) {
     let Value::Array(rows) = json else { return };
     for (item, row) in items.iter().zip(rows.iter_mut()) {
         if let Value::Object(map) = row
             && crate::resolver::torrent::is_magnet(&item.source_url)
         {
-            map.insert("torrent".into(), torrent_json(state, item));
+            map.insert("torrent".into(), torrent_json(state, item, window));
         }
     }
 }

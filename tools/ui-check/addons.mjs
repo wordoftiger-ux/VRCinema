@@ -445,6 +445,17 @@ try {
   await page.screenshot({ path: join(shots, 'addons-settings-phone.png') });
 
   check(page.__errors.length === 0, 'no console errors', page.__errors);
+
+  // ---------- A remote panel: the download folder stays in the window ----------
+  await scenario({ remote: true });
+  const remote = await openApp();
+  await remote.evaluate(() => (location.hash = '#/settings/addons'));
+  await remote.waitForSelector('.tr-dir-remote');
+  check((await count(remote, '[name="torrentDir"]')) === 0 && (await count(remote, '.tr-drive-free')) === 0, 'remote: no download folder field and no free space');
+  check((await text(remote, '.tr-dir-remote')).includes('Download folder'), 'remote: the folder is named as window-only', await text(remote, '.tr-dir-remote'));
+  const rs = await remote.evaluate(async () => (await fetch('/api/admin/channels/main/settings')).json());
+  check(!('torrentDir' in rs) && !('torrentDirDefault' in rs) && !('torrentDriveFreeBytes' in rs), 'remote: the settings carry no folder path or free space', rs);
+  await remote.close();
   console.log(`\n${passed} checks passed`);
 } finally {
   await ctx.close();

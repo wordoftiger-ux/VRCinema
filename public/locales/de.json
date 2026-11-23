@@ -48,6 +48,7 @@
   "errors.torrent_dir_not_absolute": "{path}: Gib den vollständigen Pfad eines Ordners ein (zum Beispiel D:\\Torrents).",
   "errors.torrent_dir_missing": "Der Ordner {path} existiert nicht.",
   "errors.torrent_dir_not_writable": "VRCinema kann nicht in den Ordner {path} schreiben.",
+  "errors.torrent_dir_not_local": "{path}: Wähle einen Ordner auf einem Laufwerk dieses Computers (keine Netzwerkfreigabe und keinen Gerätepfad).",
   "errors.app_closing": "Die App wird beendet.",
   "errors.archive_lacks_file": "Im heruntergeladenen Archiv fehlt {file}.",
   "errors.autostart_failed": "Der Start mit Windows konnte nicht geändert werden: {detail}",

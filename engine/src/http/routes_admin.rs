@@ -162,6 +162,7 @@ fn loading_json(
     snapshot: &crate::engine::Snapshot,
     playing: &[QueueItem],
     lang: Lang,
+    window: bool,
 ) -> Value {
     use crate::pipeline::channel::ChannelStatus;
     use crate::pipeline::loading::LoadStage;
@@ -185,7 +186,7 @@ fn loading_json(
     };
     let mut row = items_json(std::slice::from_ref(item), lang);
     super::routes_thumbs::add_thumbs(state, std::slice::from_ref(item), &mut row);
-    super::routes_torrent::add_torrent_status(state, std::slice::from_ref(item), &mut row);
+    super::routes_torrent::add_torrent_status(state, std::slice::from_ref(item), &mut row, window);
     json!({
         "item": row.get(0).cloned().unwrap_or(Value::Null),
         "stage": stage.as_str(),
@@ -194,7 +195,14 @@ fn loading_json(
     })
 }
 
-async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) -> ApiResult {
+async fn panel(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    ReqLang(lang): ReqLang,
+    headers: axum::http::HeaderMap,
+) -> ApiResult {
+    // The drive's free space is shown in the window only.
+    let window = state.is_window(&headers);
     let id = state.channel_id;
     let (playing, queue, pending, history) = state.with_db(|c| {
         let q = QueueRepo::new(c);
@@ -224,12 +232,12 @@ async fn panel(State(state): State<AppState>, ctx: Ctx, ReqLang(lang): ReqLang) 
     let listed = |items: &[QueueItem]| {
         let mut json = items_json(items, lang);
         super::routes_thumbs::add_thumbs(&state, items, &mut json);
-        super::routes_torrent::add_torrent_status(&state, items, &mut json);
+        super::routes_torrent::add_torrent_status(&state, items, &mut json, window);
         json
     };
     body.insert(
         "loading".into(),
-        loading_json(&state, &snapshot, &playing, lang),
+        loading_json(&state, &snapshot, &playing, lang, window),
     );
     body.insert("playing".into(), listed(&playing));
     body.insert("queue".into(), listed(&queue));
@@ -894,23 +902,40 @@ async fn qr(State(state): State<AppState>) -> ApiResult {
     super::request_qr_response(&state.live.public_url.get())
 }
 
-async fn get_settings(State(state): State<AppState>) -> ApiResult {
+async fn get_settings(State(state): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult {
+    let window = state.is_window(&headers);
     let mut body = json!(state.settings()?);
     // What the "add popular sites" button of the settings puts in a list.
     body["popularDomains"] = json!(crate::rules::POPULAR_DOMAINS);
-    add_torrent_dir_info(&state, &mut body);
+    add_torrent_dir_info(&state, &mut body, window);
     Ok(json_ok(&body))
 }
 
 /// The torrents' default folder and the free space on the drive of the folder in use
-/// (`null`: not known), shown with the download folder field.
-fn add_torrent_dir_info(state: &AppState, body: &mut serde_json::Value) {
+/// (`null`: not known), shown with the download folder field. The folder is the window's:
+/// a remote panel gets no path and no free space (`torrentDir` is left out too).
+fn add_torrent_dir_info(state: &AppState, body: &mut serde_json::Value, window: bool) {
+    if !window {
+        if let Some(map) = body.as_object_mut() {
+            map.remove("torrentDir");
+        }
+        return;
+    }
     body["torrentDirDefault"] = json!(state.torrents.default_root().to_string_lossy());
     body["torrentDriveFreeBytes"] = json!(state.torrents.drive_free());
 }
 
-async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiResult {
+async fn put_settings(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    JsonBody(body): JsonBody,
+) -> ApiResult {
+    let window = state.is_window(&headers);
     let body = if body.is_null() { json!({}) } else { body };
+    // The download folder is a path on the window's computer: not from a remote panel.
+    if !window && body.get("torrentDir").is_some() {
+        return Err(ApiError::coded(StatusCode::FORBIDDEN, "window_only", &[]));
+    }
     let patch = sanitize_settings_patch(&body)
         .map_err(|e| ApiError::from_msg(StatusCode::BAD_REQUEST, e))?;
     let (before, updated) = state.with_db(|c| {
@@ -944,7 +969,7 @@ async fn put_settings(State(state): State<AppState>, JsonBody(body): JsonBody) -
         super::routes_slates::refresh_slates(&state);
     }
     let mut body = json!(updated);
-    add_torrent_dir_info(&state, &mut body);
+    add_torrent_dir_info(&state, &mut body, window);
     Ok(json_ok(&body))
 }
 

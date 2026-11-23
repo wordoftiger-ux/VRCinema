@@ -1174,11 +1174,18 @@ torrent`, torrent: true });
 
   const INTERVALS = [60, 120, 300, 600];
   function settingsRoute(res, req, patch) {
-    // The engine adds the torrents' default folder and the free space of its drive.
-    const dirInfo = { torrentDirDefault: 'C:\\Users\\owner\\AppData\\Local\\VRCinema\\data\\torrents', torrentDriveFreeBytes: 16750372454 };
-    if (req.method === 'GET') return json(res, 200, { ...s.settings, ...dirInfo, popularDomains: POPULAR });
+    // The engine adds the torrents' default folder and the free space of its drive, for the
+    // window only: a remote panel gets neither, nor the folder itself, and may not set it.
+    const remote = s.remote || s.headless;
+    const shown = (o) => {
+      if (!remote) return { ...o, torrentDirDefault: 'C:\\Users\\owner\\AppData\\Local\\VRCinema\\data\\torrents', torrentDriveFreeBytes: 16750372454 };
+      const { torrentDir, ...rest } = o;
+      return rest;
+    };
+    if (req.method === 'GET') return json(res, 200, { ...shown(s.settings), popularDomains: POPULAR });
     if (req.method !== 'PUT') return json(res, 404, { error: 'Not Found' });
     const fail = (code, message) => coded(res, 400, code, message);
+    if (remote && patch && 'torrentDir' in patch) return coded(res, 403, 'window_only', 'Only in the program window.');
     const next = { ...s.settings };
     for (const [key, value] of Object.entries(patch ?? {})) {
       if (!(key in s.settings)) return fail('unknown_setting', `Unknown setting: ${key}`);
@@ -1208,7 +1215,7 @@ torrent`, torrent: true });
       } else next[key] = value;
     }
     s.settings = next;
-    return json(res, 200, { ...next, ...dirInfo });
+    return json(res, 200, shown(next));
   }
 
   const ENCODER_RESULT = 'h264_nvenc';

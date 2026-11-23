@@ -50,6 +50,7 @@
   "errors.torrent_dir_not_absolute": "{path}: należy podać pełną ścieżkę folderu (na przykład D:\\Torrents).",
   "errors.torrent_dir_missing": "Folder {path} nie istnieje.",
   "errors.torrent_dir_not_writable": "VRCinema nie może zapisywać w folderze {path}.",
+  "errors.torrent_dir_not_local": "{path}: należy wybrać folder na dysku tego komputera (nie udział sieciowy ani ścieżkę urządzenia).",
   "errors.app_closing": "Aplikacja jest zamykana.",
   "errors.archive_lacks_file": "W pobranym archiwum brak pliku {file}.",
   "errors.autostart_failed": "Nie udało się zmienić autostartu: {detail}",

@@ -47,6 +47,7 @@
   "errors.torrent_dir_not_absolute": "{path}：フォルダーのフルパスを入力してください（例：D:\\Torrents）。",
   "errors.torrent_dir_missing": "フォルダー {path} は存在しません。",
   "errors.torrent_dir_not_writable": "VRCinema はフォルダー {path} に書き込めません。",
+  "errors.torrent_dir_not_local": "{path}：このコンピューターのドライブ上のフォルダーを選んでください（ネットワーク共有やデバイスパスは使えません）。",
   "errors.app_closing": "アプリを終了しています。",
   "errors.archive_lacks_file": "ダウンロードしたアーカイブに{file}がありません。",
   "errors.autostart_failed": "自動起動の設定を変更できませんでした：{detail}",
