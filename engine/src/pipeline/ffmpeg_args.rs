@@ -472,6 +472,27 @@ pub struct ClipExtras {
     /// Tonemap an HDR picture on the processor even when the graphics card can (a retry of
     /// the film: a source its decoder cannot handle still plays).
     pub cpu_hdr: bool,
+    /// The audio stream of the source played (`0:a:<n>`; 0: the first). Ignored when the
+    /// sound comes from a second input or is silence.
+    pub audio_stream: u32,
+    /// Burn in the picture subtitles (PGS, DVD, DVB) of this subtitle stream of the source
+    /// (`0:s:<n>`), laid over the converted picture once it is software frames at its output
+    /// size; ignored when the video is copied or the picture is made from the sound.
+    pub image_subtitle: Option<u32>,
+}
+
+/// The overlay of picture subtitle stream `index` on the picture labelled `[v]`, its canvas
+/// (the source's size) scaled like the picture was (`scale`: output height over source
+/// height), centred at the bottom; the result labelled `[vs]`.
+pub fn image_subtitle_graph(index: u32, scale: Option<f64>) -> String {
+    let fit = scale
+        .filter(|f| f.is_finite() && *f > 0.0 && (*f - 1.0).abs() > 1e-6)
+        .map(|f| format!("scale=w='trunc(iw*{f:.6})':h='trunc(ih*{f:.6})',"))
+        .unwrap_or_default();
+    format!(
+        "[0:s:{index}]{fit}format=yuva420p[sub];\
+         [v][sub]overlay=x='(W-w)/2':y='H-h':eof_action=pass:format=yuv420,format=yuv420p[vs]"
+    )
 }
 
 /// The fades of a clip of `length_s` seconds (`None`: unknown, a live stream): fade-in always,
@@ -507,6 +528,25 @@ pub fn subtitles_filter(file: &str, start_at_s: f64) -> String {
     } else {
         format!("subtitles={file}")
     }
+}
+
+/// ffmpeg's arguments copying text subtitle stream `index` of `input` (the whole film, film
+/// times) into the ASS file `out`, burned in later with [`subtitles_filter`].
+pub fn subtitle_extract_args(input: &StreamInput, index: u32, out: &Path) -> Vec<OsString> {
+    let mut args = Vec::new();
+    push_all(
+        &mut args,
+        &["-hide_banner", "-loglevel", "error", "-nostdin", "-y"],
+    );
+    args.extend(input_options(input));
+    args.push("-i".into());
+    args.push((&input.url).into());
+    push_all(
+        &mut args,
+        &["-map", &format!("0:s:{index}"), "-c:s", "ass", "-f", "ass"],
+    );
+    args.push(out.as_os_str().to_owned());
+    args
 }
 
 pub fn segment_output_args(segment_seconds: u32, out_dir: &Path) -> Vec<OsString> {
@@ -624,7 +664,7 @@ fn build_clip_args_hdr(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -
     let audio_map = if o.inputs.len() > 1 {
         "1:a:0".to_string()
     } else if !add_silence {
-        "0:a:0".to_string()
+        format!("0:a:{}", x.audio_stream)
     } else {
         push_all(
             &mut args,
@@ -641,7 +681,14 @@ fn build_clip_args_hdr(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -
         .audio_visual
         .as_ref()
         .filter(|_| o.mode == VideoMode::Transcode);
-    let video_map = if visual.is_some() { "[vout]" } else { "0:v:0" };
+    let image_subtitle = x
+        .image_subtitle
+        .filter(|_| o.mode == VideoMode::Transcode && visual.is_none());
+    let video_map = if visual.is_some() || image_subtitle.is_some() {
+        "[vout]"
+    } else {
+        "0:v:0"
+    };
     push_all(&mut args, &["-map", video_map, "-map", &audio_map]);
     // The picture made from the sound ends with it (not a frame later).
     if add_silence || visual.is_some() {
@@ -672,6 +719,9 @@ fn build_clip_args_hdr(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -
                 filters.push(format!("fps={}", output_fps(o.info.fps)));
             }
             filters.push("format=yuv420p".to_string());
+            // Picture subtitles go over the software frames at the output size (after the
+            // graphics card's tonemapping and download), before the letterbox and the rest.
+            let before_subtitles = filters.len();
             if o.info.portrait {
                 filters.push(LETTERBOX.to_string());
             }
@@ -691,15 +741,32 @@ fn build_clip_args_hdr(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -
             if vaapi {
                 filters.push(VAAPI_UPLOAD.to_string());
             }
-            match visual {
-                Some(graph) => push_all(
+            match (visual, image_subtitle) {
+                (Some(graph), _) => push_all(
                     &mut args,
                     &[
                         "-filter_complex",
                         &format!("{graph},{}[vout]", filters.join(",")),
                     ],
                 ),
-                None => push_all(&mut args, &["-vf", &filters.join(",")]),
+                (None, Some(index)) => {
+                    let (before, after) = filters.split_at(before_subtitles);
+                    let scale = (o.info.height > 0).then(|| {
+                        f64::from(o.info.height.min(max_height)) / f64::from(o.info.height)
+                    });
+                    let after = if after.is_empty() {
+                        "null".to_string()
+                    } else {
+                        after.join(",")
+                    };
+                    let graph = format!(
+                        "[0:v:0]{}[v];{};[vs]{after}[vout]",
+                        before.join(","),
+                        image_subtitle_graph(index, scale)
+                    );
+                    push_all(&mut args, &["-filter_complex", &graph]);
+                }
+                (None, None) => push_all(&mut args, &["-vf", &filters.join(",")]),
             }
             let light = x.light && o.encoder == VideoEncoder::Libx264;
             let rate = x.rate.unwrap_or(if light {
@@ -1743,5 +1810,177 @@ mod hdr_tests {
                 20.0 / secs
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod track_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn film() -> ClipArgsOptions {
+        ClipArgsOptions {
+            inputs: vec![StreamInput {
+                url: "film.mkv".into(),
+                headers: Vec::new(),
+            }],
+            input_format: None,
+            mode: VideoMode::Transcode,
+            info: VideoInfo {
+                codec: "h264".into(),
+                height: 1080,
+                pix_fmt: "yuv420p".into(),
+                fps: 24.0,
+                has_audio: true,
+                ..VideoInfo::default()
+            },
+            encoder: VideoEncoder::Libx264,
+            segment_seconds: 4,
+            out_dir: PathBuf::from("/tmp/clip"),
+            start_at_s: 0.0,
+            readrate: None,
+            overlay: None,
+            duration_limit_s: None,
+        }
+    }
+
+    fn build(o: &ClipArgsOptions, x: &ClipExtras, path: HdrPath) -> Vec<String> {
+        build_clip_args_hdr(o, x, path)
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn after(args: &[String], flag: &str) -> Option<String> {
+        let at = args.iter().position(|a| a == flag)?;
+        args.get(at + 1).cloned()
+    }
+
+    fn maps(args: &[String]) -> Vec<String> {
+        args.windows(2)
+            .filter(|w| w[0] == "-map")
+            .map(|w| w[1].clone())
+            .collect()
+    }
+
+    #[test]
+    fn ffmpeg_args_map_the_chosen_audio_stream() {
+        let x = ClipExtras {
+            audio_stream: 1,
+            ..ClipExtras::default()
+        };
+        assert_eq!(maps(&build(&film(), &x, HdrPath::Cpu)), ["0:v:0", "0:a:1"]);
+        // A second input brings the sound (yt-dlp): its first stream.
+        let mut two = film();
+        two.inputs.push(StreamInput {
+            url: "audio.m4a".into(),
+            headers: Vec::new(),
+        });
+        assert_eq!(maps(&build(&two, &x, HdrPath::Cpu)), ["0:v:0", "1:a:0"]);
+    }
+
+    #[test]
+    fn ffmpeg_args_burn_text_subtitles_from_film_time() {
+        let mut o = film();
+        o.start_at_s = 754.5;
+        let x = ClipExtras {
+            subtitles: Some(("subs.ass".into(), 754.5)),
+            audio_stream: 1,
+            ..ClipExtras::default()
+        };
+        let args = build(&o, &x, HdrPath::Cpu);
+        let vf = after(&args, "-vf").unwrap();
+        assert!(
+            vf.contains(
+                "format=yuv420p,setpts=PTS+754.500/TB,subtitles=subs.ass,setpts=PTS-754.500/TB"
+            ),
+            "{vf}"
+        );
+        assert_eq!(after(&args, "-ss").as_deref(), Some("754.5"));
+        let extract = subtitle_extract_args(
+            &StreamInput {
+                url: "http://127.0.0.1:1/internal/torrent/x".into(),
+                headers: Vec::new(),
+            },
+            2,
+            Path::new("/c/_subs/7-s2.ass"),
+        );
+        let extract: Vec<String> = extract
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(after(&extract, "-map").as_deref(), Some("0:s:2"));
+        assert_eq!(after(&extract, "-c:s").as_deref(), Some("ass"));
+        assert!(extract.contains(&"-reconnect".to_string()));
+        assert!(!extract.contains(&"-ss".to_string()));
+        assert_eq!(extract.last().unwrap(), "/c/_subs/7-s2.ass");
+    }
+
+    #[test]
+    fn ffmpeg_args_overlay_image_subtitles_after_scaling() {
+        let x = ClipExtras {
+            image_subtitle: Some(3),
+            max_height: Some(720),
+            fade_in_s: Some(1.0),
+            ..ClipExtras::default()
+        };
+        let args = build(&film(), &x, HdrPath::Cpu);
+        assert!(!args.contains(&"-vf".to_string()));
+        let graph = after(&args, "-filter_complex").unwrap();
+        assert_eq!(
+            graph,
+            "[0:v:0]scale=-2:'min(720,ih)':out_color_matrix=bt709:out_range=tv,format=yuv420p[v];\
+             [0:s:3]scale=w='trunc(iw*0.666667)':h='trunc(ih*0.666667)',format=yuva420p[sub];\
+             [v][sub]overlay=x='(W-w)/2':y='H-h':eof_action=pass:format=yuv420,format=yuv420p[vs];\
+             [vs]fade=t=in:st=0:d=1[vout]"
+        );
+        assert_eq!(maps(&args), ["[vout]", "0:a:0"]);
+        // At the source size nothing is scaled, and no later filter: a plain pass-through.
+        let x = ClipExtras {
+            image_subtitle: Some(0),
+            ..ClipExtras::default()
+        };
+        let graph = after(&build(&film(), &x, HdrPath::Cpu), "-filter_complex").unwrap();
+        assert!(graph.contains("[0:s:0]format=yuva420p[sub]"), "{graph}");
+        assert!(graph.ends_with("[vs]null[vout]"), "{graph}");
+    }
+
+    #[test]
+    fn ffmpeg_args_overlay_image_subtitles_after_the_gpu_hdr_download() {
+        let mut o = film();
+        o.info.codec = "hevc".into();
+        o.info.height = 2160;
+        o.info.hdr = true;
+        o.encoder = VideoEncoder::H264Nvenc;
+        let x = ClipExtras {
+            image_subtitle: Some(1),
+            max_height: Some(1080),
+            ..ClipExtras::default()
+        };
+        for path in HdrPath::GPU {
+            let args = build(&o, &x, path);
+            assert!(args.contains(&"-hwaccel".to_string()), "{path:?}");
+            let graph = after(&args, "-filter_complex").unwrap();
+            let gpu = path.filter(1080).unwrap();
+            assert!(
+                graph.starts_with(&format!("[0:v:0]{gpu},format=yuv420p[v];[0:s:1]scale=")),
+                "{graph}"
+            );
+            assert!(graph.contains("trunc(iw*0.500000)"), "{graph}");
+            assert!(graph.contains("[v][sub]overlay="), "{graph}");
+        }
+    }
+
+    #[test]
+    fn ffmpeg_args_image_subtitles_are_ignored_when_the_video_is_copied() {
+        let mut o = film();
+        o.mode = VideoMode::Copy;
+        let x = ClipExtras {
+            image_subtitle: Some(0),
+            ..ClipExtras::default()
+        };
+        let args = build(&o, &x, HdrPath::Cpu);
+        assert_eq!(after(&args, "-c:v").as_deref(), Some("copy"));
+        assert_eq!(maps(&args), ["0:v:0", "0:a:0"]);
     }
 }

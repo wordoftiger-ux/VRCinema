@@ -4843,3 +4843,134 @@ fn remote_panels_get_torrent_failure_reasons_only_in_a_general_form() {
         other.render(Lang::En)
     );
 }
+
+// ---------- Audio tracks and subtitles (spec 2026-11-22 §4) ----------
+
+#[tokio::test(start_paused = true)]
+async fn tracks_route_stores_the_choice_and_restarts_the_film_on_air() {
+    use crate::pipeline::probe::{AudioTrack, StreamTracks, SubtitleKind, SubtitleTrack};
+    let mut h = Harness::new();
+    let cookie = h.login().await;
+    let film = h.add("Film", ItemStatus::Playing);
+    let queued = h.add("Next", ItemStatus::Queued);
+    let streams = StreamTracks {
+        audio: vec![
+            AudioTrack {
+                index: 0,
+                lang: "eng".into(),
+                codec: "ac3".into(),
+                channels: 6,
+                default: true,
+                ..AudioTrack::default()
+            },
+            AudioTrack {
+                index: 1,
+                lang: "pol".into(),
+                codec: "aac".into(),
+                channels: 2,
+                ..AudioTrack::default()
+            },
+        ],
+        subtitles: vec![SubtitleTrack {
+            index: 0,
+            lang: "pol".into(),
+            codec: "hdmv_pgs_subtitle".into(),
+            kind: SubtitleKind::Image,
+            ..SubtitleTrack::default()
+        }],
+    };
+    h.with_db(|c| crate::db::tracks::save_streams(c, film.id, &streams).unwrap());
+    h.update_settings(
+        crate::db::sanitize_settings_patch(
+            &json!({"preferredAudioLangs": "pl", "preferredSubtitleLangs": "pl"}),
+        )
+        .unwrap(),
+    );
+    let mut control = film_control(Some(100.0), false);
+    control.item_id = Some(film.id);
+    h.set_control(control);
+    let url = |id: i64| format!("/api/admin/channels/main/items/{id}/tracks");
+
+    let r = h
+        .send(call("POST", &url(film.id)).json(json!({"audio": 0})))
+        .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    let r = h
+        .send(
+            call("POST", &url(film.id))
+                .cookie(&cookie)
+                .json(json!({"audio": 0, "subtitle": -1})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.json(),
+        json!({"restart": true, "tracks": {
+            "audio": [
+                {"index": 0, "lang": "eng", "title": "", "codec": "ac3", "channels": 6,
+                 "default": true},
+                {"index": 1, "lang": "pol", "title": "", "codec": "aac", "channels": 2,
+                 "default": false}
+            ],
+            "subtitles": [
+                {"index": 0, "lang": "pol", "title": "", "codec": "hdmv_pgs_subtitle",
+                 "kind": "image", "forced": false, "default": false}
+            ],
+            "chosenAudio": 0, "chosenSubtitle": -1, "autoAudio": 1, "autoSubtitle": 0
+        }})
+    );
+    assert_eq!(h.commands(), [Command::ApplyTracks { item_id: film.id }]);
+    let kept = h.with_db(|c| crate::db::tracks::item_tracks(c, film.id).unwrap());
+    assert_eq!((kept.audio_track, kept.subtitle_track), (Some(0), Some(-1)));
+
+    // A key left out stays; null is automatic.
+    let r = h
+        .send(
+            call("POST", &url(film.id))
+                .cookie(&cookie)
+                .json(json!({"audio": null})),
+        )
+        .await;
+    assert_eq!(r.json()["tracks"]["chosenAudio"], Value::Null);
+    assert_eq!(r.json()["tracks"]["chosenSubtitle"], -1);
+
+    // The panel lists them; a queued film never analysed has none yet.
+    let panel = h
+        .send(get("/api/admin/channels/main").cookie(&cookie))
+        .await
+        .json();
+    assert_eq!(panel["playing"][0]["tracks"]["autoAudio"], 1);
+    assert_eq!(panel["queue"][0]["tracks"], Value::Null);
+
+    // Not on air: stored, no restart promised.
+    h.commands();
+    let r = h
+        .send(
+            call("POST", &url(queued.id))
+                .cookie(&cookie)
+                .json(json!({"subtitle": 2})),
+        )
+        .await;
+    assert_eq!(r.json()["restart"], false);
+    assert_eq!(r.json()["tracks"]["chosenSubtitle"], 2);
+    for bad in [
+        json!({"audio": -1}),
+        json!({"audio": "1"}),
+        json!({"subtitle": -2}),
+        json!({"subtitle": 1.5}),
+        json!([1]),
+    ] {
+        let r = h
+            .send(
+                call("POST", &url(film.id))
+                    .cookie(&cookie)
+                    .json(bad.clone()),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let r = h
+        .send(call("POST", &url(9999)).cookie(&cookie).json(json!({})))
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}

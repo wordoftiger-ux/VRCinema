@@ -233,6 +233,7 @@ async fn panel(
         let mut json = items_json(items, lang, window);
         super::routes_thumbs::add_thumbs(&state, items, &mut json);
         super::routes_torrent::add_torrent_status(&state, items, &mut json, window);
+        super::routes_tracks::add_tracks(&state, &settings, items, &mut json);
         json
     };
     body.insert(

@@ -25,11 +25,11 @@ use crate::pipeline::audio_visual::{
 use crate::pipeline::channel::{BoxFuture, ClipFactory, ClipHandle};
 use crate::pipeline::ffmpeg_args::{
     ClipArgsOptions, ClipExtras, MAX_HEIGHT, RateLimit, ReadRate, build_clip_args_ext, clip_fades,
-    height_caps, light_profile,
+    height_caps, light_profile, subtitle_extract_args,
 };
 use crate::pipeline::loading::{LoadStage, LoadStages};
 use crate::pipeline::probe::{
-    AudioTags, ProbeError, VideoInfo, VideoMode, decide_video_mode, probe_video,
+    AudioTags, ProbeError, SubtitleKind, VideoInfo, VideoMode, decide_video_mode, probe_video,
 };
 use crate::pipeline::segmenter::{ClipSegmenter, SegmentInfo, SegmenterState};
 use crate::pipeline::slate_look::{Backdrop, backdrop_source, text_shadow};
@@ -40,6 +40,9 @@ use crate::pipeline::ticker::{
     TEXT_FILE, TickerContent, TickerMode, TickerQr, TickerWriter, compose_text, overlay_filter,
     prepare_after_s, window_budget_px,
 };
+use crate::pipeline::tracks;
+use crate::process::run_process;
+use crate::redact::redact_urls;
 use crate::resolver::torrent::{is_magnet, is_stream_route_url};
 use crate::resolver::ytdlp::{FALLBACK_YOUTUBE_CLIENT, youtube_client};
 use crate::resolver::{MediaResolver, ResolvedStream, StreamInput};
@@ -133,6 +136,16 @@ pub fn clip_video_mode(info: &VideoInfo, settings: &ChannelSettings) -> VideoMod
 pub fn capped_mode(mode: VideoMode, info: &VideoInfo, copy_cap: u32) -> VideoMode {
     if mode == VideoMode::Copy && info.height > copy_cap {
         VideoMode::Transcode
+    } else {
+        mode
+    }
+}
+
+/// Burned-in subtitles are drawn on a converted picture: they force the conversion (a film
+/// that would be copied is converted).
+pub fn subtitled_mode(mode: VideoMode, info: &VideoInfo, burns_subtitles: bool) -> VideoMode {
+    if burns_subtitles {
+        decide_video_mode(info, true)
     } else {
         mode
     }
@@ -254,6 +267,121 @@ async fn fetch_subtitles(
     std::fs::create_dir_all(out_dir).ok()?;
     std::fs::copy(&file, out_dir.join(&name)).ok()?;
     Some(name)
+}
+
+/// How long copying a film's own text subtitles may take (ffmpeg reads the whole film once;
+/// the clip waits for it).
+const SUBTITLE_EXTRACT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// What a clip burns in and plays of the film's own streams (spec §4): the owner's choice or
+/// the preferred languages.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackPlan {
+    /// `0:a:<n>` of the source.
+    pub audio_stream: u32,
+    /// The film's own subtitle stream burned in, and whether it is a picture one.
+    pub subtitle: Option<(u32, SubtitleKind)>,
+    /// The owner turned the subtitles off for this film (no yt-dlp subtitles either).
+    pub subtitles_off: bool,
+}
+
+/// The tracks of a clip of `info` for the owner's `choice` and the advanced settings. The
+/// audio choice only counts for a source whose sound is its own (one input); a live stream
+/// gets no subtitles.
+pub fn track_plan(
+    info: &VideoInfo,
+    choice: &crate::db::tracks::ItemTracks,
+    adv: &AdvancedSettings,
+    one_input: bool,
+    live: bool,
+) -> TrackPlan {
+    let audio_prefs = tracks::lang_list(&adv.preferred_audio_langs);
+    let subtitle_prefs = tracks::lang_list(&adv.preferred_subtitle_langs);
+    let audio_stream = if one_input {
+        tracks::choose_audio(&info.tracks.audio, &audio_prefs, choice.audio_track).unwrap_or(0)
+    } else {
+        0
+    };
+    let subtitle = if live {
+        None
+    } else {
+        tracks::choose_subtitle(
+            &info.tracks.subtitles,
+            &subtitle_prefs,
+            choice.subtitle_track,
+        )
+        .and_then(|i| info.tracks.subtitles.iter().find(|t| t.index == i))
+        .map(|t| (t.index, t.kind))
+    };
+    TrackPlan {
+        audio_stream,
+        subtitle,
+        subtitles_off: choice.subtitle_track == Some(tracks::SUBTITLES_OFF),
+    }
+}
+
+/// The language of yt-dlp's subtitles: the first preferred subtitle language, else the
+/// earlier single setting.
+pub fn ytdlp_subtitle_language(adv: &AdvancedSettings) -> String {
+    tracks::lang_list(&adv.preferred_subtitle_langs)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| adv.subtitles_language.clone())
+}
+
+/// A short fingerprint of the item's link (a cached file of another source is not reused).
+fn source_tag(source: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(source.as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The film's own text subtitle stream `index` copied into the clip folder as `subs.ass`
+/// (film times; [`ClipExtras::subtitles`] shifts them for a clip started midway). Read from
+/// the source once per film and stream (`clips/_subs`); `None` (logged): the film airs
+/// without them.
+async fn embedded_subtitles(
+    d: &ClipFactoryDeps,
+    item: &QueueItem,
+    input: &StreamInput,
+    index: u32,
+    out_dir: &Path,
+) -> Option<String> {
+    let cache = d.clips_dir.join("_subs");
+    std::fs::create_dir_all(&cache).ok()?;
+    let file = cache.join(format!(
+        "{}-s{index}-{}.ass",
+        item.id,
+        source_tag(&item.source_url)
+    ));
+    if !file.exists() {
+        let part = file.with_extension("part");
+        let args = subtitle_extract_args(input, index, &part);
+        let failure = match run_process(&d.ffmpeg_path, &args, SUBTITLE_EXTRACT_TIMEOUT).await {
+            Ok(out) if out.code == Some(0) => None,
+            Ok(out) => Some(Msg::error("source_message").arg(
+                "detail",
+                redact_urls(out.stderr.trim().lines().next_back().unwrap_or("ffmpeg")),
+            )),
+            Err(e) => Some(e.message()),
+        };
+        if let Some(error) = failure {
+            let _ = std::fs::remove_file(&part);
+            if let Some(log) = &d.log {
+                log(Msg::new("log.subtitles_failed")
+                    .arg("title", &item.title)
+                    .arg_msg("error", error));
+            }
+            return None;
+        }
+        std::fs::rename(&part, &file).ok()?;
+    }
+    std::fs::create_dir_all(out_dir).ok()?;
+    std::fs::copy(&file, out_dir.join("subs.ass")).ok()?;
+    Some("subs.ass".into())
 }
 
 /// ffmpeg's last error lines say the ticker's filters failed (not the source or the encoder).
@@ -598,6 +726,11 @@ async fn prepare_film(factory: RealClipFactory, item: QueueItem) -> Result<(), M
         None,
     )
     .await?;
+    // Its streams for the panel's choice before it airs.
+    {
+        let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = crate::db::tracks::save_streams(&conn, item.id, &probed.1.tracks);
+    }
     factory.keep_prepared(&item, probed);
     Ok(())
 }
@@ -1438,11 +1571,31 @@ async fn start_clip(
     };
     // Settings → Advanced: subtitles (fetched now, cached per film), fades, peak, loudness.
     let adv = &settings.advanced;
-    let subs = if adv.subtitles_enabled && !live {
-        fetch_subtitles(&d, &item, &adv.subtitles_language, &out_dir).await
-    } else {
-        None
+    // The film's own audio track and subtitles (the owner's choice, else the preferred
+    // languages); its streams are kept for the panel.
+    let choice = {
+        let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = crate::db::tracks::save_streams(&conn, item.id, &info.tracks);
+        crate::db::tracks::item_tracks(&conn, item.id).unwrap_or_default()
     };
+    let plan = track_plan(&info, &choice, adv, stream.inputs.len() == 1, live);
+    let (subs, image_subtitle) = match plan.subtitle.filter(|_| visual.is_none()) {
+        Some((index, SubtitleKind::Text)) => match stream.inputs.first() {
+            Some(input) => (
+                embedded_subtitles(&d, &item, input, index, &out_dir).await,
+                None,
+            ),
+            None => (None, None),
+        },
+        Some((index, SubtitleKind::Image)) => (None, Some(index)),
+        // A site's film: yt-dlp's subtitles in the first preferred language.
+        None if adv.subtitles_enabled && !live && !plan.subtitles_off => (
+            fetch_subtitles(&d, &item, &ytdlp_subtitle_language(adv), &out_dir).await,
+            None,
+        ),
+        None => (None, None),
+    };
+    let burns_subtitles = subs.is_some() || image_subtitle.is_some();
     let clip_len_s = item
         .end_s(duration_s.or(item.duration_s))
         .filter(|_| !live)
@@ -1453,6 +1606,8 @@ async fn start_clip(
         audio_visual: visual.as_ref().map(|v| v.graph.clone()),
         // A retry tonemaps HDR on the processor (the card's decoder may be what failed).
         cpu_hdr: attempt > 0,
+        audio_stream: plan.audio_stream,
+        image_subtitle,
         ..clip_extras(adv, clip_len_s, subs.clone(), start_at_s)
     };
     // Fades are drawn on a converted picture, so they force the conversion like the ticker.
@@ -1463,16 +1618,15 @@ async fn start_clip(
     );
     let mode = if ticker.is_some() {
         clip_video_mode(&info, &settings)
-    } else if subs.is_some() {
-        decide_video_mode(&info, true)
     } else {
-        plain_mode
+        subtitled_mode(plain_mode, &info, burns_subtitles)
     };
     let mode = capped_mode(mode, &info, copy_cap);
     // Without the ticker and the subtitles (the fallback when ffmpeg cannot draw them).
     // The plain restart runs in another folder: an audio picture there uses no file.
     let plain_extras = ClipExtras {
         subtitles: None,
+        image_subtitle: None,
         audio_visual: visual.as_ref().map(|v| v.plain_graph.clone()),
         ..extras.clone()
     };
@@ -1544,7 +1698,7 @@ async fn start_clip(
         None => {
             // Burned-in subtitles are read from ffmpeg's working folder (the clip folder),
             // with a plain restart should ffmpeg fail to draw them.
-            let fallback = subs.as_ref().map(|_| {
+            let fallback = burns_subtitles.then(|| {
                 let plain_dir = PathBuf::from(format!("{}-plain", out_dir.display()));
                 PlainRestart {
                     args: build_clip_args_ext(
@@ -3229,6 +3383,102 @@ mod tests {
         assert_eq!(clip_video_mode(&info, &settings), VideoMode::Transcode);
     }
 
+    fn tracked_video() -> VideoInfo {
+        use crate::pipeline::probe::{AudioTrack, StreamTracks, SubtitleTrack};
+        let audio = |index: u32, lang: &str, default: bool| AudioTrack {
+            index,
+            lang: lang.into(),
+            default,
+            ..AudioTrack::default()
+        };
+        let sub = |index: u32, lang: &str, kind: SubtitleKind| SubtitleTrack {
+            index,
+            lang: lang.into(),
+            kind,
+            ..SubtitleTrack::default()
+        };
+        VideoInfo {
+            tracks: StreamTracks {
+                audio: vec![audio(0, "eng", true), audio(1, "pol", false)],
+                subtitles: vec![
+                    sub(0, "eng", SubtitleKind::Image),
+                    sub(1, "pol", SubtitleKind::Text),
+                ],
+            },
+            ..video("h264", 720, 25.0, true)
+        }
+    }
+
+    #[test]
+    fn clip_factory_plans_the_tracks_from_the_choice_and_the_preferences() {
+        use crate::db::tracks::ItemTracks;
+        let info = tracked_video();
+        let mut adv = AdvancedSettings::default();
+        let auto = ItemTracks::default();
+        // No preferences: the default audio, no subtitles.
+        assert_eq!(
+            track_plan(&info, &auto, &adv, true, false),
+            TrackPlan::default()
+        );
+        adv.preferred_audio_langs = "pl, en".into();
+        adv.preferred_subtitle_langs = "pol".into();
+        assert_eq!(
+            track_plan(&info, &auto, &adv, true, false),
+            TrackPlan {
+                audio_stream: 1,
+                subtitle: Some((1, SubtitleKind::Text)),
+                subtitles_off: false,
+            }
+        );
+        // The owner's picture subtitles; a live stream none; the sound of a second input.
+        let chosen = ItemTracks {
+            audio_track: Some(0),
+            subtitle_track: Some(0),
+            ..ItemTracks::default()
+        };
+        let plan = track_plan(&info, &chosen, &adv, true, false);
+        assert_eq!(
+            (plan.audio_stream, plan.subtitle),
+            (0, Some((0, SubtitleKind::Image)))
+        );
+        assert_eq!(track_plan(&info, &chosen, &adv, true, true).subtitle, None);
+        assert_eq!(track_plan(&info, &auto, &adv, false, false).audio_stream, 0);
+        // Streams the file no longer has: automatic. Off: none, and no yt-dlp ones.
+        let gone = ItemTracks {
+            audio_track: Some(5),
+            subtitle_track: Some(9),
+            ..ItemTracks::default()
+        };
+        let plan = track_plan(&info, &gone, &adv, true, false);
+        assert_eq!(
+            (plan.audio_stream, plan.subtitle),
+            (1, Some((1, SubtitleKind::Text)))
+        );
+        let off = ItemTracks {
+            subtitle_track: Some(-1),
+            ..ItemTracks::default()
+        };
+        let plan = track_plan(&info, &off, &adv, true, false);
+        assert!(plan.subtitles_off && plan.subtitle.is_none());
+    }
+
+    #[test]
+    fn clip_factory_burned_subtitles_force_the_conversion_and_ytdlp_uses_the_first_language() {
+        let info = tracked_video();
+        assert_eq!(
+            subtitled_mode(VideoMode::Copy, &info, false),
+            VideoMode::Copy
+        );
+        assert_eq!(
+            subtitled_mode(VideoMode::Copy, &info, true),
+            VideoMode::Transcode
+        );
+        let mut adv = AdvancedSettings::default();
+        assert_eq!(ytdlp_subtitle_language(&adv), "en");
+        adv.preferred_subtitle_langs = "pl, en".into();
+        assert_eq!(ytdlp_subtitle_language(&adv), "pl");
+    }
+
     #[test]
     fn the_countdown_shows_minutes_or_hours_and_an_out_point_limits_a_clip() {
         assert_eq!(
@@ -4015,5 +4265,79 @@ mod tests {
         assert_eq!(handle.state(), SegmenterState::Done);
         assert!(handle.error().is_none());
         handle.dispose();
+    }
+}
+
+/// A real run on a film with two audio tracks and subtitles (`VRCINEMA_TRACKS_SAMPLE`: the
+/// film, `VRCINEMA_TRACKS_OUT`: an empty folder; ffmpeg and ffprobe from `bin/`): the clip
+/// plays the preferred audio track with the preferred subtitles burned in, from 5 s.
+#[cfg(test)]
+mod tracks_real {
+    use super::*;
+    use crate::db::tracks::ItemTracks;
+
+    #[tokio::test]
+    #[ignore = "needs a sample film and ffmpeg"]
+    async fn tracks_real_ffmpeg_burns_the_preferred_subtitles_with_the_preferred_audio() {
+        let sample = PathBuf::from(std::env::var("VRCINEMA_TRACKS_SAMPLE").unwrap());
+        let out = PathBuf::from(std::env::var("VRCINEMA_TRACKS_OUT").unwrap());
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let ffmpeg = root.join("bin").join("ffmpeg.exe");
+        let ffprobe = root.join("bin").join("ffprobe.exe");
+        let input = StreamInput {
+            url: sample.to_string_lossy().into_owned(),
+            headers: Vec::new(),
+        };
+        let info = probe_video(&ffprobe, std::slice::from_ref(&input))
+            .await
+            .unwrap();
+        eprintln!("{:?}", info.tracks);
+        let adv = AdvancedSettings {
+            preferred_audio_langs: "pl, en".into(),
+            preferred_subtitle_langs: "pl".into(),
+            ..AdvancedSettings::default()
+        };
+        let plan = track_plan(&info, &ItemTracks::default(), &adv, true, false);
+        eprintln!("{plan:?}");
+        let (index, kind) = plan.subtitle.unwrap();
+        assert_eq!(kind, SubtitleKind::Text);
+        std::fs::create_dir_all(&out).unwrap();
+        let ass = out.join("subs.ass");
+        let args = subtitle_extract_args(&input, index, &ass);
+        let res = run_process(&ffmpeg, &args, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(res.code, Some(0), "{}", res.stderr);
+        let start = 5.0;
+        let options = ClipArgsOptions {
+            inputs: vec![input],
+            input_format: None,
+            mode: subtitled_mode(decide_video_mode(&info, false), &info, true),
+            info: info.clone(),
+            encoder: VideoEncoder::Libx264,
+            segment_seconds: 4,
+            out_dir: out.clone(),
+            start_at_s: start,
+            readrate: None,
+            overlay: None,
+            duration_limit_s: Some(8.0),
+        };
+        let extras = ClipExtras {
+            audio_stream: plan.audio_stream,
+            subtitles: Some(("subs.ass".into(), start)),
+            ..ClipExtras::default()
+        };
+        let args = build_clip_args_ext(&options, &extras);
+        eprintln!("{args:?}");
+        let res = std::process::Command::new(&ffmpeg)
+            .args(&args)
+            .current_dir(&out)
+            .output()
+            .unwrap();
+        assert!(
+            res.status.success(),
+            "{}",
+            String::from_utf8_lossy(&res.stderr)
+        );
     }
 }

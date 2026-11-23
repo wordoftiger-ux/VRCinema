@@ -68,6 +68,11 @@ pub enum Command {
     ApplyTickerCode {
         public_url: String,
     },
+    /// The owner chose the audio track or subtitles of item `item_id`: when it is on air it
+    /// starts again from where it is (see [`Channel::apply_tracks`]).
+    ApplyTracks {
+        item_id: i64,
+    },
 }
 
 /// What HTTP reads: the state right after the latest tick.
@@ -117,6 +122,10 @@ pub trait ChannelControl: SegmentSource + Send {
     fn play_now(&mut self, item_id: i64) -> anyhow::Result<()>;
     fn apply_ticker(&mut self);
     fn apply_ticker_code(&mut self, public_url: &str);
+    /// The owner chose the tracks of an item (test doubles: nothing happens).
+    fn apply_tracks(&mut self, item_id: i64) {
+        let _ = item_id;
+    }
     /// Called every tick before the broadcaster (runs a seek once its quiet has passed).
     fn on_tick(&mut self);
     fn state(&self) -> ChannelState;
@@ -187,6 +196,9 @@ impl ChannelControl for Channel {
     }
     fn apply_ticker_code(&mut self, public_url: &str) {
         Channel::apply_ticker_code(self, public_url)
+    }
+    fn apply_tracks(&mut self, item_id: i64) {
+        Channel::apply_tracks(self, item_id)
     }
     fn on_tick(&mut self) {
         Channel::on_tick(self)
@@ -532,7 +544,8 @@ where
                     | Command::Restart
                     | Command::PlayNow { .. }
                     | Command::ApplyTicker
-                    | Command::ApplyTickerCode { .. } => {}
+                    | Command::ApplyTickerCode { .. }
+                    | Command::ApplyTracks { .. } => {}
                 }
                 let play_now = matches!(command, Command::PlayNow { .. });
                 match guarded(|| core.apply(command)) {
@@ -627,6 +640,10 @@ impl<C: ChannelControl> Core<C> {
             }
             Command::ApplyTickerCode { public_url } => {
                 self.channel.apply_ticker_code(&public_url);
+                Ok(())
+            }
+            Command::ApplyTracks { item_id } => {
+                self.channel.apply_tracks(item_id);
                 Ok(())
             }
         }

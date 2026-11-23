@@ -1388,6 +1388,39 @@ impl Channel {
         }
     }
 
+    /// The owner chose another audio track or other subtitles for item `item_id`: the film on
+    /// air starts again from where it is (like a ticker change, logged as `log.tracks_changed`;
+    /// the clip factory reads the new choice). A prefetched film is prepared again; a paused
+    /// or queued one gets it at its start.
+    pub fn apply_tracks(&mut self, item_id: i64) {
+        if self.prefetched_item_id() == Some(item_id) {
+            self.drop_prefetched();
+        }
+        if self.parked.is_some() {
+            return;
+        }
+        let Some(c) = self
+            .current
+            .as_ref()
+            .filter(|c| c.item.id == item_id && !c.item.is_live)
+        else {
+            return;
+        };
+        let msg = Msg::new("log.tracks_changed")
+            .arg("id", c.item.id)
+            .arg("title", &c.item.title)
+            .arg("seconds", format!("{:.0}", c.position_s()));
+        self.log(msg);
+        self.request(SeekRequest::By(0.0), true);
+        if let Some(seek) = self
+            .pending_seek
+            .as_mut()
+            .filter(|s| s.ticker && s.item_id == item_id)
+        {
+            seek.quiet = true;
+        }
+    }
+
     /// The public address became `public_url`: like [`Self::apply_ticker`] for the ticker's QR
     /// code, unless the process on air already draws the code of that address (it was started
     /// after the change, e.g. by a resume when the tunnel came back).
@@ -5658,6 +5691,46 @@ mod tests {
         assert_eq!(e.key(), relaunched_key(&a, 0, 1));
         assert_eq!(e.starts(), 2);
         assert_eq!(e.get(b.id).status, ItemStatus::Queued);
+    }
+
+    /// A new audio track or subtitles of the film on air: it starts again from where it is,
+    /// logged once as the track change; another item's choice restarts nothing.
+    #[tokio::test]
+    async fn tracks_changed_on_air_start_the_film_again_from_its_position() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        let h0 = e.air(&a, 3).await; // 12 s aired
+        e.channel.apply_tracks(b.id);
+        e.advance(700);
+        e.tick();
+        e.flush().await;
+        assert_eq!(e.starts(), 1);
+        e.channel.apply_tracks(a.id);
+        e.advance(700);
+        e.tick();
+        assert!(h0.disposed());
+        assert_eq!(
+            e.factory.calls()[1..],
+            [Call {
+                item_id: a.id,
+                start_at_s: 12.0,
+                attempt: 0
+            }]
+        );
+        let logs = e.logs.lock().unwrap().clone();
+        assert_eq!(
+            logs.iter()
+                .filter(|l| l.contains("audio track or subtitles"))
+                .count(),
+            1,
+            "{logs:?}"
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|l| l.contains("Info ticker settings changed"))
+        );
     }
 
     /// Final wave I1: a new public address restarts the film for the ticker's code only when

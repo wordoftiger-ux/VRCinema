@@ -16,6 +16,7 @@ mod routes_slates;
 mod routes_stream;
 mod routes_thumbs;
 mod routes_torrent;
+mod routes_tracks;
 mod routes_uploads;
 mod viewer_lists;
 
@@ -1399,6 +1400,7 @@ pub fn build_router(state: AppState) -> Router {
     .merge(routes_queue::router())
     .merge(routes_slates::router())
     .merge(routes_thumbs::router())
+    .merge(routes_tracks::router())
     .merge(viewer_lists::admin_router())
     .merge(routes_addons::router())
     .route_layer(middleware::from_fn_with_state(

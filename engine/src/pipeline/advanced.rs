@@ -28,8 +28,15 @@ pub struct AdvancedSettings {
     pub peak_buffer_s: f64,
     /// Burn the film's subtitles (yt-dlp) into the picture.
     pub subtitles_enabled: bool,
-    /// Which subtitles (a language code: `en`, `pl`, `pt-BR`).
+    /// Which subtitles yt-dlp fetches when no preferred subtitle language is set (a language
+    /// code: `en`, `pl`, `pt-BR`).
     pub subtitles_language: String,
+    /// The audio languages a film airs in, most wanted first (`"pl, en"`; empty: the file's
+    /// default track).
+    pub preferred_audio_langs: String,
+    /// The subtitle languages burned in, most wanted first (empty: no subtitles unless the
+    /// owner picks them for a film). The first is also the language of yt-dlp's subtitles.
+    pub preferred_subtitle_langs: String,
     /// Normalise the loudness of the sound.
     pub loudness_enabled: bool,
     /// One of [`LOUDNESS_TARGETS`].
@@ -62,6 +69,8 @@ impl Default for AdvancedSettings {
             peak_buffer_s: 2.0,
             subtitles_enabled: false,
             subtitles_language: "en".into(),
+            preferred_audio_langs: String::new(),
+            preferred_subtitle_langs: String::new(),
             loudness_enabled: false,
             loudness_target: -16,
             alarms_enabled: false,
@@ -82,6 +91,8 @@ pub struct AdvancedPatch {
     pub peak_buffer_s: Option<f64>,
     pub subtitles_enabled: Option<bool>,
     pub subtitles_language: Option<String>,
+    pub preferred_audio_langs: Option<String>,
+    pub preferred_subtitle_langs: Option<String>,
     pub loudness_enabled: Option<bool>,
     pub loudness_target: Option<i32>,
     pub alarms_enabled: Option<bool>,
@@ -160,6 +171,36 @@ fn language(key: &str, value: &Value) -> Result<String, Msg> {
         .ok_or_else(|| Msg::error("setting_not_language_code").arg("key", key))
 }
 
+/// Most languages in a preferred list.
+pub const MAX_PREFERRED_LANGS: usize = 8;
+
+/// A comma list of language codes (`"pl, en"`, or a JSON list of codes), stored as
+/// `"pl, en"`; empty is fine (no preference). Each code like [`valid_language_code`].
+fn language_list(key: &str, value: &Value) -> Result<String, Msg> {
+    let bad = || Msg::error("setting_not_language_list").arg("key", key);
+    let codes: Vec<String> = match value {
+        Value::String(s) => crate::pipeline::tracks::lang_list(s),
+        Value::Array(list) => list
+            .iter()
+            .map(|v| v.as_str().map(|s| s.trim().to_string()).ok_or_else(bad))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|c| !c.is_empty())
+            .collect(),
+        _ => return Err(bad()),
+    };
+    if codes.len() > MAX_PREFERRED_LANGS || !codes.iter().all(|c| valid_language_code(c)) {
+        return Err(bad());
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for code in codes {
+        if !unique.iter().any(|u| u.eq_ignore_ascii_case(&code)) {
+            unique.push(code);
+        }
+    }
+    Ok(unique.join(", "))
+}
+
 fn loudness_target(key: &str, value: &Value) -> Result<i32, Msg> {
     value
         .as_i64()
@@ -184,6 +225,10 @@ pub fn sanitize_key(key: &str, value: &Value, out: &mut AdvancedPatch) -> Option
             "peakBufferS" => out.peak_buffer_s = Some(ranged(key, value, 0.5, 4.0, 0.5)?),
             "subtitlesEnabled" => out.subtitles_enabled = Some(bool_of(key, value)?),
             "subtitlesLanguage" => out.subtitles_language = Some(language(key, value)?),
+            "preferredAudioLangs" => out.preferred_audio_langs = Some(language_list(key, value)?),
+            "preferredSubtitleLangs" => {
+                out.preferred_subtitle_langs = Some(language_list(key, value)?);
+            }
             "loudnessEnabled" => out.loudness_enabled = Some(bool_of(key, value)?),
             "loudnessTarget" => out.loudness_target = Some(loudness_target(key, value)?),
             "alarmsEnabled" => out.alarms_enabled = Some(bool_of(key, value)?),
@@ -236,6 +281,8 @@ impl AdvancedSettings {
             peak_buffer_s,
             subtitles_enabled,
             subtitles_language,
+            preferred_audio_langs,
+            preferred_subtitle_langs,
             loudness_enabled,
             loudness_target,
             alarms_enabled,
@@ -260,6 +307,11 @@ impl AdvancedPatch {
             ("peakBufferS", self.peak_buffer_s.is_some()),
             ("subtitlesEnabled", self.subtitles_enabled.is_some()),
             ("subtitlesLanguage", self.subtitles_language.is_some()),
+            ("preferredAudioLangs", self.preferred_audio_langs.is_some()),
+            (
+                "preferredSubtitleLangs",
+                self.preferred_subtitle_langs.is_some(),
+            ),
             ("loudnessEnabled", self.loudness_enabled.is_some()),
             ("loudnessTarget", self.loudness_target.is_some()),
             ("alarmsEnabled", self.alarms_enabled.is_some()),
@@ -299,7 +351,8 @@ mod tests {
             serde_json::to_value(&d).unwrap(),
             json!({
                 "transitionsEnabled": false, "transitionS": 1, "peakMbps": 0, "peakBufferS": 2,
-                "subtitlesEnabled": false, "subtitlesLanguage": "en", "loudnessEnabled": false,
+                "subtitlesEnabled": false, "subtitlesLanguage": "en",
+                "preferredAudioLangs": "", "preferredSubtitleLangs": "", "loudnessEnabled": false,
                 "loudnessTarget": -16, "alarmsEnabled": false, "alarmBlackS": 10,
                 "alarmSilenceS": 15, "alarmSilenceDb": -50, "maxHeight": 0
             })
@@ -336,6 +389,27 @@ mod tests {
         }
         let mut out = AdvancedPatch::default();
         assert!(sanitize_key("moderation", &json!(true), &mut out).is_none());
+    }
+
+    #[test]
+    fn settings_preferred_languages_are_comma_lists_of_codes() {
+        let p = patch(json!({"preferredAudioLangs": " pl ,en,, PL", "preferredSubtitleLangs": ""}))
+            .unwrap();
+        assert_eq!(p.preferred_audio_langs.as_deref(), Some("pl, en"));
+        assert_eq!(p.preferred_subtitle_langs.as_deref(), Some(""));
+        let p = patch(json!({"preferredSubtitleLangs": ["pol", "pt-BR"]})).unwrap();
+        assert_eq!(p.preferred_subtitle_langs.as_deref(), Some("pol, pt-BR"));
+        for bad in [
+            json!({"preferredAudioLangs": "pl, polski"}),
+            json!({"preferredAudioLangs": 5}),
+            json!({"preferredSubtitleLangs": "a,b"}),
+            json!({"preferredSubtitleLangs": "aa,bb,cc,dd,ee,ff,gg,hh,ii"}),
+        ] {
+            assert!(patch(bad.clone()).is_err(), "{bad}");
+        }
+        let mut s = AdvancedSettings::default();
+        s.apply(&patch(json!({"preferredAudioLangs": "de"})).unwrap());
+        assert_eq!(s.preferred_audio_langs, "de");
     }
 
     #[test]

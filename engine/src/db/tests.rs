@@ -468,6 +468,8 @@ fn settings_serialize_with_camel_case_keys() {
             "peakBufferS": 2,
             "subtitlesEnabled": false,
             "subtitlesLanguage": "en",
+            "preferredAudioLangs": "",
+            "preferredSubtitleLangs": "",
             "loudnessEnabled": false,
             "loudnessTarget": -16,
             "alarmsEnabled": false,
@@ -518,6 +520,8 @@ fn settings_serialize_with_camel_case_keys() {
             "peakBufferS",
             "subtitlesEnabled",
             "subtitlesLanguage",
+            "preferredAudioLangs",
+            "preferredSubtitleLangs",
             "loudnessEnabled",
             "loudnessTarget",
             "alarmsEnabled",
@@ -1393,4 +1397,62 @@ fn viewer_list_settings_are_stored_and_the_size_is_kept_within_1_to_50() {
     );
     assert!(sanitize_settings_patch(&json!({"viewerLists": "yes"})).is_err());
     assert!(sanitize_settings_patch(&json!({"viewerListMax": -1})).is_err());
+}
+
+#[test]
+fn settings_the_ytdlp_subtitle_language_becomes_the_preferred_one_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vrcinema.db");
+    let set = |conn: &Connection, key: &str, value: &str| {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (channel_id, key, value) VALUES (1, ?, ?)",
+            params![key, value],
+        )
+        .unwrap();
+    };
+    let preferred = |conn: &Connection| {
+        SettingsRepo::new(conn)
+            .get(MAIN_CHANNEL_ID)
+            .unwrap()
+            .advanced
+            .preferred_subtitle_langs
+    };
+    {
+        // A database of the version before the track choice: subtitles on, in Polish.
+        let conn = open_database(&path).unwrap();
+        conn.execute_batch("DROP TABLE item_tracks").unwrap();
+        set(&conn, "subtitlesEnabled", "true");
+        set(&conn, "subtitlesLanguage", "\"pl\"");
+    }
+    let conn = open_database(&path).unwrap();
+    assert_eq!(preferred(&conn), "pl");
+    // The owner empties the list: it stays empty at the next start.
+    set(&conn, "preferredSubtitleLangs", "\"\"");
+    drop(conn);
+    let conn = open_database(&path).unwrap();
+    assert_eq!(preferred(&conn), "");
+    // Subtitles turned on later (or off before): nothing is copied.
+    conn.execute(
+        "DELETE FROM settings WHERE key = 'preferredSubtitleLangs'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let conn = open_database(&path).unwrap();
+    assert_eq!(preferred(&conn), "");
+    {
+        let conn = open_database(&dir.path().join("off.db")).unwrap();
+        conn.execute_batch("DROP TABLE item_tracks").unwrap();
+        set(&conn, "subtitlesLanguage", "\"de\"");
+    }
+    let conn = open_database(&dir.path().join("off.db")).unwrap();
+    assert_eq!(preferred(&conn), "");
+    // On, with the default language.
+    {
+        let conn = open_database(&dir.path().join("en.db")).unwrap();
+        conn.execute_batch("DROP TABLE item_tracks").unwrap();
+        set(&conn, "subtitlesEnabled", "true");
+    }
+    let conn = open_database(&dir.path().join("en.db")).unwrap();
+    assert_eq!(preferred(&conn), "en");
 }

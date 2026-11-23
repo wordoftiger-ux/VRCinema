@@ -10,6 +10,7 @@ pub mod lists;
 pub mod queue;
 pub mod settings;
 pub mod thumbs;
+pub mod tracks;
 
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -82,6 +83,17 @@ CREATE TABLE IF NOT EXISTS nick_keys (
 CREATE INDEX IF NOT EXISTS nick_keys_skeleton ON nick_keys(skeleton);
 ";
 
+/// The yt-dlp subtitles language of a channel that burns subtitles in becomes its preferred
+/// subtitle language (spec `2026-11-22-viewer-and-tracks-design.md` §4), unless the channel
+/// has preferred subtitle languages already (also an empty list the owner set).
+const PREFERRED_SUBTITLES_MIGRATION: &str = "
+INSERT OR IGNORE INTO settings (channel_id, key, value)
+SELECT e.channel_id, 'preferredSubtitleLangs',
+  COALESCE((SELECT l.value FROM settings l
+            WHERE l.channel_id = e.channel_id AND l.key = 'subtitlesLanguage'), '\"en\"')
+FROM settings e WHERE e.key = 'subtitlesEnabled' AND e.value = 'true';
+";
+
 /// Brings an opened database up to the current schema: new tables and columns only, so no
 /// row is lost and the old server can still read the file.
 pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -90,6 +102,11 @@ pub(crate) fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(addons::SCHEMA)?;
     conn.execute_batch(journal::SCHEMA)?;
     conn.execute_batch(thumbs::SCHEMA)?;
+    // Once: the first start of the version that has the track choice.
+    if !has_table(conn, "item_tracks")? {
+        conn.execute_batch(PREFERRED_SUBTITLES_MIGRATION)?;
+    }
+    conn.execute_batch(tracks::SCHEMA)?;
     add_column_if_missing(conn, "queue_items", "requester_key_hash", "TEXT")?;
     // In and out points (film seconds) and the start time (Unix ms) of an item.
     add_column_if_missing(conn, "queue_items", "in_s", "REAL")?;

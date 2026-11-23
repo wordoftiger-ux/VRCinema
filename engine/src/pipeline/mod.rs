@@ -50,4 +50,5 @@ pub mod slate_look;
 pub mod slates;
 pub mod temp_downloads;
 pub mod ticker;
+pub mod tracks;
 pub mod tsrewrite;

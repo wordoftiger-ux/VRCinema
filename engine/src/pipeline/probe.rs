@@ -41,6 +41,121 @@ pub struct VideoInfo {
     /// An audio-only source (no video stream; an attached cover picture is not one): what its
     /// tags say. `None`: a video.
     pub audio: Option<AudioTags>,
+    /// The audio and subtitle streams of the first input (the owner's choice per film).
+    pub tracks: StreamTracks,
+}
+
+/// The audio and subtitle streams of a source, as the panel lists them and the clip maps them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StreamTracks {
+    pub audio: Vec<AudioTrack>,
+    /// Only the subtitles that can be burned in (text or image; teletext and the like are left
+    /// out, their numbers skipped).
+    pub subtitles: Vec<SubtitleTrack>,
+}
+
+/// One audio stream; `index` counts the audio streams of the input (ffmpeg's `0:a:<index>`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AudioTrack {
+    pub index: u32,
+    /// The language tag as the file has it (`pol`, `en`; empty: none).
+    pub lang: String,
+    pub title: String,
+    pub codec: String,
+    pub channels: u32,
+    pub default: bool,
+}
+
+/// How a subtitle stream is burned in: a text one through the subtitles filter, a picture one
+/// (PGS, DVD, DVB) laid over the picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubtitleKind {
+    #[default]
+    Text,
+    Image,
+}
+
+/// One subtitle stream; `index` counts the subtitle streams of the input (`0:s:<index>`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubtitleTrack {
+    pub index: u32,
+    pub lang: String,
+    pub title: String,
+    pub codec: String,
+    pub kind: SubtitleKind,
+    pub forced: bool,
+    pub default: bool,
+}
+
+/// The kind of a subtitle codec ffmpeg can burn in; `None`: neither (teletext, closed captions).
+pub fn subtitle_kind(codec: &str) -> Option<SubtitleKind> {
+    match codec {
+        "subrip" | "srt" | "ass" | "ssa" | "mov_text" | "webvtt" | "text" => {
+            Some(SubtitleKind::Text)
+        }
+        "hdmv_pgs_subtitle" | "dvd_subtitle" | "dvb_subtitle" => Some(SubtitleKind::Image),
+        _ => None,
+    }
+}
+
+/// The audio and subtitle streams of ffprobe's stream list.
+pub fn stream_tracks(streams: &[Value]) -> StreamTracks {
+    let text = |s: &Value, key: &str| {
+        s.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let tag = |s: &Value, name: &str| {
+        s.get("tags")
+            .and_then(Value::as_object)
+            .and_then(|tags| {
+                tags.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .and_then(|(_, v)| v.as_str())
+            })
+            .map(|v| v.trim().replace(['\r', '\n'], " "))
+            .unwrap_or_default()
+    };
+    let flag = |s: &Value, name: &str| {
+        s.get("disposition")
+            .and_then(|d| d.get(name))
+            .is_some_and(js_truthy)
+    };
+    let of_type = |t: &'static str| {
+        streams
+            .iter()
+            .filter(move |s| s.get("codec_type").and_then(Value::as_str) == Some(t))
+    };
+    let audio = of_type("audio")
+        .enumerate()
+        .map(|(i, s)| AudioTrack {
+            index: i as u32,
+            lang: tag(s, "language"),
+            title: tag(s, "title"),
+            codec: text(s, "codec_name"),
+            channels: s.get("channels").and_then(Value::as_u64).unwrap_or(0) as u32,
+            default: flag(s, "default"),
+        })
+        .collect();
+    let subtitles = of_type("subtitle")
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let codec = text(s, "codec_name");
+            Some(SubtitleTrack {
+                index: i as u32,
+                lang: tag(s, "language"),
+                title: tag(s, "title"),
+                kind: subtitle_kind(&codec)?,
+                codec,
+                forced: flag(s, "forced"),
+                default: flag(s, "default"),
+            })
+        })
+        .collect();
+    StreamTracks { audio, subtitles }
 }
 
 /// The tags of an audio-only source (empty: not tagged).
@@ -272,6 +387,7 @@ pub fn parse_probe_output(j: &Value) -> Result<VideoInfo, ProbeError> {
         duration_s: (duration.is_finite() && duration > 0.0).then_some(duration),
         keyframe_gap_s: keyframe_gap(j, video),
         audio: None,
+        tracks: stream_tracks(streams),
     })
 }
 
@@ -317,6 +433,7 @@ fn audio_only(j: &Value, streams: &[Value]) -> Result<VideoInfo, ProbeError> {
             album: tag(&["album"]),
             cover_stream,
         }),
+        tracks: stream_tracks(streams),
         ..VideoInfo::default()
     })
 }
@@ -496,6 +613,50 @@ mod tests {
     }
 
     #[test]
+    fn probe_lists_audio_and_burnable_subtitle_streams() {
+        let info = parse_probe_output(&json!({"streams": [
+            {"codec_type": "video", "codec_name": "h264", "height": 1080},
+            {"codec_type": "audio", "codec_name": "ac3", "channels": 6,
+             "tags": {"language": "pol", "title": "Lektor"}, "disposition": {"default": 1}},
+            {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+             "tags": {"LANGUAGE": "eng"}, "disposition": {"default": 0}},
+            {"codec_type": "subtitle", "codec_name": "dvb_teletext", "tags": {"language": "ger"}},
+            {"codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle",
+             "tags": {"language": "eng"}, "disposition": {"forced": 1}},
+            {"codec_type": "subtitle", "codec_name": "subrip", "tags": {"language": "pol"},
+             "disposition": {"default": 1}}
+        ], "format": {}}))
+        .unwrap();
+        let t = &info.tracks;
+        assert_eq!(t.audio.len(), 2);
+        assert_eq!(
+            t.audio[0],
+            AudioTrack {
+                index: 0,
+                lang: "pol".into(),
+                title: "Lektor".into(),
+                codec: "ac3".into(),
+                channels: 6,
+                default: true,
+            }
+        );
+        assert_eq!((t.audio[1].index, t.audio[1].lang.as_str()), (1, "eng"));
+        assert!(!t.audio[1].default);
+        // The teletext stream is left out, its number skipped.
+        assert_eq!(t.subtitles.len(), 2);
+        assert_eq!(t.subtitles[0].index, 1);
+        assert_eq!(t.subtitles[0].kind, SubtitleKind::Image);
+        assert!(t.subtitles[0].forced && !t.subtitles[0].default);
+        assert_eq!(t.subtitles[1].index, 2);
+        assert_eq!(t.subtitles[1].kind, SubtitleKind::Text);
+        assert!(t.subtitles[1].default);
+        assert_eq!(
+            serde_json::to_value(&t.subtitles[0]).unwrap()["kind"],
+            json!("image")
+        );
+    }
+
+    #[test]
     fn a_portrait_video_is_detected_and_always_converted() {
         let probe = |video: serde_json::Value| {
             parse_probe_output(&json!({"streams": [video], "format": {}}))
@@ -579,6 +740,13 @@ mod tests {
                 duration_s: Some(123.45),
                 portrait: false,
                 keyframe_gap_s: None,
+                tracks: StreamTracks {
+                    audio: vec![AudioTrack {
+                        codec: "aac".into(),
+                        ..AudioTrack::default()
+                    }],
+                    subtitles: Vec::new(),
+                },
                 ..VideoInfo::default()
             }
         );
