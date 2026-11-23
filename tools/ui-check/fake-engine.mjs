@@ -215,6 +215,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     peakBufferS: 2,
     subtitlesEnabled: false,
     subtitlesLanguage: 'en',
+    preferredAudioLangs: '',
+    preferredSubtitleLangs: '',
     loudnessEnabled: false,
     loudnessTarget: -16,
     alarmsEnabled: false,
@@ -526,7 +528,25 @@ torrent`, torrent: true });
   }
 
   /** The items with their pictures (scenario `thumbs`). */
-  const withThumbs = (items) => items.map((i) => ({ ...i, thumb: s.thumbs?.[i.id] ?? null }));
+  // Scenario `tracks`: true gives every listed item the panel's `tracks` (two audio, three subtitle streams; the choice is kept per id by POST …/items/{id}/tracks).
+  const TRACKS = {
+    audio: [
+      { index: 0, lang: 'eng', title: '', codec: 'ac3', channels: 6, default: true },
+      { index: 1, lang: 'pol', title: '', codec: 'aac', channels: 2, default: false },
+    ],
+    subtitles: [
+      { index: 0, lang: 'pol', title: '', codec: 'hdmv_pgs_subtitle', kind: 'image', forced: false, default: false },
+      { index: 1, lang: 'eng', title: '', codec: 'subrip', kind: 'text', forced: true, default: false },
+      { index: 2, lang: '', title: '', codec: 'ass', kind: 'text', forced: false, default: false },
+    ],
+  };
+  const choices = new Map();
+  const withTracks = (i) => {
+    if (!s.tracks) return { ...i, tracks: null };
+    const c = choices.get(i.id) ?? {};
+    return { ...i, tracks: { ...TRACKS, chosenAudio: c.audio ?? null, chosenSubtitle: c.subtitle ?? null, autoAudio: 1, autoSubtitle: 0 } };
+  };
+  const withThumbs = (items) => items.map((i) => ({ ...withTracks(i), thumb: s.thumbs?.[i.id] ?? null }));
 
   function panel() {
     const current =
@@ -1228,6 +1248,10 @@ torrent`, torrent: true });
       } else if (key === 'tickerIntervalS') {
         if (!INTERVALS.includes(value)) return fail('setting_not_one_of', `${key}: expected one of: 60, 120, 300, 600`);
         next[key] = value;
+      } else if (key === 'preferredAudioLangs' || key === 'preferredSubtitleLangs') {
+        const codes = (Array.isArray(value) ? value : String(value).split(',')).map((c) => String(c).trim()).filter(Boolean);
+        if (codes.length > 8 || codes.some((c) => !/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(c))) return fail('setting_not_language_list', key + ': expected language codes separated by commas, such as pl, en (at most 8)');
+        next[key] = [...new Set(codes)].join(', ');
       } else if (key === 'oscPort') {
         if (!Number.isInteger(value) || value < 1 || value > 65535) return fail('setting_out_of_range', `${key}: expected a number from 1 to 65535`);
         next[key] = value;
@@ -1617,6 +1641,15 @@ torrent`, torrent: true });
         'Content-Disposition': `attachment; filename="vrcinema-journal-20261106.${csv ? 'csv' : 'json'}"`,
       });
       return res.end(csv ? 'started,ended,duration_s,title\r\n' : JSON.stringify(s.journal));
+    }
+    const tracksRoute = path.match(/^[/]api[/]admin[/]channels[/]main[/]items[/]([0-9]+)[/]tracks$/);
+    if (tracksRoute && req.method === 'POST') {
+      const id = Number(tracksRoute[1]);
+      const c = { ...(choices.get(id) ?? {}) };
+      if ('audio' in (payload ?? {})) c.audio = payload.audio;
+      if ('subtitle' in (payload ?? {})) c.subtitle = payload.subtitle;
+      choices.set(id, c);
+      return json(res, 200, { tracks: withTracks({ id }).tracks, restart: id === 7 && s.playing === 'film' && !s.paused });
     }
     const itemRoute = path.match(/^\/api\/admin\/items\/(\d+)$/);
     if (itemRoute) {

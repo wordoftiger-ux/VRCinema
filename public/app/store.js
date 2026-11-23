@@ -454,6 +454,21 @@ export const trimItem = (itemId, inS, outS) =>
   mutate(() => api('POST', `${PANEL}/trim`, { itemId, inS, outS }));
 
 /**
+ * The audio track and subtitles of a video: `{audio}` (a stream number or null: automatic) and/or
+ * `{subtitle}` (a number, -1: off, null: automatic). Resolves to `{tracks, restart}` or null.
+ */
+export async function setTracks(itemId, choice) {
+  try {
+    const answer = await api('POST', `${PANEL}/items/${itemId}/tracks`, choice);
+    refreshPanel();
+    return answer;
+  } catch (e) {
+    showToast(errorText(e));
+    return null;
+  }
+}
+
+/**
  * When a waiting video starts: `{startAt}` (Unix ms), `{afterS}` (from the engine's clock) or
  * `{}` (no start time). Resolves to success.
  */

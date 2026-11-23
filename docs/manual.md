@@ -132,6 +132,25 @@ The program can show the video on air in **your own VRChat chatbox** (the bubble
 - **Settings** → **Channel** → **Viewer nicks** lists the nicks with their icons; **Release** frees a nick, **Block device** refuses requests from that device (and **Unblock** lifts it).
 - Limits: a nick needs the device key, so it works only in a browser that keeps its site data; a viewer in a private window or after clearing the site data gets a new key, so the old nick shows as taken; they can pick another nick or send without one. A blocked viewer can still send requests **without a nick** from a new browser profile (anonymously); the request limits per address still apply, and approval (**Settings** → **Channel** → approval) stops anything you don't want.
 
+### Skip voting
+
+- Viewers vote on the request page ("Vote to skip"). One vote counts per address; a second vote from the same address changes nothing, and a viewer can take their vote back.
+- **Settings** → **Channel** → **Skipping by viewers** has three modes: **Skip at a share of viewers** (a percentage of the people watching), **Skip at a number of votes**, and **Only show the votes**. The default is **Only show the votes**: the number appears in the player bar and on the request page, and you decide. **Off** hides the button.
+- When the film is skipped by votes it happens like your own **Next video** button; the next film starts as usual.
+
+### The request page
+
+- On a **phone** it has tabs: **Now**, **Queue** and **Add**. On a **PC** the same parts sit in two columns: what is on air and the queue on one side, adding on the other.
+- **Now** shows the film on air with its picture and the vote to skip. **Queue** lists what is next with pictures and an estimate of when each film starts; the viewer's own requests are marked, with the ones still waiting for your approval. **Add** is the form with the link, the nick and the files.
+
+### Audio and subtitles
+
+- A film with several audio tracks or subtitles gets the track picked by the **preferred languages**: **Settings** → **Advanced** → **Preferred audio languages** and **Preferred subtitle languages** (codes in order, such as `pl, en`). With no match the file's default audio plays and no subtitles are shown. A forced track is only used when nothing else matches in that language; text subtitles are preferred to picture ones.
+- Per film: right click a film in **Up next** → **Audio and subtitles…**, or press the subtitles button in the player bar for the film on air. The first entry, **Auto**, says what it would pick. Changing the film on air restarts it from the same position; a queued film uses the choice when it starts.
+- Subtitles are always **burned into the picture** (viewers cannot switch them). Text subtitles (SRT, ASS, WebVTT) are drawn with the program's font; picture subtitles (PGS from Blu-ray, VobSub from DVD) are overlaid at the size of the video. A film with burned-in subtitles is converted, so it uses more of the computer than a repackaged one.
+- The tracks are known once the film has been read: when it starts, or when it is prepared as the next one. Until then the entry shows nothing to choose. For films from the web or torrents the text subtitles also need that first read before the start: the first start can take longer by the time it takes to copy them out of the file.
+- The yt-dlp subtitles switch (**Burned-in subtitles**) is a separate thing for web videos with their own captions; it uses the first preferred subtitle language.
+
 ### Remote panel and phone
 
 - The remote panel is the same interface as the window at `<public address>/admin` (or `http://<this computer>:<port>/admin` with home network access), after logging in with the password from **Settings** → **Remote panel**. It can do everything the window can **except five things that stay in the window**: the port and home network access, the password and switching the remote panel off, **Trust Cloudflare headers** (it decides who a request comes from), the Cloudflare login (and therefore setting up and deleting the permanent link), and picking the cookies file (a file dialog on the computer; the remote panel can detach it and sees only its file name, not its folder). Dropping files and the first-run wizard are window-only too. Those places show "Available in the program on the computer".

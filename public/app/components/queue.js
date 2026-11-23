@@ -24,6 +24,7 @@ import { Library } from './library.js';
 import { Approvals } from './approvals.js';
 import { RequesterBadge } from './badge.js';
 import { openDialog } from './dialog.js';
+import { openTracks } from './tracks.js';
 import { RowMarks, openSchedule, openTrim } from './broadcast.js';
 import { copyText, formatTime } from './playerbar.js';
 import {
@@ -191,6 +192,7 @@ function menuFor(item, index, count) {
     'separator',
     { key: 'queue.trim', icon: 'trim', disabled: Boolean(item.isLive), action: () => openTrim(item) },
     { key: 'queue.schedule', icon: 'clock', action: () => openSchedule(item) },
+    { key: 'queue.tracks', icon: 'tracks', disabled: !item.tracks, action: () => openTracks(item) },
     'separator',
     { key: 'queue.remove', icon: 'close', danger: true, action: () => removeItem(item.id) },
     ...(hasRequester(item)

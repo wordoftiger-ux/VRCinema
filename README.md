@@ -41,12 +41,14 @@ When the queue is empty, the channel shows a calm waiting screen (with a QR code
 
 **Let friends join**
 - A request page for viewers: they add links (or small video and music files) under a nick protected by a PIN.
+- A request page with a queue: the film on air, what is next, your own requests and a vote to skip the film (tabs on a phone, two columns on a PC).
 - Limits, approval, playlists from viewers and a block list: you decide how open it is.
 - Add Stremio-compatible **addons** by their address and search films and series by title. Viewers can pick a film from the catalog, and you choose the source when you approve it. Torrent sources are optional and off by default. VRCinema provides no addons, and you are responsible for what the addons you add offer.
 
 **Make it look good**
 - An info band on the picture: the title, who added it, what is next, your own messages, a QR code and a progress line.
 - Slates for pauses and waiting, with your own picture if you like. Music gets a cover and moving bars.
+- Choose the audio track and the subtitles of each film (or let preferred languages decide).
 - Optional smooth fades, loudness levelling and subtitles.
 
 **Go further**

@@ -16,6 +16,7 @@ import { monitorRunning, monitorState, previewPosition } from './monitor.js';
 import { sourceState, sourceUrl } from './sourceplayer.js';
 import { monitorMuted, monitorVolume, previewMuted, previewVolume } from './volume.js';
 import { countdownText } from './broadcast.js';
+import { TracksButton } from './tracks.js';
 import {
   channel,
   channelLink,
@@ -439,6 +440,7 @@ export function PlayerBar({ onShortcuts }) {
           approx=${previewPos === null && Boolean(c?.positionApprox)} seekable=${canSeek} live=${live && Boolean(current)} />
       </div>
       <div class="right">
+        <${TracksButton} />
         <${Volume} />
         ${net ? html`<span class=${`pill net-${net}`} role="status"><span class="dot" aria-hidden="true"></span>${t(NET_KEYS[net])}</span>` : null}
         <${CopyLink} />

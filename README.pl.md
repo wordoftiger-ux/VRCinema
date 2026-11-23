@@ -41,12 +41,14 @@ Gdy kolejka jest pusta, kanał pokazuje spokojny ekran oczekiwania (z kodem QR d
 
 **Zaproś znajomych**
 - Strona zgłoszeń dla widzów: dodają linki (albo małe pliki wideo i muzyczne) pod nickiem chronionym PIN-em.
+- Strona zgłoszeń z kolejką: film na antenie, co dalej, Twoje zgłoszenia i głosowanie za pominięciem filmu (zakładki na telefonie, dwie kolumny na komputerze).
 - Limity, zatwierdzanie, playlisty od widzów i lista blokad: Ty decydujesz, jak otwarte to ma być.
 - Dodawaj **dodatki** zgodne ze Stremio po ich adresie i szukaj filmów oraz seriali po tytule. Widzowie mogą wybrać film z katalogu, a Ty wybierasz źródło przy zatwierdzaniu. Źródła torrent są opcjonalne i domyślnie wyłączone. VRCinema nie dostarcza żadnych dodatków, a Ty odpowiadasz za to, co oferują dodane przez Ciebie dodatki.
 
 **Dobry wygląd**
 - Pasek informacyjny w obrazie: tytuł, kto dodał, co dalej, Twoje własne wiadomości, kod QR i pasek postępu.
 - Plansze na przerwy i oczekiwanie, z własnym obrazem, jeśli chcesz. Muzyka dostaje okładkę i ruchome słupki.
+- Wybór ścieżki dźwiękowej i napisów dla każdego filmu (albo decydują preferowane języki).
 - Opcjonalnie płynne przejścia, wyrównywanie głośności i napisy.
 
 **Więcej możliwości**

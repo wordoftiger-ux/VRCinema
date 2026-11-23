@@ -132,6 +132,25 @@ Program może pokazywać film na antenie w **Twoim własnym chatboxie VRChat** (
 - **Ustawienia** → **Kanał** → **Nicki widzów** pokazuje nicki z ikonkami; **Zwolnij** zwalnia nick, **Zablokuj urządzenie** odrzuca zgłoszenia z tego urządzenia (a **Odblokuj** zdejmuje blokadę).
 - Ograniczenia: nick wymaga klucza urządzenia, więc działa tylko w przeglądarce, która zachowuje dane strony; widz w oknie prywatnym albo po wyczyszczeniu danych strony dostaje nowy klucz, więc stary nick pokazuje się jako zajęty; może wybrać inny nick albo wysłać bez nicku. Zablokowany widz może dalej wysyłać zgłoszenia **bez nicku** z nowego profilu przeglądarki (anonimowo); limity zgłoszeń na adres nadal działają, a zatwierdzanie (**Ustawienia** → **Kanał** → zatwierdzanie) zatrzyma wszystko, czego nie chcesz.
 
+### Głosowanie za pominięciem
+
+- Widzowie głosują na stronie zgłoszeń („Głosuj za pominięciem”). Liczy się jeden głos z adresu; drugi głos z tego samego adresu niczego nie zmienia, a widz może cofnąć swój głos.
+- **Ustawienia** → **Kanał** → **Pomijanie przez widzów** ma trzy tryby: **Pomiń przy udziale widzów** (procent oglądających), **Pomiń przy liczbie głosów** i **Tylko pokazuj głosy**. Domyślnie jest **Tylko pokazuj głosy**: liczba pojawia się na pasku odtwarzacza i na stronie zgłoszeń, a decyzja należy do Ciebie. **Wyłączone** chowa przycisk.
+- Film pominięty głosami przechodzi tak samo jak po Twoim przycisku **Następny film**; następny film startuje jak zwykle.
+
+### Strona zgłoszeń
+
+- Na **telefonie** ma zakładki: **Teraz**, **Kolejka** i **Dodaj**. Na **komputerze** te same części są w dwóch kolumnach: film na antenie i kolejka po jednej stronie, dodawanie po drugiej.
+- **Teraz** pokazuje film na antenie z obrazkiem i głosowaniem za pominięciem. **Kolejka** wylicza, co dalej, z obrazkami i szacunkiem, kiedy każdy film ruszy; zgłoszenia widza są oznaczone, także te czekające na Twoje zatwierdzenie. **Dodaj** to formularz z linkiem, nickiem i plikami.
+
+### Dźwięk i napisy
+
+- Film z kilkoma ścieżkami dźwięku lub napisów dostaje ścieżkę wybraną według **preferowanych języków**: **Ustawienia** → **Zaawansowane** → **Preferowane języki dźwięku** i **Preferowane języki napisów** (kody po kolei, np. `pl, en`). Bez dopasowania gra domyślna ścieżka pliku i nie ma napisów. Napisy wymuszone są użyte tylko wtedy, gdy w tym języku nie ma innych; napisy tekstowe są wybierane przed obrazkowymi.
+- Dla pojedynczego filmu: prawy przycisk myszy na filmie w **Następne** → **Dźwięk i napisy…**, albo przycisk napisów na pasku odtwarzacza dla filmu na antenie. Pierwsza pozycja, **Auto**, mówi, co wybierze program. Zmiana w filmie na antenie uruchamia go ponownie od tego samego miejsca; film w kolejce użyje wyboru przy starcie.
+- Napisy są zawsze **wypalane w obrazie** (widzowie nie mogą ich przełączać). Napisy tekstowe (SRT, ASS, WebVTT) są rysowane czcionką programu; napisy obrazkowe (PGS z Blu-ray, VobSub z DVD) są nakładane w rozmiarze filmu. Film z wypalonymi napisami jest konwertowany, więc obciąża komputer bardziej niż film tylko przepakowany.
+- Ścieżki są znane, gdy film został odczytany: przy starcie albo gdy jest przygotowywany jako następny. Wcześniej nie ma czego wybierać. W filmach z internetu i torrentów napisy tekstowe też potrzebują tego pierwszego odczytu przed startem: pierwszy start może potrwać o czas wyciągnięcia napisów z pliku.
+- Przełącznik napisów yt-dlp (**Wypalane napisy**) to osobna rzecz dla filmów z internetu z własnymi napisami; używa pierwszego z preferowanych języków napisów.
+
 ### Panel zdalny i telefon
 
 - Panel zdalny to ten sam interfejs co okno, pod `<adres publiczny>/admin` (albo `http://<ten komputer>:<port>/admin` przy dostępie z sieci domowej), po zalogowaniu hasłem z **Ustawienia** → **Panel zdalny**. Może wszystko to, co okno, **poza pięcioma rzeczami, które zostają w oknie**: port i dostęp z sieci domowej, hasło i wyłączenie panelu zdalnego, **Ufaj nagłówkom Cloudflare** (od tego zależy, od kogo przychodzi żądanie), logowanie do Cloudflare (a więc ustawienie i usunięcie stałego linku) oraz wybór pliku cookies (okno wyboru pliku otwiera się na komputerze; panel zdalny może plik odłączyć i widzi tylko jego nazwę, bez folderu). Upuszczanie plików i kreator pierwszego uruchomienia też są tylko w oknie. Te miejsca pokazują „Dostępne w programie na komputerze”.

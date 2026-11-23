@@ -46,22 +46,23 @@ function Numbers({ settings, say, name, fields, okText, disabled = false }) {
     </form>`;
 }
 
-function Subtitles({ settings, say }) {
-  const [code, setCode] = useState(settings.subtitlesLanguage);
-  useEffect(() => setCode(settings.subtitlesLanguage), [settings.subtitlesLanguage]);
+/** A comma list of language codes: the preferred audio or subtitle languages (the engine checks them). */
+function LanguageList({ settings, say, name, label, hint }) {
+  const [text, setText] = useState(settings[name] ?? '');
+  useEffect(() => setText(settings[name] ?? ''), [settings[name]]);
   const submit = (e) => {
     e.preventDefault();
-    const c = code.trim();
-    if (!/^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(c)) return say('err', t('settings.advanced.subtitles_language_invalid'));
-    saveChannelWith(say, { subtitlesLanguage: c }, t('settings.advanced.saved'));
+    saveChannelWith(say, { [name]: text.trim() }, t('settings.advanced.saved'));
   };
   return html`
-    <form class="limits" data-form="subtitles" onSubmit=${submit}>
-      <label class="limit"><span>${t('settings.advanced.subtitles_language')}</span>
-        <input type="text" class="num" name="subtitlesLanguage" maxlength="12" value=${code}
-          disabled=${!settings.subtitlesEnabled} onInput=${(e) => setCode(e.target.value)} /></label>
-      <button type="submit" class="btn pri" disabled=${!settings.subtitlesEnabled}>${t('settings.save')}</button>
-    </form>`;
+    <${Row} title=${label} hint=${hint} block>
+      <form class="limits" data-form=${name} onSubmit=${submit}>
+        <label class="limit"><span class="sr-only">${label}</span>
+          <input type="text" class="num lang-list" name=${name} maxlength="60" autocomplete="off" spellcheck="false"
+            placeholder=${t('settings.advanced.preferred_placeholder')} value=${text} onInput=${(e) => setText(e.target.value)} /></label>
+        <button type="submit" class="btn pri">${t('settings.save')}</button>
+      </form>
+    <//>`;
 }
 
 /** Unix ms as a short local date and time. */
@@ -188,8 +189,9 @@ export function BroadcastOptions() {
             { key: 'peakBufferS', label: t('settings.advanced.peak_buffer'), min: 0.5, max: 4, step: 0.5 },
           ]} />
       <//>
+      <${LanguageList} settings=${settings} say=${say} name="preferredAudioLangs" label=${t('settings.advanced.preferred_audio')} hint=${t('settings.advanced.preferred_audio_hint')} />
+      <${LanguageList} settings=${settings} say=${say} name="preferredSubtitleLangs" label=${t('settings.advanced.preferred_subtitles')} hint=${t('settings.advanced.preferred_subtitles_hint')} />
       ${toggle('subtitlesEnabled', t('settings.advanced.subtitles'), t('settings.advanced.subtitles_hint'))}
-      <${Subtitles} settings=${settings} say=${say} />
       ${toggle('loudnessEnabled', t('settings.advanced.loudness'), t('settings.advanced.loudness_hint'))}
       <${Row} title=${t('settings.advanced.loudness_target')}>
         <${Segmented} label=${t('settings.advanced.loudness_target')} value=${settings.loudnessTarget} disabled=${!settings.loudnessEnabled}
