@@ -1183,18 +1183,32 @@ fn requester_badge(added_by: crate::db::AddedBy, key_hash: Option<&str>) -> Valu
     })
 }
 
-/// A stored failure reason for a remote panel: a torrent reason that names the download folder,
-/// the drive's free space or the library's own text (which may hold a file path) becomes its
-/// general form; any other reason stays as it is.
+/// A stored failure reason for a remote panel. Deny by default for torrents: any reason with a
+/// `torrent_*` code anywhere in it (it may carry the download folder, the drive's free space or
+/// the library's own text with a path) becomes a general form, and so does any reason that
+/// mentions the loopback torrent stream (an ffmpeg line with its per-run address); any other
+/// reason stays as it is.
 pub(crate) fn remote_error_text(stored: &str, lang: Lang) -> String {
-    let general = if stored.contains("torrent_disk_full") {
-        Some("torrent_disk_full_remote")
-    } else if stored.contains("torrent_dir_") {
-        Some("torrent_dir_remote")
-    } else if stored.contains("torrent_failed") {
-        Some("torrent_failed")
-    } else {
-        None
+    let general = match Msg::from_stored(stored) {
+        Some(msg) => {
+            let codes = msg.codes();
+            if codes.iter().any(|c| c.starts_with("torrent_disk_full")) {
+                Some("torrent_disk_full_remote")
+            } else if codes.iter().any(|c| c.starts_with("torrent_dir_")) {
+                Some("torrent_dir_remote")
+            } else if codes.iter().any(|c| c.starts_with("torrent_"))
+                || stored.contains("/internal/torrent/")
+            {
+                Some("torrent_failed")
+            } else {
+                None
+            }
+        }
+        // An older plain-text reason: hidden when it could name the torrent stream or folder.
+        None if stored.contains("/internal/torrent/") || stored.contains("torrent") => {
+            Some("torrent_failed")
+        }
+        None => None,
     };
     match general {
         Some(code) => Msg::error(code).render(lang),

@@ -313,6 +313,15 @@ impl Msg {
         }
     }
 
+    /// The error codes of this message and of every part of a chain, outermost first.
+    pub fn codes(&self) -> Vec<&str> {
+        match &self.body {
+            Body::Key(key) => key.strip_prefix(ERRORS).into_iter().collect(),
+            Body::Text(_) => Vec::new(),
+            Body::Chain(parts) => parts.iter().flat_map(Msg::codes).collect(),
+        }
+    }
+
     /// The error code of an `errors.` message.
     pub fn code(&self) -> Option<&str> {
         match &self.body {

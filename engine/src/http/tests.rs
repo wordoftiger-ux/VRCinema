@@ -4805,3 +4805,36 @@ async fn the_slate_background_is_uploaded_only_from_home_checked_and_removed() {
         .await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
 }
+
+/// A remote panel never gets a torrent reason's details (deny by default): any `torrent_*` code
+/// in a chain, or an ffmpeg line naming the loopback torrent stream, becomes a general message;
+/// other reasons stay as they are.
+#[test]
+fn remote_panels_get_torrent_failure_reasons_only_in_a_general_form() {
+    use crate::i18n::{Lang, Msg};
+    let general = Msg::error("torrent_failed").render(Lang::En);
+    for stored in [
+        Msg::chain(vec![
+            Msg::error("torrent_session"),
+            Msg::text(r"C:\Users\x\torrents: access denied"),
+        ]),
+        Msg::chain(vec![Msg::error("torrent_metadata"), Msg::text(r"D:\t\a")]),
+        Msg::error("source_message").arg(
+            "detail",
+            "http://127.0.0.1:8080/internal/torrent/abc/def: EOF",
+        ),
+    ] {
+        let text = super::remote_error_text(&stored.to_stored(), Lang::En);
+        assert_eq!(text, general, "{stored:?}");
+        assert!(!text.contains(":\\") && !text.contains("internal"));
+    }
+    assert_eq!(
+        super::remote_error_text(&Msg::error("torrent_disk_full").to_stored(), Lang::En),
+        Msg::error("torrent_disk_full_remote").render(Lang::En)
+    );
+    let other = Msg::error("fetch_failed").arg("reason", "404");
+    assert_eq!(
+        super::remote_error_text(&other.to_stored(), Lang::En),
+        other.render(Lang::En)
+    );
+}
