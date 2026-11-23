@@ -51,6 +51,8 @@
   "errors.torrent_dir_missing": "Folder {path} nie istnieje.",
   "errors.torrent_dir_not_writable": "VRCinema nie może zapisywać w folderze {path}.",
   "errors.torrent_dir_not_local": "{path}: należy wybrać folder na dysku tego komputera (nie udział sieciowy ani ścieżkę urządzenia).",
+  "errors.torrent_disk_full_remote": "Za mało wolnego miejsca na dysku dla tego torrenta. Szczegóły są w oknie programu.",
+  "errors.torrent_dir_remote": "Nie można użyć folderu pobierania torrentów. Szczegóły są w oknie programu.",
   "errors.app_closing": "Aplikacja jest zamykana.",
   "errors.archive_lacks_file": "W pobranym archiwum brak pliku {file}.",
   "errors.autostart_failed": "Nie udało się zmienić autostartu: {detail}",

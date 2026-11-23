@@ -49,6 +49,8 @@
   "errors.torrent_dir_missing": "The folder {path} does not exist.",
   "errors.torrent_dir_not_writable": "VRCinema cannot write to the folder {path}.",
   "errors.torrent_dir_not_local": "{path}: choose a folder on a drive of this computer (not a network share or a device path).",
+  "errors.torrent_disk_full_remote": "Not enough free space on the drive for this torrent. The details are in the program window.",
+  "errors.torrent_dir_remote": "The torrent download folder cannot be used. The details are in the program window.",
   "errors.app_closing": "The app is closing.",
   "errors.archive_lacks_file": "The downloaded archive has no {file}.",
   "errors.autostart_failed": "Could not change starting with Windows: {detail}",

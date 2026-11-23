@@ -148,8 +148,8 @@ fn ok() -> Response {
     json_ok(&json!({ "ok": true }))
 }
 
-fn items_json(items: &[QueueItem], lang: Lang) -> Value {
-    Value::Array(items.iter().map(|i| admin_item(i, lang)).collect())
+fn items_json(items: &[QueueItem], lang: Lang, window: bool) -> Value {
+    Value::Array(items.iter().map(|i| admin_item(i, lang, window)).collect())
 }
 
 /// The film being loaded for the "Now loading" card, or `null`: its item (with its picture),
@@ -184,7 +184,7 @@ fn loading_json(
     } else {
         state.loading.get(item.id).unwrap_or(LoadStage::Resolving)
     };
-    let mut row = items_json(std::slice::from_ref(item), lang);
+    let mut row = items_json(std::slice::from_ref(item), lang, window);
     super::routes_thumbs::add_thumbs(state, std::slice::from_ref(item), &mut row);
     super::routes_torrent::add_torrent_status(state, std::slice::from_ref(item), &mut row, window);
     json!({
@@ -230,7 +230,7 @@ async fn panel(
     );
     // The pictures of the lists (a film's site picture, YouTube's, or a frame of a disk film).
     let listed = |items: &[QueueItem]| {
-        let mut json = items_json(items, lang);
+        let mut json = items_json(items, lang, window);
         super::routes_thumbs::add_thumbs(&state, items, &mut json);
         super::routes_torrent::add_torrent_status(&state, items, &mut json, window);
         json

@@ -50,6 +50,8 @@
   "errors.torrent_dir_missing": "Le dossier {path} n’existe pas.",
   "errors.torrent_dir_not_writable": "VRCinema ne peut pas écrire dans le dossier {path}.",
   "errors.torrent_dir_not_local": "{path} : choisis un dossier sur un lecteur de cet ordinateur (pas un partage réseau ni un chemin de périphérique).",
+  "errors.torrent_disk_full_remote": "Pas assez d’espace libre sur le lecteur pour ce torrent. Les détails sont dans la fenêtre du programme.",
+  "errors.torrent_dir_remote": "Le dossier de téléchargement des torrents ne peut pas être utilisé. Les détails sont dans la fenêtre du programme.",
   "errors.app_closing": "L’application est en cours de fermeture.",
   "errors.archive_lacks_file": "L’archive téléchargée ne contient pas {file}.",
   "errors.autostart_failed": "Impossible de modifier le démarrage avec Windows : {detail}",

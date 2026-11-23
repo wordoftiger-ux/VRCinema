@@ -1183,13 +1183,39 @@ fn requester_badge(added_by: crate::db::AddedBy, key_hash: Option<&str>) -> Valu
     })
 }
 
-pub(crate) fn admin_item(i: &QueueItem, lang: Lang) -> Value {
+/// A stored failure reason for a remote panel: a torrent reason that names the download folder,
+/// the drive's free space or the library's own text (which may hold a file path) becomes its
+/// general form; any other reason stays as it is.
+pub(crate) fn remote_error_text(stored: &str, lang: Lang) -> String {
+    let general = if stored.contains("torrent_disk_full") {
+        Some("torrent_disk_full_remote")
+    } else if stored.contains("torrent_dir_") {
+        Some("torrent_dir_remote")
+    } else if stored.contains("torrent_failed") {
+        Some("torrent_failed")
+    } else {
+        None
+    };
+    match general {
+        Some(code) => Msg::error(code).render(lang),
+        None => crate::i18n::stored_text(stored, lang),
+    }
+}
+
+/// `window`: the program's window asks; a remote panel gets the failure reasons that would
+/// show the torrent folder or its drive (a path, free space) in a general form.
+pub(crate) fn admin_item(i: &QueueItem, lang: Lang, window: bool) -> Value {
     let mut item = public_item(i);
     if let Value::Object(map) = &mut item {
         map.insert("sourceUrl".into(), json!(i.source_url));
         map.insert("status".into(), json!(i.status.as_str()));
         map.insert("addedBy".into(), json!(i.added_by.as_str()));
-        map.insert("error".into(), json!(i.error_text(lang)));
+        let error = if window {
+            i.error_text(lang)
+        } else {
+            i.error.as_deref().map(|e| remote_error_text(e, lang))
+        };
+        map.insert("error".into(), json!(error));
         map.insert("createdAt".into(), json!(i.created_at));
         map.insert("finishedAt".into(), json!(i.finished_at));
         map.insert("inS".into(), opt_num_json(i.in_s));

@@ -46,6 +46,8 @@
   "errors.torrent_dir_missing": "API error (Settings → Addons, torrent download folder field): the chosen folder does not exist (or its drive is not connected); {path} is the folder.",
   "errors.torrent_dir_not_writable": "API error (Settings → Addons, torrent download folder field): the program cannot create or write files in the chosen folder; {path} is the folder.",
   "errors.torrent_dir_not_local": "API error (Settings → Addons, torrent download folder field): the path is a network share (\\\\server\\share) or a Windows device path (\\\\?\\…, \\\\.\\…); only a folder on a local drive is accepted. {path} is what was entered.",
+  "errors.torrent_disk_full_remote": "Reason a torrent film failed or waits, as shown in a remote panel (the window shows the full text with the free and needed gigabytes; a remote panel does not see the drive). \"The program window\" is the desktop app’s own window.",
+  "errors.torrent_dir_remote": "Reason a torrent film failed, as shown in a remote panel: the chosen download folder is missing or not writable (the window shows the folder path; a remote panel does not).",
   "errors.app_closing": "API error (panel, request page or app window notice). The app window asked for something while the app shuts down.",
   "errors.archive_lacks_file": "Error text (shown in the app window and written to the log). Tools install; {file} is a file name inside the archive.",
   "errors.autostart_failed": "API error (panel, request page or app window notice). Settings: switching \"start with Windows\" failed; {detail} is the system error.",

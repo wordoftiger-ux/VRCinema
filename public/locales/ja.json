@@ -48,6 +48,8 @@
   "errors.torrent_dir_missing": "フォルダー {path} は存在しません。",
   "errors.torrent_dir_not_writable": "VRCinema はフォルダー {path} に書き込めません。",
   "errors.torrent_dir_not_local": "{path}：このコンピューターのドライブ上のフォルダーを選んでください（ネットワーク共有やデバイスパスは使えません）。",
+  "errors.torrent_disk_full_remote": "このトレントに必要なドライブの空き容量が足りません。詳細はプログラムのウィンドウにあります。",
+  "errors.torrent_dir_remote": "トレントのダウンロードフォルダーを使用できません。詳細はプログラムのウィンドウにあります。",
   "errors.app_closing": "アプリを終了しています。",
   "errors.archive_lacks_file": "ダウンロードしたアーカイブに{file}がありません。",
   "errors.autostart_failed": "自動起動の設定を変更できませんでした：{detail}",

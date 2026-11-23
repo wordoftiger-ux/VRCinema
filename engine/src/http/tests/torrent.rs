@@ -212,6 +212,56 @@ async fn settings_take_a_checked_torrent_download_folder() {
         assert!(seen.get(key).is_none(), "remote JSON has no {key}");
     }
     assert!(!seen.to_string().contains(&*dir.replace('\\', "\\\\")));
+
+    // Failed torrent films: a remote panel sees their reasons without the folder or the drive.
+    let reasons = [
+        crate::torrent::disk_full_msg(3 << 30, 21 << 30),
+        Msg::error("torrent_dir_missing").arg("path", r"E:\Private\Films"),
+        Msg::chain(vec![
+            Msg::error("torrent_failed"),
+            Msg::text(r"write failed: E:\Private\Films\x.mkv"),
+        ]),
+    ];
+    for (n, reason) in reasons.iter().enumerate() {
+        let item = h.add(&format!("t{n}"), ItemStatus::Playing);
+        h.with_db(|c| {
+            QueueRepo::new(c)
+                .finish(item.id, ItemStatus::Failed, Some(&reason.to_stored()))
+                .unwrap()
+        });
+    }
+    let hr = &h;
+    let history_errors = |cookie: &str| {
+        let cookie = cookie.to_string();
+        async move {
+            let panel = hr
+                .send(call("GET", "/api/admin/channels/main").cookie(&cookie))
+                .await
+                .json();
+            panel["history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|i| i["error"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        }
+    };
+    let full = history_errors(&cookie).await.join("\n");
+    assert!(full.contains(r"E:\Private\Films"), "{full}");
+    assert!(full.contains("3.0 GB"), "{full}");
+    let general = history_errors(&remote).await;
+    assert_eq!(general.len(), 3, "{general:?}");
+    let joined = general.join("\n");
+    assert!(
+        !joined.contains("Private") && !joined.contains("GB"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("Za mało wolnego miejsca na dysku dla tego torrenta."),
+        "{joined}"
+    );
+    assert!(joined.contains("Nie można użyć folderu pobierania torrentów."));
+
     // A remote change of other settings still answers without the folder.
     let r = h
         .send(
