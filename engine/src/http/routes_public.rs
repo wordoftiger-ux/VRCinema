@@ -80,10 +80,18 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
     let settings = state.settings()?;
     let queue = state
         .with_db(|c| QueueRepo::new(c).list_by_status(state.channel_id, &[ItemStatus::Queued]))?;
-    let mut body = state_map(&state.snapshot().state);
-    body.insert(
-        "queue".into(),
-        Value::Array(queue.iter().map(public_item).collect()),
+    let pending = state.with_db(|c| {
+        QueueRepo::new(c).list_by_status(state.channel_id, &[ItemStatus::PendingApproval])
+    })?;
+    let snapshot = state.snapshot();
+    let mut body = state_map(&snapshot.state);
+    add_viewer_queue(
+        &state,
+        &snapshot.state,
+        &ctx.ip,
+        &queue,
+        &pending,
+        &mut body,
     );
     body.insert(
         "channelUrl".into(),
@@ -117,6 +125,100 @@ async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
         }),
     );
     Ok(json_ok(&Value::Object(body)))
+}
+
+/// The picture of an item the viewer's browser may load: the kept site (or catalog) picture or
+/// YouTube's picture of the link, only when it is public (`https`, a named host). An own frame
+/// (disk film, sent file) is served to the owner only, so those have none.
+pub(crate) fn public_thumb(item: &crate::db::QueueItem, kept: Option<&String>) -> Option<String> {
+    kept.filter(|u| crate::db::is_public_thumbnail(u))
+        .cloned()
+        .or_else(|| crate::db::youtube_thumbnail(&item.source_url))
+        .filter(|u| crate::db::is_public_thumbnail(u))
+}
+
+/// What the request page's Queue and Now views need: `queue` (title, length, requester, picture,
+/// `mine` for this address, `startsInS`: seconds until it starts, `null` after an unknown
+/// length), `myRequests` (this address's requests awaiting approval) and the picture of the
+/// film on air. "Mine" is by client address, as the skip vote is.
+fn add_viewer_queue(
+    state: &AppState,
+    channel: &crate::pipeline::channel::ChannelState,
+    ip: &str,
+    queue: &[crate::db::QueueItem],
+    pending: &[crate::db::QueueItem],
+    body: &mut serde_json::Map<String, Value>,
+) {
+    let mine: Vec<&crate::db::QueueItem> = pending
+        .iter()
+        .filter(|i| i.added_by == AddedBy::Public && i.requester_ip.as_deref() == Some(ip))
+        .collect();
+    let mut ids: Vec<i64> = queue
+        .iter()
+        .map(|i| i.id)
+        .chain(mine.iter().map(|i| i.id))
+        .collect();
+    let on_air = channel.current.as_ref().map(|c| c.item_id);
+    ids.extend(on_air);
+    let kept = state
+        .with_db(|c| crate::db::thumbnails(c, &ids))
+        .unwrap_or_default();
+    // Seconds until the first queued film starts: what is left of the one on air.
+    let mut starts = match &channel.current {
+        None => Some(0.0),
+        Some(c) if c.is_live => None,
+        Some(c) => c.duration_s.map(|d| (d - c.position_s as f64).max(0.0)),
+    };
+    let rows: Vec<Value> = queue
+        .iter()
+        .map(|item| {
+            let mut row = public_item(item);
+            if let Value::Object(map) = &mut row {
+                map.insert(
+                    "thumb".into(),
+                    json!(public_thumb(item, kept.get(&item.id))),
+                );
+                map.insert(
+                    "mine".into(),
+                    json!(
+                        item.added_by == AddedBy::Public
+                            && item.requester_ip.as_deref() == Some(ip)
+                    ),
+                );
+                map.insert("startsInS".into(), starts.map_or(Value::Null, num_json));
+            }
+            starts = starts
+                .zip(item.end_s(item.duration_s))
+                .map(|(at, end)| at + (end - item.start_s()).max(0.0));
+            row
+        })
+        .collect();
+    body.insert("queue".into(), Value::Array(rows));
+    body.insert(
+        "myRequests".into(),
+        Value::Array(
+            mine.iter()
+                .map(|item| {
+                    let mut row = public_item(item);
+                    if let Value::Object(map) = &mut row {
+                        map.insert(
+                            "thumb".into(),
+                            json!(public_thumb(item, kept.get(&item.id))),
+                        );
+                    }
+                    row
+                })
+                .collect(),
+        ),
+    );
+    if let (Some(id), Some(Value::Object(cur))) = (on_air, body.get_mut("current")) {
+        let thumb = state
+            .with_db(|c| QueueRepo::new(c).get(id))
+            .ok()
+            .flatten()
+            .and_then(|i| public_thumb(&i, kept.get(&id)));
+        cur.insert("thumb".into(), json!(thumb));
+    }
 }
 
 /// Control and invisible format characters removed, trimmed, at most 32 UTF-16 units; empty
@@ -287,7 +389,7 @@ async fn post_title_request(state: AppState, ctx: Ctx, body: Value) -> ApiResult
     }
     let (type_, id) = routes_addons::title_ref(body.get("title").unwrap_or(&Value::Null))?;
     let viewer = admit_viewer_request(&state, &settings, &body, &ctx.ip)?;
-    let stored = routes_addons::stored_title(&state, type_, id).await?;
+    let (stored, poster) = routes_addons::stored_title(&state, type_, id).await?;
     claim_viewer(&state, &viewer)?;
     let ip = ctx.ip;
     let item = state.with_db(|c| {
@@ -304,6 +406,10 @@ async fn post_title_request(state: AppState, ctx: Ctx, body: Value) -> ApiResult
             requester_key_hash: viewer.key_hash.clone(),
         })
     })?;
+    // The catalog's poster stays with the request (it is kept when the owner picks a source).
+    if let Some(poster) = poster.filter(|p| crate::db::is_public_thumbnail(p)) {
+        let _ = state.with_db(|c| crate::db::set_thumbnail(c, item.id, &poster));
+    }
     (state.log)(
         Msg::new("log.request_received")
             .arg("viewer", state.viewer_tag(&ip))

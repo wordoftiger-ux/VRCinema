@@ -348,6 +348,7 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             ))
         })?;
         item_id = Some(item.id);
+        remember_poster(&state, item.id, &body);
         1
     };
     state.send_command(Command::QueueChanged);
@@ -358,6 +359,18 @@ async fn add_item(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
             None => json!({ "added": added, "title": meta.title }),
         },
     ))
+}
+
+/// Keeps the catalog poster the window sends with an add (`poster`) as the item's picture, only
+/// when it is a public address (`https`, a named host).
+fn remember_poster(state: &AppState, id: i64, body: &Value) {
+    if let Some(poster) = body
+        .get("poster")
+        .and_then(Value::as_str)
+        .filter(|p| crate::db::is_public_thumbnail(p))
+    {
+        let _ = state.with_db(|c| crate::db::set_thumbnail(c, id, poster));
+    }
 }
 
 /// `Number(id)` is NaN for anything but a number; ids are integers, so only those can match.
@@ -1013,6 +1026,7 @@ async fn choose_source(
     if !changed {
         return Err(not_title_request());
     }
+    remember_poster(&state, id, &body);
     state.send_command(Command::QueueChanged);
     Ok(ok())
 }

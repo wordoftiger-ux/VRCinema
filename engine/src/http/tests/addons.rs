@@ -635,3 +635,120 @@ async fn addon_streams_include_torrents_only_when_enabled() {
     assert_eq!(parsed.trackers, vec!["udp://t.example:80"]);
     assert_eq!(parsed.name.as_deref(), Some("Film 1080p"));
 }
+
+fn poster_answers(n: &FakeNet, poster: &str) {
+    let base = crate::addons::base_url(CINEMETA_URL).to_string();
+    n.answers.lock().unwrap().insert(
+        format!("{base}/meta/movie/tt1.json"),
+        json!({"meta": {"id": "tt1", "type": "movie", "name": "Example Film", "releaseInfo": "1999",
+            "poster": poster}}),
+    );
+}
+
+async fn my_state(h: &Harness, ip: &str) -> Value {
+    h.send(get("/api/channels/main/state").ip(ip)).await.json()
+}
+
+#[tokio::test]
+async fn title_request_keeps_the_poster_and_shows_it_to_its_author_only() {
+    let n = net(true);
+    poster_answers(&n, "https://img.example.org/p/tt1.jpg");
+    let h = harness(n);
+    assert_eq!(
+        request_title(&h, "movie", "tt1").await.status,
+        StatusCode::CREATED
+    );
+    let id = h.list(ItemStatus::PendingApproval)[0].id;
+    let mine = my_state(&h, "1.1.1.1").await;
+    assert_eq!(mine["myRequests"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["myRequests"][0]["title"], "Example Film (1999)");
+    assert_eq!(
+        mine["myRequests"][0]["thumb"],
+        "https://img.example.org/p/tt1.jpg"
+    );
+    // Another address sees none of it, and never an address.
+    let other = my_state(&h, "2.2.2.2").await;
+    assert_eq!(other["myRequests"], json!([]));
+    assert!(!mine.to_string().contains("1.1.1.1"));
+    // The owner picks a source: the item joins the queue and keeps the poster.
+    let cookie = h.login().await;
+    assert_eq!(
+        choose(&h, &cookie, id, "https://youtu.be/a").await.status,
+        StatusCode::OK
+    );
+    let state = my_state(&h, "1.1.1.1").await;
+    assert_eq!(state["myRequests"], json!([]));
+    assert_eq!(
+        state["queue"][0]["thumb"],
+        "https://img.example.org/p/tt1.jpg"
+    );
+    assert_eq!(state["queue"][0]["mine"], true);
+}
+
+#[tokio::test]
+async fn a_poster_that_is_not_public_is_not_kept() {
+    for poster in [
+        "http://img.example.org/p.jpg",
+        "https://127.0.0.1/p.jpg",
+        "https://192.168.1.5/p.jpg",
+        "https://localhost/p.jpg",
+        "https://printer.local/p.jpg",
+    ] {
+        let n = net(true);
+        poster_answers(&n, poster);
+        let h = harness(n);
+        request_title(&h, "movie", "tt1").await;
+        let mine = my_state(&h, "1.1.1.1").await;
+        assert_eq!(mine["myRequests"][0]["thumb"], Value::Null, "{poster}");
+    }
+}
+
+#[tokio::test]
+async fn the_owner_adds_and_chooses_with_a_poster() {
+    let h = title_harness();
+    let cookie = h.login().await;
+    // Added from Search with its poster.
+    let r = h
+        .send(
+            call("POST", "/api/admin/channels/main/items")
+                .cookie(&cookie)
+                .json(
+                    json!({"url": "https://youtu.be/b", "poster": "https://img.example.org/b.jpg"}),
+                ),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    // A poster that is not public is ignored (no picture).
+    let r = h
+        .send(
+            call("POST", "/api/admin/channels/main/items")
+                .cookie(&cookie)
+                .json(json!({"url": "https://youtu.be/d", "poster": "http://10.0.0.2/x.jpg"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.text());
+    // A title request resolved with a poster from the window.
+    request_title(&h, "movie", "tt1").await;
+    let id = h.list(ItemStatus::PendingApproval)[0].id;
+    let r = h
+        .send(
+            call(
+                "POST",
+                format!("/api/admin/channels/main/items/{id}/source").as_str(),
+            )
+            .cookie(&cookie)
+            .json(json!({"url": "https://youtu.be/c", "poster": "https://img.example.org/c.jpg"})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let queue = my_state(&h, "9.9.9.9").await["queue"].clone();
+    let thumbs: Vec<&Value> = queue
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| &i["thumb"])
+        .collect();
+    assert_eq!(thumbs[0], "https://img.example.org/b.jpg");
+    assert_eq!(thumbs[1], &Value::Null);
+    assert_eq!(thumbs[2], "https://img.example.org/c.jpg");
+}

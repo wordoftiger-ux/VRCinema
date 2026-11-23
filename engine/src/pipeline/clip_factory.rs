@@ -764,6 +764,10 @@ fn remember_thumbnail(d: &ClipFactoryDeps, item: &QueueItem, stream: &ResolvedSt
         return;
     };
     let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
+    // A picture kept already (the catalog's poster) is better than the site's frame.
+    if crate::db::thumbnails(&conn, &[item.id]).is_ok_and(|kept| kept.contains_key(&item.id)) {
+        return;
+    }
     let _ = crate::db::set_thumbnail(&conn, item.id, url);
 }
 

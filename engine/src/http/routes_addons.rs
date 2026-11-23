@@ -436,8 +436,12 @@ fn year_text(year: &str) -> &str {
 
 /// The title stored for a viewer's request, built from the addons' details: a film as
 /// `Name (Year)`, an episode as `Name S01E02 – Episode title`. A series id must be one of the
-/// episodes the addon lists.
-pub(super) async fn stored_title(state: &AppState, type_: &str, id: &str) -> ApiResult<String> {
+/// episodes the addon lists. Also the title poster address as the addon gave it.
+pub(super) async fn stored_title(
+    state: &AppState,
+    type_: &str,
+    id: &str,
+) -> ApiResult<(String, Option<String>)> {
     ensure_seeded(state).await;
     let addons = viewer_manifests(state)?;
     // The details belong to the series; an episode id is `<series>:<season>:<episode>`.
@@ -452,6 +456,7 @@ pub(super) async fn stored_title(state: &AppState, type_: &str, id: &str) -> Api
         .await
         .map_err(addon_error)?;
     let name = meta.name.trim();
+    let poster = meta.poster.clone();
     if type_ == "series" {
         let ep = meta
             .videos
@@ -460,14 +465,16 @@ pub(super) async fn stored_title(state: &AppState, type_: &str, id: &str) -> Api
             .ok_or_else(title_invalid)?;
         let code = format!("{name} S{:02}E{:02}", ep.season, ep.episode);
         let title = ep.title.trim();
-        return Ok(if title.is_empty() {
+        let title = if title.is_empty() {
             code
         } else {
             format!("{code} \u{2013} {title}")
-        });
+        };
+        return Ok((title, poster));
     }
-    Ok(match meta.year.as_deref().map(year_text) {
+    let title = match meta.year.as_deref().map(year_text) {
         Some(year) if !year.is_empty() => format!("{name} ({year})"),
         _ => name.to_string(),
-    })
+    };
+    Ok((title, poster))
 }

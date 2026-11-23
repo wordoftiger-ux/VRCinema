@@ -45,6 +45,7 @@ mod nick_pin;
 mod skip_vote;
 mod torrent;
 mod uploads;
+mod viewer_queue;
 
 type Metas = Arc<Mutex<HashMap<String, Result<MediaMeta, String>>>>;
 
@@ -582,7 +583,8 @@ async fn adds_a_film_to_the_end_of_the_queue_with_a_nickname() {
     item["requesterBadge"] = Value::Null;
     assert_eq!(
         item,
-        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false})
+        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false,
+            "thumb": null, "mine": false, "startsInS": 0})
     );
     let items = h.list(ItemStatus::Queued);
     assert_eq!(items.len(), 1);
@@ -931,7 +933,7 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
     first["requesterBadge"] = Value::Null;
     assert_eq!(
         first,
-        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false})
+        json!({"id": 1, "title": "A", "durationS": 100, "requesterName": "Ola", "requesterBadge": null, "isLive": false, "thumb": null, "mine": false, "startsInS": 0})
     );
     assert!(!res.text().contains("1.1.1.1"));
     assert_eq!(body["channelUrl"], "http://tv.local:8080/live/main.m3u8");
@@ -960,6 +962,7 @@ async fn channel_state_shows_the_queue_without_ip_addresses() {
             "paused",
             "pauseReasons",
             "queue",
+            "myRequests",
             "channelUrl",
             "requestUrl",
             "skipVote",
@@ -1002,7 +1005,7 @@ async fn channel_state_serializes_the_current_film_like_the_ts_state() {
         json!({
             "itemId": 7, "title": "Film", "durationS": 100, "positionS": 8,
             "requesterName": "Ola", "requesterBadge": {"hue": badge.hue, "shape": badge.shape},
-            "isLive": false
+            "isLive": false, "thumb": null
         })
     );
 }
