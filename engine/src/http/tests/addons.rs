@@ -239,7 +239,7 @@ async fn search_and_streams_only_use_enabled_addons() {
     let r = h.send(get(&one).cookie(&cookie)).await;
     assert_eq!(
         r.json(),
-        json!({"streams": [{"url": "https://cdn.example/a.mp4", "name": "Fast", "title": "1080p", "torrent": false}]})
+        json!({"streams": [{"url": "https://cdn.example/a.mp4", "name": "Fast", "title": "1080p", "torrent": false}], "hiddenTorrents": 0})
     );
     // A catalog addon has no sources to ask.
     let other = format!("/api/admin/addons/streams/movie/tt1?addon={cat}");
