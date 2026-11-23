@@ -16,6 +16,7 @@ use super::{ApiError, ApiResult, AppState, Ctx, JsonBody, json_ok};
 use crate::db::{ChannelSettings, SkipVoteMode};
 use crate::engine::Command;
 use crate::i18n::Msg;
+use crate::pipeline::channel::ChannelStatus;
 use crate::rules::RateLimiter;
 
 /// Votes (and withdrawals) one address may send per minute.
@@ -76,24 +77,32 @@ pub(crate) fn needed_votes(settings: &ChannelSettings, watching: usize) -> Optio
     }
 }
 
-fn on_air(state: &AppState) -> Option<i64> {
-    state.snapshot().state.current.as_ref().map(|c| c.item_id)
+impl SkipVotes {
+    /// The film on air starts again (a restart, a play-now): its votes start from none.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
-/// Skips the film once the votes are enough (also when the viewers watching dropped).
-fn skip_now(state: &AppState, votes: usize) {
-    let title = state
-        .snapshot()
-        .state
-        .current
+/// The film on air (its id and title) and whether it is paused, from one snapshot.
+fn on_air(state: &AppState) -> Option<(i64, String, bool)> {
+    let snapshot = state.snapshot();
+    let s = &snapshot.state;
+    let paused = s.paused || s.status == ChannelStatus::Paused;
+    s.current
         .as_ref()
-        .map(|c| c.title.clone());
+        .map(|c| (c.item_id, c.title.clone(), paused))
+}
+
+/// Skips film `item_id` once the votes are enough (also when the viewers watching dropped);
+/// the channel ignores it if another film airs by then.
+fn skip_now(state: &AppState, item_id: i64, title: &str, votes: usize) {
     (state.log)(
         Msg::new("log.skip_vote")
-            .arg("title", title.unwrap_or_default())
+            .arg("title", title)
             .arg("votes", votes),
     );
-    state.send_command(Command::Skip);
+    state.send_command(Command::SkipItem { item_id });
 }
 
 /// `{ mode, votes, needed }` (+ `mine` when the caller's address is given: whether it has
@@ -113,11 +122,15 @@ pub(crate) fn skip_vote_json(
             .skip_votes
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        store.sync(on_air(state));
-        let fire = if on_air(state).is_some() {
-            store.reached(settings, watching)
-        } else {
-            false
+        // Read under the lock, so the count and the film are those of this moment.
+        let film = on_air(state);
+        store.sync(film.as_ref().map(|f| f.0));
+        // A paused film is never skipped by votes (nor marked as skipped).
+        let fire = match &film {
+            Some((id, title, false)) if store.reached(settings, watching) => {
+                Some((*id, title.clone(), store.voters.len()))
+            }
+            _ => None,
         };
         let mut out = json!({
             "mode": settings.skip_vote_mode.as_str(),
@@ -127,10 +140,10 @@ pub(crate) fn skip_vote_json(
         if let Some(ip) = ip {
             out["mine"] = json!(store.voters.contains_key(ip));
         }
-        (out, fire.then(|| store.voters.len()))
+        (out, fire)
     };
-    if let Some(votes) = fire {
-        skip_now(state, votes);
+    if let Some((id, title, votes)) = fire {
+        skip_now(state, id, &title, votes);
     }
     Some(out)
 }
@@ -142,7 +155,11 @@ pub(super) fn router() -> Router<AppState> {
 /// `{ deviceKey, vote: bool, itemId?, name? }`. One vote per client address (`mine`: this address voted). 404 when voting is off; 409 `skip_vote_stale`
 /// when no film is on air or `itemId` is not the one on air (nothing is recorded). Answers
 /// `{ skipVote: { mode, votes, needed, mine } }`.
-async fn post_vote(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody) -> ApiResult {
+async fn post_vote(
+    State(state): State<AppState>,
+    ctx: Ctx,
+    JsonBody(mut body): JsonBody,
+) -> ApiResult {
     let settings = state.settings()?;
     if settings.skip_vote_mode == SkipVoteMode::Off {
         return Err(ApiError::coded(StatusCode::NOT_FOUND, "not_found", &[]));
@@ -151,11 +168,7 @@ async fn post_vote(State(state): State<AppState>, ctx: Ctx, JsonBody(body): Json
         .get("vote")
         .and_then(Value::as_bool)
         .ok_or_else(|| ApiError::bad_request("invalid_vote"))?;
-    let viewer = check_viewer(&state, &body)?;
-    // One device, one vote: a device key is required.
-    let key = viewer
-        .key_hash
-        .ok_or_else(|| ApiError::bad_request("invalid_device_key"))?;
+    // Counted before the key is checked: a bad or blocked key costs a request too.
     let allowed = state
         .skip_limiter
         .lock()
@@ -168,7 +181,16 @@ async fn post_vote(State(state): State<AppState>, ctx: Ctx, JsonBody(body): Json
             &[],
         ));
     }
-    let current = on_air(&state);
+    // A vote needs no name: only the key is checked.
+    if let Some(fields) = body.as_object_mut() {
+        fields.remove("name");
+    }
+    let viewer = check_viewer(&state, &body)?;
+    // One device, one vote: a device key is required.
+    let key = viewer
+        .key_hash
+        .ok_or_else(|| ApiError::bad_request("invalid_device_key"))?;
+    let current = on_air(&state).map(|f| f.0);
     let asked = body.get("itemId").and_then(Value::as_i64);
     let Some(item) = current.filter(|item| asked.is_none_or(|a| a == *item)) else {
         return Err(ApiError::coded(

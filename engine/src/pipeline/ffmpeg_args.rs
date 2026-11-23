@@ -681,9 +681,11 @@ fn build_clip_args_hdr(o: &ClipArgsOptions, x: &ClipExtras, detected: HdrPath) -
         .audio_visual
         .as_ref()
         .filter(|_| o.mode == VideoMode::Transcode);
+    // The subtitle canvas is scaled by output ÷ source height: only right when the scale is
+    // the only change of the picture's size (not after a capture's fit filter).
     let image_subtitle = x
         .image_subtitle
-        .filter(|_| o.mode == VideoMode::Transcode && visual.is_none());
+        .filter(|_| o.mode == VideoMode::Transcode && visual.is_none() && x.pre_filter.is_none());
     let video_map = if visual.is_some() || image_subtitle.is_some() {
         "[vout]"
     } else {

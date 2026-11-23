@@ -256,7 +256,10 @@ async fn reaching_the_count_skips_once_and_logs() {
         "one vote of two does not skip"
     );
     vote(&h, "2.2.2.2", KEY_B, true).await;
-    assert!(matches!(h.commands.try_recv(), Ok(Command::Skip)));
+    assert!(matches!(
+        h.commands.try_recv(),
+        Ok(Command::SkipItem { item_id: 1 })
+    ));
     assert!(
         h.logs()
             .iter()
@@ -294,7 +297,10 @@ async fn a_state_request_completes_a_skip_when_the_threshold_drops() {
     configure(&h, json!({"skipVotePercent": 30}));
     let state = h.send(get("/api/channels/main/state")).await.json();
     assert_eq!(state["skipVote"]["needed"], 3);
-    assert!(matches!(h.commands.try_recv(), Ok(Command::Skip)));
+    assert!(matches!(
+        h.commands.try_recv(),
+        Ok(Command::SkipItem { item_id: 1 })
+    ));
     h.send(get("/api/channels/main/state")).await;
     assert!(h.commands.try_recv().is_err(), "skipped once");
 }
@@ -334,4 +340,49 @@ async fn votes_are_limited_per_address() {
         vote(&h, "2.2.2.2", KEY_B, true).await.status,
         StatusCode::OK
     );
+}
+
+/// Review I1: the skip names the voted film (the engine ignores it when another one airs by
+/// then), and a paused film is never skipped by votes nor marked as skipped: the votes skip it
+/// once it airs again.
+#[tokio::test]
+async fn a_paused_film_is_not_skipped_and_the_skip_names_the_voted_film() {
+    let mut h = Harness::with_state(config(), |s| s.with_viewers(watchers(10)));
+    configure(&h, json!({"skipVoteMode": "count", "skipVoteCount": 2}));
+    on_air(&h, 7);
+    let mut paused = h.snapshots.borrow().as_ref().clone();
+    paused.state.status = ChannelStatus::Paused;
+    paused.state.paused = true;
+    h.snapshots.send_replace(Arc::new(paused));
+    vote(&h, "1.1.1.1", KEY_A, true).await;
+    let r = vote(&h, "2.2.2.2", KEY_B, true).await;
+    assert_eq!(r.json()["skipVote"]["votes"], 2);
+    assert!(h.commands.try_recv().is_err(), "paused: no skip");
+    // It airs again: the votes it has are enough.
+    on_air(&h, 7);
+    h.send(get("/api/channels/main/state")).await;
+    assert!(matches!(
+        h.commands.try_recv(),
+        Ok(Command::SkipItem { item_id: 7 })
+    ));
+}
+
+/// Review M5: a restart of the film on air starts its votes from none.
+#[tokio::test]
+async fn a_restart_starts_the_votes_from_none() {
+    let h = Harness::with_state(config(), |s| s.with_viewers(watchers(10)));
+    configure(&h, json!({"skipVoteMode": "count", "skipVoteCount": 5}));
+    on_air(&h, 1);
+    let r = vote(&h, "1.1.1.1", KEY_A, true).await;
+    assert_eq!(r.json()["skipVote"]["votes"], 1);
+    let mut controlled = h.snapshots.borrow().as_ref().clone();
+    controlled.state.control = film_control(Some(100.0), false);
+    h.snapshots.send_replace(Arc::new(controlled));
+    let cookie = h.login().await;
+    let r = h
+        .send(call("POST", "/api/admin/channels/main/restart").cookie(&cookie))
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let state = h.send(get("/api/channels/main/state")).await.json();
+    assert_eq!(state["skipVote"]["votes"], 0);
 }

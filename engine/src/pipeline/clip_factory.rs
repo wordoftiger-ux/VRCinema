@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::Connection;
+use tokio::sync::watch;
 
 use crate::capture::{
     CaptureInputs, CaptureRegistry, Platform, capture_inputs, fit_filter, is_capture_source,
@@ -269,9 +270,9 @@ async fn fetch_subtitles(
     Some(name)
 }
 
-/// How long copying a film's own text subtitles may take (ffmpeg reads the whole film once;
-/// the clip waits for it).
-const SUBTITLE_EXTRACT_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long copying a film's own text subtitles may take (ffmpeg reads the whole film once,
+/// in the background: the film airs without them meanwhile, see [`SUBTITLE_WAIT`]).
+const SUBTITLE_EXTRACT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// What a clip burns in and plays of the film's own streams (spec §4): the owner's choice or
 /// the preferred languages.
@@ -339,48 +340,129 @@ fn source_tag(source: &str) -> String {
         .collect()
 }
 
-/// The film's own text subtitle stream `index` copied into the clip folder as `subs.ass`
-/// (film times; [`ClipExtras::subtitles`] shifts them for a clip started midway). Read from
-/// the source once per film and stream (`clips/_subs`); `None` (logged): the film airs
-/// without them.
-async fn embedded_subtitles(
-    d: &ClipFactoryDeps,
+/// What a background extraction of a film's own text subtitles came to: `None` while it
+/// runs, else the subtitle file or why there is none.
+pub type SubtitleOutcome = Option<Result<PathBuf, Msg>>;
+
+/// The extractions of films' own text subtitles: one per film, stream and source, started
+/// ahead (when the film is prepared as the next one) or at its start, and run in the
+/// background whatever its clips do. A failure is remembered with its reason, so a seek, a
+/// restart or a resume never reads the whole source again.
+#[derive(Clone, Default)]
+pub struct SubtitleJobs(
+    Arc<Mutex<std::collections::HashMap<PathBuf, watch::Sender<SubtitleOutcome>>>>,
+);
+
+impl SubtitleJobs {
+    /// The job of `file`; `run` is spawned only when it is not known yet.
+    pub fn ensure<F>(
+        &self,
+        file: &Path,
+        run: impl FnOnce() -> F,
+    ) -> watch::Receiver<SubtitleOutcome>
+    where
+        F: std::future::Future<Output = Result<PathBuf, Msg>> + Send + 'static,
+    {
+        let mut jobs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(tx) = jobs.get(file) {
+            return tx.subscribe();
+        }
+        let (tx, rx) = watch::channel(None);
+        jobs.insert(file.to_path_buf(), tx.clone());
+        let job = run();
+        tokio::spawn(async move {
+            let outcome = job.await;
+            tx.send_replace(Some(outcome));
+        });
+        rx
+    }
+}
+
+/// Waits at most `max` for a subtitle job: its outcome, or `None` while it still runs.
+pub async fn wait_subtitles(
+    job: &mut watch::Receiver<SubtitleOutcome>,
+    max: Duration,
+) -> SubtitleOutcome {
+    match tokio::time::timeout(max, job.wait_for(Option::is_some)).await {
+        Ok(Ok(outcome)) => outcome.clone(),
+        _ => None,
+    }
+}
+
+/// A clip waits this long for the film's own subtitles at its start (well under the
+/// channel's start timeout); after that it airs without them, and starts again with them
+/// once they are ready.
+pub const SUBTITLE_WAIT: Duration = Duration::from_secs(30);
+
+/// The extraction of the film's own text subtitle stream `index` to `clips/_subs` (started
+/// when not known yet). Film times; [`ClipExtras::subtitles`] shifts them for a clip
+/// started midway.
+fn subtitle_job(
+    d: &Arc<ClipFactoryDeps>,
+    jobs: &SubtitleJobs,
     item: &QueueItem,
     input: &StreamInput,
     index: u32,
-    out_dir: &Path,
-) -> Option<String> {
+) -> watch::Receiver<SubtitleOutcome> {
     let cache = d.clips_dir.join("_subs");
-    std::fs::create_dir_all(&cache).ok()?;
     let file = cache.join(format!(
         "{}-s{index}-{}.ass",
         item.id,
         source_tag(&item.source_url)
     ));
-    if !file.exists() {
-        let part = file.with_extension("part");
-        let args = subtitle_extract_args(input, index, &part);
-        let failure = match run_process(&d.ffmpeg_path, &args, SUBTITLE_EXTRACT_TIMEOUT).await {
-            Ok(out) if out.code == Some(0) => None,
-            Ok(out) => Some(Msg::error("source_message").arg(
-                "detail",
-                redact_urls(out.stderr.trim().lines().next_back().unwrap_or("ffmpeg")),
-            )),
-            Err(e) => Some(e.message()),
-        };
-        if let Some(error) = failure {
-            let _ = std::fs::remove_file(&part);
-            if let Some(log) = &d.log {
+    jobs.ensure(&file, || {
+        let d = Arc::clone(d);
+        let title = item.title.clone();
+        let input = input.clone();
+        let file = file.clone();
+        async move {
+            let result = extract_subtitles(&d, &cache, &input, index, &file).await;
+            if let Err(error) = &result
+                && let Some(log) = &d.log
+            {
+                // Once per film and stream: later starts air without them quietly.
                 log(Msg::new("log.subtitles_failed")
-                    .arg("title", &item.title)
-                    .arg_msg("error", error));
+                    .arg("title", &title)
+                    .arg_msg("error", error.clone()));
             }
-            return None;
+            result
         }
-        std::fs::rename(&part, &file).ok()?;
+    })
+}
+
+async fn extract_subtitles(
+    d: &ClipFactoryDeps,
+    cache: &Path,
+    input: &StreamInput,
+    index: u32,
+    file: &Path,
+) -> Result<PathBuf, Msg> {
+    if file.exists() {
+        return Ok(file.to_path_buf());
     }
+    std::fs::create_dir_all(cache).map_err(Msg::text)?;
+    let part = file.with_extension("part");
+    let args = subtitle_extract_args(input, index, &part);
+    let failure = match run_process(&d.ffmpeg_path, &args, SUBTITLE_EXTRACT_TIMEOUT).await {
+        Ok(out) if out.code == Some(0) => None,
+        Ok(out) => Some(Msg::error("source_message").arg(
+            "detail",
+            redact_urls(out.stderr.trim().lines().next_back().unwrap_or("ffmpeg")),
+        )),
+        Err(e) => Some(e.message()),
+    };
+    if let Some(error) = failure {
+        let _ = std::fs::remove_file(&part);
+        return Err(error);
+    }
+    std::fs::rename(&part, file).map_err(Msg::text)?;
+    Ok(file.to_path_buf())
+}
+
+/// The subtitle file copied into the clip folder as `subs.ass`.
+fn place_subtitles(file: &Path, out_dir: &Path) -> Option<String> {
     std::fs::create_dir_all(out_dir).ok()?;
-    std::fs::copy(&file, out_dir.join("subs.ass")).ok()?;
+    std::fs::copy(file, out_dir.join("subs.ass")).ok()?;
     Some("subs.ass".into())
 }
 
@@ -470,6 +552,9 @@ struct RealClipHandle {
     title: String,
     log: Option<SharedLogFn>,
     disposed: bool,
+    /// The film's own subtitles were still being read when this clip started (it airs
+    /// without them): their job, watched for when they are ready.
+    subtitles_later: Option<watch::Receiver<SubtitleOutcome>>,
     /// The downloaded film this clip plays (removed a while after its last clip is gone).
     _download: Option<Lease>,
 }
@@ -582,6 +667,12 @@ impl ClipHandle for RealClipHandle {
         }
     }
 
+    fn subtitles_ready(&self) -> bool {
+        self.subtitles_later
+            .as_ref()
+            .is_some_and(|job| matches!(&*job.borrow(), Some(Ok(_))))
+    }
+
     fn ticker_slow(&self) -> bool {
         self.ticker
             .as_ref()
@@ -645,6 +736,8 @@ pub struct RealClipFactory {
     capture: Option<Arc<CaptureRegistry>>,
     /// What each film's start is doing (the panel's "Now loading").
     loading: LoadStages,
+    /// The films' own text subtitles being (or already) read in the background.
+    subtitles: SubtitleJobs,
 }
 
 /// How long a film resolved ahead stays usable (a site's address may expire).
@@ -727,9 +820,27 @@ async fn prepare_film(factory: RealClipFactory, item: QueueItem) -> Result<(), M
     )
     .await?;
     // Its streams for the panel's choice before it airs.
-    {
+    let (settings, choice) = {
         let conn = d.db.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = crate::db::tracks::save_streams(&conn, item.id, &probed.1.tracks);
+        (
+            SettingsRepo::new(&conn).get(d.channel_id).ok(),
+            crate::db::tracks::item_tracks(&conn, item.id).unwrap_or_default(),
+        )
+    };
+    // Its own text subtitles are read in the background from now on (the whole source once):
+    // at its start they are ready, or the film airs without them until they are.
+    if let Some(settings) = settings {
+        let (stream, info, _) = &probed;
+        let one_input = stream.inputs.len() == 1;
+        let live = item.is_live || stream.is_live;
+        let pictured = info.audio.is_some() && one_input;
+        let plan = track_plan(info, &choice, &settings.advanced, one_input, live);
+        if let (Some((index, SubtitleKind::Text)), Some(input), false) =
+            (plan.subtitle, stream.inputs.first(), pictured)
+        {
+            let _ = subtitle_job(&d, &factory.subtitles, &item, input, index);
+        }
     }
     factory.keep_prepared(&item, probed);
     Ok(())
@@ -746,6 +857,7 @@ pub fn create_clip_factory(deps: ClipFactoryDeps) -> RealClipFactory {
         prepared: Arc::new(Mutex::new(Vec::new())),
         capture: None,
         loading: LoadStages::default(),
+        subtitles: SubtitleJobs::default(),
     }
 }
 
@@ -1484,6 +1596,7 @@ async fn start_clip(
         prepared: _,
         capture: _,
         loading,
+        subtitles: subtitle_jobs,
     } = factory;
     loading.set(item.id, LoadStage::Resolving);
     // A viewer's link is looked up again now (yt-dlp fetches it anew): its name may have started
@@ -1579,12 +1692,30 @@ async fn start_clip(
         crate::db::tracks::item_tracks(&conn, item.id).unwrap_or_default()
     };
     let plan = track_plan(&info, &choice, adv, stream.inputs.len() == 1, live);
+    // The film's own text subtitles are read in the background (started ahead when it was
+    // prepared): waited for at most SUBTITLE_WAIT, else the film airs without them now and
+    // the channel starts it again with them once they are ready.
+    let mut subtitles_later = None;
     let (subs, image_subtitle) = match plan.subtitle.filter(|_| visual.is_none()) {
         Some((index, SubtitleKind::Text)) => match stream.inputs.first() {
-            Some(input) => (
-                embedded_subtitles(&d, &item, input, index, &out_dir).await,
-                None,
-            ),
+            Some(input) => {
+                let mut job = subtitle_job(&d, &subtitle_jobs, &item, input, index);
+                let subs = match wait_subtitles(&mut job, SUBTITLE_WAIT).await {
+                    Some(Ok(file)) => place_subtitles(&file, &out_dir),
+                    // Logged once, when the extraction failed.
+                    Some(Err(_)) => None,
+                    None => {
+                        if let Some(log) = &d.log {
+                            log(Msg::new("log.subtitles_later")
+                                .arg("id", item.id)
+                                .arg("title", &item.title));
+                        }
+                        subtitles_later = Some(job);
+                        None
+                    }
+                };
+                (subs, None)
+            }
             None => (None, None),
         },
         Some((index, SubtitleKind::Image)) => (None, Some(index)),
@@ -1757,6 +1888,7 @@ async fn start_clip(
         title: item.title.clone(),
         log: d.log.clone(),
         disposed: false,
+        subtitles_later,
         _download: download,
     }))
 }
@@ -1897,6 +2029,7 @@ async fn start_countdown(
         title: item.title.clone(),
         log: d.log.clone(),
         disposed: false,
+        subtitles_later: None,
         _download: None,
     }))
 }
@@ -2050,6 +2183,7 @@ async fn start_obs(
         title: item.title.clone(),
         log: d.log.clone(),
         disposed: false,
+        subtitles_later: None,
         _download: None,
     }))
 }
@@ -2250,6 +2384,7 @@ async fn start_capture(
         title: item.title.clone(),
         log: d.log.clone(),
         disposed: false,
+        subtitles_later: None,
         _download: None,
     };
     Ok(Box::new(CaptureClipHandle {
@@ -2383,6 +2518,60 @@ impl ClipFactory for RealClipFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Subtitles slower than the clip's wait: the start goes on without them well within the
+    /// channel's start timeout (120 s), the extraction keeps running, and later starts take
+    /// its file at once.
+    #[tokio::test(start_paused = true)]
+    async fn slow_subtitles_do_not_hold_the_start_and_are_ready_later() {
+        let jobs = SubtitleJobs::default();
+        let file = PathBuf::from("/clips/_subs/1-s0-abc.ass");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let start = |runs: Arc<AtomicUsize>, file: PathBuf| {
+            move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(Duration::from_secs(100)).await;
+                    Ok(file)
+                }
+            }
+        };
+        let began = tokio::time::Instant::now();
+        let mut job = jobs.ensure(&file, start(Arc::clone(&runs), file.clone()));
+        assert_eq!(wait_subtitles(&mut job, SUBTITLE_WAIT).await, None);
+        assert!(began.elapsed() <= SUBTITLE_WAIT && SUBTITLE_WAIT < Duration::from_secs(60));
+        tokio::time::sleep(Duration::from_secs(80)).await;
+        assert_eq!(*job.borrow(), Some(Ok(file.clone())));
+        // A restart's start: the same job, ready at once.
+        let mut again = jobs.ensure(&file, start(Arc::clone(&runs), file.clone()));
+        let waited = tokio::time::Instant::now();
+        assert_eq!(
+            wait_subtitles(&mut again, SUBTITLE_WAIT).await,
+            Some(Ok(file))
+        );
+        assert_eq!(waited.elapsed(), Duration::ZERO);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failed extraction is remembered with its reason: the next start does not run it again.
+    #[tokio::test]
+    async fn a_failed_subtitle_extraction_is_remembered() {
+        let jobs = SubtitleJobs::default();
+        let file = PathBuf::from("/clips/_subs/2-s1-abc.ass");
+        let runs = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let runs = Arc::clone(&runs);
+            let mut job = jobs.ensure(&file, move || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                async { Err(Msg::text("broken stream")) }
+            });
+            assert_eq!(
+                wait_subtitles(&mut job, SUBTITLE_WAIT).await,
+                Some(Err(Msg::text("broken stream")))
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
     use crate::db::{AddedBy, ItemStatus, MAIN_CHANNEL_ID, NewItem, QueueRepo, open_database};
     use crate::pipeline::ffmpeg_args::build_clip_args;
     use crate::pipeline::segmenter::SegmenterState;
@@ -3738,6 +3927,7 @@ mod tests {
                 sink.lock().unwrap().push(l.to_string())
             })),
             disposed: false,
+            subtitles_later: None,
             _download: None,
         });
         let segments = run_to_the_end(&mut handle).await;
@@ -3808,6 +3998,7 @@ mod tests {
             title: "Test".into(),
             log: None,
             disposed: false,
+            subtitles_later: None,
             _download: None,
         };
         assert_eq!(handle.poll().len(), 1);
@@ -4070,6 +4261,7 @@ mod tests {
                 sink.lock().unwrap().push(l.to_string())
             })),
             disposed: false,
+            subtitles_later: None,
             _download: None,
         })
     }

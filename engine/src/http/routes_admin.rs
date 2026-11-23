@@ -838,6 +838,8 @@ async fn seek(State(state): State<AppState>, JsonBody(body): JsonBody) -> ApiRes
 
 async fn restart(State(state): State<AppState>) -> ApiResult {
     controllable_film(&state)?;
+    // The film starts again: its skip votes start from none.
+    reset_skip_votes(&state);
     apply_control(&state, Command::Restart).await
 }
 
@@ -858,6 +860,7 @@ async fn play_now(State(state): State<AppState>, JsonBody(body): JsonBody) -> Ap
         return Err(control_bad_request("not_playable_now"));
     }
     super::routes_queue::refuse_gone_upload(&state, &item)?;
+    reset_skip_votes(&state);
     apply_control(&state, Command::PlayNow { item_id: item.id }).await
 }
 
@@ -1030,4 +1033,14 @@ async fn choose_source(
     remember_poster(&state, id, &body);
     state.send_command(Command::QueueChanged);
     Ok(ok())
+}
+
+/// A restart or a play-now airs a film anew (perhaps the same item): the skip votes of the
+/// film on air start from none.
+fn reset_skip_votes(state: &AppState) {
+    state
+        .skip_votes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .reset();
 }

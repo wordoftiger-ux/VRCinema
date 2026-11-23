@@ -60,6 +60,12 @@ pub trait ClipHandle: Send {
     fn stats(&self) -> ClipStats {
         ClipStats::default()
     }
+    /// The clip started without the film's own subtitles because they were still being read
+    /// from the source, and they are ready now: the channel starts the film again from where
+    /// it is, with them.
+    fn subtitles_ready(&self) -> bool {
+        false
+    }
     /// Kills the process and removes the clip files.
     fn dispose(&mut self);
 }
@@ -1411,6 +1417,12 @@ impl Channel {
             .arg("title", &c.item.title)
             .arg("seconds", format!("{:.0}", c.position_s()));
         self.log(msg);
+        self.restart_quietly(item_id);
+    }
+
+    /// The film on air starts again from where it is (a ticker-style seek by 0, after 700 ms
+    /// of quiet), logged by the caller only.
+    fn restart_quietly(&mut self, item_id: i64) {
         self.request(SeekRequest::By(0.0), true);
         if let Some(seek) = self
             .pending_seek
@@ -1419,6 +1431,44 @@ impl Channel {
         {
             seek.quiet = true;
         }
+    }
+
+    /// The film on air started without its own subtitles (they were still being read from the
+    /// source) and they are ready now: it starts again from where it is, with them. Not while
+    /// paused, while a seek waits, or at the very end of the film.
+    fn restart_for_subtitles(&mut self) {
+        if self.parked.is_some() {
+            return;
+        }
+        let Some(c) = self.current.as_ref().filter(|c| !c.item.is_live) else {
+            return;
+        };
+        let id = c.item.id;
+        if self.pending_seek.as_ref().is_some_and(|s| s.item_id == id)
+            || !c.handle.as_ref().is_some_and(|h| h.subtitles_ready())
+            || ends_film(c.position_s(), c.end_s())
+        {
+            return;
+        }
+        let msg = Msg::new("log.subtitles_ready")
+            .arg("id", id)
+            .arg("title", &c.item.title)
+            .arg("seconds", format!("{:.0}", c.position_s()));
+        self.log(msg);
+        self.restart_quietly(id);
+    }
+
+    /// The viewers voted the film `item_id` off: skipped only while that film airs (not when
+    /// another one took its place since, and never a paused film).
+    pub fn skip_item(&mut self, item_id: i64) -> anyhow::Result<()> {
+        let airing = self.parked.is_none()
+            && !self.is_holding_back()
+            && self.current.as_ref().is_some_and(|c| c.item.id == item_id);
+        if !airing {
+            self.log(Msg::new("log.skip_vote_ignored").arg("id", item_id));
+            return Ok(());
+        }
+        self.skip()
     }
 
     /// The public address became `public_url`: like [`Self::apply_ticker`] for the ticker's QR
@@ -1445,6 +1495,7 @@ impl Channel {
             self.log_error("log.channel_error_seek", &e);
         }
         self.warn_if_too_slow();
+        self.restart_for_subtitles();
         self.refresh_monitor();
         self.torrent_tick();
     }
@@ -3303,6 +3354,7 @@ mod tests {
         start_at_s: f64,
         ticker_slow: bool,
         ticker_code: Option<String>,
+        subtitles_ready: bool,
     }
 
     /// Test-side view of a fake handle (shared with the handle the channel owns).
@@ -3363,6 +3415,9 @@ mod tests {
         }
         fn ticker_code(&self) -> Option<String> {
             self.fake.lock().ticker_code.clone()
+        }
+        fn subtitles_ready(&self) -> bool {
+            self.fake.lock().subtitles_ready
         }
         fn poll(&mut self) -> Vec<SegmentInfo> {
             std::mem::take(&mut self.fake.lock().pending)
@@ -3524,6 +3579,7 @@ mod tests {
                     start_at_s,
                     ticker_slow: false,
                     ticker_code: None,
+                    subtitles_ready: false,
                 })));
                 shared.lock().unwrap().handles.push(fake.clone());
                 Ok(Box::new(FakeHandle {
@@ -5730,6 +5786,95 @@ mod tests {
             !logs
                 .iter()
                 .any(|l| l.contains("Info ticker settings changed"))
+        );
+    }
+
+    /// Subtitles slower than the clip's wait: the film aired without them (its start did not
+    /// wait for them), and once they are ready it starts again from where it is, logged once;
+    /// the new clip (with them) restarts nothing.
+    #[tokio::test]
+    async fn subtitles_ready_later_start_the_film_again_from_its_position() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await; // 12 s aired without subtitles
+        e.tick();
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 1, "nothing ready yet: no restart");
+        h0.lock().subtitles_ready = true;
+        e.tick();
+        e.tick();
+        e.advance(700);
+        e.tick();
+        assert!(h0.disposed());
+        assert_eq!(
+            e.factory.calls()[1..],
+            [Call {
+                item_id: a.id,
+                start_at_s: 12.0,
+                attempt: 0
+            }]
+        );
+        e.flush().await;
+        e.factory.handle(1).produce(1);
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 2);
+        let logs = e.logs.lock().unwrap().clone();
+        assert_eq!(
+            logs.iter()
+                .filter(|l| l.contains("its subtitles are ready"))
+                .count(),
+            1,
+            "{logs:?}"
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|l| l.contains("Info ticker settings changed"))
+        );
+    }
+
+    /// A paused film is not restarted for its subtitles (it gets them when it resumes).
+    #[tokio::test]
+    async fn subtitles_ready_while_paused_restart_nothing() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let h0 = e.air(&a, 3).await;
+        h0.lock().subtitles_ready = true;
+        e.channel.pause(PauseReason::Tunnel);
+        e.advance(700);
+        e.tick();
+        e.advance(700);
+        e.tick();
+        assert_eq!(e.starts(), 1);
+    }
+
+    /// A vote's skip only skips the film it was for, and never a paused one.
+    #[tokio::test]
+    async fn a_vote_skip_skips_only_the_voted_film_on_air() {
+        let mut e = setup();
+        let a = e.add_item("a");
+        let b = e.add_item("b");
+        e.air(&a, 3).await;
+        // Another film (already gone) was voted off: the one on air stays.
+        e.channel.skip_item(b.id).unwrap();
+        assert_eq!(e.channel.current_item_id(), Some(a.id));
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        // Paused: not skipped.
+        e.channel.pause(PauseReason::Manual);
+        e.channel.skip_item(a.id).unwrap();
+        assert_eq!(e.get(a.id).status, ItemStatus::Playing);
+        e.channel.resume(PauseReason::Manual);
+        e.flush().await;
+        // On air: skipped.
+        e.channel.skip_item(a.id).unwrap();
+        assert_eq!(e.get(a.id).status, ItemStatus::Played);
+        let logs = e.logs.lock().unwrap().clone();
+        assert_eq!(
+            logs.iter().filter(|l| l.contains("skip of video")).count(),
+            2,
+            "{logs:?}"
         );
     }
 

@@ -163,11 +163,22 @@ fn add_viewer_queue(
     let kept = state
         .with_db(|c| crate::db::thumbnails(c, &ids))
         .unwrap_or_default();
-    // Seconds until the first queued film starts: what is left of the one on air.
+    // Seconds until the first queued film starts: what is left of the one on air (up to its
+    // out point). Unknown while the channel is paused: nobody knows when it resumes.
+    let paused =
+        channel.paused || channel.status == crate::pipeline::channel::ChannelStatus::Paused;
     let mut starts = match &channel.current {
+        _ if paused => None,
         None => Some(0.0),
         Some(c) if c.is_live => None,
-        Some(c) => c.duration_s.map(|d| (d - c.position_s as f64).max(0.0)),
+        Some(c) => {
+            let out = channel
+                .control
+                .out_s
+                .filter(|_| channel.control.item_id == Some(c.item_id));
+            out.or(c.duration_s)
+                .map(|end| (end - c.position_s as f64).max(0.0))
+        }
     };
     let rows: Vec<Value> = queue
         .iter()

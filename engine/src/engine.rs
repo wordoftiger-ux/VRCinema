@@ -29,6 +29,11 @@ use crate::stats::ChannelStats;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Skip,
+    /// The viewers voted film `item_id` off: skipped only while that film airs (see
+    /// [`Channel::skip_item`]).
+    SkipItem {
+        item_id: i64,
+    },
     QueueChanged,
     /// Adds a pause reason; the channel pauses while any reason is active. The loop keeps the
     /// active reasons, so a channel rebuilt after a crash starts paused too.
@@ -104,6 +109,11 @@ pub trait ChannelControl: SegmentSource + Send {
     fn start(&mut self) -> anyhow::Result<()>;
     fn stop(&mut self);
     fn skip(&mut self) -> anyhow::Result<()>;
+    /// Skips film `item_id` only while it airs (test doubles: a plain skip).
+    fn skip_item(&mut self, item_id: i64) -> anyhow::Result<()> {
+        let _ = item_id;
+        self.skip()
+    }
     fn on_queue_changed(&mut self) -> anyhow::Result<()>;
     fn pause(&mut self, reason: PauseReason);
     /// The owner's pause at `at_s` seconds of the film (test doubles: a plain manual pause).
@@ -163,6 +173,9 @@ impl ChannelControl for Channel {
     }
     fn skip(&mut self) -> anyhow::Result<()> {
         Channel::skip(self)
+    }
+    fn skip_item(&mut self, item_id: i64) -> anyhow::Result<()> {
+        Channel::skip_item(self, item_id)
     }
     fn on_queue_changed(&mut self) -> anyhow::Result<()> {
         Channel::on_queue_changed(self)
@@ -538,6 +551,7 @@ where
                         self.pause_reasons.remove(reason);
                     }
                     Command::Skip
+                    | Command::SkipItem { .. }
                     | Command::QueueChanged
                     | Command::Seek { .. }
                     | Command::SeekBy { .. }
@@ -604,6 +618,7 @@ impl<C: ChannelControl> Core<C> {
     fn apply(&mut self, command: Command) -> anyhow::Result<()> {
         match command {
             Command::Skip => self.channel.skip(),
+            Command::SkipItem { item_id } => self.channel.skip_item(item_id),
             Command::QueueChanged => self.channel.on_queue_changed(),
             Command::Pause(reason) => {
                 self.channel.pause(reason);

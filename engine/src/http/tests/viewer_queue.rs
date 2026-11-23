@@ -178,3 +178,25 @@ fn only_public_pictures_reach_viewers() {
         own("https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg")
     );
 }
+
+/// Review M2: the film on air counts up to its out point, and nothing is estimated while the
+/// channel is paused.
+#[tokio::test]
+async fn estimates_use_the_out_point_and_are_unknown_while_paused() {
+    let h = Harness::new();
+    let playing = add_playing(&h, "https://example.com/now", Some(100.0), false);
+    on_air(&h, playing, Some(100.0), 40, false);
+    add(&h, item("https://example.com/a", Some(30.0), false, None));
+    let mut cut = h.snapshots.borrow().as_ref().clone();
+    cut.state.control.item_id = Some(playing);
+    cut.state.control.out_s = Some(70.0);
+    h.snapshots.send_replace(Arc::new(cut.clone()));
+    assert_eq!(state(&h, "1.1.1.1").await["queue"][0]["startsInS"], 30);
+    cut.state.status = ChannelStatus::Paused;
+    cut.state.paused = true;
+    h.snapshots.send_replace(Arc::new(cut));
+    assert_eq!(
+        state(&h, "1.1.1.1").await["queue"][0]["startsInS"],
+        Value::Null
+    );
+}
