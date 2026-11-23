@@ -171,6 +171,48 @@ function ViewerLists({ settings, say }) {
     <//>`;
 }
 
+const SKIP_MODES = [
+  ['off', 'settings.channel.skip_vote_off'],
+  ['percent', 'settings.channel.skip_vote_percent_opt'],
+  ['count', 'settings.channel.skip_vote_count_opt'],
+  ['signal', 'settings.channel.skip_vote_signal_opt'],
+];
+
+/** Skipping by viewers: the mode, and for the percent and count modes their limits (1–100). */
+function SkipVotes({ settings, say }) {
+  const [form, setForm] = useState({ percent: String(settings.skipVotePercent ?? 50), count: String(settings.skipVoteCount ?? 3) });
+  const key = `${settings.skipVotePercent}/${settings.skipVoteCount}`;
+  useEffect(() => setForm({ percent: String(settings.skipVotePercent ?? 50), count: String(settings.skipVoteCount ?? 3) }), [key]);
+  const mode = settings.skipVoteMode ?? 'signal';
+  const submit = (e) => {
+    e.preventDefault();
+    const percent = Number(form.percent);
+    const count = Number(form.count);
+    const ok = (n) => Number.isInteger(n) && n >= 1 && n <= 100;
+    if (!ok(percent) || !ok(count)) return say('err', t('settings.channel.skip_vote_invalid'));
+    saveChannelWith(say, { skipVotePercent: percent, skipVoteCount: count }, t('settings.channel.skip_vote_saved'));
+  };
+  const label = t('settings.channel.skip_vote_mode');
+  return html`
+    <${Block} title=${t('settings.channel.skip_vote_block')}>
+      <${Row} title=${label} hint=${t('settings.channel.skip_vote_hint')}>
+        <select class="sel" name="skipVoteMode" aria-label=${label} value=${mode}
+          onChange=${(e) => saveChannelWith(say, { skipVoteMode: e.target.value }, t('settings.channel.skip_vote_saved'))}>
+          ${SKIP_MODES.map(([value, key]) => html`<option value=${value} selected=${value === mode}>${t(key)}</option>`)}
+        </select>
+      <//>
+      <form class="limits" data-form="skip-vote" onSubmit=${submit}>
+        <label class="limit"><span>${t('settings.channel.skip_vote_percent')}</span>
+          <input type="number" class="num" min="1" max="100" step="1" name="skipVotePercent" value=${form.percent}
+            disabled=${mode !== 'percent'} onInput=${(e) => setForm({ ...form, percent: e.target.value })} /></label>
+        <label class="limit"><span>${t('settings.channel.skip_vote_count')}</span>
+          <input type="number" class="num" min="1" max="100" step="1" name="skipVoteCount" value=${form.count}
+            disabled=${mode !== 'count'} onInput=${(e) => setForm({ ...form, count: e.target.value })} /></label>
+        <button type="submit" class="btn pri" disabled=${mode === 'off' || mode === 'signal'}>${t('settings.save')}</button>
+      </form>
+    <//>`;
+}
+
 /** Video and audio files from viewers: the switch, the largest file, the longest video, the longest audio and all files together. */
 function ViewerUploads({ settings, say }) {
   const minutes = (s) => String(Math.max(1, Math.round((s ?? 600) / 60)));
@@ -264,6 +306,7 @@ export function ChannelSettings() {
       <${Block} title=${t('settings.channel.viewer_catalog_block')}>
         ${toggle('viewerCatalog', t('settings.channel.viewer_catalog'), t('settings.channel.viewer_catalog_hint'), t('settings.channel.viewer_catalog_on'), t('settings.channel.viewer_catalog_off'))}
       <//>
+      <${SkipVotes} settings=${settings} say=${say} />
       <${ViewerLists} settings=${settings} say=${say} />
       <${ViewerUploads} settings=${settings} say=${say} />
       <${Block} title=${t('settings.channel.stream')}>

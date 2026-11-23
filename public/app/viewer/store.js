@@ -60,3 +60,30 @@ export function startPolling() {
     if (!document.hidden) poll();
   });
 }
+
+// ---------- Layout and tabs ----------
+
+/** The tab shown below the wide-screen breakpoint: `now`, `queue` or `add`. */
+export const tab = signal('now');
+/** Whether the add-a-film drawer is open (wide screens). */
+export const drawerOpen = signal(false);
+
+const WIDE_QUERY = '(min-width: 900px)';
+const wideList = window.matchMedia(WIDE_QUERY);
+/** True from about 900 px: two columns and the drawer instead of the tab bar. */
+export const wide = signal(wideList.matches);
+wideList.addEventListener('change', (e) => {
+  wide.value = e.matches;
+  if (!e.matches) drawerOpen.value = false;
+});
+
+/** Takes the viewer to where a new request shows: the queue tab, or closes the drawer. */
+export function requestDone() {
+  if (wide.value) drawerOpen.value = false;
+  else tab.value = 'queue';
+}
+
+/** Shows the vote of the answer at once (the next state read confirms it). */
+export function setSkipVote(skipVote) {
+  if (channel.value) channel.value = { ...channel.value, skipVote };
+}

@@ -599,3 +599,329 @@ p.v-time {
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
+
+/* ================= Layout B: Now / Queue / Add ================= */
+
+.v-page {
+  padding-bottom: 88px; /* room for the tab bar */
+}
+
+.v-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.v-now,
+.v-queue,
+.v-upnext {
+  min-width: 0;
+}
+
+/* Pictures: the channel's thumbnail or a navy gradient. */
+.v-pic {
+  position: relative;
+  display: block;
+  flex: none;
+  overflow: hidden;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #3b2f5e, #7a3f4f 60%, #c4783a);
+}
+
+.v-pic-1 { background: linear-gradient(135deg, #1f4a5e, #2f7a6b); }
+.v-pic-2 { background: linear-gradient(135deg, #5e1f3a, #b0553a); }
+.v-pic-3 { background: linear-gradient(135deg, #2a2f5e, #4f6ab0); }
+
+.v-pic img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.v-hero {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 46vh;
+  margin: 0 0 12px;
+}
+
+p.v-now-title {
+  font-size: 19px;
+}
+
+.v-progress {
+  margin-top: 12px;
+}
+
+.v-skip {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--line-card);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.v-skip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-strong);
+}
+
+.v-skip-count {
+  color: var(--text-faint);
+  text-align: right;
+}
+
+.v-bar {
+  height: 5px;
+  margin: 8px 0 10px;
+  border-radius: 3px;
+  background: var(--line-control);
+  overflow: hidden;
+}
+
+.v-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--amber);
+}
+
+.v-skip-head + .btn {
+  margin-top: 10px;
+}
+
+.v-skip-btn {
+  width: 100%;
+  justify-content: center;
+  min-height: 44px;
+}
+
+.v-skip-btn.on {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.v-upnext {
+  margin-top: 18px;
+}
+
+.v-row,
+.v-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.v-item {
+  padding: 8px 0 8px 8px;
+}
+
+.v-row .v-pic,
+.v-item .v-pic {
+  width: 72px;
+  height: 40px;
+  border-radius: 8px;
+}
+
+.v-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+
+.v-eta {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.v-chip {
+  flex: none;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--selected);
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.v-mine {
+  box-shadow: inset 2px 0 0 var(--amber);
+}
+
+.v-requests {
+  margin-top: 18px;
+}
+
+/* The bottom tab bar (phones). */
+.v-tabs {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  border-top: 1px solid var(--line-card);
+  background: var(--surface);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.v-tab {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.v-tab.on {
+  color: var(--amber);
+}
+
+.v-tab:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -3px;
+}
+
+.v-badge {
+  position: absolute;
+  top: 5px;
+  left: calc(50% + 8px);
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--amber);
+  color: var(--on-amber);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.v-toast-slot {
+  bottom: 72px;
+}
+
+/* The add form, restyled. */
+.v-add.card2 {
+  padding: 14px;
+}
+
+.v-add .txt,
+.v-add .v-links {
+  background: var(--field);
+  border-color: var(--line-control);
+  border-radius: 10px;
+}
+
+/* ---------- Wide screens: two columns and the drawer ---------- */
+
+.v-page.v-wide {
+  width: min(1180px, 100%);
+  padding: 20px 28px 40px;
+}
+
+.v-wide .v-head h1 {
+  flex: 1;
+}
+
+.v-wide .v-addfilm {
+  min-height: 40px;
+  font-weight: 600;
+}
+
+.v-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.v-col-now {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.v-col-queue {
+  min-width: 0;
+  padding-left: 24px;
+  border-left: 1px solid var(--line-bar);
+}
+
+.v-wide .v-row .v-pic,
+.v-wide .v-item .v-pic {
+  width: 96px;
+  height: 54px;
+}
+
+.v-drawer-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+.v-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(5, 6, 12, 0.6);
+}
+
+.v-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100%);
+  padding: 18px 20px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line-card);
+  background: var(--bg);
+  box-shadow: var(--shadow-pop);
+}
+
+.v-drawer:focus {
+  outline: none;
+}
+
+.v-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.v-drawer-head h2 {
+  margin: 0;
+  font-size: 17px;
+  color: var(--text-strong);
+}
+
+.v-drawer-head .btn {
+  min-width: 40px;
+  min-height: 40px;
+  justify-content: center;
+  font-size: 20px;
+}
+
+@media (max-width: 380px) {
+  .v-page {
+    padding-inline: 12px;
+  }
+}

@@ -475,9 +475,9 @@ export const approveList = (list) => decideList(list, 'approve');
 export const rejectList = (list) => decideList(list, 'reject');
 
 /** Adds a link (a video or a playlist): resolves to `{added, title}`, throws `ApiError`. */
-export async function addLink(url) {
+export async function addLink(url, poster = null) {
   try {
-    return await api('POST', `${PANEL}/items`, { url }, { timeoutMs: 180000 });
+    return await api('POST', `${PANEL}/items`, poster ? { url, poster } : { url }, { timeoutMs: 180000 });
   } finally {
     refreshPanel();
   }
@@ -486,8 +486,8 @@ export async function addLink(url) {
 // ---------- Titles from the addons ----------
 
 /** Adds `url` to the queue and puts it first in line: resolves to `{added, title}`, throws `ApiError`. */
-export async function addLinkNext(url) {
-  const added = await addLink(url);
+export async function addLinkNext(url, poster = null) {
+  const added = await addLink(url, poster);
   await refreshPanel();
   if (Number.isInteger(added?.itemId)) await api('POST', `${PANEL}/play-next`, { itemId: added.itemId });
   refreshPanel();
@@ -495,9 +495,9 @@ export async function addLinkNext(url) {
 }
 
 /** Gives a viewer's title request (an item waiting for approval) its source: it joins the queue. */
-export async function chooseSource(itemId, url) {
+export async function chooseSource(itemId, url, poster = null) {
   try {
-    return await api('POST', `${PANEL}/items/${itemId}/source`, { url }, { timeoutMs: 60000 });
+    return await api('POST', `${PANEL}/items/${itemId}/source`, poster ? { url, poster } : { url }, { timeoutMs: 60000 });
   } finally {
     refreshPanel();
   }

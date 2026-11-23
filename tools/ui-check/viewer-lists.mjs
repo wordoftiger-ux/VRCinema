@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
+import { showAdd } from './viewer-nav.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -100,6 +101,7 @@ try {
   const page = await ctx.newPage();
   const errors = watch(page);
   await page.goto(`${base}/`);
+  await showAdd(page);
   await page.waitForSelector('textarea[name=urls]');
   check((await page.locator('input[name=url]').count()) === 0, 'the single link field gives way to the list field');
   check((await page.locator('#v-links-hint').innerText()).includes('Up to 3 videos'), 'the hint names the list size', await page.locator('#v-links-hint').innerText());
@@ -139,6 +141,7 @@ try {
   await page.setViewportSize({ width: 520, height: 900 });
 
   // ---------- With approval: one group in the Channel view ----------
+  await showAdd(page);
   await scenario({ listDelayMs: 0, settingsPatch: { moderation: true } });
   await page.waitForFunction(() => document.querySelector('.v-rules')?.innerText.includes('approves'));
   await page.fill('textarea[name=urls]', 'https://youtube.com/playlist?list=PL2');

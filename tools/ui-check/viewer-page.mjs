@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
+import { showAdd, showNow, showQueue } from './viewer-nav.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -78,6 +79,7 @@ async function open(ctx) {
 const text = (page, sel) => page.locator(sel).first().innerText();
 const posts = async () => (await call('/__test/requests')).filter((r) => r.method === 'POST');
 const sendRequest = async (page, url, nick) => {
+  await showAdd(page);
   await page.fill('input[name=url]', url);
   if (nick !== undefined) await page.fill('input[name=nick]', nick);
   await page.click('.v-submit');
@@ -114,10 +116,11 @@ try {
 
   // ---------- Now playing, the queue, Polish default title ----------
   check((await text(page, '.v-now-title')) === 'Never Gonna Give You Up', 'now playing title');
-  check((await page.locator('.v-now svg.rbadge').count()) === 1, 'the requester of the playing video has an icon');
+  check((await page.locator('.v-now > p.v-sub svg.rbadge').count()) === 1, 'the requester of the playing video has an icon');
   const bar = page.locator('.v-progress');
   check((await bar.getAttribute('aria-valuenow')) === '80' && (await bar.getAttribute('aria-valuemax')) === '213', 'progress from positionS/durationS', await bar.getAttribute('aria-valuenow'));
   check((await text(page, '.v-now .v-time')) === '1:20 / 3:33', 'progress text', await text(page, '.v-now .v-time'));
+  await showQueue(page);
   const rows = page.locator('.v-item');
   check((await rows.count()) === 4, 'four videos in the queue');
   check((await page.locator('.v-item svg.rbadge').count()) === 3, 'icons for the host and the two viewers with a key (not the anonymous one)');
@@ -128,6 +131,7 @@ try {
   await waitFor(async () => (await rows.nth(3).innerText()).startsWith('Untitled'), 'the stored default title is localized');
   check((await rows.nth(1).innerText()).includes('added by the host'), 'the owner item says the host added it (viewer.added_by_host, not the owner-side "added here")');
 
+  await showNow(page);
   // ---------- Live: no bar ----------
   await scenario({ playing: 'live' });
   await waitFor(async () => (await page.locator('.v-progress').count()) === 0 && (await page.locator('.v-now .live').count()) === 1, 'live: no bar, LIVE tag');
@@ -137,6 +141,7 @@ try {
   await scenario({ playing: 'film' });
   await waitFor(async () => (await page.locator('.v-progress').count()) === 1, 'film again');
 
+  await showAdd(page);
   // ---------- Link mode: sites only in allowlist ----------
   check((await page.locator('.v-sites').count()) === 0, 'mode all: no list of sites');
   check((await text(page, '.v-rules')).includes('Paste a link to a video.'), 'mode all: generic hint');
@@ -159,10 +164,12 @@ try {
   const first = (await posts())[1].body;
   check(/^[0-9a-f]{32}$/.test(first.deviceKey) && first.name === 'Ola', 'device key is 32 hex and goes with the nick', first);
   check((await page.evaluate(() => localStorage.getItem('vrcinema.viewer.deviceKey'))) === first.deviceKey, 'the key is stored');
+  await showAdd(page);
   await waitFor(async () => (await page.locator('.v-own-badge svg').count()) === 1, 'own icon next to the nick field');
   check((await page.locator('.v-own-badge').getAttribute('aria-label')) === 'Your icon on this device', 'own icon has a name');
   await page.reload();
   await page.waitForSelector('.v-now');
+  await showAdd(page);
   check((await page.locator('input[name=nick]').inputValue()) === 'Ola', 'the nick is remembered');
   check((await page.locator('.v-own-badge svg').count()) === 1, 'own icon remembered');
   await sendRequest(page, 'https://www.youtube.com/watch?v=two');
@@ -176,7 +183,7 @@ try {
 
   // ---------- Errors ----------
   await scenario({ viewerNickTaken: ['tomek'] });
-  await page.fill('input[name=nick]', 'Tomek');
+  await showAdd(page); await page.fill('input[name=nick]', 'Tomek');
   await page.evaluate(() => localStorage.setItem('vrcinema.viewer.deviceKey', 'f'.repeat(32)));
   await sendRequest(page, 'https://www.youtube.com/watch?v=taken');
   await page.waitForSelector('.v-error[data-code=nick_taken]');
@@ -209,7 +216,7 @@ try {
   ];
   for (const [code, fragment] of refused) {
     await scenario({ viewerError: code });
-    await page.fill('input[name=nick]', 'Ola');
+    await showAdd(page); await page.fill('input[name=nick]', 'Ola');
     await sendRequest(page, 'https://example.org/v');
     await page.waitForSelector(`.v-error[data-code=${code}]`);
     check((await text(page, '.v-error')).includes(fragment), `${code} is shown`, await text(page, '.v-error'));
@@ -217,7 +224,7 @@ try {
   await scenario({ viewerError: null });
   // Final wave M3: a request that never reached the server is not retried: the page says so.
   await page.route('**/api/channels/main/requests', (r) => r.abort());
-  await page.fill('input[name=nick]', 'Ola');
+  await showAdd(page); await page.fill('input[name=nick]', 'Ola');
   await sendRequest(page, 'https://example.org/lost');
   await page.waitForSelector('.v-error[data-code=network]');
   check(
@@ -235,7 +242,7 @@ try {
   const { maxViewerInFlight } = await call('/__test/stats');
   await scenario({ viewerStateDelayMs: 0 });
   check(maxViewerInFlight === 1, 'one state request at a time while the channel answers slowly', maxViewerInFlight);
-  await page.fill('input[name=nick]', '');
+  await showAdd(page); await page.fill('input[name=nick]', '');
   await sendRequest(page, 'ftp://x');
   await page.waitForSelector('.v-error[data-code=invalid_link]');
   check((await text(page, '.v-error')).includes('valid link'), 'invalid_link is shown');
@@ -282,6 +289,7 @@ try {
   });
   await bp.goto(`${base}/`);
   await bp.waitForSelector('.v-now');
+  await bp.click('.v-tab[data-tab=add]');
   await bp.fill('input[name=url]', 'https://www.youtube.com/watch?v=nostorage');
   await bp.fill('input[name=nick]', 'Memory');
   await bp.click('.v-submit');

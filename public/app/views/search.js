@@ -94,7 +94,7 @@ function SearchPage() {
 
 // ---------- The sources ----------
 
-function Source({ stream, forItem }) {
+function Source({ stream, forItem, poster }) {
   const [busy, setBusy] = useState(false);
   const run = async (job) => {
     if (busy) return;
@@ -107,11 +107,11 @@ function Source({ stream, forItem }) {
       setBusy(false);
     }
   };
-  const add = () => run(async () => showToast(t('queue.added_one', { title: (await addLink(stream.url)).title }), 'info'));
-  const next = () => run(async () => showToast(t('history.play_next_done', { title: (await addLinkNext(stream.url)).title }), 'info'));
+  const add = () => run(async () => showToast(t('queue.added_one', { title: (await addLink(stream.url, poster)).title }), 'info'));
+  const next = () => run(async () => showToast(t('history.play_next_done', { title: (await addLinkNext(stream.url, poster)).title }), 'info'));
   const use = () =>
     run(async () => {
-      await chooseSource(forItem, stream.url);
+      await chooseSource(forItem, stream.url, poster);
       showToast(t('search.source_chosen'), 'info');
       location.hash = '#/channel';
     });
@@ -133,7 +133,7 @@ function Source({ stream, forItem }) {
 }
 
 /** What every addon with sources offers for `type`/`id`: each addon is asked on its own and shows when it answers. */
-function Sources({ type, id, forItem }) {
+function Sources({ type, id, forItem, poster }) {
   const [addons, setAddons] = useState(null);
   const [error, setError] = useState(null);
 
@@ -178,7 +178,7 @@ function Sources({ type, id, forItem }) {
               : a.state === 'error'
                 ? html`<p class="src-fail">${t('addons.no_answer', { name: a.name })}</p>`
                 : a.streams.length
-                  ? html`<ul class="src-list">${a.streams.map((s, i) => html`<${Source} key=${`${i}-${s.url}`} stream=${s} forItem=${forItem} />`)}</ul>`
+                  ? html`<ul class="src-list">${a.streams.map((s, i) => html`<${Source} key=${`${i}-${s.url}`} stream=${s} forItem=${forItem} poster=${poster} />`)}</ul>`
                   : a.hidden
                     ? null
                     : html`<p class="src-fail">${t('search.addon_empty', { name: a.name })}</p>`}
@@ -296,7 +296,7 @@ function TitlePage({ type, id, forItem }) {
             </section>`
         : null}
       ${target
-        ? html`<${Sources} key=${target} type=${type} id=${target} forItem=${forItem} />`
+        ? html`<${Sources} key=${target} type=${type} id=${target} forItem=${forItem} poster=${meta?.poster ?? null} />`
         : html`<p class="q-empty tp-pick">${t('search.pick_episode')}</p>`}
     </div>`;
 }

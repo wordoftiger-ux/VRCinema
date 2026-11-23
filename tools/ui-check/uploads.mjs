@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
+import { showAdd, showQueue } from './viewer-nav.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -82,6 +83,7 @@ try {
   const page = await ctx.newPage();
   const errors = watch(page);
   await page.goto(`${base}/`);
+  await showAdd(page);
   await page.waitForSelector('input[name=url]');
   check((await page.locator('.v-file').count()) === 0, 'files off by default: no file box');
 
@@ -146,17 +148,21 @@ try {
   await waitFor(async () => (await page.locator('.v-toast').count()) === 1 && (await page.locator('.v-toast').innerText()).includes('Mój klip'), 'the toast names the file');
   const sent = (await uploads())[0];
   check(sent?.size === 200000 && sent.name === 'Mój klip.mp4' && sent.nick === 'Filmowiec' && /^[0-9a-f]{32}$/.test(sent.key ?? '') && sent.lang === 'en', 'the raw file with its name, the nick and the device key', sent);
+  await showAdd(page);
   check((await page.locator('.v-file[data-file=none]').count()) === 1, 'the box is empty again');
+  await showQueue(page);
   await waitFor(async () => (await page.locator('.v-item').allInnerTexts()).some((t) => t.includes('Mój klip')), 'the file is in the queue on the page');
 
   await scenario({ uploadDelayMs: 0 });
   const mp3 = Buffer.alloc(4000);
   mp3.write('ID3\x04', 0, 'latin1');
+  await showAdd(page);
   await page.setInputFiles('.v-file input[type=file]', { name: 'Piosenka.mp3', mimeType: 'audio/mpeg', buffer: mp3 });
   await page.click(SUBMIT);
   await waitFor(async () => (await page.locator('.v-item').allInnerTexts()).some((t) => t.includes('Piosenka')), 'an audio file is queued like a video');
   check((await uploads()).at(-1)?.name === 'Piosenka.mp3', 'the audio file was sent as it is');
 
+  await showAdd(page);
   await page.setInputFiles('.v-file input[type=file]', { name: 'notes.mp4', mimeType: 'video/mp4', buffer: Buffer.from('hello, not a video') });
   await page.click(SUBMIT);
   await page.waitForSelector('.v-error[data-code=upload_not_video]');

@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
 import { makeTestStream } from './hls-fixture.mjs';
+import { showAdd, showQueue } from './viewer-nav.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -284,7 +285,14 @@ async function viewerPage(lang, tr) {
     check((await page.evaluate(() => document.documentElement.lang)) === lang, `${lang} request page starts in ${lang}`);
     await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
     await sleep(300);
-    await assertScreen(page, lang, `request page ${width} px`);
+    await assertScreen(page, lang, `request page ${width} px (now)`);
+    await showQueue(page);
+    await sleep(200);
+    await assertScreen(page, lang, `request page ${width} px (queue)`);
+    await showAdd(page);
+    await page.evaluate(() => document.querySelectorAll('details').forEach((d) => (d.open = true)));
+    await sleep(300);
+    await assertScreen(page, lang, `request page ${width} px (add)`);
     // The length limit and the moderation note are two sentences in one line: Japanese puts no
     // space after 。, the other languages one space.
     const rules = await page.locator('.v-rules p').last().innerText();

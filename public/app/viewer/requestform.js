@@ -140,7 +140,8 @@ function Rules({ rules }) {
     </div>`;
 }
 
-export function RequestForm() {
+/** `bare`: inside the drawer (its own heading, no card); `onDone`: called after a request went through. */
+export function RequestForm({ bare = false, onDone }) {
   const [url, setUrl] = useState('');
   const [nick, setNick] = useState(savedNick());
   const [busy, setBusy] = useState(false);
@@ -219,6 +220,7 @@ export function RequestForm() {
         setFindKey((k) => k + 1);
         keepBadge(r.item?.requesterBadge);
         refresh();
+        onDone?.();
         return;
       }
       if (sendingFile) {
@@ -229,6 +231,7 @@ export function RequestForm() {
         setFile(null);
         keepBadge(r.item?.requesterBadge);
         refresh();
+        onDone?.();
         return;
       }
       if (lists) {
@@ -248,6 +251,7 @@ export function RequestForm() {
       setUrl('');
       keepBadge(r.item?.requesterBadge);
       refresh();
+      onDone?.();
     } catch (err) {
       // Kept as the error itself: its text follows a language switch made after it.
       setError(err);
@@ -268,8 +272,8 @@ export function RequestForm() {
   };
 
   return html`
-    <section class="v-add card2" aria-labelledby="v-add-h">
-      <h2 id="v-add-h" class="v-eyebrow">${t('viewer.add_heading')}</h2>
+    <section class=${bare ? 'v-add' : 'v-add card2'} aria-labelledby=${bare ? undefined : 'v-add-h'} aria-label=${bare ? t('viewer.add_film') : undefined}>
+      ${bare ? null : html`<h2 id="v-add-h" class="v-eyebrow">${t('viewer.add_heading')}</h2>`}
       <form onSubmit=${submit} novalidate>
         ${catalog
           ? html`<div class="v-mode" role="group" aria-label=${t('viewer.add_heading')}>

@@ -180,7 +180,7 @@ function obsLines(state, current) {
   return null;
 }
 
-function NowPlaying({ current, c }) {
+function NowPlaying({ current, c, skipVote }) {
   const obs = obsLines(obsState.value, current);
   if (obs?.title) {
     return html`
@@ -203,6 +203,13 @@ function NowPlaying({ current, c }) {
   const countdown = current ? null : countdownText(queue.value);
   if (countdown && !c?.paused) sub = countdown.text;
   if (obs) sub = obs.sub;
+  // The viewers' skip votes for the film on air.
+  const votes = current && skipVote
+    ? Number.isFinite(skipVote.needed)
+      ? t('player.skip_votes', { votes: skipVote.votes, needed: skipVote.needed })
+      : t('player.skip_votes_only', { votes: skipVote.votes })
+    : '';
+  if (votes && !obs) sub = sub ? `${sub} · ${votes}` : votes;
   const title = current
     ? videoTitle(current.title)
     : countdown
@@ -413,7 +420,7 @@ export function PlayerBar({ onShortcuts }) {
 
   return html`
     <section class="player" aria-label=${t('player.label')} ...${contextMenuHandlers('player.menu', menuItems)}>
-      <${NowPlaying} current=${current} c=${c} />
+      <${NowPlaying} current=${current} c=${c} skipVote=${ch?.skipVote ?? null} />
       <div class="mid">
         <div class="ctl">
           <button type="button" class="sm" disabled=${!canSeek} aria-label=${t('player.back_10_label')}

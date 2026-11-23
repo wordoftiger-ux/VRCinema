@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
+import { showAdd } from './viewer-nav.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -78,6 +79,7 @@ try {
   const first = await browser('en-US');
   let page = await open(first);
   await page.waitForSelector('.v-now');
+  await showAdd(page);
   check((await page.locator('details.v-pin').getAttribute('open')) === null, 'the PIN section starts closed');
   await page.click('details.v-pin summary');
   await page.click('[data-tab=set]');
@@ -115,6 +117,7 @@ try {
   const second = await browser('pl-PL', { width: 320, height: 900 });
   page = await open(second);
   await page.waitForSelector('.v-now');
+  await showAdd(page);
   await page.fill('input[name=url]', 'https://www.youtube.com/watch?v=x');
   await page.fill('input[name=nick]', 'kasia');
   await page.click('form .v-submit');
@@ -146,6 +149,7 @@ try {
   const third = await browser('en-US');
   page = await open(third);
   await page.waitForSelector('.v-now');
+  await showAdd(page);
   await page.fill('input[name=nick]', 'Kasia');
   await page.click('details.v-pin summary');
   await page.click('[data-tab=adopt]');

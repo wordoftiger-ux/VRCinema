@@ -124,8 +124,8 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     ...extra,
   });
   const initialQueue = () => [
-    queued(8, 'Darude — Sandstorm'),
-    queued(9, 'Shrek 2 (2004).mkv', { durationS: 6130, requesterName: null, requesterBadge: 'host', sourceUrl: 'local:0/Shrek%202.mkv', addedBy: 'admin' }),
+    queued(8, 'Darude — Sandstorm', { mine: true, thumb: '/__test/pic/1.svg' }),
+    queued(9, 'Shrek 2 (2004).mkv', { thumb: '/__test/pic/2.svg', durationS: 6130, requesterName: null, requesterBadge: 'host', sourceUrl: 'local:0/Shrek%202.mkv', addedBy: 'admin' }),
     queued(10, 'Lofi hip hop radio', { durationS: null, isLive: true, requesterName: 'Kasia', requesterBadge: { hue: 40, shape: 3 } }),
     queued(11, 'Bez tytułu', { requesterName: null, requesterBadge: null }),
   ];
@@ -196,6 +196,9 @@ export function startFakeEngine(port = 8193, { hlsDir = null, hlsDir2 = null, pr
     viewerLists: false,
     viewerListMax: 10,
     viewerCatalog: true,
+    skipVoteMode: 'signal',
+    skipVotePercent: 50,
+    skipVoteCount: 3,
     torrentsEnabled: false,
     torrentUploadKbps: 200,
     torrentDiskCapGb: 50,
@@ -346,6 +349,10 @@ torrent`, torrent: true });
       pending: 0,
       addError: null,
       viewerError: null,
+      skipOthers: 1,
+      skipMine: false,
+      skipWatching: 4,
+      currentThumb: '/__test/pic/3.svg',
       viewerNickTaken: [],
       viewerKnown: [],
       viewerPins: {},
@@ -555,6 +562,7 @@ torrent`, torrent: true });
         .filter((l) => l.itemIds.length >= 2),
       history: withThumbs(s.history),
       settings: {},
+      ...(skipVoteJson(false, current) ? { skipVote: skipVoteJson(false, current) } : {}),
       control: control(),
       // The engine's air clock: a typical viewer `airLatencyS` behind the edge, 12 s of film
       // behind the server's position.
@@ -570,14 +578,35 @@ torrent`, torrent: true });
   // (409 nick_taken), `viewerError` is a code to refuse every request with (400, 429 for
   // too_many_active / too_many_requests), `viewerKnown` the keys that already own a nick.
   const publicItem = (i) => ({ id: i.id, title: i.title, durationS: i.durationS, requesterName: i.requesterName, requesterBadge: i.requesterBadge, isLive: i.isLive });
+  // The public queue: picture, `mine` and `startsInS` (what is left of the film on air plus the
+  // lengths before it; null after a live stream or an unknown length) as the engine sends them.
+  function viewerQueue(current) {
+    let at = !current ? 0 : current.isLive || current.durationS == null ? null : Math.max(0, current.durationS - current.positionS);
+    return s.queue.map((i) => {
+      const row = { ...publicItem(i), thumb: i.thumb ?? null, mine: Boolean(i.mine), startsInS: at };
+      at = at === null || i.isLive || i.durationS == null ? null : at + i.durationS;
+      return row;
+    });
+  }
+  // Skip voting (scenario: `skipOthers` votes from others, `skipMine`, `skipWatching`; setting
+  // skipVoteMode / skipVotePercent / skipVoteCount): absent when off or nothing is on air.
+  function skipVoteJson(withMine, current) {
+    const mode = s.settings.skipVoteMode;
+    if (mode === 'off' || !current) return null;
+    const votes = s.skipOthers + (s.skipMine ? 1 : 0);
+    const needed = mode === 'count' ? s.settings.skipVoteCount : mode === 'percent' && s.skipWatching > 0 ? Math.max(1, Math.ceil((s.settings.skipVotePercent / 100) * s.skipWatching)) : null;
+    return withMine ? { mode, votes, needed, mine: s.skipMine } : { mode, votes, needed };
+  }
   function viewerState() {
     const p = panel();
     return {
       status: p.status,
-      current: p.current,
+      current: p.current ? { ...p.current, thumb: s.currentThumb ?? null } : null,
       paused: p.paused,
       pauseReasons: p.pauseReasons,
-      queue: s.queue.map(publicItem),
+      queue: viewerQueue(p.current),
+      myRequests: s.pendingItems.filter((i) => i.mine).map((i) => ({ ...publicItem(i), thumb: i.thumb ?? null })),
+      ...(skipVoteJson(true, p.current) ? { skipVote: skipVoteJson(true, p.current) } : {}),
       channelUrl: p.channelUrl,
       requestUrl: p.requestUrl,
       rules: { linkMode: s.settings.linkMode, allowedDomains: s.settings.allowedDomains, maxDurationS: s.settings.maxDurationS, moderation: s.settings.moderation, viewerLists: s.settings.viewerLists, viewerListMax: s.settings.viewerListMax, viewerCatalog: s.settings.viewerCatalog,
@@ -659,7 +688,7 @@ torrent`, torrent: true });
       const tkey = payload.deviceKey ?? null;
       const tnick = String(payload.name ?? '').trim();
       const tbadge = tkey ? { hue: parseInt(tkey.slice(0, 3), 16) % 360, shape: parseInt(tkey[3], 16) % 12 } : null;
-      const titem = queued(nextId++, `Title ${payload.title.id}`, { requesterName: tnick || null, requesterBadge: tbadge });
+      const titem = queued(nextId++, `Title ${payload.title.id}`, { requesterName: tnick || null, requesterBadge: tbadge, mine: true, thumb: '/__test/pic/4.svg' });
       s.pendingItems.push({ ...titem, status: 'pending_approval' });
       return json(res, 201, { status: 'pending_approval', item: publicItem(titem) });
     }
@@ -673,7 +702,7 @@ torrent`, torrent: true });
     }
     if (nick && key && !s.viewerKnown.includes(key)) s.viewerKnown.push(key);
     const badge = key ? { hue: parseInt(key.slice(0, 3), 16) % 360, shape: parseInt(key[3], 16) % 12 } : null;
-    const item = queued(nextId++, 'Added from ' + new URL(payload.url).hostname, { requesterName: nick || null, requesterBadge: badge });
+    const item = queued(nextId++, 'Added from ' + new URL(payload.url).hostname, { requesterName: nick || null, requesterBadge: badge, mine: true });
     const pending = s.settings.moderation;
     if (pending) s.pendingItems.push({ ...item, status: 'pending_approval' });
     else s.queue.push(item);
@@ -1351,6 +1380,12 @@ torrent`, torrent: true });
       if ('viewerStateDelayMs' in change) maxViewerInFlight = viewerInFlight;
       return json(res, 200, { ...s, queue: undefined, pendingItems: undefined });
     }
+    const pic = path.match(/^\/__test\/pic\/(\d+)\.svg$/);
+    if (pic) {
+      const hue = (Number(pic[1]) * 67) % 360;
+      res.writeHead(200, { 'content-type': 'image/svg+xml' });
+      return res.end(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue},45%,28%)"/><stop offset="1" stop-color="hsl(${(hue + 50) % 360},55%,48%)"/></linearGradient></defs><rect width="160" height="90" fill="url(#g)"/></svg>`);
+    }
     if (!path.startsWith('/api/')) return json(res, 404, { error: 'Not Found' });
 
     const thumbRoute = path.match(/^\/api\/admin\/items\/(\d+)\/thumb$/);
@@ -1380,6 +1415,14 @@ torrent`, torrent: true });
     if (pub && req.method === 'GET') {
       if (!s.settings.viewerCatalog) return coded(res, 404, 'not_found', 'Not found.');
       return addonRoute(res, req, `/api/admin/addons/${pub[1]}`, url, null);
+    }
+    if (path === '/api/channels/main/skip-vote' && req.method === 'POST') {
+      if (!/^[0-9a-f]{32}$/.test(payload?.deviceKey ?? '') || typeof payload.vote !== 'boolean') return coded(res, 400, 'invalid_device_key', 'The device key must be 32 hexadecimal characters.');
+      if (s.settings.skipVoteMode === 'off') return coded(res, 404, 'not_found', 'Not found.');
+      const current = panel().current;
+      if (!current || (payload.itemId !== undefined && payload.itemId !== current.itemId)) return coded(res, 409, 'skip_vote_stale', 'That film is no longer on air.');
+      s.skipMine = payload.vote;
+      return json(res, 200, { skipVote: skipVoteJson(true, current) });
     }
     if (path === '/api/channels/main/requests' && req.method === 'POST') return viewerRequest(res, req, payload);
     if (path === '/api/channels/main/request-list' && req.method === 'POST') return viewerList(res, req, payload);

@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { startFakeEngine } from './fake-engine.mjs';
+import { showAdd } from './viewer-nav.mjs';
 
 const BRAVE = 'C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe';
 const shots = process.argv[2];
@@ -315,6 +316,7 @@ try {
   await viewer.setViewportSize({ width: 390, height: 780 });
   await viewer.route('https://addons.example/**', (r) => r.abort());
   await viewer.goto(`${base}/`);
+  await showAdd(viewer);
   await viewer.waitForSelector('.v-add form');
   await viewer.evaluate(async () => (await import('/static/app/i18n.js')).loadLang('en'));
   check((await count(viewer, '.v-mode')) === 0, 'viewer: with the setting off there is no switch');
