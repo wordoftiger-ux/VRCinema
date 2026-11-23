@@ -458,7 +458,7 @@ fn settings_serialize_with_camel_case_keys() {
             "viewerLists": false,
             "viewerListMax": 10,
             "viewerCatalog": true,
-            "skipVoteMode": "percent",
+            "skipVoteMode": "signal",
             "skipVotePercent": 50,
             "skipVoteCount": 3,
             "uploadMbps": 0,

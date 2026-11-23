@@ -78,7 +78,7 @@ fn needed_votes_math() {
             w,
         )
     };
-    assert_eq!(pct(50, 0), Some(1), "nobody watching still needs one vote");
+    assert_eq!(pct(50, 0), None, "nobody watching: unknown, never fires");
     assert_eq!(pct(50, 1), Some(1));
     assert_eq!(pct(50, 3), Some(2));
     assert_eq!(pct(50, 4), Some(2));
@@ -128,7 +128,7 @@ async fn off_is_404_and_the_state_has_no_skip_vote() {
 }
 
 #[tokio::test]
-async fn one_vote_per_device_withdraw_and_mine() {
+async fn one_vote_per_address_withdraw_and_mine() {
     let h = Harness::with_state(config(), |s| s.with_viewers(watchers(10)));
     configure(&h, json!({"skipVoteMode": "count", "skipVoteCount": 3}));
     on_air(&h, 1);
@@ -138,30 +138,26 @@ async fn one_vote_per_device_withdraw_and_mine() {
         r.json()["skipVote"],
         json!({"mode": "count", "votes": 1, "needed": 3, "mine": true})
     );
-    // The same device again is still one vote (also from another address).
-    let again = vote(&h, "2.2.2.2", KEY_A, true).await;
-    assert_eq!(again.json()["skipVote"]["votes"], 1);
-    // Another device.
-    let second = vote(&h, "3.3.3.3", KEY_B, true).await;
-    assert_eq!(second.json()["skipVote"]["votes"], 2);
-    // The state tells the caller's own vote from the header, and the panel has no `mine`.
+    // Another key (client-made) from the same address is not another vote.
+    let minted = vote(&h, "1.1.1.1", KEY_B, true).await;
+    assert_eq!(minted.json()["skipVote"]["votes"], 1);
+    assert_eq!(minted.json()["skipVote"]["mine"], true);
+    // The same key from another address is another voter.
+    let other = vote(&h, "2.2.2.2", KEY_A, true).await;
+    assert_eq!(other.json()["skipVote"]["votes"], 2);
+    // `mine` of the state is by address; the panel has none.
     let mine = h
-        .send(get("/api/channels/main/state").header("x-device-key", KEY_A))
+        .send(get("/api/channels/main/state").ip("1.1.1.1"))
         .await
         .json();
     assert_eq!(mine["skipVote"]["mine"], true);
-    let other = h
-        .send(get("/api/channels/main/state").header("x-device-key", KEY_C))
+    let stranger = h
+        .send(get("/api/channels/main/state").ip("9.9.9.9"))
         .await
         .json();
-    assert_eq!(other["skipVote"]["mine"], false);
-    let anon = h.send(get("/api/channels/main/state")).await.json();
-    assert_eq!(
-        anon["skipVote"],
-        json!({"mode": "count", "votes": 2, "needed": 3})
-    );
-    // Withdrawing.
-    let r = vote(&h, "1.1.1.1", KEY_A, false).await.json();
+    assert_eq!(stranger["skipVote"]["mine"], false);
+    // Withdrawing from the address, whatever key.
+    let r = vote(&h, "1.1.1.1", KEY_C, false).await.json();
     assert_eq!(
         r["skipVote"],
         json!({"mode": "count", "votes": 1, "needed": 3, "mine": false})
@@ -183,6 +179,18 @@ async fn one_vote_per_device_withdraw_and_mine() {
         .send(call("POST", VOTE).json(json!({"deviceKey": KEY_A})))
         .await;
     assert_eq!(no_vote.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn many_keys_from_one_address_never_skip() {
+    let mut h = Harness::with_state(config(), |s| s.with_viewers(watchers(10)));
+    configure(&h, json!({"skipVoteMode": "count", "skipVoteCount": 2}));
+    on_air(&h, 1);
+    for i in 0..10 {
+        let key = format!("{i:032x}");
+        vote(&h, "1.1.1.1", &key, true).await;
+    }
+    assert!(h.commands.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -260,11 +268,35 @@ async fn reaching_the_count_skips_once_and_logs() {
 }
 
 #[tokio::test]
-async fn percent_with_nobody_watching_skips_on_one_vote() {
+async fn percent_with_nobody_watching_never_skips_and_needs_nothing() {
     let mut h = Harness::new();
+    configure(&h, json!({"skipVoteMode": "percent"}));
     on_air(&h, 1);
-    vote(&h, "1.1.1.1", KEY_A, true).await;
+    let r = vote(&h, "1.1.1.1", KEY_A, true).await;
+    assert_eq!(r.json()["skipVote"]["needed"], Value::Null);
+    assert_eq!(r.json()["skipVote"]["votes"], 1);
+    assert!(h.commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_state_request_completes_a_skip_when_the_threshold_drops() {
+    let mut h = Harness::with_state(config(), |s| s.with_viewers(watchers(10)));
+    configure(
+        &h,
+        json!({"skipVoteMode": "percent", "skipVotePercent": 100}),
+    );
+    on_air(&h, 1);
+    for (ip, key) in [("1.1.1.1", KEY_A), ("2.2.2.2", KEY_B), ("3.3.3.3", KEY_C)] {
+        vote(&h, ip, key, true).await;
+    }
+    assert!(h.commands.try_recv().is_err(), "3 of 10 needed");
+    // The needed number falls (here: the owner lowers the percentage).
+    configure(&h, json!({"skipVotePercent": 30}));
+    let state = h.send(get("/api/channels/main/state")).await.json();
+    assert_eq!(state["skipVote"]["needed"], 3);
     assert!(matches!(h.commands.try_recv(), Ok(Command::Skip)));
+    h.send(get("/api/channels/main/state")).await;
+    assert!(h.commands.try_recv().is_err(), "skipped once");
 }
 
 #[tokio::test]
@@ -280,7 +312,7 @@ async fn signal_mode_never_skips() {
     let state = h.send(get("/api/channels/main/state")).await.json();
     assert_eq!(
         state["skipVote"],
-        json!({"mode": "signal", "votes": 3, "needed": null})
+        json!({"mode": "signal", "votes": 3, "needed": null, "mine": false})
     );
 }
 

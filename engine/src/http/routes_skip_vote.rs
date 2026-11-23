@@ -1,13 +1,13 @@
 //! Skip voting: viewers vote to skip the film on air (`POST /api/channels/main/skip-vote`).
 //! The votes live in memory, for the film on air only: a new film starts from none.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::PoisonError;
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::routing::post;
 use serde_json::{Value, json};
 
@@ -16,7 +16,6 @@ use super::{ApiError, ApiResult, AppState, Ctx, JsonBody, json_ok};
 use crate::db::{ChannelSettings, SkipVoteMode};
 use crate::engine::Command;
 use crate::i18n::Msg;
-use crate::nicks::hash_device_key;
 use crate::rules::RateLimiter;
 
 /// Votes (and withdrawals) one address may send per minute.
@@ -27,11 +26,12 @@ pub(super) fn new_limiter() -> RateLimiter {
     RateLimiter::new(VOTE_LIMIT, VOTE_WINDOW, crate::rules::system_clock())
 }
 
-/// The votes for the film on air: the device keys (hashed) that want it skipped.
+/// The votes for the film on air: one per client address (a device key is client-made, so
+/// many keys from one address must not mean many votes). The value is the key that voted.
 #[derive(Debug, Default)]
 pub(crate) struct SkipVotes {
     item: Option<i64>,
-    voters: HashSet<String>,
+    voters: HashMap<String, String>,
     /// The skip was already sent for this film: later votes change nothing.
     fired: bool,
 }
@@ -45,15 +45,29 @@ impl SkipVotes {
             self.fired = false;
         }
     }
+
+    /// True once (per film) when the votes reach what is needed; marks the film as skipped.
+    fn reached(&mut self, settings: &ChannelSettings, watching: usize) -> bool {
+        // In percent mode only as many votes count as there are viewers.
+        let counted = match settings.skip_vote_mode {
+            SkipVoteMode::Percent => self.voters.len().min(watching),
+            _ => self.voters.len(),
+        };
+        let fire =
+            !self.fired && needed_votes(settings, watching).is_some_and(|n| counted >= n as usize);
+        self.fired |= fire;
+        fire
+    }
 }
 
-/// Votes needed to skip, or `None` when the votes never skip (signal, off). Percent counts the
-/// viewers watching (the estimate of Stats for nerds); never less than 1, also with nobody
-/// watching.
+/// Votes needed to skip, or `None` when the votes never skip (signal, off, or percent with
+/// nobody watching: the estimate is unknown). Percent counts the viewers watching (the
+/// estimate of Stats for nerds).
 pub(crate) fn needed_votes(settings: &ChannelSettings, watching: usize) -> Option<u32> {
     match settings.skip_vote_mode {
         SkipVoteMode::Off | SkipVoteMode::Signal => None,
         SkipVoteMode::Count => Some(settings.skip_vote_count.max(1)),
+        SkipVoteMode::Percent if watching == 0 => None,
         SkipVoteMode::Percent => {
             let percent = u64::from(settings.skip_vote_percent.clamp(1, 100));
             let n = (percent * watching as u64).div_ceil(100).max(1);
@@ -66,45 +80,66 @@ fn on_air(state: &AppState) -> Option<i64> {
     state.snapshot().state.current.as_ref().map(|c| c.item_id)
 }
 
-/// `{ mode, votes, needed }` (+ `mine` when the device key is known); `None` when voting is off.
+/// Skips the film once the votes are enough (also when the viewers watching dropped).
+fn skip_now(state: &AppState, votes: usize) {
+    let title = state
+        .snapshot()
+        .state
+        .current
+        .as_ref()
+        .map(|c| c.title.clone());
+    (state.log)(
+        Msg::new("log.skip_vote")
+            .arg("title", title.unwrap_or_default())
+            .arg("votes", votes),
+    );
+    state.send_command(Command::Skip);
+}
+
+/// `{ mode, votes, needed }` (+ `mine` when the caller's address is given: whether it has
+/// voted); `None` when voting is off. Also re-checks the threshold, so a drop of the viewers
+/// watching completes a skip.
 pub(crate) fn skip_vote_json(
     state: &AppState,
     settings: &ChannelSettings,
-    key_hash: Option<&str>,
+    ip: Option<&str>,
 ) -> Option<Value> {
     if settings.skip_vote_mode == SkipVoteMode::Off {
         return None;
     }
     let watching = state.viewers.stats(std::time::Instant::now()).watching;
-    let mut votes = state
-        .skip_votes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    votes.sync(on_air(state));
-    let mut out = json!({
-        "mode": settings.skip_vote_mode.as_str(),
-        "votes": votes.voters.len(),
-        "needed": needed_votes(settings, watching),
-    });
-    if let Some(key) = key_hash {
-        out["mine"] = json!(votes.voters.contains(key));
+    let (out, fire) = {
+        let mut store = state
+            .skip_votes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        store.sync(on_air(state));
+        let fire = if on_air(state).is_some() {
+            store.reached(settings, watching)
+        } else {
+            false
+        };
+        let mut out = json!({
+            "mode": settings.skip_vote_mode.as_str(),
+            "votes": store.voters.len(),
+            "needed": needed_votes(settings, watching),
+        });
+        if let Some(ip) = ip {
+            out["mine"] = json!(store.voters.contains_key(ip));
+        }
+        (out, fire.then(|| store.voters.len()))
+    };
+    if let Some(votes) = fire {
+        skip_now(state, votes);
     }
     Some(out)
-}
-
-/// The caller's device key from the `X-Device-Key` header (the state route is a GET), hashed.
-pub(crate) fn header_key_hash(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-device-key")
-        .and_then(|v| v.to_str().ok())
-        .and_then(hash_device_key)
 }
 
 pub(super) fn router() -> Router<AppState> {
     Router::new().route("/api/channels/main/skip-vote", post(post_vote))
 }
 
-/// `{ deviceKey, vote: bool, itemId?, name? }`. 404 when voting is off; 409 `skip_vote_stale`
+/// `{ deviceKey, vote: bool, itemId?, name? }`. One vote per client address (`mine`: this address voted). 404 when voting is off; 409 `skip_vote_stale`
 /// when no film is on air or `itemId` is not the one on air (nothing is recorded). Answers
 /// `{ skipVote: { mode, votes, needed, mine } }`.
 async fn post_vote(State(state): State<AppState>, ctx: Ctx, JsonBody(body): JsonBody) -> ApiResult {
@@ -142,39 +177,19 @@ async fn post_vote(State(state): State<AppState>, ctx: Ctx, JsonBody(body): Json
             &[],
         ));
     };
-    let watching = state.viewers.stats(std::time::Instant::now()).watching;
-    let (votes, fire) = {
+    {
         let mut store = state
             .skip_votes
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         store.sync(Some(item));
         if vote {
-            store.voters.insert(key.clone());
+            // One vote per address: another key from the same address changes nothing.
+            store.voters.entry(ctx.ip.clone()).or_insert(key);
         } else {
-            store.voters.remove(&key);
+            store.voters.remove(&ctx.ip);
         }
-        let votes = store.voters.len();
-        let fire = vote
-            && !store.fired
-            && needed_votes(&settings, watching).is_some_and(|n| votes >= n as usize);
-        store.fired |= fire;
-        (votes, fire)
-    };
-    if fire {
-        let title = state
-            .snapshot()
-            .state
-            .current
-            .as_ref()
-            .map(|c| c.title.clone());
-        (state.log)(
-            Msg::new("log.skip_vote")
-                .arg("title", title.unwrap_or_default())
-                .arg("votes", votes),
-        );
-        state.send_command(Command::Skip);
     }
-    let view = skip_vote_json(&state, &settings, Some(&key)).unwrap_or(Value::Null);
+    let view = skip_vote_json(&state, &settings, Some(&ctx.ip)).unwrap_or(Value::Null);
     Ok(json_ok(&json!({ "skipVote": view })))
 }

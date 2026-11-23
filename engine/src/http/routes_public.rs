@@ -76,11 +76,7 @@ async fn admin_page() -> Response {
     page("app.html")
 }
 
-async fn channel_state(
-    State(state): State<AppState>,
-    ctx: Ctx,
-    headers: axum::http::HeaderMap,
-) -> ApiResult {
+async fn channel_state(State(state): State<AppState>, ctx: Ctx) -> ApiResult {
     let settings = state.settings()?;
     let queue = state
         .with_db(|c| QueueRepo::new(c).list_by_status(state.channel_id, &[ItemStatus::Queued]))?;
@@ -94,12 +90,8 @@ async fn channel_state(
         json!(format!("{}/live/main.m3u8", ctx.base_url)),
     );
     body.insert("requestUrl".into(), json!(format!("{}/", ctx.base_url)));
-    // Skip voting (absent when off); `mine` for the device key in the `X-Device-Key` header.
-    if let Some(vote) = super::routes_skip_vote::skip_vote_json(
-        &state,
-        &settings,
-        super::routes_skip_vote::header_key_hash(&headers).as_deref(),
-    ) {
+    // Skip voting (absent when off); `mine` is whether this address has voted.
+    if let Some(vote) = super::routes_skip_vote::skip_vote_json(&state, &settings, Some(&ctx.ip)) {
         body.insert("skipVote".into(), vote);
     }
     body.insert(

@@ -139,7 +139,7 @@ impl Default for ChannelSettings {
             viewer_lists: false,
             viewer_list_max: 10,
             viewer_catalog: true,
-            skip_vote_mode: SkipVoteMode::Percent,
+            skip_vote_mode: SkipVoteMode::Signal,
             skip_vote_percent: 50,
             skip_vote_count: 3,
             upload_mbps: 0.0,
